@@ -1,0 +1,160 @@
+import { describe, it, expect } from "vitest";
+import { extractOperations } from "../../src/parser/operations.js";
+
+describe("extractOperations", () => {
+  it("groups operations by first path segment", () => {
+    const paths = {
+      "/users": {
+        get: {
+          operationId: "listUsers",
+          responses: { "200": { description: "ok" } },
+        },
+      },
+      "/organizations": {
+        get: {
+          operationId: "listOrgs",
+          responses: { "200": { description: "ok" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services).toHaveLength(2);
+    const names = services.map((s) => s.name).sort();
+    expect(names).toEqual(["Organizations", "Users"]);
+  });
+
+  it("infers list for GET /resources", () => {
+    const paths = {
+      "/users": {
+        get: {
+          operationId: "listUsers",
+          responses: { "200": { description: "ok" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].name).toBe("list");
+    expect(services[0].operations[0].httpMethod).toBe("get");
+  });
+
+  it("infers retrieve for GET /resources/{id}", () => {
+    const paths = {
+      "/users/{user_id}": {
+        get: {
+          operationId: "getUser",
+          parameters: [
+            { name: "user_id", in: "path" as const, required: true, schema: { type: "string" } },
+          ],
+          responses: { "200": { description: "ok" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].name).toBe("retrieve");
+    expect(services[0].operations[0].pathParams).toHaveLength(1);
+    expect(services[0].operations[0].pathParams[0].name).toBe("user_id");
+  });
+
+  it("infers create for POST", () => {
+    const paths = {
+      "/users": {
+        post: {
+          operationId: "createUser",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { name: { type: "string" } } },
+              },
+            },
+          },
+          responses: { "201": { description: "created" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].name).toBe("create");
+    expect(services[0].operations[0].idempotent).toBe(true);
+    expect(services[0].operations[0].requestBody).toBeDefined();
+  });
+
+  it("infers update for PUT", () => {
+    const paths = {
+      "/users/{id}": {
+        put: {
+          operationId: "updateUser",
+          parameters: [{ name: "id", in: "path" as const, required: true, schema: { type: "string" } }],
+          responses: { "200": { description: "ok" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].name).toBe("update");
+  });
+
+  it("infers delete for DELETE", () => {
+    const paths = {
+      "/users/{id}": {
+        delete: {
+          operationId: "deleteUser",
+          parameters: [{ name: "id", in: "path" as const, required: true, schema: { type: "string" } }],
+          responses: { "204": { description: "deleted" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].name).toBe("delete");
+  });
+
+  it("extracts error responses", () => {
+    const paths = {
+      "/users": {
+        post: {
+          operationId: "createUser",
+          responses: {
+            "201": { description: "created" },
+            "400": {
+              description: "bad request",
+              content: {
+                "application/json": {
+                  schema: { type: "object", properties: { message: { type: "string" } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].errors).toHaveLength(1);
+    expect(services[0].operations[0].errors[0].statusCode).toBe(400);
+  });
+
+  it("detects pagination when cursor param present", () => {
+    const paths = {
+      "/users": {
+        get: {
+          operationId: "listUsers",
+          parameters: [
+            { name: "cursor", in: "query" as const, schema: { type: "string" } },
+          ],
+          responses: { "200": { description: "ok" } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    expect(services[0].operations[0].paginated).toBe(true);
+  });
+
+  it("returns empty for undefined paths", () => {
+    expect(extractOperations(undefined)).toEqual([]);
+  });
+});

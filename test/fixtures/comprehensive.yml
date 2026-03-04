@@ -1,0 +1,237 @@
+openapi: "3.1.0"
+info:
+  title: Comprehensive API
+  version: "2.0.0"
+  description: Tests all supported constructs
+servers:
+  - url: https://api.comprehensive.com
+paths:
+  /organizations:
+    get:
+      operationId: listOrganizations
+      summary: List organizations
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of organizations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Organization"
+    post:
+      operationId: createOrganization
+      summary: Create organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrganization"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /organizations/{org_id}:
+    get:
+      operationId: getOrganization
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: An organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+    put:
+      operationId: updateOrganization
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrganization"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+    delete:
+      operationId: deleteOrganization
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+  /members:
+    get:
+      operationId: listMembers
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: after
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of members
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Member"
+components:
+  schemas:
+    Organization:
+      type: object
+      required:
+        - id
+        - name
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          $ref: "#/components/schemas/OrganizationStatus"
+        parent_id:
+          type:
+            - string
+            - "null"
+        metadata:
+          type: object
+          additionalProperties: true
+    CreateOrganization:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        parent_id:
+          type:
+            - string
+            - "null"
+    UpdateOrganization:
+      type: object
+      properties:
+        name:
+          type: string
+    OrganizationStatus:
+      type: string
+      enum:
+        - active
+        - inactive
+        - pending
+    Member:
+      allOf:
+        - type: object
+          required:
+            - id
+            - role
+          properties:
+            id:
+              type: string
+            role:
+              $ref: "#/components/schemas/MemberRole"
+        - type: object
+          required:
+            - org_id
+          properties:
+            org_id:
+              type: string
+            display_name:
+              type: string
+    MemberRole:
+      type: string
+      enum:
+        - admin
+        - member
+        - viewer
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    Pet:
+      oneOf:
+        - $ref: "#/components/schemas/Dog"
+        - $ref: "#/components/schemas/Cat"
+      discriminator:
+        propertyName: pet_type
+        mapping:
+          dog: "#/components/schemas/Dog"
+          cat: "#/components/schemas/Cat"
+    Dog:
+      type: object
+      required:
+        - pet_type
+        - breed
+      properties:
+        pet_type:
+          type: string
+        breed:
+          type: string
+    Cat:
+      type: object
+      required:
+        - pet_type
+        - indoor
+      properties:
+        pet_type:
+          type: string
+        indoor:
+          type: boolean
