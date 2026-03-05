@@ -1,0 +1,40 @@
+import type { ApiSpec } from "../ir/types.js";
+import type { Emitter, EmitterContext, GeneratedFile } from "./types.js";
+import { toSnakeCase } from "../utils/naming.js";
+import { writeFiles } from "./writer.js";
+
+export async function generate(
+  spec: ApiSpec,
+  emitter: Emitter,
+  options: { namespace: string; dryRun?: boolean; outputDir: string },
+): Promise<GeneratedFile[]> {
+  const ctx: EmitterContext = {
+    namespace: toSnakeCase(options.namespace),
+    namespacePascal: options.namespace,
+    spec,
+  };
+
+  const files: GeneratedFile[] = [
+    ...emitter.generateModels(spec.models, ctx),
+    ...emitter.generateEnums(spec.enums, ctx),
+    ...emitter.generateResources(spec.services, ctx),
+    ...emitter.generateClient(spec, ctx),
+    ...emitter.generateErrors(ctx),
+    ...emitter.generateConfig(ctx),
+    ...emitter.generateTypeSignatures(spec, ctx),
+    ...emitter.generateTests(spec, ctx),
+  ];
+
+  const header = emitter.fileHeader();
+  const withHeaders = files.map((f) => ({
+    ...f,
+    content: header + "\n\n" + f.content,
+  }));
+
+  if (options.dryRun) {
+    return withHeaders;
+  }
+
+  await writeFiles(withHeaders, options.outputDir);
+  return withHeaders;
+}
