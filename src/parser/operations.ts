@@ -1,14 +1,7 @@
-import type {
-  Service,
-  Operation,
-  HttpMethod,
-  Parameter,
-  TypeRef,
-  ErrorResponse,
-} from "../ir/types.js";
-import { toPascalCase, toCamelCase } from "../utils/naming.js";
-import { schemaToTypeRef } from "./schemas.js";
-import { detectPagination } from "./pagination.js";
+import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse } from '../ir/types.js';
+import { toPascalCase, toCamelCase } from '../utils/naming.js';
+import { schemaToTypeRef } from './schemas.js';
+import { detectPagination } from './pagination.js';
 
 interface PathItem {
   get?: OperationObject;
@@ -31,7 +24,7 @@ interface OperationObject {
 
 interface ParameterObject {
   name: string;
-  in: "path" | "query" | "header" | "cookie";
+  in: 'path' | 'query' | 'header' | 'cookie';
   required?: boolean;
   description?: string;
   schema?: Record<string, unknown>;
@@ -47,11 +40,9 @@ interface ResponseObject {
   content?: Record<string, { schema?: Record<string, unknown> }>;
 }
 
-const HTTP_METHODS: HttpMethod[] = ["get", "post", "put", "patch", "delete"];
+const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
 
-export function extractOperations(
-  paths: Record<string, PathItem> | undefined,
-): Service[] {
+export function extractOperations(paths: Record<string, PathItem> | undefined): Service[] {
   if (!paths) return [];
 
   const serviceMap = new Map<string, Operation[]>();
@@ -79,35 +70,35 @@ export function extractOperations(
 
 function inferServiceName(path: string): string {
   // Extract first meaningful path segment: /widgets/{id}/sub → "Widgets"
-  const segments = path.split("/").filter(Boolean);
-  const first = segments[0] ?? "Default";
+  const segments = path.split('/').filter(Boolean);
+  const first = segments[0] ?? 'Default';
   // Skip path params
-  if (first.startsWith("{")) return "Default";
+  if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
 }
 
 function inferOperationName(method: HttpMethod, path: string, operationId?: string): string {
-  const segments = path.split("/").filter(Boolean);
-  const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith("{");
+  const segments = path.split('/').filter(Boolean);
+  const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith('{');
   const isCollectionPath = !hasTrailingParam;
 
   // Check for nested resource patterns like /widgets/{id}/sub
-  const nonParamSegments = segments.filter((s) => !s.startsWith("{"));
+  const nonParamSegments = segments.filter((s) => !s.startsWith('{'));
   if (nonParamSegments.length > 1) {
     // Nested resource: use operationId if available
     if (operationId) return toCamelCase(operationId);
   }
 
   switch (method) {
-    case "get":
-      return isCollectionPath ? "list" : "retrieve";
-    case "post":
-      return "create";
-    case "put":
-    case "patch":
-      return "update";
-    case "delete":
-      return "delete";
+    case 'get':
+      return isCollectionPath ? 'list' : 'retrieve';
+    case 'post':
+      return 'create';
+    case 'put':
+    case 'patch':
+      return 'update';
+    case 'delete':
+      return 'delete';
     default:
       return operationId ? toCamelCase(operationId) : method;
   }
@@ -121,9 +112,9 @@ function buildOperation(
 ): Operation {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
-  const pathParams = extractParams(allParams, "path");
-  const queryParams = extractParams(allParams, "query");
-  const headerParams = extractParams(allParams, "header");
+  const pathParams = extractParams(allParams, 'path');
+  const queryParams = extractParams(allParams, 'query');
+  const headerParams = extractParams(allParams, 'header');
 
   const requestBody = extractRequestBody(op.requestBody);
   const { response, errors } = extractResponses(op.responses);
@@ -142,21 +133,18 @@ function buildOperation(
     response,
     errors,
     paginated,
-    idempotent: method === "post",
+    idempotent: method === 'post',
   };
 }
 
-function extractParams(
-  params: ParameterObject[],
-  location: "path" | "query" | "header",
-): Parameter[] {
+function extractParams(params: ParameterObject[], location: 'path' | 'query' | 'header'): Parameter[] {
   return params
     .filter((p) => p.in === location)
     .map((p) => ({
       name: p.name,
       type: p.schema
         ? schemaToTypeRef(p.schema as Record<string, unknown>, p.name)
-        : ({ kind: "primitive", type: "string" } as TypeRef),
+        : ({ kind: 'primitive', type: 'string' } as TypeRef),
       required: p.required ?? false,
       description: p.description,
     }));
@@ -165,20 +153,15 @@ function extractParams(
 function extractRequestBody(body?: RequestBodyObject): TypeRef | undefined {
   if (!body?.content) return undefined;
 
-  const jsonContent = body.content["application/json"];
+  const jsonContent = body.content['application/json'];
   if (!jsonContent?.schema) return undefined;
 
-  return schemaToTypeRef(
-    jsonContent.schema as Record<string, unknown>,
-    "RequestBody",
-  );
+  return schemaToTypeRef(jsonContent.schema as Record<string, unknown>, 'RequestBody');
 }
 
-function extractResponses(
-  responses?: Record<string, ResponseObject>,
-): { response: TypeRef; errors: ErrorResponse[] } {
+function extractResponses(responses?: Record<string, ResponseObject>): { response: TypeRef; errors: ErrorResponse[] } {
   const errors: ErrorResponse[] = [];
-  let response: TypeRef = { kind: "primitive", type: "string" };
+  let response: TypeRef = { kind: 'primitive', type: 'string' };
 
   if (!responses) return { response, errors };
 
@@ -186,20 +169,14 @@ function extractResponses(
     const code = parseInt(statusCode, 10);
 
     if (code >= 200 && code < 300) {
-      const jsonContent = resp.content?.["application/json"];
+      const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
-        response = schemaToTypeRef(
-          jsonContent.schema as Record<string, unknown>,
-          "Response",
-        );
+        response = schemaToTypeRef(jsonContent.schema as Record<string, unknown>, 'Response');
       }
     } else if (code >= 400) {
-      const jsonContent = resp.content?.["application/json"];
+      const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema
-        ? schemaToTypeRef(
-            jsonContent.schema as Record<string, unknown>,
-            `Error${code}`,
-          )
+        ? schemaToTypeRef(jsonContent.schema as Record<string, unknown>, `Error${code}`)
         : undefined;
       errors.push({ statusCode: code, type });
     }

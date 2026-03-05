@@ -1,12 +1,9 @@
-import type { ApiSpec } from "../../ir/types.js";
-import type { EmitterContext, GeneratedFile } from "../../engine/types.js";
-import { toSnakeCase } from "../../utils/naming.js";
-import { rubyClassName } from "./naming.js";
+import type { ApiSpec } from '../../ir/types.js';
+import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { toSnakeCase } from '../../utils/naming.js';
+import { rubyClassName } from './naming.js';
 
-export function generateClient(
-  _spec: ApiSpec,
-  ctx: EmitterContext,
-): GeneratedFile[] {
+export function generateClient(_spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;
 
   const resourceAccessors = ctx.spec.services
@@ -17,10 +14,10 @@ export function generateClient(
         `    # @return [${ns}::Resources::${className}]`,
         `    def ${methodName}`,
         `      @${methodName} ||= ${ns}::Resources::${className}.new(client: self)`,
-        "    end",
-      ].join("\n");
+        '    end',
+      ].join('\n');
     })
-    .join("\n\n");
+    .join('\n\n');
 
   const content = `require "net/http"
 require "json"
@@ -107,7 +104,7 @@ ${resourceAccessors}
       }.fetch(method)
 
       req = klass.new(uri)
-      req["Authorization"] = "Bearer \#{@api_key}"
+      req["Authorization"] = "Bearer #{@api_key}"
       req["Content-Type"] = "application/json"
       req["Idempotency-Key"] = idempotency_key if idempotency_key
 
@@ -128,7 +125,7 @@ ${resourceAccessors}
         error_class = error_class_for_status(status)
         raise error_class.new(
           status: status,
-          message: parsed["message"] || "Request failed with status \#{status}",
+          message: parsed["message"] || "Request failed with status #{status}",
           request_id: request_id,
           code: parsed["code"]
         )

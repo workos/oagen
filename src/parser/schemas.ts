@@ -1,11 +1,5 @@
-import type {
-  Model,
-  Enum,
-  EnumValue,
-  Field,
-  TypeRef,
-} from "../ir/types.js";
-import { toPascalCase, toUpperSnakeCase } from "../utils/naming.js";
+import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
+import { toPascalCase, toUpperSnakeCase } from '../utils/naming.js';
 
 interface SchemaObject {
   type?: string | string[];
@@ -30,9 +24,7 @@ export interface ExtractedSchemas {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function extractSchemas(
-  schemas: Record<string, any> | undefined,
-): ExtractedSchemas {
+export function extractSchemas(schemas: Record<string, any> | undefined): ExtractedSchemas {
   const models: Model[] = [];
   const enums: Enum[] = [];
 
@@ -69,9 +61,7 @@ function extractModel(name: string, schema: SchemaObject): Model {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
 
-  for (const [fieldName, fieldSchema] of Object.entries(
-    schema.properties ?? {},
-  )) {
+  for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     fields.push({
       name: fieldName,
       type: schemaToTypeRef(fieldSchema, fieldName),
@@ -92,9 +82,7 @@ function extractAllOfModel(name: string, schema: SchemaObject): Model {
       for (const r of subSchema.required) requiredSet.add(r);
     }
     if (subSchema.properties) {
-      for (const [fieldName, fieldSchema] of Object.entries(
-        subSchema.properties,
-      )) {
+      for (const [fieldName, fieldSchema] of Object.entries(subSchema.properties)) {
         fields.push({
           name: fieldName,
           type: schemaToTypeRef(fieldSchema, fieldName),
@@ -119,30 +107,22 @@ function extractAllOfModel(name: string, schema: SchemaObject): Model {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function schemaToTypeRef(
-  schema: any,
-  contextName?: string,
-): TypeRef {
+export function schemaToTypeRef(schema: any, contextName?: string): TypeRef {
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
   if (Array.isArray(schema.type)) {
-    const nonNullTypes = schema.type.filter((t: string) => t !== "null");
-    if (schema.type.includes("null") && nonNullTypes.length === 1) {
+    const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
+    if (schema.type.includes('null') && nonNullTypes.length === 1) {
       return {
-        kind: "nullable",
-        inner: schemaToTypeRef(
-          { ...schema, type: nonNullTypes[0], nullable: false },
-          contextName,
-        ),
+        kind: 'nullable',
+        inner: schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName),
       };
     }
     // Multiple non-null types → union
     if (nonNullTypes.length > 1) {
-      const variants = nonNullTypes.map((t: string) =>
-        schemaToTypeRef({ ...schema, type: t }, contextName),
-      );
-      const ref: TypeRef = { kind: "union", variants };
-      if (schema.type.includes("null")) {
-        return { kind: "nullable", inner: ref };
+      const variants = nonNullTypes.map((t: string) => schemaToTypeRef({ ...schema, type: t }, contextName));
+      const ref: TypeRef = { kind: 'union', variants };
+      if (schema.type.includes('null')) {
+        return { kind: 'nullable', inner: ref };
       }
       return ref;
     }
@@ -151,21 +131,16 @@ export function schemaToTypeRef(
   // Handle OAS 3.0 nullable flag
   if (schema.nullable && schema.type) {
     return {
-      kind: "nullable",
-      inner: schemaToTypeRef(
-        { ...schema, nullable: false },
-        contextName,
-      ),
+      kind: 'nullable',
+      inner: schemaToTypeRef({ ...schema, nullable: false }, contextName),
     };
   }
 
   // Handle oneOf / anyOf → Union
   if (schema.oneOf || schema.anyOf) {
-    const variants = (schema.oneOf ?? schema.anyOf ?? []).map((v: SchemaObject) =>
-      schemaToTypeRef(v, contextName),
-    );
+    const variants = (schema.oneOf ?? schema.anyOf ?? []).map((v: SchemaObject) => schemaToTypeRef(v, contextName));
     const union: TypeRef = {
-      kind: "union",
+      kind: 'union',
       variants,
       ...(schema.discriminator
         ? {
@@ -182,44 +157,44 @@ export function schemaToTypeRef(
   // Handle enum
   if (schema.enum) {
     return {
-      kind: "enum",
-      name: toPascalCase(contextName ?? "UnknownEnum"),
+      kind: 'enum',
+      name: toPascalCase(contextName ?? 'UnknownEnum'),
     };
   }
 
   // Handle array
-  if (schema.type === "array" && schema.items) {
+  if (schema.type === 'array' && schema.items) {
     return {
-      kind: "array",
+      kind: 'array',
       items: schemaToTypeRef(schema.items, contextName),
     };
   }
 
   // Handle object → ModelRef (if it has properties, it's a named model reference)
-  if (schema.type === "object" && schema.properties) {
+  if (schema.type === 'object' && schema.properties) {
     return {
-      kind: "model",
-      name: toPascalCase(contextName ?? "UnknownModel"),
+      kind: 'model',
+      name: toPascalCase(contextName ?? 'UnknownModel'),
     };
   }
 
   // Handle primitives
-  const primitiveMap: Record<string, "string" | "integer" | "number" | "boolean"> = {
-    string: "string",
-    integer: "integer",
-    number: "number",
-    boolean: "boolean",
+  const primitiveMap: Record<string, 'string' | 'integer' | 'number' | 'boolean'> = {
+    string: 'string',
+    integer: 'integer',
+    number: 'number',
+    boolean: 'boolean',
   };
 
   const typeStr = Array.isArray(schema.type) ? schema.type[0] : schema.type;
   if (typeStr && primitiveMap[typeStr]) {
     return {
-      kind: "primitive",
+      kind: 'primitive',
       type: primitiveMap[typeStr],
       ...(schema.format ? { format: schema.format } : {}),
     };
   }
 
   // Fallback: treat unknown schemas as string
-  return { kind: "primitive", type: "string" };
+  return { kind: 'primitive', type: 'string' };
 }

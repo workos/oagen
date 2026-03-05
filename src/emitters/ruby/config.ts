@@ -1,4 +1,4 @@
-import type { EmitterContext, GeneratedFile } from "../../engine/types.js";
+import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 
 export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;
@@ -9,7 +9,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
 
     def initialize
       @api_key = ENV["${ctx.namespace.toUpperCase()}_API_KEY"]
-      @base_url = "https://api.${ctx.namespace.replace(/_/g, "")}.com"
+      @base_url = "https://api.${ctx.namespace.replace(/_/g, '')}.com"
       @max_retries = 2
       @timeout = 60
     end

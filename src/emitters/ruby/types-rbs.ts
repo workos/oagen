@@ -1,12 +1,9 @@
-import type { ApiSpec, Model, Enum, Service, Operation } from "../../ir/types.js";
-import type { EmitterContext, GeneratedFile } from "../../engine/types.js";
-import { mapTypeRefForRbs } from "./type-map.js";
-import { rubyClassName, rubyFileName } from "./naming.js";
+import type { ApiSpec, Model, Enum, Service, Operation } from '../../ir/types.js';
+import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { mapTypeRefForRbs } from './type-map.js';
+import { rubyClassName, rubyFileName } from './naming.js';
 
-export function generateRbs(
-  spec: ApiSpec,
-  ctx: EmitterContext,
-): GeneratedFile[] {
+export function generateRbs(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
   const files: GeneratedFile[] = [];
 
   for (const model of spec.models) {
@@ -38,7 +35,7 @@ function generateModelRbs(model: Model, ctx: EmitterContext): string {
   const lines: string[] = [];
 
   lines.push(`module ${ctx.namespacePascal}`);
-  lines.push("  module Models");
+  lines.push('  module Models');
   lines.push(`    class ${className}`);
 
   for (const field of model.fields) {
@@ -48,12 +45,12 @@ function generateModelRbs(model: Model, ctx: EmitterContext): string {
     lines.push(`      attr_reader ${field.name}: ${rbsType}`);
   }
 
-  lines.push("    end");
-  lines.push("  end");
-  lines.push("end");
-  lines.push("");
+  lines.push('    end');
+  lines.push('  end');
+  lines.push('end');
+  lines.push('');
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 function generateEnumRbs(e: Enum, ctx: EmitterContext): string {
@@ -61,19 +58,19 @@ function generateEnumRbs(e: Enum, ctx: EmitterContext): string {
   const lines: string[] = [];
 
   lines.push(`module ${ctx.namespacePascal}`);
-  lines.push("  module Models");
+  lines.push('  module Models');
   lines.push(`    module ${className}`);
 
   for (const v of e.values) {
     lines.push(`      ${v.name}: Symbol`);
   }
 
-  lines.push("    end");
-  lines.push("  end");
-  lines.push("end");
-  lines.push("");
+  lines.push('    end');
+  lines.push('  end');
+  lines.push('end');
+  lines.push('');
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 function generateResourceRbs(service: Service, ctx: EmitterContext): string {
@@ -81,7 +78,7 @@ function generateResourceRbs(service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
 
   lines.push(`module ${ctx.namespacePascal}`);
-  lines.push("  module Resources");
+  lines.push('  module Resources');
   lines.push(`    class ${className}`);
   lines.push(`      def initialize: (client: ${ctx.namespacePascal}::Client) -> void`);
 
@@ -89,12 +86,12 @@ function generateResourceRbs(service: Service, ctx: EmitterContext): string {
     lines.push(`      ${generateMethodSigRbs(op, ctx)}`);
   }
 
-  lines.push("    end");
-  lines.push("  end");
-  lines.push("end");
-  lines.push("");
+  lines.push('    end');
+  lines.push('  end');
+  lines.push('end');
+  lines.push('');
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 function generateMethodSigRbs(op: Operation, ctx: EmitterContext): string {
@@ -103,21 +100,21 @@ function generateMethodSigRbs(op: Operation, ctx: EmitterContext): string {
     params.push(`${mapTypeRefForRbs(p.type, ctx.namespacePascal)} ${p.name}`);
   }
   if (op.requestBody) {
-    params.push("Hash[Symbol, untyped] params");
+    params.push('Hash[Symbol, untyped] params');
   } else if (op.queryParams.length > 0) {
-    params.push("?Hash[Symbol, untyped] params");
+    params.push('?Hash[Symbol, untyped] params');
   }
-  if (op.idempotent && op.httpMethod === "post") {
-    params.push("?idempotency_key: String");
+  if (op.idempotent && op.httpMethod === 'post') {
+    params.push('?idempotency_key: String');
   }
-  params.push("?request_options: Hash[Symbol, untyped]");
+  params.push('?request_options: Hash[Symbol, untyped]');
 
-  const isDelete = op.httpMethod === "delete";
+  const isDelete = op.httpMethod === 'delete';
   const returnType = op.paginated
     ? `${ctx.namespacePascal}::Internal::CursorPage`
     : isDelete
-      ? "void"
+      ? 'void'
       : mapTypeRefForRbs(op.response, ctx.namespacePascal);
 
-  return `def ${op.name}: (${params.join(", ")}) -> ${returnType}`;
+  return `def ${op.name}: (${params.join(', ')}) -> ${returnType}`;
 }

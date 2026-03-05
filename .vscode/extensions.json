@@ -1,0 +1,7 @@
+{
+  "recommendations": [
+    "nicolo-ribaudo.oxfmt-vscode",
+    "nicolo-ribaudo.oxlint-vscode",
+    "esbenp.prettier-vscode"
+  ]
+}

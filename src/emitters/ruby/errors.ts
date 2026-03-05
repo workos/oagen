@@ -1,4 +1,4 @@
-import type { EmitterContext, GeneratedFile } from "../../engine/types.js";
+import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 
 export function generateErrors(ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;

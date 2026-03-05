@@ -24,28 +24,28 @@ This document defines the patterns and conventions for the Ruby language emitter
 
 ## Naming Conventions
 
-| IR Name | Ruby Class | Ruby File | Ruby Method |
-|---------|-----------|-----------|-------------|
-| `UserProfile` | `UserProfile` | `user_profile.rb` | — |
-| `listUsers` | — | — | `list_users` |
-| `user_id` (field) | — | — | `:user_id` |
-| `ACTIVE` (enum value) | `ACTIVE = :active` | — | — |
+| IR Name               | Ruby Class         | Ruby File         | Ruby Method  |
+| --------------------- | ------------------ | ----------------- | ------------ |
+| `UserProfile`         | `UserProfile`      | `user_profile.rb` | —            |
+| `listUsers`           | —                  | —                 | `list_users` |
+| `user_id` (field)     | —                  | —                 | `:user_id`   |
+| `ACTIVE` (enum value) | `ACTIVE = :active` | —                 | —            |
 
 ## Type Mapping
 
-| IR TypeRef | Ruby BaseModel Type | RBS Type | Sorbet Type | YARD Type |
-|------------|-------------------|----------|-------------|-----------|
-| `primitive:string` | `String` | `String` | `String` | `String` |
-| `primitive:string:date` | `Date` | `Date` | `Date` | `Date` |
-| `primitive:string:date-time` | `Time` | `Time` | `Time` | `Time` |
-| `primitive:integer` | `Integer` | `Integer` | `Integer` | `Integer` |
-| `primitive:number` | `Float` | `Float` | `Float` | `Float` |
-| `primitive:boolean` | `{NS}::Internal::Type::Boolean` | `bool` | `T::Boolean` | `Boolean` |
-| `array` | `{NS}::Internal::Type::ArrayOf[T]` | `Array[T]` | `T::Array[T]` | `Array<T>` |
-| `model:Foo` | `-> { {NS}::Models::Foo }` | `{NS}::Models::Foo` | `{NS}::Models::Foo` | `{NS}::Models::Foo` |
-| `enum:Foo` | `enum: -> { {NS}::Models::Foo }` | `Symbol` | `Symbol` | `Symbol` |
-| `nullable` | `T, nil?: true` | `T?` | `T.nilable(T)` | `T, nil` |
-| `union` | `{NS}::Internal::Type::Union[...]` | `T1 \| T2` | `T.any(T1, T2)` | `T1, T2` |
+| IR TypeRef                   | Ruby BaseModel Type                | RBS Type            | Sorbet Type         | YARD Type           |
+| ---------------------------- | ---------------------------------- | ------------------- | ------------------- | ------------------- |
+| `primitive:string`           | `String`                           | `String`            | `String`            | `String`            |
+| `primitive:string:date`      | `Date`                             | `Date`              | `Date`              | `Date`              |
+| `primitive:string:date-time` | `Time`                             | `Time`              | `Time`              | `Time`              |
+| `primitive:integer`          | `Integer`                          | `Integer`           | `Integer`           | `Integer`           |
+| `primitive:number`           | `Float`                            | `Float`             | `Float`             | `Float`             |
+| `primitive:boolean`          | `{NS}::Internal::Type::Boolean`    | `bool`              | `T::Boolean`        | `Boolean`           |
+| `array`                      | `{NS}::Internal::Type::ArrayOf[T]` | `Array[T]`          | `T::Array[T]`       | `Array<T>`          |
+| `model:Foo`                  | `-> { {NS}::Models::Foo }`         | `{NS}::Models::Foo` | `{NS}::Models::Foo` | `{NS}::Models::Foo` |
+| `enum:Foo`                   | `enum: -> { {NS}::Models::Foo }`   | `Symbol`            | `Symbol`            | `Symbol`            |
+| `nullable`                   | `T, nil?: true`                    | `T?`                | `T.nilable(T)`      | `T, nil`            |
+| `union`                      | `{NS}::Internal::Type::Union[...]` | `T1 \| T2`          | `T.any(T1, T2)`     | `T1, T2`            |
 
 ## Model Pattern
 
@@ -187,6 +187,7 @@ def request(method:, path:, query: nil, body: nil, model: nil, page: nil, idempo
 ```
 
 Key behaviors:
+
 - `model:` and `page:` parameters control response deserialization
 - `model: NilClass` for delete operations (returns nil)
 - `page.new(model: model, page: parsed)` for paginated responses
@@ -228,12 +229,14 @@ Key behaviors:
 ## RBS/RBI Type Signatures
 
 ### RBS
+
 - Model field attributes include optionality (`?` suffix for optional fields)
 - Enum modules with `Symbol` constant types
 - Resource methods include `request_options`, `idempotency_key` parameters
 - Delete operations return `void`
 
 ### RBI (Sorbet)
+
 - `# typed: strong` header
 - Enum modules with `T.let(:value, Symbol)` constants
 - Resource methods include `request_options: T.nilable(T::Hash[Symbol, T.untyped])`
@@ -263,17 +266,17 @@ test/
 
 ## Structural Guidelines
 
-| Category | Choice | Notes |
-|----------|--------|-------|
-| Testing Framework | Minitest | Stdlib-based, lightweight. RSpec also acceptable |
-| HTTP Mocking | WebMock | Stubs Net::HTTP (and other clients) at the adapter level |
-| Documentation | YARD | @param, @return, @raise tags. Generates HTML docs |
-| Type Signatures | Sorbet (RBI) + RBS | Sorbet for static analysis, RBS for stdlib-compatible sigs |
-| Linting/Formatting | Standard (StandardRB) | Zero-config Rubocop wrapper. Enforces consistent style |
-| HTTP Client (default) | Net::HTTP (stdlib) | No external deps needed |
-| JSON Parsing | json (stdlib) | No external deps needed |
-| Package Manager | Bundler / RubyGems | gemspec for metadata, Gemfile for dev deps |
-| CI/CD | GitHub Actions | Matrix testing across Ruby versions |
+| Category              | Choice                | Notes                                                      |
+| --------------------- | --------------------- | ---------------------------------------------------------- |
+| Testing Framework     | Minitest              | Stdlib-based, lightweight. RSpec also acceptable           |
+| HTTP Mocking          | WebMock               | Stubs Net::HTTP (and other clients) at the adapter level   |
+| Documentation         | YARD                  | @param, @return, @raise tags. Generates HTML docs          |
+| Type Signatures       | Sorbet (RBI) + RBS    | Sorbet for static analysis, RBS for stdlib-compatible sigs |
+| Linting/Formatting    | Standard (StandardRB) | Zero-config Rubocop wrapper. Enforces consistent style     |
+| HTTP Client (default) | Net::HTTP (stdlib)    | No external deps needed                                    |
+| JSON Parsing          | json (stdlib)         | No external deps needed                                    |
+| Package Manager       | Bundler / RubyGems    | gemspec for metadata, Gemfile for dev deps                 |
+| CI/CD                 | GitHub Actions        | Matrix testing across Ruby versions                        |
 
 ## File Header
 

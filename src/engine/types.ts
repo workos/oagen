@@ -1,4 +1,4 @@
-import type { ApiSpec, Model, Enum, Service } from "../ir/types.js";
+import type { ApiSpec, Model, Enum, Service } from '../ir/types.js';
 
 export interface GeneratedFile {
   path: string;

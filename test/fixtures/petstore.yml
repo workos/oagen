@@ -1,7 +1,7 @@
-openapi: "3.1.0"
+openapi: '3.1.0'
 info:
   title: Petstore
-  version: "1.0.0"
+  version: '1.0.0'
   description: A sample API for pet management
 servers:
   - url: https://api.petstore.io
@@ -20,7 +20,7 @@ paths:
           schema:
             type: integer
       responses:
-        "200":
+        '200':
           description: A list of pets
           content:
             application/json:
@@ -30,7 +30,7 @@ paths:
                   data:
                     type: array
                     items:
-                      $ref: "#/components/schemas/Pet"
+                      $ref: '#/components/schemas/Pet'
     post:
       operationId: createPet
       summary: Create a pet
@@ -39,14 +39,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreatePet"
+              $ref: '#/components/schemas/CreatePet'
       responses:
-        "201":
+        '201':
           description: Created pet
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Pet"
+                $ref: '#/components/schemas/Pet'
   /pets/{pet_id}:
     get:
       operationId: getPet
@@ -58,12 +58,12 @@ paths:
           schema:
             type: string
       responses:
-        "200":
+        '200':
           description: A single pet
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Pet"
+                $ref: '#/components/schemas/Pet'
     put:
       operationId: updatePet
       summary: Update a pet
@@ -78,14 +78,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/UpdatePet"
+              $ref: '#/components/schemas/UpdatePet'
       responses:
-        "200":
+        '200':
           description: Updated pet
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Pet"
+                $ref: '#/components/schemas/Pet'
     delete:
       operationId: deletePet
       summary: Delete a pet
@@ -96,7 +96,7 @@ paths:
           schema:
             type: string
       responses:
-        "204":
+        '204':
           description: Deleted
   /owners:
     get:
@@ -108,7 +108,7 @@ paths:
           schema:
             type: string
       responses:
-        "200":
+        '200':
           description: A list of owners
           content:
             application/json:
@@ -118,7 +118,7 @@ paths:
                   data:
                     type: array
                     items:
-                      $ref: "#/components/schemas/Owner"
+                      $ref: '#/components/schemas/Owner'
 components:
   schemas:
     Pet:
@@ -135,13 +135,13 @@ components:
         name:
           type: string
         species:
-          $ref: "#/components/schemas/Species"
+          $ref: '#/components/schemas/Species'
         status:
-          $ref: "#/components/schemas/PetStatus"
+          $ref: '#/components/schemas/PetStatus'
         owner_id:
           type:
             - string
-            - "null"
+            - 'null'
         tags:
           type: array
           items:
@@ -158,7 +158,7 @@ components:
         name:
           type: string
         species:
-          $ref: "#/components/schemas/Species"
+          $ref: '#/components/schemas/Species'
         owner_id:
           type: string
     UpdatePet:
@@ -167,7 +167,7 @@ components:
         name:
           type: string
         status:
-          $ref: "#/components/schemas/PetStatus"
+          $ref: '#/components/schemas/PetStatus'
     Owner:
       type: object
       required:

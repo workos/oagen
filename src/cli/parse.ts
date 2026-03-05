@@ -1,4 +1,4 @@
-import { parseSpec } from "../parser/parse.js";
+import { parseSpec } from '../parser/parse.js';
 
 export async function parseCommand(opts: { spec: string }): Promise<void> {
   try {

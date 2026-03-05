@@ -1,15 +1,15 @@
-import { defineConfig } from "tsup";
+import { defineConfig } from 'tsup';
 
 export default defineConfig({
   entry: {
-    index: "src/index.ts",
-    "cli/index": "src/cli/index.ts",
+    index: 'src/index.ts',
+    'cli/index': 'src/cli/index.ts',
   },
-  format: ["esm"],
+  format: ['esm'],
   dts: true,
   clean: true,
-  target: "node20",
+  target: 'node20',
   banner: {
-    js: "#!/usr/bin/env node",
+    js: '#!/usr/bin/env node',
   },
 });

@@ -1,12 +1,7 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  makeDocumentFromString,
-  bundleDocument,
-  createConfig,
-  BaseResolver,
-} from "@redocly/openapi-core";
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { makeDocumentFromString, bundleDocument, createConfig, BaseResolver } from '@redocly/openapi-core';
 
 export interface BundledSpec {
   parsed: Record<string, unknown>;
@@ -15,7 +10,7 @@ export interface BundledSpec {
 
 export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> {
   const absolutePath = resolve(specPath);
-  const content = await readFile(absolutePath, "utf-8");
+  const content = await readFile(absolutePath, 'utf-8');
   const document = makeDocumentFromString(content, pathToFileURL(absolutePath).href);
 
   const config = await createConfig({});
@@ -28,11 +23,11 @@ export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> 
     dereference: true,
   });
 
-  if (result.problems.some((p) => p.severity === "error")) {
+  if (result.problems.some((p) => p.severity === 'error')) {
     const errors = result.problems
-      .filter((p) => p.severity === "error")
+      .filter((p) => p.severity === 'error')
       .map((p) => p.message)
-      .join("\n");
+      .join('\n');
     throw new Error(`Failed to parse spec: ${errors}`);
   }
 

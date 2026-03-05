@@ -46,18 +46,18 @@ Use `AskUserQuestion` to walk through each category. For each category, explain 
 
 The categories are:
 
-| Category | What it controls in the emitter |
-|----------|-------------------------------|
-| **Testing Framework** | `tests.ts` — which test runner syntax to generate (assertions, test structure, setup/teardown) |
-| **HTTP Mocking** | `tests.ts` — how HTTP stubs are written in generated tests (request matching, response faking) |
-| **Documentation** | `models.ts`, `resources.ts` — docstring/annotation format on generated classes and methods |
-| **Type Signatures** | `types-*.ts` — whether separate type annotation files are needed, and what format |
-| **Linting/Formatting** | Validation step — which linter to run on generated output to verify style compliance |
-| **HTTP Client (default)** | `client.ts` — which HTTP library the generated client code uses for requests |
-| **JSON Parsing** | `client.ts` — how JSON serialization/deserialization is done in the generated client |
-| **Package Manager** | `config.ts` — what package metadata file to reference (e.g., gemspec, pyproject.toml, go.mod) |
-| **Build Tool** | Only if language needs one (e.g., `tsdown` for TypeScript, Gradle for Kotlin). Omit if N/A. |
-| **CI/CD** | Not used by emitter directly, but documented in the SDK design doc for reference |
+| Category                  | What it controls in the emitter                                                                |
+| ------------------------- | ---------------------------------------------------------------------------------------------- |
+| **Testing Framework**     | `tests.ts` — which test runner syntax to generate (assertions, test structure, setup/teardown) |
+| **HTTP Mocking**          | `tests.ts` — how HTTP stubs are written in generated tests (request matching, response faking) |
+| **Documentation**         | `models.ts`, `resources.ts` — docstring/annotation format on generated classes and methods     |
+| **Type Signatures**       | `types-*.ts` — whether separate type annotation files are needed, and what format              |
+| **Linting/Formatting**    | Validation step — which linter to run on generated output to verify style compliance           |
+| **HTTP Client (default)** | `client.ts` — which HTTP library the generated client code uses for requests                   |
+| **JSON Parsing**          | `client.ts` — how JSON serialization/deserialization is done in the generated client           |
+| **Package Manager**       | `config.ts` — what package metadata file to reference (e.g., gemspec, pyproject.toml, go.mod)  |
+| **Build Tool**            | Only if language needs one (e.g., `tsdown` for TypeScript, Gradle for Kotlin). Omit if N/A.    |
+| **CI/CD**                 | Not used by emitter directly, but documented in the SDK design doc for reference               |
 
 Ask these as a series of questions. For example, for Python you might ask:
 
@@ -123,6 +123,7 @@ src/emitters/{language}/
 ```
 
 Not every language needs every file. For example:
+
 - Go doesn't need separate type annotation files (types are inline)
 - Python might need a single `types-pyi.ts` for `.pyi` stubs
 - TypeScript SDK needs no separate type files (types are in the source)
@@ -137,20 +138,20 @@ This is the foundation. Map every IR `TypeRef` kind to the target language's typ
 
 Every type-map must handle these IR types:
 
-| IR TypeRef | What to Map |
-|------------|-------------|
-| `{ kind: "primitive", type: "string" }` | String type |
-| `{ kind: "primitive", type: "string", format: "date" }` | Date type |
-| `{ kind: "primitive", type: "string", format: "date-time" }` | DateTime type |
-| `{ kind: "primitive", type: "string", format: "uuid" }` | String or UUID type |
-| `{ kind: "primitive", type: "integer" }` | Integer type |
-| `{ kind: "primitive", type: "number" }` | Float/double type |
-| `{ kind: "primitive", type: "boolean" }` | Boolean type |
-| `{ kind: "array", items: ... }` | Array/list of mapped item type |
-| `{ kind: "model", name: "Foo" }` | Reference to model class |
-| `{ kind: "enum", name: "Foo" }` | Reference to enum type |
-| `{ kind: "nullable", inner: ... }` | Optional/nullable wrapper |
-| `{ kind: "union", variants: [...] }` | Union/sum type |
+| IR TypeRef                                                   | What to Map                    |
+| ------------------------------------------------------------ | ------------------------------ |
+| `{ kind: "primitive", type: "string" }`                      | String type                    |
+| `{ kind: "primitive", type: "string", format: "date" }`      | Date type                      |
+| `{ kind: "primitive", type: "string", format: "date-time" }` | DateTime type                  |
+| `{ kind: "primitive", type: "string", format: "uuid" }`      | String or UUID type            |
+| `{ kind: "primitive", type: "integer" }`                     | Integer type                   |
+| `{ kind: "primitive", type: "number" }`                      | Float/double type              |
+| `{ kind: "primitive", type: "boolean" }`                     | Boolean type                   |
+| `{ kind: "array", items: ... }`                              | Array/list of mapped item type |
+| `{ kind: "model", name: "Foo" }`                             | Reference to model class       |
+| `{ kind: "enum", name: "Foo" }`                              | Reference to enum type         |
+| `{ kind: "nullable", inner: ... }`                           | Optional/nullable wrapper      |
+| `{ kind: "union", variants: [...] }`                         | Union/sum type                 |
 
 Export a `mapTypeRef(typeRef: TypeRef, namespacePascal: string): string` function.
 
@@ -182,12 +183,12 @@ export function modulePath(namespace: string, category: string, name: string): s
 
 ### Examples by Language
 
-| IR Name | Ruby | Python | Go | Kotlin |
-|---------|------|--------|----|--------|
-| `UserProfile` (class) | `UserProfile` | `UserProfile` | `UserProfile` | `UserProfile` |
-| `UserProfile` (file) | `user_profile.rb` | `user_profile.py` | `user_profile.go` | `UserProfile.kt` |
-| `listUsers` (method) | `list_users` | `list_users` | `ListUsers` | `listUsers` |
-| `user_id` (field) | `user_id` | `user_id` | `UserID` | `userId` |
+| IR Name               | Ruby              | Python            | Go                | Kotlin           |
+| --------------------- | ----------------- | ----------------- | ----------------- | ---------------- |
+| `UserProfile` (class) | `UserProfile`     | `UserProfile`     | `UserProfile`     | `UserProfile`    |
+| `UserProfile` (file)  | `user_profile.rb` | `user_profile.py` | `user_profile.go` | `UserProfile.kt` |
+| `listUsers` (method)  | `list_users`      | `list_users`      | `ListUsers`       | `listUsers`      |
+| `user_id` (field)     | `user_id`         | `user_id`         | `UserID`          | `userId`         |
 
 Use the shared utilities from `src/utils/naming.ts` (`toPascalCase`, `toSnakeCase`, `toCamelCase`, `toKebabCase`, `toUpperSnakeCase`) as building blocks.
 
@@ -335,13 +336,17 @@ Every test file needs an `EmitterContext`. Use this pattern:
 
 ```typescript
 const emptySpec: ApiSpec = {
-  name: "Test", version: "1.0.0", baseUrl: "",
-  services: [], models: [], enums: [],
+  name: 'Test',
+  version: '1.0.0',
+  baseUrl: '',
+  services: [],
+  models: [],
+  enums: [],
 };
 
 const ctx: EmitterContext = {
-  namespace: "{snake_case_namespace}",
-  namespacePascal: "{PascalNamespace}",
+  namespace: '{snake_case_namespace}',
+  namespacePascal: '{PascalNamespace}',
   spec: emptySpec,
 };
 ```
@@ -422,19 +427,19 @@ Generated SDK structure:
 
 > **This inventory is Ruby-specific.** Files like `yard.ts`, `types-rbs.ts`, and `types-rbi.ts` are unique to Ruby — do not replicate them for other languages unless the target language has an equivalent type annotation system. Use this table to understand the purpose of each generator file, not as a universal file list. The scaffold in Step 1 is the actual template.
 
-| File | Purpose |
-|------|---------|
-| `index.ts` | Entry point, wires all generators into `Emitter` interface |
-| `type-map.ts` | `mapTypeRef`, `mapTypeRefForRbs`, `mapTypeRefForSorbet` |
-| `naming.ts` | `rubyClassName`, `rubyFileName` |
-| `yard.ts` | `yardType` — IR TypeRef to YARD documentation type strings |
-| `models.ts` | `generateModels` — BaseModel DSL classes with YARD `@!attribute` docs |
-| `enums.ts` | `generateEnums` — Module-based enums with `extend Enum` and symbol values |
+| File           | Purpose                                                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------------------------- |
+| `index.ts`     | Entry point, wires all generators into `Emitter` interface                                                 |
+| `type-map.ts`  | `mapTypeRef`, `mapTypeRefForRbs`, `mapTypeRefForSorbet`                                                    |
+| `naming.ts`    | `rubyClassName`, `rubyFileName`                                                                            |
+| `yard.ts`      | `yardType` — IR TypeRef to YARD documentation type strings                                                 |
+| `models.ts`    | `generateModels` — BaseModel DSL classes with YARD `@!attribute` docs                                      |
+| `enums.ts`     | `generateEnums` — Module-based enums with `extend Enum` and symbol values                                  |
 | `resources.ts` | `generateResources` — Keyword-style `@client.request(method:, path:, model:, ...)` with `request_options:` |
-| `client.ts` | `generateClient` — Net::HTTP client with keyword args, model/page deserialization, retry |
-| `errors.ts` | `generateErrors` — Error hierarchy |
-| `config.ts` | `generateConfig` — Configuration module |
-| `types-rbs.ts` | `generateRbs` — RBS type signatures (models, enums, resources with request_options) |
-| `types-rbi.ts` | `generateRbi` — Sorbet RBI signatures (models, enums, resources with request_options) |
-| `tests.ts` | `generateTests` — Minitest + WebMock tests (CRUD, error, retry, idempotency) |
-| `fixtures.ts` | `generateFixtures` — JSON test fixtures |
+| `client.ts`    | `generateClient` — Net::HTTP client with keyword args, model/page deserialization, retry                   |
+| `errors.ts`    | `generateErrors` — Error hierarchy                                                                         |
+| `config.ts`    | `generateConfig` — Configuration module                                                                    |
+| `types-rbs.ts` | `generateRbs` — RBS type signatures (models, enums, resources with request_options)                        |
+| `types-rbi.ts` | `generateRbi` — Sorbet RBI signatures (models, enums, resources with request_options)                      |
+| `tests.ts`     | `generateTests` — Minitest + WebMock tests (CRUD, error, retry, idempotency)                               |
+| `fixtures.ts`  | `generateFixtures` — JSON test fixtures                                                                    |

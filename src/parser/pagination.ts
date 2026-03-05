@@ -1,4 +1,4 @@
-import type { TypeRef, Parameter } from "../ir/types.js";
+import type { TypeRef, Parameter } from '../ir/types.js';
 
 /**
  * Detect if an operation uses cursor-based pagination.
@@ -10,14 +10,9 @@ import type { TypeRef, Parameter } from "../ir/types.js";
  * OR:
  * 1. Response has a wrapper object with list_metadata / next_cursor field
  */
-export function detectPagination(
-  response: TypeRef,
-  queryParams: Parameter[],
-): boolean {
+export function detectPagination(response: TypeRef, queryParams: Parameter[]): boolean {
   const hasCursorParam = queryParams.some((p) =>
-    ["cursor", "after", "before", "starting_after", "ending_before"].includes(
-      p.name,
-    ),
+    ['cursor', 'after', 'before', 'starting_after', 'ending_before'].includes(p.name),
   );
 
   if (!hasCursorParam) return false;

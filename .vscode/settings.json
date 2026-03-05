@@ -1,5 +1,17 @@
 {
-    "[markdown]": {
-        "editor.defaultFormatter": "esbenp.prettier-vscode"
-    }
+  "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode",
+  "editor.formatOnSave": true,
+  "oxlint.enable": true,
+  "[markdown]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[typescript]": {
+    "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+  },
+  "[json]": {
+    "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+  },
+  "[yaml]": {
+    "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+  }
 }

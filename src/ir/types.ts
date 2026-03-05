@@ -32,7 +32,7 @@ export interface Operation {
   idempotent: boolean;
 }
 
-export type HttpMethod = "get" | "post" | "put" | "patch" | "delete";
+export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 
 export interface Parameter {
   name: string;
@@ -42,43 +42,37 @@ export interface Parameter {
 }
 
 /** Type reference — the core type system of the IR */
-export type TypeRef =
-  | PrimitiveType
-  | ArrayType
-  | ModelRef
-  | EnumRef
-  | UnionType
-  | NullableType;
+export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType | NullableType;
 
 export interface PrimitiveType {
-  kind: "primitive";
-  type: "string" | "integer" | "number" | "boolean";
+  kind: 'primitive';
+  type: 'string' | 'integer' | 'number' | 'boolean';
   format?: string;
 }
 
 export interface ArrayType {
-  kind: "array";
+  kind: 'array';
   items: TypeRef;
 }
 
 export interface ModelRef {
-  kind: "model";
+  kind: 'model';
   name: string;
 }
 
 export interface EnumRef {
-  kind: "enum";
+  kind: 'enum';
   name: string;
 }
 
 export interface UnionType {
-  kind: "union";
+  kind: 'union';
   variants: TypeRef[];
   discriminator?: { property: string; mapping: Record<string, string> };
 }
 
 export interface NullableType {
-  kind: "nullable";
+  kind: 'nullable';
   inner: TypeRef;
 }
 

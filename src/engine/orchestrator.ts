@@ -1,7 +1,7 @@
-import type { ApiSpec } from "../ir/types.js";
-import type { Emitter, EmitterContext, GeneratedFile } from "./types.js";
-import { toSnakeCase } from "../utils/naming.js";
-import { writeFiles } from "./writer.js";
+import type { ApiSpec } from '../ir/types.js';
+import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
+import { toSnakeCase } from '../utils/naming.js';
+import { writeFiles } from './writer.js';
 
 export async function generate(
   spec: ApiSpec,
@@ -28,7 +28,7 @@ export async function generate(
   const header = emitter.fileHeader();
   const withHeaders = files.map((f) => ({
     ...f,
-    content: header + "\n\n" + f.content,
+    content: header + '\n\n' + f.content,
   }));
 
   if (options.dryRun) {

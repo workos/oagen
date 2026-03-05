@@ -21,9 +21,9 @@ Parse an OpenAPI spec and output the intermediate representation (IR) as JSON to
 oagen parse --spec path/to/openapi.yml
 ```
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--spec <path>` | Yes | Path to an OpenAPI 3.1 spec file (YAML or JSON) |
+| Argument        | Required | Description                                     |
+| --------------- | -------- | ----------------------------------------------- |
+| `--spec <path>` | Yes      | Path to an OpenAPI 3.1 spec file (YAML or JSON) |
 
 ### `oagen generate`
 
@@ -33,17 +33,18 @@ Generate SDK code from an OpenAPI spec.
 oagen generate --spec openapi.yml --lang ruby --output ./sdk --namespace WorkOS
 ```
 
-| Argument | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `--spec <path>` | Yes | | Path to an OpenAPI 3.1 spec file |
-| `--lang <language>` | Yes | | Target language emitter (e.g., `ruby`) |
-| `--output <dir>` | Yes | | Directory to write generated files into |
-| `--namespace <name>` | No | Spec's `info.title` | SDK namespace in PascalCase — used directly for code identifiers (e.g., `WorkOS::Client`) and converted to `snake_case` for file paths (e.g., `lib/work_os/`). Use PascalCase with the exact casing you want (e.g., `WorkOS` not `work_os`). |
-| `--dry-run` | No | `false` | Print the list of file paths that would be generated, without writing anything to disk |
+| Argument             | Required | Default             | Description                                                                                                                                                                                                                                  |
+| -------------------- | -------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--spec <path>`      | Yes      |                     | Path to an OpenAPI 3.1 spec file                                                                                                                                                                                                             |
+| `--lang <language>`  | Yes      |                     | Target language emitter (e.g., `ruby`)                                                                                                                                                                                                       |
+| `--output <dir>`     | Yes      |                     | Directory to write generated files into                                                                                                                                                                                                      |
+| `--namespace <name>` | No       | Spec's `info.title` | SDK namespace in PascalCase — used directly for code identifiers (e.g., `WorkOS::Client`) and converted to `snake_case` for file paths (e.g., `lib/work_os/`). Use PascalCase with the exact casing you want (e.g., `WorkOS` not `work_os`). |
+| `--dry-run`          | No       | `false`             | Print the list of file paths that would be generated, without writing anything to disk                                                                                                                                                       |
 
 **How `--namespace` flows through the generated SDK:**
 
 Given `--namespace WorkOS`:
+
 - Module/class names use it as-is: `module WorkOS; module Models; class Organization`
 - Type references use it as-is: `WorkOS::Models::Organization`
 - File paths are derived as snake_case: `lib/work_os/models/organization.rb`
@@ -53,20 +54,20 @@ If omitted, the namespace is derived from the spec's `info.title` field (e.g., a
 
 ### `oagen diff`
 
-Incrementally generate from spec changes. *(Not yet implemented — coming in Phase 3.)*
+Incrementally generate from spec changes. _(Not yet implemented — coming in Phase 3.)_
 
 ```bash
 oagen diff --old old-spec.yml --new new-spec.yml --lang ruby --output ./sdk
 ```
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--old <path>` | Yes | Path to the old/previous spec |
-| `--new <path>` | Yes | Path to the new/current spec |
-| `--lang <language>` | No | Target language (required unless `--report`) |
-| `--output <dir>` | No | Output directory for regenerated files |
-| `--report` | No | Output a diff report as JSON instead of generating code |
-| `--force` | No | Allow file deletions without confirmation |
+| Argument            | Required | Description                                             |
+| ------------------- | -------- | ------------------------------------------------------- |
+| `--old <path>`      | Yes      | Path to the old/previous spec                           |
+| `--new <path>`      | Yes      | Path to the new/current spec                            |
+| `--lang <language>` | No       | Target language (required unless `--report`)            |
+| `--output <dir>`    | No       | Output directory for regenerated files                  |
+| `--report`          | No       | Output a diff report as JSON instead of generating code |
+| `--force`           | No       | Allow file deletions without confirmation               |
 
 ## Development
 
@@ -159,7 +160,7 @@ docs/sdk-designs/{language}.md              (language-specific design spec — s
 src/emitters/{language}/                    (emitter source code)
 ```
 
-**`SKILL.md`** is the step-by-step procedure the AI follows. It proposes tooling choices, confirms them with the user, creates a language design doc, then scaffolds and implements the emitter. It is language-agnostic — it describes *what* each generator must do without prescribing *how* any particular language does it.
+**`SKILL.md`** is the step-by-step procedure the AI follows. It proposes tooling choices, confirms them with the user, creates a language design doc, then scaffolds and implements the emitter. It is language-agnostic — it describes _what_ each generator must do without prescribing _how_ any particular language does it.
 
 **`{language}.md`** (e.g., `ruby.md`) is the language-specific design spec produced by running the skill. It is the **single source of truth** for that emitter — idiomatic patterns, type mappings, code examples, structural guidelines (tooling choices), and directory structure all live here. The Ruby design doc also serves as the structural template — new language docs should have the same sections.
 
@@ -179,9 +180,9 @@ src/emitters/{language}/                    (emitter source code)
 
 ### Key files for reference
 
-| File | What it is |
-|------|-----------|
-| `src/engine/types.ts` | The `Emitter` interface contract (9 methods + `fileHeader`) |
-| `src/ir/types.ts` | The IR type system (`ApiSpec`, `Model`, `Enum`, `Service`, `TypeRef`, etc.) |
-| `src/emitters/ruby/` | Reference emitter implementation |
-| `docs/sdk-designs/ruby.md` | Reference design doc (also the structural template for new languages) |
+| File                       | What it is                                                                  |
+| -------------------------- | --------------------------------------------------------------------------- |
+| `src/engine/types.ts`      | The `Emitter` interface contract (9 methods + `fileHeader`)                 |
+| `src/ir/types.ts`          | The IR type system (`ApiSpec`, `Model`, `Enum`, `Service`, `TypeRef`, etc.) |
+| `src/emitters/ruby/`       | Reference emitter implementation                                            |
+| `docs/sdk-designs/ruby.md` | Reference design doc (also the structural template for new languages)       |
