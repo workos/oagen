@@ -180,4 +180,33 @@ describe('schemaToTypeRef', () => {
     const ref = schemaToTypeRef({ type: 'string', enum: ['a', 'b'] }, 'status');
     expect(ref).toEqual({ kind: 'enum', name: 'Status' });
   });
+
+  it('resolves $ref to named ModelRef', () => {
+    const ref = schemaToTypeRef({ $ref: '#/components/schemas/ValidateApiKeyDto' });
+    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKeyDto' });
+  });
+
+  it('resolves $ref with PascalCase name preserved', () => {
+    const ref = schemaToTypeRef({ $ref: '#/components/schemas/ListMetadata' });
+    expect(ref).toEqual({ kind: 'model', name: 'ListMetadata' });
+  });
+
+  it('resolves $ref with kebab-case name to PascalCase', () => {
+    const ref = schemaToTypeRef({ $ref: '#/components/schemas/api-key-response' });
+    expect(ref).toEqual({ kind: 'model', name: 'ApiKeyResponse' });
+  });
+
+  it('$ref takes priority over other schema properties', () => {
+    const ref = schemaToTypeRef({
+      $ref: '#/components/schemas/UserDto',
+      type: 'object',
+      properties: { id: { type: 'string' } },
+    });
+    expect(ref).toEqual({ kind: 'model', name: 'UserDto' });
+  });
+
+  it('falls through on malformed $ref with no segments', () => {
+    const ref = schemaToTypeRef({ $ref: '', type: 'string' });
+    expect(ref).toEqual({ kind: 'primitive', type: 'string' });
+  });
 });

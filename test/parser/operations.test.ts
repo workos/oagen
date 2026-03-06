@@ -153,4 +153,128 @@ describe('extractOperations', () => {
   it('returns empty for undefined paths', () => {
     expect(extractOperations(undefined)).toEqual([]);
   });
+
+  it('uses operationId for inline response type name', () => {
+    const paths = {
+      '/api_keys/validate': {
+        post: {
+          operationId: 'ApiKeysController_validateApiKey',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { valid: { type: 'boolean' } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.response).toEqual({
+      kind: 'model',
+      name: 'ApiKeysControllerValidateApiKeyResponse',
+    });
+  });
+
+  it('falls back to path-based response name without operationId', () => {
+    const paths = {
+      '/widgets': {
+        get: {
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { items: { type: 'array', items: { type: 'string' } } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.response).toEqual({
+      kind: 'model',
+      name: 'WidgetsGetResponse',
+    });
+  });
+
+  it('resolves $ref response to named model', () => {
+    const paths = {
+      '/users/{id}': {
+        get: {
+          operationId: 'getUser',
+          parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/UserDto' },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.response).toEqual({ kind: 'model', name: 'UserDto' });
+  });
+
+  it('uses operationId for inline request body name', () => {
+    const paths = {
+      '/users': {
+        post: {
+          operationId: 'createUser',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { name: { type: 'string' } } },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserRequest' });
+  });
+
+  it('resolves $ref request body to named model', () => {
+    const paths = {
+      '/users': {
+        post: {
+          operationId: 'createUser',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/CreateUserDto' },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const services = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserDto' });
+  });
 });

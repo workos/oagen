@@ -116,8 +116,8 @@ function buildOperation(
   const queryParams = extractParams(allParams, 'query');
   const headerParams = extractParams(allParams, 'header');
 
-  const requestBody = extractRequestBody(op.requestBody);
-  const { response, errors } = extractResponses(op.responses);
+  const requestBody = extractRequestBody(op.requestBody, op);
+  const { response, errors } = extractResponses(op.responses, op, path, method);
 
   const paginated = detectPagination(response, queryParams);
 
@@ -150,16 +150,33 @@ function extractParams(params: ParameterObject[], location: 'path' | 'query' | '
     }));
 }
 
-function extractRequestBody(body?: RequestBodyObject): TypeRef | undefined {
+function extractRequestBody(body?: RequestBodyObject, op?: OperationObject): TypeRef | undefined {
   if (!body?.content) return undefined;
 
   const jsonContent = body.content['application/json'];
   if (!jsonContent?.schema) return undefined;
 
-  return schemaToTypeRef(jsonContent.schema as Record<string, unknown>, 'RequestBody');
+  const contextName = op?.operationId
+    ? toPascalCase(op.operationId) + 'Request'
+    : 'RequestBody';
+  return schemaToTypeRef(jsonContent.schema as Record<string, unknown>, contextName);
 }
 
-function extractResponses(responses?: Record<string, ResponseObject>): { response: TypeRef; errors: ErrorResponse[] } {
+function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
+  if (op?.operationId) {
+    return toPascalCase(op.operationId) + 'Response';
+  }
+  const segments = path.split('/').filter(Boolean);
+  const resource = segments[0] ?? 'Unknown';
+  return toPascalCase(resource) + toPascalCase(method) + 'Response';
+}
+
+function extractResponses(
+  responses?: Record<string, ResponseObject>,
+  op?: OperationObject,
+  path?: string,
+  method?: HttpMethod,
+): { response: TypeRef; errors: ErrorResponse[] } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
 
@@ -171,7 +188,8 @@ function extractResponses(responses?: Record<string, ResponseObject>): { respons
     if (code >= 200 && code < 300) {
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
-        response = schemaToTypeRef(jsonContent.schema as Record<string, unknown>, 'Response');
+        const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
+        response = schemaToTypeRef(jsonContent.schema as Record<string, unknown>, contextName);
       }
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
