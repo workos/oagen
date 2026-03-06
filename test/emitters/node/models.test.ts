@@ -7,7 +7,42 @@ const emptySpec: ApiSpec = {
   name: 'Test',
   version: '1.0.0',
   baseUrl: '',
-  services: [{ name: 'Organizations', operations: [] }],
+  services: [
+    {
+      name: 'Organizations',
+      operations: [
+        {
+          name: 'getOrganization',
+          httpMethod: 'get',
+          path: '/organizations/{id}',
+          pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+          queryParams: [],
+          headerParams: [],
+          response: { kind: 'model', name: 'Organization' },
+          errors: [],
+          paginated: false,
+          idempotent: false,
+        },
+      ],
+    },
+    {
+      name: 'UserManagement',
+      operations: [
+        {
+          name: 'getUser',
+          httpMethod: 'get',
+          path: '/users/{id}',
+          pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+          queryParams: [],
+          headerParams: [],
+          response: { kind: 'model', name: 'User' },
+          errors: [],
+          paginated: false,
+          idempotent: false,
+        },
+      ],
+    },
+  ],
   models: [],
   enums: [],
 };
@@ -173,22 +208,33 @@ describe('generateModels (node)', () => {
     expect(interfaceFile!.content).toContain('  data: DogResponse | CatResponse;');
   });
 
-  it('generates barrel index files', () => {
+  it('generates per-service barrel index files', () => {
     const models: Model[] = [
       { name: 'User', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
       { name: 'Organization', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
     ];
 
     const files = generateModels(models, ctx);
-    const interfaceIndex = files.find((f) => f.path.endsWith('interfaces/index.ts'));
-    expect(interfaceIndex).toBeDefined();
-    expect(interfaceIndex!.content).toContain("export * from './user.interface.js';");
-    expect(interfaceIndex!.content).toContain("export * from './organization.interface.js';");
 
-    const serializerIndex = files.find((f) => f.path.endsWith('serializers/index.ts'));
-    expect(serializerIndex).toBeDefined();
-    expect(serializerIndex!.content).toContain("export * from './user.serializer.js';");
-    expect(serializerIndex!.content).toContain("export * from './organization.serializer.js';");
+    // Organizations service barrel
+    const orgInterfaceIndex = files.find((f) => f.path === 'src/organizations/interfaces/index.ts');
+    expect(orgInterfaceIndex).toBeDefined();
+    expect(orgInterfaceIndex!.content).toContain("export * from './organization.interface.js';");
+    expect(orgInterfaceIndex!.content).not.toContain('user');
+
+    const orgSerializerIndex = files.find((f) => f.path === 'src/organizations/serializers/index.ts');
+    expect(orgSerializerIndex).toBeDefined();
+    expect(orgSerializerIndex!.content).toContain("export * from './organization.serializer.js';");
+
+    // UserManagement service barrel
+    const umInterfaceIndex = files.find((f) => f.path === 'src/user-management/interfaces/index.ts');
+    expect(umInterfaceIndex).toBeDefined();
+    expect(umInterfaceIndex!.content).toContain("export * from './user.interface.js';");
+    expect(umInterfaceIndex!.content).not.toContain('organization');
+
+    const umSerializerIndex = files.find((f) => f.path === 'src/user-management/serializers/index.ts');
+    expect(umSerializerIndex).toBeDefined();
+    expect(umSerializerIndex!.content).toContain("export * from './user.serializer.js';");
   });
 
   it('maps primitive types correctly', () => {
@@ -208,5 +254,58 @@ describe('generateModels (node)', () => {
     expect(interfaceFile!.content).toContain('  count: number;');
     expect(interfaceFile!.content).toContain('  ratio: number;');
     expect(interfaceFile!.content).toContain('  active: boolean;');
+  });
+
+  it('distributes models to their owning service', () => {
+    const models: Model[] = [
+      { name: 'Organization', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      { name: 'User', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+    ];
+
+    const files = generateModels(models, ctx);
+
+    const orgInterface = files.find((f) => f.path.includes('organization.interface.ts'));
+    expect(orgInterface!.path).toBe('src/organizations/interfaces/organization.interface.ts');
+
+    const userInterface = files.find((f) => f.path.includes('user.interface.ts'));
+    expect(userInterface!.path).toBe('src/user-management/interfaces/user.interface.ts');
+  });
+
+  it('falls back to common for unreferenced models', () => {
+    const models: Model[] = [
+      { name: 'Orphan', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+    ];
+
+    const files = generateModels(models, ctx);
+
+    const orphanInterface = files.find((f) => f.path.includes('orphan.interface.ts'));
+    expect(orphanInterface!.path).toBe('src/common/interfaces/orphan.interface.ts');
+
+    const orphanSerializer = files.find((f) => f.path.includes('orphan.serializer.ts'));
+    expect(orphanSerializer!.path).toBe('src/common/serializers/orphan.serializer.ts');
+  });
+
+  it('handles cross-service model references', () => {
+    const models: Model[] = [
+      {
+        name: 'Team',
+        fields: [
+          { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+          { name: 'owner', type: { kind: 'model', name: 'User' }, required: true },
+        ],
+      },
+    ];
+
+    // Team is not referenced by any operation in emptySpec, so it goes to 'common'.
+    // User is referenced by UserManagement. The import should cross service boundaries.
+    const files = generateModels(models, ctx);
+
+    const teamInterface = files.find((f) => f.path.includes('team.interface.ts'));
+    expect(teamInterface!.path).toBe('src/common/interfaces/team.interface.ts');
+    // Import User from user-management service
+    expect(teamInterface!.content).toContain("from '../../user-management/interfaces/user.interface.js'");
+
+    const teamSerializer = files.find((f) => f.path.includes('team.serializer.ts'));
+    expect(teamSerializer!.content).toContain("from '../../user-management/serializers/user.serializer.js'");
   });
 });
