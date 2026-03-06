@@ -1,20 +1,51 @@
 import type { TypeRef, Model, ApiSpec } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeFileName } from './naming.js';
+import { nodeFileName, nodeFixturePath } from './naming.js';
 import { toSnakeCase } from '../../utils/naming.js';
 
 export function generateFixtures(spec: ApiSpec, _ctx: EmitterContext): GeneratedFile[] {
   const files: GeneratedFile[] = [];
 
+  // Build model→service map from operation references
+  const modelToService = new Map<string, string>();
+  for (const service of spec.services) {
+    for (const op of service.operations) {
+      collectModelRefsToService(op.response, service.name, modelToService);
+      if (op.requestBody) collectModelRefsToService(op.requestBody, service.name, modelToService);
+    }
+  }
+
   for (const model of spec.models) {
+    const service = modelToService.get(model.name) ?? 'common';
     const fixture = generateFixtureForModel(model, spec);
     files.push({
-      path: `test/fixtures/${nodeFileName(model.name)}.json`,
+      path: nodeFixturePath(service, model.name),
       content: JSON.stringify(fixture, null, 2) + '\n',
     });
   }
 
   return files;
+}
+
+function collectModelRefsToService(
+  typeRef: TypeRef,
+  serviceName: string,
+  map: Map<string, string>,
+): void {
+  switch (typeRef.kind) {
+    case 'model':
+      if (!map.has(typeRef.name)) map.set(typeRef.name, serviceName);
+      break;
+    case 'array':
+      collectModelRefsToService(typeRef.items, serviceName, map);
+      break;
+    case 'nullable':
+      collectModelRefsToService(typeRef.inner, serviceName, map);
+      break;
+    case 'union':
+      for (const v of typeRef.variants) collectModelRefsToService(v, serviceName, map);
+      break;
+  }
 }
 
 function generateFixtureForModel(model: Model, spec: ApiSpec): Record<string, unknown> {

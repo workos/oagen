@@ -285,6 +285,48 @@ describe('generateModels (node)', () => {
     expect(orphanSerializer!.path).toBe('src/common/serializers/orphan.serializer.ts');
   });
 
+  it('distributes inline response models to owning service', () => {
+    // Inline model discovered during response extraction
+    const specWithInline: ApiSpec = {
+      ...emptySpec,
+      services: [
+        {
+          name: 'Organizations',
+          operations: [
+            {
+              name: 'getOrganization',
+              httpMethod: 'get',
+              path: '/organizations/{id}',
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'OrganizationDetail' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+    };
+    const ctxWithInline: EmitterContext = { ...ctx, spec: specWithInline };
+
+    const models: Model[] = [
+      {
+        name: 'OrganizationDetail',
+        fields: [
+          { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+          { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+        ],
+      },
+    ];
+
+    const files = generateModels(models, ctxWithInline);
+    const interfaceFile = files.find((f) => f.path.includes('organization-detail.interface.ts'));
+    expect(interfaceFile).toBeDefined();
+    expect(interfaceFile!.path).toBe('src/organizations/interfaces/organization-detail.interface.ts');
+  });
+
   it('handles cross-service model references', () => {
     const models: Model[] = [
       {

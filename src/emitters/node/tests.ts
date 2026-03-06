@@ -1,6 +1,6 @@
 import type { ApiSpec, Service, Operation, TypeRef, Model } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeClassName, nodeFileName, nodeTestPath } from './naming.js';
+import { nodeClassName, nodeFileName, nodeTestPath, nodeFixturePath } from './naming.js';
 import { toCamelCase, toPascalCase, toSnakeCase } from '../../utils/naming.js';
 import { generateFixtures } from './fixtures.js';
 
@@ -95,7 +95,7 @@ function generateCrudTestWithValidation(op: Operation, service: Service, ctx: Em
   }
 
   lines.push(`    it('${op.name}s and deserializes the response', async () => {`);
-  lines.push(`      const fixture = require('../fixtures/${fixtureName}.json');`);
+  lines.push(`      const fixture = require('./fixtures/${fixtureName}.json');`);
   lines.push(`      fetchOnce(fixture, ${statusCode});`);
   lines.push('');
 
@@ -135,7 +135,7 @@ function generateParamTests(op: Operation, service: Service, ctx: EmitterContext
     const testValue = getTestValueForType(param.type, param.name);
 
     lines.push(`    it('sends ${param.name} parameter', async () => {`);
-    lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 200);`);
+    lines.push(`      fetchOnce(require('./fixtures/${fixtureName}.json'), 200);`);
     lines.push('');
     lines.push(`      await ${clientVar}.${resourceProp}.${methodName}({ ${camelParam}: ${testValue} });`);
     lines.push('');
@@ -146,7 +146,7 @@ function generateParamTests(op: Operation, service: Service, ctx: EmitterContext
 
   if (op.queryParams.length > 1) {
     lines.push(`    it('sends multiple parameters together', async () => {`);
-    lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 200);`);
+    lines.push(`      fetchOnce(require('./fixtures/${fixtureName}.json'), 200);`);
     lines.push('');
     const paramObj = op.queryParams
       .slice(0, 3)
@@ -217,7 +217,7 @@ function generateRetryTest(op: Operation, service: Service, ctx: EmitterContext)
   lines.push(`    it('retries on 429 rate limit', async () => {`);
   lines.push(`      fetch.mockResponses(`);
   lines.push(`        [JSON.stringify({}), { status: 429, headers: { 'Retry-After': '0.01' } }],`);
-  lines.push(`        [JSON.stringify(require('../fixtures/${fixtureName}.json')), { status: 200 }],`);
+  lines.push(`        [JSON.stringify(require('./fixtures/${fixtureName}.json')), { status: 200 }],`);
   lines.push(`      );`);
   lines.push('');
   const args = buildTestCallArgs(op);
@@ -238,7 +238,7 @@ function generateIdempotencyTests(op: Operation, service: Service, ctx: EmitterC
   const fixtureName = getResponseFixtureName(op, service);
 
   lines.push(`    it('sends explicit idempotency key', async () => {`);
-  lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 201);`);
+  lines.push(`      fetchOnce(require('./fixtures/${fixtureName}.json'), 201);`);
   lines.push('');
   lines.push(`      await ${clientVar}.${resourceProp}.${methodName}(`);
   lines.push(`        { name: 'Test' },`);
@@ -250,7 +250,7 @@ function generateIdempotencyTests(op: Operation, service: Service, ctx: EmitterC
   lines.push('');
 
   lines.push(`    it('auto-generates idempotency key for POST', async () => {`);
-  lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 201);`);
+  lines.push(`      fetchOnce(require('./fixtures/${fixtureName}.json'), 201);`);
   lines.push('');
   lines.push(`      await ${clientVar}.${resourceProp}.${methodName}({ name: 'Test' });`);
   lines.push('');
@@ -278,8 +278,13 @@ function stripLeadingSlash(path: string): string {
 }
 
 function getResponseFixtureName(op: Operation, service: Service): string {
-  const resourceName = nodeFileName(service.name);
-  return `${resourceName}/${op.name}`;
+  if (op.response.kind === 'model') {
+    return nodeFileName(op.response.name);
+  }
+  if (op.response.kind === 'array' && op.response.items.kind === 'model') {
+    return nodeFileName(op.response.items.name);
+  }
+  return nodeFileName(op.name);
 }
 
 function findModelByName(name: string, ctx: EmitterContext): Model | undefined {

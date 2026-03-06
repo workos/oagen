@@ -170,6 +170,36 @@ describe('generateResources (node)', () => {
     expect(content).toContain('`organizations/${id}`');
   });
 
+  it('generates a resource with array response type for paginated list', () => {
+    const services: Service[] = [
+      {
+        name: 'Organizations',
+        operations: [
+          {
+            name: 'list',
+            httpMethod: 'get',
+            path: '/organizations',
+            pathParams: [],
+            queryParams: [
+              { name: 'cursor', type: { kind: 'primitive', type: 'string' }, required: false },
+            ],
+            headerParams: [],
+            response: { kind: 'array', items: { kind: 'model', name: 'Organization' } },
+            errors: [],
+            paginated: true,
+            idempotent: false,
+          },
+        ],
+      },
+    ];
+
+    const files = generateResources(services, ctx);
+    const content = files[0].content;
+    expect(content).toContain('AutoPaginatable<Organization>');
+    expect(content).toContain('deserializeOrganization');
+    expect(content).toContain('OrganizationResponse');
+  });
+
   it('generates multiple resources as separate files', () => {
     const services: Service[] = [
       { name: 'Users', operations: [] },

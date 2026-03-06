@@ -153,13 +153,21 @@ describe('generateTests (node)', () => {
     expect(content).toContain('auto-generates idempotency key');
   });
 
-  it('generates fixture JSON files', () => {
+  it('generates fixture JSON files in per-service directories', () => {
     const files = generateTests(spec, ctx);
     const fixture = files.find((f) => f.path.includes('fixtures/') && f.path.endsWith('.json'));
     expect(fixture).toBeDefined();
+    // Fixture should be in the service's fixture directory
+    expect(fixture!.path).toBe('src/organizations/fixtures/organization.json');
     const parsed = JSON.parse(fixture!.content);
     expect(parsed).toHaveProperty('id');
     expect(parsed).toHaveProperty('name');
+  });
+
+  it('references fixtures using correct relative path in generated tests', () => {
+    const content = getTestFile();
+    // Fixture path should be relative to test file (same service directory)
+    expect(content).toContain("require('./fixtures/organization.json')");
   });
 
   it('uses beforeEach to reset fetch mocks', () => {
