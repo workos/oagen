@@ -24,7 +24,14 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
 
-  const services = extractOperations(spec.paths as Record<string, Record<string, unknown>> | undefined);
+  const { services, inlineModels } = extractOperations(
+    spec.paths as Record<string, Record<string, unknown>> | undefined,
+  );
+
+  // Merge inline models with component schema models, component schemas take precedence
+  const schemaModelNames = new Set(models.map((m) => m.name));
+  const deduplicatedInlineModels = inlineModels.filter((m) => !schemaModelNames.has(m.name));
+  const allModels = [...models, ...deduplicatedInlineModels];
 
   return {
     name: spec.info?.title ?? 'Unknown API',
@@ -32,7 +39,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     description: spec.info?.description,
     baseUrl: spec.servers?.[0]?.url ?? '',
     services,
-    models,
+    models: allModels,
     enums,
   };
 }

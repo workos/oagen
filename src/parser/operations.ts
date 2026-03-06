@@ -1,7 +1,8 @@
-import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse } from '../ir/types.js';
+import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse, Model } from '../ir/types.js';
 import { toPascalCase, toCamelCase } from '../utils/naming.js';
 import { schemaToTypeRef } from './schemas.js';
 import { detectPagination } from './pagination.js';
+import { classifyAndExtractResponse } from './responses.js';
 
 interface PathItem {
   get?: OperationObject;
@@ -42,10 +43,16 @@ interface ResponseObject {
 
 const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
 
-export function extractOperations(paths: Record<string, PathItem> | undefined): Service[] {
-  if (!paths) return [];
+export interface OperationExtractionResult {
+  services: Service[];
+  inlineModels: Model[];
+}
+
+export function extractOperations(paths: Record<string, PathItem> | undefined): OperationExtractionResult {
+  if (!paths) return { services: [], inlineModels: [] };
 
   const serviceMap = new Map<string, Operation[]>();
+  const inlineModels: Model[] = [];
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const serviceName = inferServiceName(path);
@@ -55,17 +62,20 @@ export function extractOperations(paths: Record<string, PathItem> | undefined): 
       const op = pathItem[method];
       if (!op) continue;
 
-      const operation = buildOperation(method, path, op, pathLevelParams);
+      const { operation, inlineModels: opModels } = buildOperation(method, path, op, pathLevelParams);
+      inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
     }
   }
 
-  return Array.from(serviceMap.entries()).map(([name, operations]) => ({
+  const services = Array.from(serviceMap.entries()).map(([name, operations]) => ({
     name,
     operations,
   }));
+
+  return { services, inlineModels };
 }
 
 function inferServiceName(path: string): string {
@@ -109,7 +119,7 @@ function buildOperation(
   path: string,
   op: OperationObject,
   pathLevelParams: ParameterObject[],
-): Operation {
+): { operation: Operation; inlineModels: Model[] } {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
   const pathParams = extractParams(allParams, 'path');
@@ -117,23 +127,26 @@ function buildOperation(
   const headerParams = extractParams(allParams, 'header');
 
   const requestBody = extractRequestBody(op.requestBody, op);
-  const { response, errors } = extractResponses(op.responses, op, path, method);
+  const { response, errors, inlineModels, isPaginated } = extractResponses(op.responses, op, path, method);
 
-  const paginated = detectPagination(response, queryParams);
+  const paginated = isPaginated || detectPagination(response, queryParams);
 
   return {
-    name: inferOperationName(method, path, op.operationId),
-    description: op.description ?? op.summary,
-    httpMethod: method,
-    path,
-    pathParams,
-    queryParams,
-    headerParams,
-    requestBody,
-    response,
-    errors,
-    paginated,
-    idempotent: method === 'post',
+    operation: {
+      name: inferOperationName(method, path, op.operationId),
+      description: op.description ?? op.summary,
+      httpMethod: method,
+      path,
+      pathParams,
+      queryParams,
+      headerParams,
+      requestBody,
+      response,
+      errors,
+      paginated,
+      idempotent: method === 'post',
+    },
+    inlineModels,
   };
 }
 
@@ -176,11 +189,13 @@ function extractResponses(
   op?: OperationObject,
   path?: string,
   method?: HttpMethod,
-): { response: TypeRef; errors: ErrorResponse[] } {
+): { response: TypeRef; errors: ErrorResponse[]; inlineModels: Model[]; isPaginated: boolean } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let inlineModels: Model[] = [];
+  let isPaginated = false;
 
-  if (!responses) return { response, errors };
+  if (!responses) return { response, errors, inlineModels, isPaginated };
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
@@ -189,7 +204,13 @@ function extractResponses(
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
         const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
-        response = schemaToTypeRef(jsonContent.schema as Record<string, unknown>, contextName);
+        const result = classifyAndExtractResponse(
+          jsonContent.schema as Record<string, unknown>,
+          contextName,
+        );
+        response = result.response;
+        inlineModels = result.inlineModels;
+        isPaginated = result.isPaginated;
       }
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
@@ -200,5 +221,5 @@ function extractResponses(
     }
   }
 
-  return { response, errors };
+  return { response, errors, inlineModels, isPaginated };
 }

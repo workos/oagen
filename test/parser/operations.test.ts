@@ -18,7 +18,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services).toHaveLength(2);
     const names = services.map((s) => s.name).sort();
     expect(names).toEqual(['Organizations', 'Users']);
@@ -34,7 +34,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('list');
     expect(services[0].operations[0].httpMethod).toBe('get');
   });
@@ -50,7 +50,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('retrieve');
     expect(services[0].operations[0].pathParams).toHaveLength(1);
     expect(services[0].operations[0].pathParams[0].name).toBe('user_id');
@@ -74,7 +74,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('create');
     expect(services[0].operations[0].idempotent).toBe(true);
     expect(services[0].operations[0].requestBody).toBeDefined();
@@ -91,7 +91,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('update');
   });
 
@@ -106,7 +106,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('delete');
   });
 
@@ -130,7 +130,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].errors).toHaveLength(1);
     expect(services[0].operations[0].errors[0].statusCode).toBe(400);
   });
@@ -146,12 +146,14 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     expect(services[0].operations[0].paginated).toBe(true);
   });
 
   it('returns empty for undefined paths', () => {
-    expect(extractOperations(undefined)).toEqual([]);
+    const { services, inlineModels } = extractOperations(undefined);
+    expect(services).toEqual([]);
+    expect(inlineModels).toEqual([]);
   });
 
   it('uses operationId for inline response type name', () => {
@@ -173,7 +175,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.response).toEqual({
       kind: 'model',
@@ -199,7 +201,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.response).toEqual({
       kind: 'model',
@@ -227,7 +229,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.response).toEqual({ kind: 'model', name: 'UserDto' });
   });
@@ -250,7 +252,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserRequest' });
   });
@@ -273,7 +275,7 @@ describe('extractOperations', () => {
       },
     };
 
-    const services = extractOperations(paths);
+    const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserDto' });
   });
