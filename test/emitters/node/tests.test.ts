@@ -16,7 +16,11 @@ const spec: ApiSpec = {
           httpMethod: 'get',
           path: '/organizations',
           pathParams: [],
-          queryParams: [{ name: 'cursor', type: { kind: 'primitive', type: 'string' }, required: false }],
+          queryParams: [
+            { name: 'cursor', type: { kind: 'primitive', type: 'string' }, required: false },
+            { name: 'limit', type: { kind: 'primitive', type: 'integer' }, required: false },
+            { name: 'order', type: { kind: 'enum', name: 'Order' }, required: false },
+          ],
           headerParams: [],
           response: { kind: 'model', name: 'Organization' },
           errors: [],
@@ -31,7 +35,7 @@ const spec: ApiSpec = {
           queryParams: [],
           headerParams: [],
           response: { kind: 'model', name: 'Organization' },
-          errors: [],
+          errors: [{ statusCode: 404 }],
           paginated: false,
           idempotent: false,
         },
@@ -44,9 +48,21 @@ const spec: ApiSpec = {
           headerParams: [],
           requestBody: { kind: 'model', name: 'CreateOrganization' },
           response: { kind: 'model', name: 'Organization' },
-          errors: [],
+          errors: [{ statusCode: 409 }],
           paginated: false,
           idempotent: true,
+        },
+        {
+          name: 'delete',
+          httpMethod: 'delete',
+          path: '/organizations/{id}',
+          pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+          queryParams: [],
+          headerParams: [],
+          response: { kind: 'primitive', type: 'string' },
+          errors: [{ statusCode: 404 }],
+          paginated: false,
+          idempotent: false,
         },
       ],
     },
@@ -69,54 +85,72 @@ const ctx: EmitterContext = {
   spec,
 };
 
+function getTestFile(): string {
+  const files = generateTests(spec, ctx);
+  return files.find((f) => f.path === 'src/organizations/organizations.spec.ts')!.content;
+}
+
 describe('generateTests (node)', () => {
   it('generates test files with jest-fetch-mock imports', () => {
-    const files = generateTests(spec, ctx);
-    const testFile = files.find((f) => f.path === 'src/organizations/organizations.spec.ts');
-    expect(testFile).toBeDefined();
-
-    expect(testFile!.content).toContain("import fetch from 'jest-fetch-mock'");
-    expect(testFile!.content).toContain('fetchOnce');
-    expect(testFile!.content).toContain("import { WorkOS } from '../work-os'");
+    const content = getTestFile();
+    expect(content).toContain("import fetch from 'jest-fetch-mock'");
+    expect(content).toContain('fetchOnce');
+    expect(content).toContain('fetchSearchParams');
+    expect(content).toContain("import { WorkOS } from '../work-os'");
   });
 
-  it('generates CRUD tests for each operation', () => {
-    const files = generateTests(spec, ctx);
-    const testFile = files.find((f) => f.path === 'src/organizations/organizations.spec.ts')!;
-
-    expect(testFile.content).toContain("it('sends a list request'");
-    expect(testFile.content).toContain("it('sends a retrieve request'");
-    expect(testFile.content).toContain("it('sends a create request'");
+  it('wraps each operation in a nested describe block', () => {
+    const content = getTestFile();
+    expect(content).toContain("describe('listOrganizations'");
+    expect(content).toContain("describe('retrieveOrganizations'");
+    expect(content).toContain("describe('createOrganizations'");
+    expect(content).toContain("describe('deleteOrganizations'");
   });
 
-  it('generates error tests (404, 401)', () => {
-    const files = generateTests(spec, ctx);
-    const testFile = files.find((f) => f.path === 'src/organizations/organizations.spec.ts')!;
+  it('generates CRUD tests with response field validation', () => {
+    const content = getTestFile();
+    // Non-delete ops validate deserialized response fields
+    expect(content).toContain("lists and deserializes the response");
+    expect(content).toContain("expect(result.id).toBe(fixture.id)");
+    expect(content).toContain("expect(result.name).toBe(fixture.name)");
 
-    expect(testFile.content).toContain('// === Error Tests ===');
-    expect(testFile.content).toContain('NotFoundException on 404');
-    expect(testFile.content).toContain('UnauthorizedException on 401');
-    expect(testFile.content).toContain('rejects.toThrow');
+    // Delete ops use simple request assertion
+    expect(content).toContain("sends a delete request");
   });
 
-  it('generates retry tests for list operations', () => {
-    const files = generateTests(spec, ctx);
-    const testFile = files.find((f) => f.path === 'src/organizations/organizations.spec.ts')!;
+  it('generates per-operation error tests with expanded status codes', () => {
+    const content = getTestFile();
 
-    expect(testFile.content).toContain('// === Retry Tests ===');
-    expect(testFile.content).toContain('retries on 429 rate limit');
-    expect(testFile.content).toContain('status: 429');
-    expect(testFile.content).toContain('fetch.mock.calls');
+    // list (GET) gets 401 + 404
+    expect(content).toContain("throws UnauthorizedException on 401");
+    expect(content).toContain("throws NotFoundException on 404");
+
+    // create (POST) gets 401 + 409 + 422
+    expect(content).toContain("throws ConflictException on 409");
+    expect(content).toContain("throws UnprocessableEntityException on 422");
   });
 
-  it('generates idempotency tests for create operations', () => {
-    const files = generateTests(spec, ctx);
-    const testFile = files.find((f) => f.path === 'src/organizations/organizations.spec.ts')!;
+  it('generates parameter combination tests for list operations', () => {
+    const content = getTestFile();
+    expect(content).toContain("sends cursor parameter");
+    expect(content).toContain("sends limit parameter");
+    expect(content).toContain("sends order parameter");
+    expect(content).toContain("sends multiple parameters together");
+    expect(content).toContain("fetchSearchParams().get('cursor')");
+  });
 
-    expect(testFile.content).toContain('// === Idempotency Tests ===');
-    expect(testFile.content).toContain('explicit idempotency key');
-    expect(testFile.content).toContain("'Idempotency-Key'");
-    expect(testFile.content).toContain('auto-generates idempotency key');
+  it('generates retry tests for GET operations', () => {
+    const content = getTestFile();
+    expect(content).toContain('retries on 429 rate limit');
+    expect(content).toContain('status: 429');
+    expect(content).toContain('fetch.mock.calls');
+  });
+
+  it('generates idempotency tests for idempotent POST operations', () => {
+    const content = getTestFile();
+    expect(content).toContain('explicit idempotency key');
+    expect(content).toContain("'Idempotency-Key'");
+    expect(content).toContain('auto-generates idempotency key');
   });
 
   it('generates fixture JSON files', () => {
@@ -129,8 +163,26 @@ describe('generateTests (node)', () => {
   });
 
   it('uses beforeEach to reset fetch mocks', () => {
-    const files = generateTests(spec, ctx);
-    const testFile = files.find((f) => f.path === 'src/organizations/organizations.spec.ts')!;
-    expect(testFile.content).toContain('beforeEach(() => fetch.resetMocks())');
+    const content = getTestFile();
+    expect(content).toContain('beforeEach(() => fetch.resetMocks())');
+  });
+
+  it('skips response field validation for delete operations', () => {
+    const content = getTestFile();
+    // The delete test should not have result.id assertions
+    // Find the delete describe block content
+    const deleteIdx = content.indexOf("describe('deleteOrganizations'");
+    const nextDescribeIdx = content.indexOf("describe('", deleteIdx + 1);
+    const deleteBlock = nextDescribeIdx > -1 ? content.slice(deleteIdx, nextDescribeIdx) : content.slice(deleteIdx);
+    expect(deleteBlock).not.toContain('result.id');
+    expect(deleteBlock).toContain("sends a delete request");
+  });
+
+  it('uses realistic test values for parameters', () => {
+    const content = getTestFile();
+    // enum param should use 'active'
+    expect(content).toContain("order: 'active'");
+    // integer param should use 10
+    expect(content).toContain('limit: 10');
   });
 });

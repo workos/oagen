@@ -1,6 +1,7 @@
 import type { TypeRef, Model, ApiSpec } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { nodeFileName } from './naming.js';
+import { toSnakeCase } from '../../utils/naming.js';
 
 export function generateFixtures(spec: ApiSpec, _ctx: EmitterContext): GeneratedFile[] {
   const files: GeneratedFile[] = [];
@@ -18,6 +19,8 @@ export function generateFixtures(spec: ApiSpec, _ctx: EmitterContext): Generated
 
 function generateFixtureForModel(model: Model, spec: ApiSpec): Record<string, unknown> {
   const obj: Record<string, unknown> = {};
+  // Add object type identifier matching WorkOS API conventions
+  obj['object'] = toSnakeCase(model.name);
   for (const field of model.fields) {
     obj[field.name] = generateFixtureValue(field.type, field.name, spec);
   }

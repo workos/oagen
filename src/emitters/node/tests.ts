@@ -1,7 +1,7 @@
-import type { ApiSpec, Service, Operation } from '../../ir/types.js';
+import type { ApiSpec, Service, Operation, TypeRef, Model } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeClassName, nodeFileName, nodeMethodName, nodeTestPath } from './naming.js';
-import { toCamelCase, toPascalCase } from '../../utils/naming.js';
+import { nodeClassName, nodeFileName, nodeTestPath } from './naming.js';
+import { toCamelCase, toPascalCase, toSnakeCase } from '../../utils/naming.js';
 import { generateFixtures } from './fixtures.js';
 
 export function generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
@@ -25,7 +25,7 @@ function generateTestFile(service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
 
   lines.push(`import fetch from 'jest-fetch-mock';`);
-  lines.push(`import { fetchOnce, fetchURL, fetchHeaders, fetchBody } from '../common/utils/test-utils';`);
+  lines.push(`import { fetchOnce, fetchURL, fetchSearchParams, fetchHeaders, fetchBody } from '../common/utils/test-utils';`);
   lines.push(`import { ${ns} } from '../${nsFile}';`);
   lines.push('');
 
@@ -35,39 +35,38 @@ function generateTestFile(service: Service, ctx: EmitterContext): string {
   lines.push(`describe('${nodeClassName(service.name)}', () => {`);
   lines.push('  beforeEach(() => fetch.resetMocks());');
 
-  // CRUD tests
-  lines.push('');
-  lines.push('  // === CRUD Tests ===');
+  // Generate per-operation nested describe blocks
   for (const op of service.operations) {
+    const methodName = toCamelCase(op.name) + toPascalCase(service.name);
     lines.push('');
-    lines.push(...generateCrudTest(op, service, ctx));
-  }
+    lines.push(`  describe('${methodName}', () => {`);
 
-  // Error tests
-  const retrieveOp = service.operations.find((o) => o.name === 'retrieve');
-  const listOp = service.operations.find((o) => o.name === 'list');
-  if (retrieveOp || listOp) {
-    lines.push('');
-    lines.push('  // === Error Tests ===');
-    lines.push('');
-    lines.push(...generateErrorTests(retrieveOp || listOp!, service, ctx));
-  }
+    // CRUD test with response validation
+    lines.push(...generateCrudTestWithValidation(op, service, ctx));
 
-  // Retry tests
-  if (listOp) {
-    lines.push('');
-    lines.push('  // === Retry Tests ===');
-    lines.push('');
-    lines.push(...generateRetryTest(listOp, service, ctx));
-  }
+    // Parameter combination tests
+    if (op.queryParams.length > 0) {
+      lines.push('');
+      lines.push(...generateParamTests(op, service, ctx));
+    }
 
-  // Idempotency tests
-  const createOp = service.operations.find((o) => o.name === 'create' && o.idempotent);
-  if (createOp) {
+    // Error tests for this operation
     lines.push('');
-    lines.push('  // === Idempotency Tests ===');
-    lines.push('');
-    lines.push(...generateIdempotencyTests(createOp, service, ctx));
+    lines.push(...generateErrorTestsForOp(op, service, ctx));
+
+    // Retry test (for operations that can get 429)
+    if (op.paginated || op.httpMethod === 'get') {
+      lines.push('');
+      lines.push(...generateRetryTest(op, service, ctx));
+    }
+
+    // Idempotency tests
+    if (op.idempotent && op.httpMethod === 'post') {
+      lines.push('');
+      lines.push(...generateIdempotencyTests(op, service, ctx));
+    }
+
+    lines.push('  });');
   }
 
   lines.push('});');
@@ -76,7 +75,7 @@ function generateTestFile(service: Service, ctx: EmitterContext): string {
   return lines.join('\n');
 }
 
-function generateCrudTest(op: Operation, service: Service, ctx: EmitterContext): string[] {
+function generateCrudTestWithValidation(op: Operation, service: Service, ctx: EmitterContext): string[] {
   const lines: string[] = [];
   const methodName = toCamelCase(op.name) + toPascalCase(service.name);
   const clientVar = toCamelCase(ctx.namespace);
@@ -84,71 +83,126 @@ function generateCrudTest(op: Operation, service: Service, ctx: EmitterContext):
   const statusCode = op.httpMethod === 'delete' ? 204 : op.httpMethod === 'post' ? 201 : 200;
   const fixtureName = getResponseFixtureName(op, service);
 
-  lines.push(`  it('sends a ${op.name} request', async () => {`);
-
-  if (statusCode === 204) {
-    lines.push(`    fetchOnce({}, ${statusCode});`);
-  } else {
-    lines.push(`    fetchOnce(require('../fixtures/${fixtureName}.json'), ${statusCode});`);
-  }
-
-  // Build method call
-  const args: string[] = [];
-  for (const _p of op.pathParams) {
-    args.push(`'test_id'`);
-  }
-  if (op.requestBody) {
-    args.push(`{ name: 'test' }`);
-  }
-
-  const call = `${clientVar}.${resourceProp}.${methodName}(${args.join(', ')})`;
-
   if (op.httpMethod === 'delete') {
-    lines.push(`    await ${call};`);
+    lines.push(`    it('sends a ${op.name} request', async () => {`);
+    lines.push(`      fetchOnce({}, ${statusCode});`);
+    const args = buildTestCallArgs(op);
+    lines.push(`      await ${clientVar}.${resourceProp}.${methodName}(${args});`);
     lines.push('');
-    lines.push(`    expect(fetchURL()).toContain('${stripLeadingSlash(op.path).replace(/\{[^}]+\}/g, 'test_id')}');`);
-  } else {
-    lines.push(`    const result = await ${call};`);
-    lines.push('');
-    lines.push(`    expect(result).toBeDefined();`);
-    lines.push(`    expect(fetchURL()).toContain('${stripLeadingSlash(op.path).replace(/\{[^}]+\}/g, 'test_id')}');`);
+    lines.push(`      expect(fetchURL()).toContain('${stripLeadingSlash(op.path).replace(/\{[^}]+\}/g, 'test_id')}');`);
+    lines.push('    });');
+    return lines;
   }
 
-  lines.push('  });');
+  lines.push(`    it('${op.name}s and deserializes the response', async () => {`);
+  lines.push(`      const fixture = require('../fixtures/${fixtureName}.json');`);
+  lines.push(`      fetchOnce(fixture, ${statusCode});`);
+  lines.push('');
+
+  const args = buildTestCallArgs(op);
+  lines.push(`      const result = await ${clientVar}.${resourceProp}.${methodName}(${args});`);
+  lines.push('');
+  lines.push(`      expect(fetchURL()).toContain('${stripLeadingSlash(op.path).replace(/\{[^}]+\}/g, 'test_id')}');`);
+
+  // Assert response fields if we know the model
+  if (op.response.kind === 'model') {
+    const model = findModelByName(op.response.name, ctx);
+    if (model) {
+      const requiredFields = model.fields.filter((f) => f.required).slice(0, 5);
+      for (const field of requiredFields) {
+        const camel = toCamelCase(field.name);
+        const snake = toSnakeCase(field.name);
+        lines.push(`      expect(result.${camel}).toBe(fixture.${snake});`);
+      }
+    }
+  }
+
+  lines.push('    });');
+  return lines;
+}
+
+function generateParamTests(op: Operation, service: Service, ctx: EmitterContext): string[] {
+  const lines: string[] = [];
+  if (op.queryParams.length === 0) return lines;
+
+  const methodName = toCamelCase(op.name) + toPascalCase(service.name);
+  const clientVar = toCamelCase(ctx.namespace);
+  const resourceProp = toCamelCase(service.name);
+  const fixtureName = getResponseFixtureName(op, service);
+
+  for (const param of op.queryParams) {
+    const camelParam = toCamelCase(param.name);
+    const testValue = getTestValueForType(param.type, param.name);
+
+    lines.push(`    it('sends ${param.name} parameter', async () => {`);
+    lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 200);`);
+    lines.push('');
+    lines.push(`      await ${clientVar}.${resourceProp}.${methodName}({ ${camelParam}: ${testValue} });`);
+    lines.push('');
+    lines.push(`      expect(fetchSearchParams().get('${param.name}')).toBe(${stringifyTestValue(testValue)});`);
+    lines.push(`    });`);
+    lines.push('');
+  }
+
+  if (op.queryParams.length > 1) {
+    lines.push(`    it('sends multiple parameters together', async () => {`);
+    lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 200);`);
+    lines.push('');
+    const paramObj = op.queryParams
+      .slice(0, 3)
+      .map((p) => `${toCamelCase(p.name)}: ${getTestValueForType(p.type, p.name)}`)
+      .join(', ');
+    lines.push(`      await ${clientVar}.${resourceProp}.${methodName}({ ${paramObj} });`);
+    lines.push('');
+    for (const param of op.queryParams.slice(0, 3)) {
+      lines.push(`      expect(fetchSearchParams().get('${param.name}')).toBeDefined();`);
+    }
+    lines.push(`    });`);
+  }
 
   return lines;
 }
 
-function generateErrorTests(op: Operation, service: Service, ctx: EmitterContext): string[] {
+const errorMap: Record<number, { exception: string; message: string }> = {
+  400: { exception: 'BadRequestException', message: 'Bad request' },
+  401: { exception: 'UnauthorizedException', message: 'Unauthorized' },
+  404: { exception: 'NotFoundException', message: 'Not found' },
+  409: { exception: 'ConflictException', message: 'Conflict' },
+  422: { exception: 'UnprocessableEntityException', message: 'Unprocessable entity' },
+  429: { exception: 'RateLimitExceededException', message: 'Rate limit exceeded' },
+};
+
+function generateErrorTestsForOp(op: Operation, service: Service, ctx: EmitterContext): string[] {
   const lines: string[] = [];
   const methodName = toCamelCase(op.name) + toPascalCase(service.name);
   const clientVar = toCamelCase(ctx.namespace);
   const resourceProp = toCamelCase(service.name);
 
-  const callArgs = op.pathParams.length > 0 ? `'invalid'` : '';
+  const statusCodes = op.errors.map((e) => e.statusCode);
+  const codesToTest = new Set([
+    401,
+    ...statusCodes,
+    ...(op.httpMethod === 'get' ? [404] : []),
+    ...(op.httpMethod === 'post' ? [409, 422] : []),
+    ...(op.httpMethod === 'put' || op.httpMethod === 'patch' ? [404, 422] : []),
+    ...(op.httpMethod === 'delete' ? [404] : []),
+  ]);
 
-  // 404 test
-  lines.push(`  it('throws NotFoundException on 404', async () => {`);
-  lines.push(`    fetchOnce({ message: 'Not found' }, 404);`);
-  lines.push('');
-  lines.push(`    await expect(`);
-  lines.push(`      ${clientVar}.${resourceProp}.${methodName}(${callArgs}),`);
-  lines.push(`    ).rejects.toThrow('Not found');`);
-  lines.push('  });');
-  lines.push('');
+  const callArgs = buildTestCallArgs(op);
 
-  // 401 test
-  const authOp = service.operations.find((o) => o.name === 'list') || op;
-  const authMethodName = nodeMethodName(authOp.name + toCamelCase(service.name));
-  const authCallArgs = authOp.pathParams.length > 0 ? `'test_id'` : '';
+  for (const code of codesToTest) {
+    const err = errorMap[code];
+    if (!err) continue;
 
-  lines.push(`  it('throws UnauthorizedException on 401', async () => {`);
-  lines.push(`    fetchOnce({ message: 'Unauthorized' }, 401);`);
-  lines.push('');
-  lines.push(`    await expect(`);
-  lines.push(`      ${clientVar}.${resourceProp}.${authMethodName}(${authCallArgs}),`);
-  lines.push(`    ).rejects.toThrow('Unauthorized');`);
-  lines.push('  });');
+    lines.push(`    it('throws ${err.exception} on ${code}', async () => {`);
+    lines.push(`      fetchOnce({ message: '${err.message}' }, ${code});`);
+    lines.push('');
+    lines.push(`      await expect(`);
+    lines.push(`        ${clientVar}.${resourceProp}.${methodName}(${callArgs}),`);
+    lines.push(`      ).rejects.toThrow('${err.message}');`);
+    lines.push('    });');
+    lines.push('');
+  }
 
   return lines;
 }
@@ -160,17 +214,18 @@ function generateRetryTest(op: Operation, service: Service, ctx: EmitterContext)
   const resourceProp = toCamelCase(service.name);
   const fixtureName = getResponseFixtureName(op, service);
 
-  lines.push(`  it('retries on 429 rate limit', async () => {`);
-  lines.push(`    fetch.mockResponses(`);
-  lines.push(`      [JSON.stringify({}), { status: 429, headers: { 'Retry-After': '0.01' } }],`);
-  lines.push(`      [JSON.stringify(require('../fixtures/${fixtureName}.json')), { status: 200 }],`);
-  lines.push(`    );`);
+  lines.push(`    it('retries on 429 rate limit', async () => {`);
+  lines.push(`      fetch.mockResponses(`);
+  lines.push(`        [JSON.stringify({}), { status: 429, headers: { 'Retry-After': '0.01' } }],`);
+  lines.push(`        [JSON.stringify(require('../fixtures/${fixtureName}.json')), { status: 200 }],`);
+  lines.push(`      );`);
   lines.push('');
-  lines.push(`    const result = await ${clientVar}.${resourceProp}.${methodName}();`);
+  const args = buildTestCallArgs(op);
+  lines.push(`      const result = await ${clientVar}.${resourceProp}.${methodName}(${args});`);
   lines.push('');
-  lines.push(`    expect(result).toBeDefined();`);
-  lines.push(`    expect(fetch.mock.calls).toHaveLength(2);`);
-  lines.push('  });');
+  lines.push(`      expect(result).toBeDefined();`);
+  lines.push(`      expect(fetch.mock.calls).toHaveLength(2);`);
+  lines.push('    });');
 
   return lines;
 }
@@ -182,31 +237,40 @@ function generateIdempotencyTests(op: Operation, service: Service, ctx: EmitterC
   const resourceProp = toCamelCase(service.name);
   const fixtureName = getResponseFixtureName(op, service);
 
-  // Explicit idempotency key
-  lines.push(`  it('sends explicit idempotency key', async () => {`);
-  lines.push(`    fetchOnce(require('../fixtures/${fixtureName}.json'), 201);`);
+  lines.push(`    it('sends explicit idempotency key', async () => {`);
+  lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 201);`);
   lines.push('');
-  lines.push(`    await ${clientVar}.${resourceProp}.${methodName}(`);
-  lines.push(`      { name: 'Test' },`);
-  lines.push(`      { idempotencyKey: 'my_key' },`);
-  lines.push(`    );`);
+  lines.push(`      await ${clientVar}.${resourceProp}.${methodName}(`);
+  lines.push(`        { name: 'Test' },`);
+  lines.push(`        { idempotencyKey: 'my_key' },`);
+  lines.push(`      );`);
   lines.push('');
-  lines.push(`    expect(fetchHeaders()['Idempotency-Key']).toBe('my_key');`);
-  lines.push('  });');
+  lines.push(`      expect(fetchHeaders()['Idempotency-Key']).toBe('my_key');`);
+  lines.push('    });');
   lines.push('');
 
-  // Auto-generated idempotency key
-  lines.push(`  it('auto-generates idempotency key for POST', async () => {`);
-  lines.push(`    fetchOnce(require('../fixtures/${fixtureName}.json'), 201);`);
+  lines.push(`    it('auto-generates idempotency key for POST', async () => {`);
+  lines.push(`      fetchOnce(require('../fixtures/${fixtureName}.json'), 201);`);
   lines.push('');
-  lines.push(`    await ${clientVar}.${resourceProp}.${methodName}({ name: 'Test' });`);
+  lines.push(`      await ${clientVar}.${resourceProp}.${methodName}({ name: 'Test' });`);
   lines.push('');
-  lines.push(`    const key = fetchHeaders()['Idempotency-Key'];`);
-  lines.push(`    expect(key).toBeDefined();`);
-  lines.push(`    expect(key).toMatch(/^[0-9a-f-]{36}$/i);`);
-  lines.push('  });');
+  lines.push(`      const key = fetchHeaders()['Idempotency-Key'];`);
+  lines.push(`      expect(key).toBeDefined();`);
+  lines.push(`      expect(key).toMatch(/^[0-9a-f-]{36}$/i);`);
+  lines.push('    });');
 
   return lines;
+}
+
+function buildTestCallArgs(op: Operation): string {
+  const args: string[] = [];
+  for (const _p of op.pathParams) {
+    args.push(`'test_id'`);
+  }
+  if (op.requestBody) {
+    args.push(`{ name: 'test' }`);
+  }
+  return args.join(', ');
 }
 
 function stripLeadingSlash(path: string): string {
@@ -216,4 +280,30 @@ function stripLeadingSlash(path: string): string {
 function getResponseFixtureName(op: Operation, service: Service): string {
   const resourceName = nodeFileName(service.name);
   return `${resourceName}/${op.name}`;
+}
+
+function findModelByName(name: string, ctx: EmitterContext): Model | undefined {
+  return ctx.spec.models.find((m) => m.name === name);
+}
+
+function getTestValueForType(type: TypeRef, name: string): string {
+  if (type.kind === 'primitive') {
+    if (type.type === 'string') {
+      if (name.includes('id')) return "'org_01EHQMYV6MBK39QC5PZXHY59C3'";
+      if (name.includes('email')) return "'test@example.com'";
+      if (name.includes('domain')) return "'example.com'";
+      return `'test_${name}'`;
+    }
+    if (type.type === 'integer' || type.type === 'number') return '10';
+    if (type.type === 'boolean') return 'true';
+  }
+  if (type.kind === 'enum') return "'active'";
+  return "'test_value'";
+}
+
+function stringifyTestValue(value: string): string {
+  // If value is already a quoted string, return as-is
+  if (value.startsWith("'") && value.endsWith("'")) return value;
+  // For numeric/boolean values, wrap in String()
+  return `String(${value})`;
 }
