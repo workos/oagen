@@ -108,6 +108,13 @@ function extractAllOfModel(name: string, schema: SchemaObject): Model {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function schemaToTypeRef(schema: any, contextName?: string): TypeRef {
+  // Handle $ref → ModelRef
+  if (schema.$ref) {
+    const segments = schema.$ref.split('/');
+    const rawName = segments[segments.length - 1];
+    return { kind: 'model', name: toPascalCase(rawName) };
+  }
+
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
   if (Array.isArray(schema.type)) {
     const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
