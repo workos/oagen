@@ -276,7 +276,6 @@ test/
 | HTTP Client (default) | Net::HTTP (stdlib)    | No external deps needed                                    |
 | JSON Parsing          | json (stdlib)         | No external deps needed                                    |
 | Package Manager       | Bundler / RubyGems    | gemspec for metadata, Gemfile for dev deps                 |
-| CI/CD                 | GitHub Actions        | Matrix testing across Ruby versions                        |
 
 ## File Header
 

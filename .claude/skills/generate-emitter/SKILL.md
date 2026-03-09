@@ -1,6 +1,6 @@
 ---
 name: generate-emitter
-description: Scaffold a new language emitter for oagen, implementing the Emitter interface with idiomatic target-language code generation
+description: Scaffold a new language emitter for oagen, implementing the Emitter interface with idiomatic target-language code generation. Use this skill whenever the user wants to add a new target language, generate SDKs for a new language, add Go/Python/Kotlin/Java/etc. support, or asks about creating an emitter — even if they don't use the word "emitter" explicitly.
 arguments:
   - name: language
     description: Target language name (e.g., "python", "go", "kotlin")
@@ -29,6 +29,7 @@ Before starting, read and understand these files:
 3. **`src/emitters/ruby/`** — The reference emitter (study the structure, not the Ruby-specific output)
 4. **`src/engine/registry.ts`** — How emitters are registered
 5. **`src/cli/generate.ts`** — How emitters are wired into the CLI
+6. **`src/cli/diff.ts`** — Also registers emitters for the diff command
 
 If an `sdk_design_path` argument is provided, read that file to understand the target language's idiomatic patterns, naming conventions, and architecture. If a path to an existing SDK repo is given instead, explore its structure to extract patterns.
 
@@ -57,7 +58,6 @@ The categories are:
 | **JSON Parsing**          | `client.ts` — how JSON serialization/deserialization is done in the generated client           |
 | **Package Manager**       | `config.ts` — what package metadata file to reference (e.g., gemspec, pyproject.toml, go.mod)  |
 | **Build Tool**            | Only if language needs one (e.g., `tsdown` for TypeScript, Gradle for Kotlin). Omit if N/A.    |
-| **CI/CD**                 | Not used by emitter directly, but documented in the SDK design doc for reference               |
 
 Ask these as a series of questions. For example, for Python you might ask:
 
@@ -122,13 +122,14 @@ src/emitters/{language}/
 └── fixtures.ts       # Test fixture generation
 ```
 
-Not every language needs every file. For example:
+Not every language needs every file, and some languages may need **additional** files beyond this scaffold. For example:
 
 - Go doesn't need separate type annotation files (types are inline)
 - Python might need a single `types-pyi.ts` for `.pyi` stubs
 - TypeScript SDK needs no separate type files (types are in the source)
+- The Node emitter adds a `common.ts` file for shared utilities like pagination, wired through `generateConfig()` — other languages may need similar shared utility generators
 
-Omit files that don't apply, but the `index.ts` must still implement all `Emitter` interface methods (return `[]` for inapplicable ones).
+Omit files that don't apply, and add language-specific utility files as needed. The `index.ts` must still implement all `Emitter` interface methods (return `[]` for inapplicable ones).
 
 ## Step 2: Implement Type Mapping (`type-map.ts`)
 
@@ -178,7 +179,11 @@ export function fileName(name: string): string;
 export function methodName(name: string): string;
 
 // Full file path for a model/resource/etc.
-export function modulePath(namespace: string, category: string, name: string): string;
+export function modulePath(
+  namespace: string,
+  category: string,
+  name: string,
+): string;
 ```
 
 ### Examples by Language
@@ -263,20 +268,25 @@ For each generator file, follow this pattern:
 
 ### Tests (`tests.ts`) and Fixtures (`fixtures.ts`)
 
+- `generateTests` is the only Emitter interface method — it should internally call `generateFixtures` from `fixtures.ts` and combine both into a single `GeneratedFile[]` return
 - Generate one test file per resource/service
 - Use the target language's standard test framework
 - Use the target language's HTTP mocking library
-- Test file path: `test/{namespace}/resources/{name}_test.{ext}` (nested under namespace)
+- Test file paths are language-specific — use the target language's idiomatic convention (e.g., Ruby uses `test/{namespace}/resources/{name}_test.rb`, Node uses `src/{service}/tests/{name}.test.ts`)
 - Test classes/modules nested in namespace modules
 - Each test: stub HTTP request → call method → assert response type using the language's idiomatic assertion style
 - Include error tests (404, 401), retry tests (429 with Retry-After), and idempotency tests (explicit + auto-generated keys)
-- Fixture JSON files organized as `test/fixtures/{resource}/{operation}.json`
+- Fixture JSON file paths are also language-specific — organize them near the test files using the target language's convention
 - Use a `load_fixture` helper for reading fixtures
 - Generate fixture JSON files from IR model schemas
 
 ## Step 5: Create Entry Point (`index.ts`)
 
-Wire everything together by implementing the `Emitter` interface:
+Wire everything together by implementing the `Emitter` interface. Note that:
+
+- `generateTests` internally calls `generateFixtures` — fixtures are not a separate Emitter method
+- Interface methods can compose multiple generators (e.g., the Node emitter's `generateConfig` returns `[...generateConfig(ctx), ...generateCommon(ctx)]` to include shared utilities)
+- Return `[]` for inapplicable methods (e.g., `generateTypeSignatures` for languages with inline types)
 
 ```typescript
 import type { Emitter } from "../../engine/types.js";
@@ -291,14 +301,23 @@ export const {language}Emitter: Emitter = {
   generateErrors(ctx) { return generateErrors(ctx); },
   generateConfig(ctx) { return generateConfig(ctx); },
   generateTypeSignatures(spec, ctx) { return generateTypeSignatures(spec, ctx); },
-  generateTests(spec, ctx) { return generateTests(spec, ctx); },
+  generateTests(spec, ctx) { return generateTests(spec, ctx); }, // includes fixtures
   fileHeader() { return "{language-appropriate auto-generated file header}"; },
 };
 ```
 
 ## Step 6: Register Emitter
 
-Add the emitter to `src/cli/generate.ts`:
+Add the emitter to **both** CLI entry points:
+
+**`src/cli/generate.ts`:**
+
+```typescript
+import { {language}Emitter } from "../emitters/{language}/index.js";
+registerEmitter({language}Emitter);
+```
+
+**`src/cli/diff.ts`:**
 
 ```typescript
 import { {language}Emitter } from "../emitters/{language}/index.js";
@@ -336,17 +355,17 @@ Every test file needs an `EmitterContext`. Use this pattern:
 
 ```typescript
 const emptySpec: ApiSpec = {
-  name: 'Test',
-  version: '1.0.0',
-  baseUrl: '',
+  name: "Test",
+  version: "1.0.0",
+  baseUrl: "",
   services: [],
   models: [],
   enums: [],
 };
 
 const ctx: EmitterContext = {
-  namespace: '{snake_case_namespace}',
-  namespacePascal: '{PascalNamespace}',
+  namespace: "{snake_case_namespace}",
+  namespacePascal: "{PascalNamespace}",
   spec: emptySpec,
 };
 ```

@@ -54,7 +54,7 @@ If omitted, the namespace is derived from the spec's `info.title` field (e.g., a
 
 ### `oagen diff`
 
-Incrementally generate from spec changes. _(Not yet implemented — coming in Phase 3.)_
+Incrementally generate from spec changes.
 
 ```bash
 oagen diff --old old-spec.yml --new new-spec.yml --lang ruby --output ./sdk
