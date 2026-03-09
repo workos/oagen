@@ -1,6 +1,6 @@
 {
   "name": "oagen",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Generate SDKs from OpenAPI 3.1 specifications",
   "type": "module",
   "main": "dist/index.js",
@@ -8,6 +8,9 @@
   "bin": {
     "oagen": "dist/cli/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/cli/index.ts",

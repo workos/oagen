@@ -6,7 +6,7 @@ import { diffCommand } from './diff.js';
 const program = new Command()
   .name('oagen')
   .description('Generate SDKs from OpenAPI 3.1 specifications')
-  .version('0.1.0');
+  .version('0.0.1');
 
 program
   .command('parse')

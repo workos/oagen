@@ -13,5 +13,8 @@
   },
   "[yaml]": {
     "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+  },
+  "[github-actions-workflow]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
   }
 }
