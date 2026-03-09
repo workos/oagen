@@ -24,27 +24,27 @@ deserializeOrganization → Response → Public converter
 
 ## Naming Conventions
 
-| IR Name               | TypeScript Name        | File Name                  | Method Name        |
-| --------------------- | ---------------------- | -------------------------- | ------------------ |
-| `UserProfile`         | `UserProfile`          | `user-profile.interface.ts`| —                  |
-| `listUsers`           | —                      | —                          | `listUsers`        |
-| `user_id` (field)     | `userId` (public)      | —                          | —                  |
-| `user_id` (response)  | `user_id` (response)   | —                          | —                  |
-| `ACTIVE` (enum value) | `'active'`             | —                          | —                  |
+| IR Name               | TypeScript Name      | File Name                   | Method Name |
+| --------------------- | -------------------- | --------------------------- | ----------- |
+| `UserProfile`         | `UserProfile`        | `user-profile.interface.ts` | —           |
+| `listUsers`           | —                    | —                           | `listUsers` |
+| `user_id` (field)     | `userId` (public)    | —                           | —           |
+| `user_id` (response)  | `user_id` (response) | —                           | —           |
+| `ACTIVE` (enum value) | `'active'`           | —                           | —           |
 
 ## Type Mapping
 
-| IR TypeRef             | TypeScript (Public)  | TypeScript (Response)    |
-| ---------------------- | -------------------- | ------------------------ |
-| `primitive:string`     | `string`             | `string`                 |
-| `primitive:integer`    | `number`             | `number`                 |
-| `primitive:number`     | `number`             | `number`                 |
-| `primitive:boolean`    | `boolean`            | `boolean`                |
-| `array<T>`            | `T[]`                | `TResponse[]`            |
-| `model:Foo`           | `Foo`                | `FooResponse`            |
-| `enum:Foo`            | `Foo`                | `Foo`                    |
-| `nullable<T>`         | `T \| null`          | `T \| null`              |
-| `union<A,B>`          | `A \| B`             | `AResponse \| BResponse` |
+| IR TypeRef          | TypeScript (Public) | TypeScript (Response)    |
+| ------------------- | ------------------- | ------------------------ |
+| `primitive:string`  | `string`            | `string`                 |
+| `primitive:integer` | `number`            | `number`                 |
+| `primitive:number`  | `number`            | `number`                 |
+| `primitive:boolean` | `boolean`           | `boolean`                |
+| `array<T>`          | `T[]`               | `TResponse[]`            |
+| `model:Foo`         | `Foo`               | `FooResponse`            |
+| `enum:Foo`          | `Foo`               | `Foo`                    |
+| `nullable<T>`       | `T \| null`         | `T \| null`              |
+| `union<A,B>`        | `A \| B`            | `AResponse \| BResponse` |
 
 ## Model Pattern
 
@@ -88,7 +88,7 @@ export const deserializeOrganization = (
 Enums use string literal union types (not TypeScript `enum`):
 
 ```typescript
-export type OrganizationStatus = 'active' | 'inactive';
+export type OrganizationStatus = "active" | "inactive";
 ```
 
 Output path: `src/common/interfaces/{enum-name}.interface.ts`
@@ -110,30 +110,43 @@ export class Organizations {
 
 ### Operation Mapping
 
-| Pattern              | Implementation                                        |
-| -------------------- | ----------------------------------------------------- |
-| Paginated GET        | `AutoPaginatable` + `fetchAndDeserialize`             |
-| Non-paginated GET    | `this.{ns}.get<Response>` + deserialize               |
-| POST (idempotent)    | `this.{ns}.post` + serialize body + requestOptions    |
-| PUT/PATCH            | `this.{ns}.put`/`patch` + serialize + deserialize     |
-| DELETE               | `this.{ns}.delete`, returns `Promise<void>`           |
-| Path params          | Template literals: `` `/organizations/${id}` ``       |
+| Pattern           | Implementation                                     |
+| ----------------- | -------------------------------------------------- |
+| Paginated GET     | `AutoPaginatable` + `fetchAndDeserialize`          |
+| Non-paginated GET | `this.{ns}.get<Response>` + deserialize            |
+| POST (idempotent) | `this.{ns}.post` + serialize body + requestOptions |
+| PUT/PATCH         | `this.{ns}.put`/`patch` + serialize + deserialize  |
+| DELETE            | `this.{ns}.delete`, returns `Promise<void>`        |
+| Path params       | Template literals: `` `/organizations/${id}` ``    |
 
 ## Client Pattern
 
 ```typescript
 export class WorkOS {
-  constructor(keyOrOptions?: string | WorkOSOptions)
+  constructor(keyOrOptions?: string | WorkOSOptions);
 
-  async get<Result>(path, options?: GetOptions): Promise<{ data: Result }>
-  async post<Result, Entity>(path, entity, options?: PostOptions): Promise<{ data: Result }>
-  async put<Result, Entity>(path, entity, options?: PutOptions): Promise<{ data: Result }>
-  async patch<Result, Entity>(path, entity, options?: PatchOptions): Promise<{ data: Result }>
-  async delete(path, query?): Promise<void>
+  async get<Result>(path, options?: GetOptions): Promise<{ data: Result }>;
+  async post<Result, Entity>(
+    path,
+    entity,
+    options?: PostOptions,
+  ): Promise<{ data: Result }>;
+  async put<Result, Entity>(
+    path,
+    entity,
+    options?: PutOptions,
+  ): Promise<{ data: Result }>;
+  async patch<Result, Entity>(
+    path,
+    entity,
+    options?: PatchOptions,
+  ): Promise<{ data: Result }>;
+  async delete(path, query?): Promise<void>;
 }
 ```
 
 Key behaviors:
+
 - API key from constructor param or `{NAMESPACE}_API_KEY` env var
 - Resource accessors as readonly properties
 - Retry with exponential backoff + jitter (retryable statuses: 429, 500, 502, 503, 504)
@@ -142,16 +155,16 @@ Key behaviors:
 
 ## Error Hierarchy
 
-| Class                          | Status |
-| ------------------------------ | ------ |
-| `GenericServerException` (base)| any    |
-| `UnauthorizedException`        | 401    |
-| `BadRequestException`          | 400    |
-| `NotFoundException`            | 404    |
-| `ConflictException`            | 409    |
-| `UnprocessableEntityException` | 422    |
-| `RateLimitExceededException`   | 429    |
-| `ApiKeyRequiredException`      | —      |
+| Class                           | Status |
+| ------------------------------- | ------ |
+| `GenericServerException` (base) | any    |
+| `UnauthorizedException`         | 401    |
+| `BadRequestException`           | 400    |
+| `NotFoundException`             | 404    |
+| `ConflictException`             | 409    |
+| `UnprocessableEntityException`  | 422    |
+| `RateLimitExceededException`    | 429    |
+| `ApiKeyRequiredException`       | —      |
 
 All exceptions extend `Error` and implement `RequestException` (except `ApiKeyRequiredException`).
 
@@ -196,16 +209,16 @@ src/
 
 ## Structural Guidelines
 
-| Category           | Choice               | Notes                                          |
-| ------------------ | -------------------- | ---------------------------------------------- |
-| Testing Framework  | Jest                 | + jest-fetch-mock for HTTP mocking             |
-| Documentation      | TSDoc                | `/** @param */` style                          |
-| Types              | Inline               | No separate .d.ts files                        |
-| HTTP Client        | native `fetch`       | Via FetchHttpClient adapter                    |
-| Build              | tsdown               | ESM + CJS dual output                          |
-| Linting            | ESLint + Prettier    | Standard config                                |
-| Package Manager    | npm                  | package.json with scripts                      |
-| Interfaces         | Dual                 | Public camelCase + response snake_case          |
+| Category          | Choice            | Notes                                  |
+| ----------------- | ----------------- | -------------------------------------- |
+| Testing Framework | Jest              | + jest-fetch-mock for HTTP mocking     |
+| Documentation     | TSDoc             | `/** @param */` style                  |
+| Types             | Inline            | No separate .d.ts files                |
+| HTTP Client       | native `fetch`    | Via FetchHttpClient adapter            |
+| Build             | tsdown            | ESM + CJS dual output                  |
+| Linting           | ESLint + Prettier | Standard config                        |
+| Package Manager   | npm               | package.json with scripts              |
+| Interfaces        | Dual              | Public camelCase + response snake_case |
 
 ## File Header
 

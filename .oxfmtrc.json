@@ -6,5 +6,5 @@
   "singleQuote": true,
   "printWidth": 120,
   "sortPackageJson": false,
-  "ignorePatterns": ["dist/", "node_modules/", "pnpm-lock.yaml"]
+  "ignorePatterns": ["dist/", "node_modules/", "pnpm-lock.yaml", "**/*.json", "**/*.md", "**/*.yaml"]
 }
