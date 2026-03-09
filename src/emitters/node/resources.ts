@@ -1,6 +1,6 @@
 import type { Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeClassName, nodeFileName, nodeMethodName, nodeResourcePath } from './naming.js';
+import { nodeClassName, nodeFileName, nodeMethodName, nodeResourcePath, mergeActionService } from './naming.js';
 import { toCamelCase, toPascalCase } from '../../utils/naming.js';
 
 export function generateResources(services: Service[], ctx: EmitterContext): GeneratedFile[] {
@@ -67,13 +67,13 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
   const optionImports: string[] = [];
   for (const op of service.operations) {
     if (op.requestBody || op.queryParams.length > 0) {
-      optionImports.push(`${nodeClassName(op.name)}${nodeClassName(service.name)}Options`);
+      optionImports.push(optionsTypeName(op, service));
     }
     if (op.requestBody) {
-      optionImports.push(`serialize${nodeClassName(op.name)}${nodeClassName(service.name)}Options`);
+      optionImports.push(`serialize${optionsTypeName(op, service)}`);
     }
     if (op.idempotent && op.httpMethod === 'post') {
-      optionImports.push(`${nodeClassName(op.name)}${nodeClassName(service.name)}RequestOptions`);
+      optionImports.push(requestOptionsTypeName(op, service));
     }
   }
 
@@ -112,20 +112,20 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
     params.push(`${toCamelCase(p.name)}: string`);
   }
   if (hasBody) {
-    const optionsType = `${nodeClassName(op.name)}${nodeClassName(service.name)}Options`;
+    const optionsType = optionsTypeName(op, service);
     params.push(`payload: ${optionsType}`);
   }
   if (op.queryParams.length > 0 && !hasBody) {
     if (op.paginated) {
-      const optionsType = `${nodeClassName(op.name)}${nodeClassName(service.name)}Options`;
+      const optionsType = optionsTypeName(op, service);
       params.push(`options?: ${optionsType}`);
     } else {
-      const optionsType = `${nodeClassName(op.name)}${nodeClassName(service.name)}Options`;
+      const optionsType = optionsTypeName(op, service);
       params.push(`options?: ${optionsType}`);
     }
   }
   if (isIdempotentPost) {
-    const reqOptsType = `${nodeClassName(op.name)}${nodeClassName(service.name)}RequestOptions`;
+    const reqOptsType = requestOptionsTypeName(op, service);
     params.push(`requestOptions: ${reqOptsType} = {}`);
   }
 
@@ -152,7 +152,7 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
   } else if (isDelete) {
     lines.push(`  await this.${clientVar}.delete(${path});`);
   } else if (hasBody) {
-    const serializerName = `serialize${nodeClassName(op.name)}${nodeClassName(service.name)}Options`;
+    const serializerName = `serialize${optionsTypeName(op, service)}`;
     if (isIdempotentPost) {
       lines.push(`  const { data } = await this.${clientVar}.post<${responseModel}Response>(`);
       lines.push(`    ${path}, ${serializerName}(payload), requestOptions,`);
@@ -195,6 +195,14 @@ function buildPathExpression(op: Operation): string {
 
 function stripLeadingSlash(path: string): string {
   return path.startsWith('/') ? path.slice(1) : path;
+}
+
+function optionsTypeName(op: Operation, service: { name: string }): string {
+  return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+}
+
+function requestOptionsTypeName(op: Operation, service: { name: string }): string {
+  return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
 }
 
 function getResponseModelName(op: Operation): string {

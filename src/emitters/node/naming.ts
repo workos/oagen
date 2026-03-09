@@ -37,3 +37,24 @@ export function nodeTestPath(service: string): string {
 export function nodeFixturePath(service: string, operation: string): string {
   return `src/${toKebabCase(service)}/fixtures/${toSnakeCase(operation)}.json`;
 }
+
+/**
+ * Merge an action string with a service name by collapsing any trailing overlap.
+ * The action's trailing PascalCase words that match the start of the service name
+ * are collapsed to avoid duplication.
+ *
+ * Examples:
+ *   mergeActionService("ValidateApiKey", "ApiKeys") → "ValidateApiKeys"
+ *   mergeActionService("CreateApiKey", "ApiKeys") → "CreateApiKeys"
+ *   mergeActionService("Check", "Authorization") → "CheckAuthorization" (no overlap)
+ */
+export function mergeActionService(action: string, service: string): string {
+  for (let i = 0; i < action.length; i++) {
+    if (!/[A-Z]/.test(action[i])) continue;
+    const suffix = action.slice(i);
+    if (service.startsWith(suffix)) {
+      return action.slice(0, i) + service;
+    }
+  }
+  return action + service;
+}
