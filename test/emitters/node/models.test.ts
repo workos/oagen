@@ -63,7 +63,11 @@ describe('generateModels (node)', () => {
           { name: 'id', type: { kind: 'primitive', type: 'string', format: 'uuid' }, required: true },
           { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true, description: 'The org name' },
           { name: 'created_at', type: { kind: 'primitive', type: 'string', format: 'date-time' }, required: true },
-          { name: 'external_id', type: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } }, required: false },
+          {
+            name: 'external_id',
+            type: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } },
+            required: false,
+          },
         ],
       },
     ];
@@ -99,7 +103,11 @@ describe('generateModels (node)', () => {
         fields: [
           { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
           { name: 'created_at', type: { kind: 'primitive', type: 'string' }, required: true },
-          { name: 'external_id', type: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } }, required: false },
+          {
+            name: 'external_id',
+            type: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } },
+            required: false,
+          },
         ],
       },
     ];
@@ -148,9 +156,7 @@ describe('generateModels (node)', () => {
     const models: Model[] = [
       {
         name: 'Organization',
-        fields: [
-          { name: 'status', type: { kind: 'enum', name: 'OrganizationStatus' }, required: true },
-        ],
+        fields: [{ name: 'status', type: { kind: 'enum', name: 'OrganizationStatus' }, required: true }],
       },
     ];
 

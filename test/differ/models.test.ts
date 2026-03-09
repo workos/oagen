@@ -19,7 +19,10 @@ describe('diffModels', () => {
   });
 
   it('detects model added', () => {
-    const team: Model = { name: 'Team', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] };
+    const team: Model = {
+      name: 'Team',
+      fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
     const changes = diffModels([userModel], [userModel, team]);
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({ kind: 'model-added', name: 'Team', classification: 'additive' });
@@ -35,7 +38,10 @@ describe('diffModels', () => {
   it('detects field added (optional = additive)', () => {
     const modified: Model = {
       ...userModel,
-      fields: [...userModel.fields, { name: 'avatar_url', type: { kind: 'primitive', type: 'string' }, required: false }],
+      fields: [
+        ...userModel.fields,
+        { name: 'avatar_url', type: { kind: 'primitive', type: 'string' }, required: false },
+      ],
     };
     const changes = diffModels([userModel], [modified]);
     expect(changes).toHaveLength(1);
@@ -91,9 +97,7 @@ describe('diffModels', () => {
   it('detects field required changed', () => {
     const modified: Model = {
       ...userModel,
-      fields: userModel.fields.map((f) =>
-        f.name === 'created_at' ? { ...f, required: true } : f,
-      ),
+      fields: userModel.fields.map((f) => (f.name === 'created_at' ? { ...f, required: true } : f)),
     };
     const changes = diffModels([userModel], [modified]);
     expect(changes).toHaveLength(1);
@@ -127,10 +131,7 @@ describe('typeRefsEqual', () => {
       ),
     ).toBe(true);
     expect(
-      typeRefsEqual(
-        { kind: 'primitive', type: 'string' },
-        { kind: 'primitive', type: 'string', format: 'email' },
-      ),
+      typeRefsEqual({ kind: 'primitive', type: 'string' }, { kind: 'primitive', type: 'string', format: 'email' }),
     ).toBe(false);
   });
 
@@ -180,8 +181,20 @@ describe('typeRefsEqual', () => {
   it('compares union types with same variants', () => {
     expect(
       typeRefsEqual(
-        { kind: 'union', variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }] },
-        { kind: 'union', variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }] },
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
+        },
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
+        },
       ),
     ).toBe(true);
   });
@@ -190,7 +203,13 @@ describe('typeRefsEqual', () => {
     expect(
       typeRefsEqual(
         { kind: 'union', variants: [{ kind: 'model', name: 'A' }] },
-        { kind: 'union', variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }] },
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
+        },
       ),
     ).toBe(false);
   });
@@ -198,8 +217,20 @@ describe('typeRefsEqual', () => {
   it('compares union types with different order', () => {
     expect(
       typeRefsEqual(
-        { kind: 'union', variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }] },
-        { kind: 'union', variants: [{ kind: 'model', name: 'B' }, { kind: 'model', name: 'A' }] },
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
+        },
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'B' },
+            { kind: 'model', name: 'A' },
+          ],
+        },
       ),
     ).toBe(false);
   });
@@ -224,12 +255,9 @@ describe('typeRefsEqual', () => {
         { ...base, discriminator: { property: 'type', mapping: { a: 'B' } } },
       ),
     ).toBe(false);
-    expect(
-      typeRefsEqual(
-        { ...base, discriminator: { property: 'type', mapping: { a: 'A' } } },
-        { ...base },
-      ),
-    ).toBe(false);
+    expect(typeRefsEqual({ ...base, discriminator: { property: 'type', mapping: { a: 'A' } } }, { ...base })).toBe(
+      false,
+    );
   });
 
   it('compares nested types: array<nullable<model>>', () => {

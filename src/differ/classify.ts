@@ -1,10 +1,6 @@
 import type { FieldChange, ParamChange } from './types.js';
 
-export function classifyFieldChange(
-  kind: FieldChange['kind'],
-  fieldName: string,
-  isRequired?: boolean,
-): FieldChange {
+export function classifyFieldChange(kind: FieldChange['kind'], fieldName: string, isRequired?: boolean): FieldChange {
   switch (kind) {
     case 'field-added':
       return {
@@ -26,11 +22,7 @@ export function classifyFieldChange(
   }
 }
 
-export function classifyParamChange(
-  kind: ParamChange['kind'],
-  paramName: string,
-  isRequired?: boolean,
-): ParamChange {
+export function classifyParamChange(kind: ParamChange['kind'], paramName: string, isRequired?: boolean): ParamChange {
   switch (kind) {
     case 'param-added':
       return {

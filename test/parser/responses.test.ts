@@ -4,10 +4,7 @@ import { classifyAndExtractResponse } from '../../src/parser/responses.js';
 describe('classifyAndExtractResponse', () => {
   describe('$ref schemas', () => {
     it('resolves $ref to named model', () => {
-      const result = classifyAndExtractResponse(
-        { $ref: '#/components/schemas/UserDto' },
-        'GetUserResponse',
-      );
+      const result = classifyAndExtractResponse({ $ref: '#/components/schemas/UserDto' }, 'GetUserResponse');
       expect(result.response).toEqual({ kind: 'model', name: 'UserDto' });
       expect(result.inlineModels).toEqual([]);
       expect(result.isPaginated).toBe(false);

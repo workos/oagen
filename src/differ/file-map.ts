@@ -7,11 +7,7 @@ export interface AffectedFiles {
   delete: string[];
 }
 
-export function mapChangesToFiles(
-  changes: Change[],
-  emitter: Emitter,
-  ctx: EmitterContext,
-): AffectedFiles {
+export function mapChangesToFiles(changes: Change[], emitter: Emitter, ctx: EmitterContext): AffectedFiles {
   const regenerate = new Set<string>();
   const toDelete = new Set<string>();
 
@@ -22,31 +18,31 @@ export function mapChangesToFiles(
   // Build file maps from emitter output
   for (const model of ctx.spec.models) {
     const files = emitter.generateModels([model], ctx);
-    const sigs = emitter.generateTypeSignatures(
-      { ...ctx.spec, models: [model], enums: [], services: [] },
-      ctx,
+    const sigs = emitter.generateTypeSignatures({ ...ctx.spec, models: [model], enums: [], services: [] }, ctx);
+    modelFiles.set(
+      model.name,
+      [...files, ...sigs].map((f) => f.path),
     );
-    modelFiles.set(model.name, [...files, ...sigs].map((f) => f.path));
   }
 
   for (const enumDef of ctx.spec.enums) {
     const files = emitter.generateEnums([enumDef], ctx);
-    enumFiles.set(enumDef.name, files.map((f) => f.path));
+    enumFiles.set(
+      enumDef.name,
+      files.map((f) => f.path),
+    );
   }
 
   for (const service of ctx.spec.services) {
     const files = [
       ...emitter.generateResources([service], ctx),
-      ...emitter.generateTests(
-        { ...ctx.spec, services: [service], models: [], enums: [] },
-        ctx,
-      ),
+      ...emitter.generateTests({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx),
     ];
-    const sigs = emitter.generateTypeSignatures(
-      { ...ctx.spec, services: [service], models: [], enums: [] },
-      ctx,
+    const sigs = emitter.generateTypeSignatures({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx);
+    serviceFiles.set(
+      service.name,
+      [...files, ...sigs].map((f) => f.path),
     );
-    serviceFiles.set(service.name, [...files, ...sigs].map((f) => f.path));
   }
 
   // Build reference graph: which services reference which models/enums

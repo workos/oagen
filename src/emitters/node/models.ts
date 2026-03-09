@@ -43,7 +43,12 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
   return files;
 }
 
-function generateInterface(model: Model, ctx: EmitterContext, serviceMap: Map<string, string>, currentService: string): string {
+function generateInterface(
+  model: Model,
+  ctx: EmitterContext,
+  serviceMap: Map<string, string>,
+  currentService: string,
+): string {
   const lines: string[] = [];
   const className = nodeClassName(model.name);
 
@@ -54,7 +59,9 @@ function generateInterface(model: Model, ctx: EmitterContext, serviceMap: Map<st
     if (impService === currentService) {
       lines.push(`import type { ${imp}, ${imp}Response } from './${nodeFileName(imp)}.interface.js';`);
     } else {
-      lines.push(`import type { ${imp}, ${imp}Response } from '../../${nodeFileName(impService)}/interfaces/${nodeFileName(imp)}.interface.js';`);
+      lines.push(
+        `import type { ${imp}, ${imp}Response } from '../../${nodeFileName(impService)}/interfaces/${nodeFileName(imp)}.interface.js';`,
+      );
     }
   }
   if (imports.length > 0) lines.push('');
@@ -90,12 +97,19 @@ function generateInterface(model: Model, ctx: EmitterContext, serviceMap: Map<st
   return lines.join('\n');
 }
 
-function generateSerializer(model: Model, ctx: EmitterContext, serviceMap: Map<string, string>, currentService: string): string {
+function generateSerializer(
+  model: Model,
+  ctx: EmitterContext,
+  serviceMap: Map<string, string>,
+  currentService: string,
+): string {
   const lines: string[] = [];
   const className = nodeClassName(model.name);
 
   // Import the interfaces
-  lines.push(`import type { ${className}, ${className}Response } from '../interfaces/${nodeFileName(model.name)}.interface.js';`);
+  lines.push(
+    `import type { ${className}, ${className}Response } from '../interfaces/${nodeFileName(model.name)}.interface.js';`,
+  );
 
   // Import nested deserializers
   const nestedModels = collectModelImports(model, 'public');
@@ -104,7 +118,9 @@ function generateSerializer(model: Model, ctx: EmitterContext, serviceMap: Map<s
     if (impService === currentService) {
       lines.push(`import { deserialize${imp} } from './${nodeFileName(imp)}.serializer.js';`);
     } else {
-      lines.push(`import { deserialize${imp} } from '../../${nodeFileName(impService)}/serializers/${nodeFileName(imp)}.serializer.js';`);
+      lines.push(
+        `import { deserialize${imp} } from '../../${nodeFileName(impService)}/serializers/${nodeFileName(imp)}.serializer.js';`,
+      );
     }
   }
 

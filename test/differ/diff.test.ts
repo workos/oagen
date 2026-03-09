@@ -17,7 +17,13 @@ const v1: ApiSpec = {
     },
   ],
   enums: [
-    { name: 'Status', values: [{ name: 'active', value: 'active' }, { name: 'inactive', value: 'inactive' }] },
+    {
+      name: 'Status',
+      values: [
+        { name: 'active', value: 'active' },
+        { name: 'inactive', value: 'inactive' },
+      ],
+    },
   ],
   services: [
     {
@@ -57,9 +63,7 @@ describe('diffSpecs', () => {
         ...v1.models,
         { name: 'Team', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
       ],
-      enums: [
-        { name: 'Status', values: [...v1.enums[0].values, { name: 'pending', value: 'pending' }] },
-      ],
+      enums: [{ name: 'Status', values: [...v1.enums[0].values, { name: 'pending', value: 'pending' }] }],
     };
 
     const diff = diffSpecs(v1, v2);
@@ -149,9 +153,7 @@ describe('diffSpecs', () => {
     const v2: ApiSpec = {
       ...v1,
       version: '2.0.0',
-      enums: [
-        { name: 'Status', values: [...v1.enums[0].values, { name: 'pending', value: 'pending' }] },
-      ],
+      enums: [{ name: 'Status', values: [...v1.enums[0].values, { name: 'pending', value: 'pending' }] }],
     };
     const diff = diffSpecs(v1, v2);
     const enumModified = diff.changes.find((c) => c.kind === 'enum-modified');
@@ -163,9 +165,7 @@ describe('diffSpecs', () => {
     const v2: ApiSpec = {
       ...v1,
       version: '2.0.0',
-      enums: [
-        { name: 'Status', values: [v1.enums[0].values[0]] },
-      ],
+      enums: [{ name: 'Status', values: [v1.enums[0].values[0]] }],
     };
     const diff = diffSpecs(v1, v2);
     const enumModified = diff.changes.find((c) => c.kind === 'enum-modified');
@@ -231,9 +231,7 @@ describe('diffSpecs', () => {
         },
         { name: 'Team', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
       ],
-      enums: [
-        { name: 'Status', values: [...v1.enums[0].values, { name: 'pending', value: 'pending' }] },
-      ],
+      enums: [{ name: 'Status', values: [...v1.enums[0].values, { name: 'pending', value: 'pending' }] }],
       services: [],
     };
     const diff = diffSpecs(v1, v2);

@@ -25,7 +25,9 @@ function generateTestFile(service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
 
   lines.push(`import fetch from 'jest-fetch-mock';`);
-  lines.push(`import { fetchOnce, fetchURL, fetchSearchParams, fetchHeaders, fetchBody } from '../common/utils/test-utils';`);
+  lines.push(
+    `import { fetchOnce, fetchURL, fetchSearchParams, fetchHeaders, fetchBody } from '../common/utils/test-utils';`,
+  );
   lines.push(`import { ${ns} } from '../${nsFile}';`);
   lines.push('');
 

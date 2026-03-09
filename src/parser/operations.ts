@@ -169,9 +169,7 @@ function extractRequestBody(body?: RequestBodyObject, op?: OperationObject): Typ
   const jsonContent = body.content['application/json'];
   if (!jsonContent?.schema) return undefined;
 
-  const contextName = op?.operationId
-    ? toPascalCase(op.operationId) + 'Request'
-    : 'RequestBody';
+  const contextName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
   return schemaToTypeRef(jsonContent.schema as Record<string, unknown>, contextName);
 }
 
@@ -204,10 +202,7 @@ function extractResponses(
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
         const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
-        const result = classifyAndExtractResponse(
-          jsonContent.schema as Record<string, unknown>,
-          contextName,
-        );
+        const result = classifyAndExtractResponse(jsonContent.schema as Record<string, unknown>, contextName);
         response = result.response;
         inlineModels = result.inlineModels;
         isPaginated = result.isPaginated;

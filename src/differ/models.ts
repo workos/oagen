@@ -101,9 +101,7 @@ export function typeRefsEqual(a: TypeRef, b: TypeRef): boolean {
       const aKeys = Object.keys(a.discriminator.mapping).sort();
       const bKeys = Object.keys(b.discriminator.mapping).sort();
       if (aKeys.length !== bKeys.length) return false;
-      return aKeys.every(
-        (k, i) => k === bKeys[i] && a.discriminator!.mapping[k] === b.discriminator!.mapping[k],
-      );
+      return aKeys.every((k, i) => k === bKeys[i] && a.discriminator!.mapping[k] === b.discriminator!.mapping[k]);
     }
   }
 }

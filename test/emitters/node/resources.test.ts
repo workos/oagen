@@ -180,9 +180,7 @@ describe('generateResources (node)', () => {
             httpMethod: 'get',
             path: '/organizations',
             pathParams: [],
-            queryParams: [
-              { name: 'cursor', type: { kind: 'primitive', type: 'string' }, required: false },
-            ],
+            queryParams: [{ name: 'cursor', type: { kind: 'primitive', type: 'string' }, required: false }],
             headerParams: [],
             response: { kind: 'array', items: { kind: 'model', name: 'Organization' } },
             errors: [],

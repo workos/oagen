@@ -54,10 +54,7 @@ function isListEnvelope(schema: Record<string, unknown>): boolean {
   return hasListMetadata && hasDataArray;
 }
 
-function extractListResponse(
-  schema: Record<string, unknown>,
-  contextName: string,
-): ResponseExtractionResult {
+function extractListResponse(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
   const allOf = schema.allOf as Record<string, unknown>[];
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
@@ -115,10 +112,7 @@ function isSingleResourceWrapper(schema: Record<string, unknown>): boolean {
   return false;
 }
 
-function extractWrappedResource(
-  schema: Record<string, unknown>,
-  contextName: string,
-): ResponseExtractionResult {
+function extractWrappedResource(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
   const required = schema.required as string[];
   const props = schema.properties as Record<string, unknown>;
   const propSchema = props[required[0]] as Record<string, unknown>;
@@ -159,10 +153,7 @@ function extractWrappedResource(
   };
 }
 
-function extractDirectResource(
-  schema: Record<string, unknown>,
-  contextName: string,
-): ResponseExtractionResult {
+function extractDirectResource(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
   const inlineModels: Model[] = [];
 
   if (schema.type === 'object' && schema.properties) {

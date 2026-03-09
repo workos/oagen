@@ -7,10 +7,8 @@ import type { ApiSpec, Model, Service } from '../../src/ir/types.js';
 function mockEmitter(): Emitter {
   return {
     language: 'mock',
-    generateModels: (models) =>
-      models.map((m) => ({ path: `models/${m.name.toLowerCase()}.rb`, content: '' })),
-    generateEnums: (enums) =>
-      enums.map((e) => ({ path: `models/${e.name.toLowerCase()}.rb`, content: '' })),
+    generateModels: (models) => models.map((m) => ({ path: `models/${m.name.toLowerCase()}.rb`, content: '' })),
+    generateEnums: (enums) => enums.map((e) => ({ path: `models/${e.name.toLowerCase()}.rb`, content: '' })),
     generateResources: (services) =>
       services.map((s) => ({ path: `resources/${s.name.toLowerCase()}.rb`, content: '' })),
     generateClient: () => [{ path: 'client.rb', content: '' }],
@@ -20,8 +18,7 @@ function mockEmitter(): Emitter {
       ...spec.models.map((m) => ({ path: `sig/${m.name.toLowerCase()}.rbs`, content: '' })),
       ...spec.services.map((s) => ({ path: `sig/${s.name.toLowerCase()}.rbs`, content: '' })),
     ],
-    generateTests: (spec) =>
-      spec.services.map((s) => ({ path: `test/test_${s.name.toLowerCase()}.rb`, content: '' })),
+    generateTests: (spec) => spec.services.map((s) => ({ path: `test/test_${s.name.toLowerCase()}.rb`, content: '' })),
     fileHeader: () => '# generated',
   };
 }
@@ -40,9 +37,7 @@ const spec: ApiSpec = {
       fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
     },
   ],
-  enums: [
-    { name: 'Status', values: [{ name: 'active', value: 'active' }] },
-  ],
+  enums: [{ name: 'Status', values: [{ name: 'active', value: 'active' }] }],
   services: [
     {
       name: 'Users',
@@ -87,12 +82,14 @@ describe('mapChangesToFiles', () => {
   });
 
   it('model modified cascades to referencing service', () => {
-    const changes: Change[] = [{
-      kind: 'model-modified',
-      name: 'User',
-      fieldChanges: [{ kind: 'field-added', fieldName: 'avatar', classification: 'additive' }],
-      classification: 'additive',
-    }];
+    const changes: Change[] = [
+      {
+        kind: 'model-modified',
+        name: 'User',
+        fieldChanges: [{ kind: 'field-added', fieldName: 'avatar', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
     const result = mapChangesToFiles(changes, mockEmitter(), ctx);
     expect(result.regenerate).toContain('models/user.rb');
     expect(result.regenerate).toContain('sig/user.rbs');
@@ -102,12 +99,14 @@ describe('mapChangesToFiles', () => {
   });
 
   it('operation added maps to service files', () => {
-    const changes: Change[] = [{
-      kind: 'operation-added',
-      serviceName: 'Users',
-      operationName: 'deleteUser',
-      classification: 'additive',
-    }];
+    const changes: Change[] = [
+      {
+        kind: 'operation-added',
+        serviceName: 'Users',
+        operationName: 'deleteUser',
+        classification: 'additive',
+      },
+    ];
     const result = mapChangesToFiles(changes, mockEmitter(), ctx);
     expect(result.regenerate).toContain('resources/users.rb');
     expect(result.regenerate).toContain('test/test_users.rb');
@@ -159,12 +158,14 @@ describe('mapChangesToFiles', () => {
       ],
     };
     const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef };
-    const changes: Change[] = [{
-      kind: 'enum-modified',
-      name: 'Status',
-      valueChanges: [{ kind: 'value-added', valueName: 'pending', classification: 'additive' }],
-      classification: 'additive',
-    }];
+    const changes: Change[] = [
+      {
+        kind: 'enum-modified',
+        name: 'Status',
+        valueChanges: [{ kind: 'value-added', valueName: 'pending', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxWithRef);
     expect(result.regenerate).toContain('models/status.rb');
     expect(result.regenerate).toContain('resources/users.rb');
@@ -241,12 +242,14 @@ describe('mapChangesToFiles', () => {
       ],
     };
     const ctxMulti: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: multiServiceSpec };
-    const changes: Change[] = [{
-      kind: 'model-modified',
-      name: 'User',
-      fieldChanges: [{ kind: 'field-added', fieldName: 'avatar', classification: 'additive' }],
-      classification: 'additive',
-    }];
+    const changes: Change[] = [
+      {
+        kind: 'model-modified',
+        name: 'User',
+        fieldChanges: [{ kind: 'field-added', fieldName: 'avatar', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxMulti);
     expect(result.regenerate).toContain('resources/users.rb');
     expect(result.regenerate).toContain('resources/admin.rb');
@@ -276,12 +279,14 @@ describe('mapChangesToFiles', () => {
       ],
     };
     const ctxNoRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: noRefSpec };
-    const changes: Change[] = [{
-      kind: 'model-modified',
-      name: 'User',
-      fieldChanges: [{ kind: 'field-added', fieldName: 'avatar', classification: 'additive' }],
-      classification: 'additive',
-    }];
+    const changes: Change[] = [
+      {
+        kind: 'model-modified',
+        name: 'User',
+        fieldChanges: [{ kind: 'field-added', fieldName: 'avatar', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxNoRef);
     expect(result.regenerate).toContain('models/user.rb');
     expect(result.regenerate).not.toContain('resources/teams.rb');

@@ -27,11 +27,7 @@ export function generateFixtures(spec: ApiSpec, _ctx: EmitterContext): Generated
   return files;
 }
 
-function collectModelRefsToService(
-  typeRef: TypeRef,
-  serviceName: string,
-  map: Map<string, string>,
-): void {
+function collectModelRefsToService(typeRef: TypeRef, serviceName: string, map: Map<string, string>): void {
   switch (typeRef.kind) {
     case 'model':
       if (!map.has(typeRef.name)) map.set(typeRef.name, serviceName);

@@ -110,32 +110,32 @@ describe('generateTests (node)', () => {
   it('generates CRUD tests with response field validation', () => {
     const content = getTestFile();
     // Non-delete ops validate deserialized response fields
-    expect(content).toContain("lists and deserializes the response");
-    expect(content).toContain("expect(result.id).toBe(fixture.id)");
-    expect(content).toContain("expect(result.name).toBe(fixture.name)");
+    expect(content).toContain('lists and deserializes the response');
+    expect(content).toContain('expect(result.id).toBe(fixture.id)');
+    expect(content).toContain('expect(result.name).toBe(fixture.name)');
 
     // Delete ops use simple request assertion
-    expect(content).toContain("sends a delete request");
+    expect(content).toContain('sends a delete request');
   });
 
   it('generates per-operation error tests with expanded status codes', () => {
     const content = getTestFile();
 
     // list (GET) gets 401 + 404
-    expect(content).toContain("throws UnauthorizedException on 401");
-    expect(content).toContain("throws NotFoundException on 404");
+    expect(content).toContain('throws UnauthorizedException on 401');
+    expect(content).toContain('throws NotFoundException on 404');
 
     // create (POST) gets 401 + 409 + 422
-    expect(content).toContain("throws ConflictException on 409");
-    expect(content).toContain("throws UnprocessableEntityException on 422");
+    expect(content).toContain('throws ConflictException on 409');
+    expect(content).toContain('throws UnprocessableEntityException on 422');
   });
 
   it('generates parameter combination tests for list operations', () => {
     const content = getTestFile();
-    expect(content).toContain("sends cursor parameter");
-    expect(content).toContain("sends limit parameter");
-    expect(content).toContain("sends order parameter");
-    expect(content).toContain("sends multiple parameters together");
+    expect(content).toContain('sends cursor parameter');
+    expect(content).toContain('sends limit parameter');
+    expect(content).toContain('sends order parameter');
+    expect(content).toContain('sends multiple parameters together');
     expect(content).toContain("fetchSearchParams().get('cursor')");
   });
 
@@ -183,7 +183,7 @@ describe('generateTests (node)', () => {
     const nextDescribeIdx = content.indexOf("describe('", deleteIdx + 1);
     const deleteBlock = nextDescribeIdx > -1 ? content.slice(deleteIdx, nextDescribeIdx) : content.slice(deleteIdx);
     expect(deleteBlock).not.toContain('result.id');
-    expect(deleteBlock).toContain("sends a delete request");
+    expect(deleteBlock).toContain('sends a delete request');
   });
 
   it('uses realistic test values for parameters', () => {

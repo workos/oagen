@@ -54,9 +54,7 @@ describe('generateEnums (node)', () => {
   });
 
   it('handles single-value enums', () => {
-    const enums: Enum[] = [
-      { name: 'Singleton', values: [{ name: 'only', value: 'only' }] },
-    ];
+    const enums: Enum[] = [{ name: 'Singleton', values: [{ name: 'only', value: 'only' }] }];
 
     const files = generateEnums(enums, ctx);
     expect(files[0].content).toContain("export type Singleton = 'only';");

@@ -19,8 +19,7 @@ function mockEmitter(): Emitter {
       ...spec.models.map((m) => ({ path: `sig/${m.name.toLowerCase()}.rbs`, content: '' })),
       ...spec.services.map((s) => ({ path: `sig/${s.name.toLowerCase()}.rbs`, content: '' })),
     ],
-    generateTests: (spec) =>
-      spec.services.map((s) => ({ path: `test/test_${s.name.toLowerCase()}.rb`, content: '' })),
+    generateTests: (spec) => spec.services.map((s) => ({ path: `test/test_${s.name.toLowerCase()}.rb`, content: '' })),
     fileHeader: () => '# generated',
   };
 }
@@ -177,10 +176,7 @@ describe('generateIncremental', () => {
     const v2: ApiSpec = {
       ...v1,
       version: '2.0.0',
-      models: [
-        ...v1.models,
-        { name: 'Team', fields: [] },
-      ],
+      models: [...v1.models, { name: 'Team', fields: [] }],
     };
 
     const result = await generateIncremental(v1, v2, mockEmitter(), {

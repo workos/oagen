@@ -3,11 +3,7 @@ import type { Change, ParamChange } from './types.js';
 import { classifyParamChange } from './classify.js';
 import { typeRefsEqual } from './models.js';
 
-export function diffOperations(
-  serviceName: string,
-  oldOps: Operation[],
-  newOps: Operation[],
-): Change[] {
+export function diffOperations(serviceName: string, oldOps: Operation[], newOps: Operation[]): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldOps.map((o) => [o.name, o]));
   const newByName = new Map(newOps.map((o) => [o.name, o]));

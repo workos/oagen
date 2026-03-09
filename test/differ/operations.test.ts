@@ -137,9 +137,7 @@ describe('diffOperations', () => {
   it('detects param required changed', () => {
     const modified: Operation = {
       ...listUsers,
-      queryParams: listUsers.queryParams.map((p) =>
-        p.name === 'cursor' ? { ...p, required: true } : p,
-      ),
+      queryParams: listUsers.queryParams.map((p) => (p.name === 'cursor' ? { ...p, required: true } : p)),
     };
     const changes = diffOperations('Users', [listUsers], [modified]);
     expect(changes).toHaveLength(1);
