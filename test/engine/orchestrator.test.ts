@@ -47,7 +47,7 @@ describe('generate', () => {
     expect(paths).toContain('test/test_users.rb');
   });
 
-  it('prepends file header to all files', async () => {
+  it('prepends file header to all non-JSON files', async () => {
     const files = await generate(minimalSpec, mockEmitter(), {
       namespace: 'test',
       dryRun: true,
@@ -55,7 +55,11 @@ describe('generate', () => {
     });
 
     for (const f of files) {
-      expect(f.content).toMatch(/^# Auto-generated\n\n/);
+      if (f.path.endsWith('.json')) {
+        expect(f.content).not.toMatch(/^# Auto-generated/);
+      } else {
+        expect(f.content).toMatch(/^# Auto-generated\n\n/);
+      }
     }
   });
 

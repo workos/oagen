@@ -28,7 +28,7 @@ export async function generate(
   const header = emitter.fileHeader();
   const withHeaders = files.map((f) => ({
     ...f,
-    content: header + '\n\n' + f.content,
+    content: f.path.endsWith('.json') ? f.content : header + '\n\n' + f.content,
   }));
 
   if (options.dryRun) {

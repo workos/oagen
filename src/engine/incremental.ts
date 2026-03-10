@@ -51,7 +51,7 @@ export async function generateIncremental(
     .filter((f) => affectedSet.has(f.path))
     .map((f) => ({
       ...f,
-      content: header + '\n\n' + f.content,
+      content: f.path.endsWith('.json') ? f.content : header + '\n\n' + f.content,
     }));
 
   if (!options.dryRun) {
