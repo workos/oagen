@@ -225,22 +225,22 @@ describe('generateModels (node)', () => {
     // Organizations service barrel
     const orgInterfaceIndex = files.find((f) => f.path === 'src/organizations/interfaces/index.ts');
     expect(orgInterfaceIndex).toBeDefined();
-    expect(orgInterfaceIndex!.content).toContain("export * from './organization.interface.js';");
+    expect(orgInterfaceIndex!.content).toContain("export * from './organization.interface';");
     expect(orgInterfaceIndex!.content).not.toContain('user');
 
     const orgSerializerIndex = files.find((f) => f.path === 'src/organizations/serializers/index.ts');
     expect(orgSerializerIndex).toBeDefined();
-    expect(orgSerializerIndex!.content).toContain("export * from './organization.serializer.js';");
+    expect(orgSerializerIndex!.content).toContain("export * from './organization.serializer';");
 
     // UserManagement service barrel
     const umInterfaceIndex = files.find((f) => f.path === 'src/user-management/interfaces/index.ts');
     expect(umInterfaceIndex).toBeDefined();
-    expect(umInterfaceIndex!.content).toContain("export * from './user.interface.js';");
+    expect(umInterfaceIndex!.content).toContain("export * from './user.interface';");
     expect(umInterfaceIndex!.content).not.toContain('organization');
 
     const umSerializerIndex = files.find((f) => f.path === 'src/user-management/serializers/index.ts');
     expect(umSerializerIndex).toBeDefined();
-    expect(umSerializerIndex!.content).toContain("export * from './user.serializer.js';");
+    expect(umSerializerIndex!.content).toContain("export * from './user.serializer';");
   });
 
   it('maps primitive types correctly', () => {
@@ -351,9 +351,9 @@ describe('generateModels (node)', () => {
     const teamInterface = files.find((f) => f.path.includes('team.interface.ts'));
     expect(teamInterface!.path).toBe('src/common/interfaces/team.interface.ts');
     // Import User from user-management service
-    expect(teamInterface!.content).toContain("from '../../user-management/interfaces/user.interface.js'");
+    expect(teamInterface!.content).toContain("from '../../user-management/interfaces/user.interface'");
 
     const teamSerializer = files.find((f) => f.path.includes('team.serializer.ts'));
-    expect(teamSerializer!.content).toContain("from '../../user-management/serializers/user.serializer.js'");
+    expect(teamSerializer!.content).toContain("from '../../user-management/serializers/user.serializer'");
   });
 });

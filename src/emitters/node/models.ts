@@ -1,7 +1,14 @@
 import type { Model, Field, TypeRef, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { mapTypeRefPublic, mapTypeRefResponse } from './type-map.js';
-import { nodeClassName, nodeFieldName, nodeFileName, nodeInterfacePath, nodeSerializerPath } from './naming.js';
+import {
+  nodeClassName,
+  nodeFieldName,
+  nodeFileName,
+  nodeInterfacePath,
+  nodeSerializerPath,
+  mergeActionService,
+} from './naming.js';
 import { toSnakeCase, toCamelCase } from '../../utils/naming.js';
 
 export function generateModels(models: Model[], ctx: EmitterContext): GeneratedFile[] {
@@ -30,13 +37,34 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
     }
 
     // Per-service barrel exports
+    const interfaceExports = serviceModels.map((m) => `export * from './${nodeFileName(m.name)}.interface';`);
+    const serializerExports = serviceModels.map((m) => `export * from './${nodeFileName(m.name)}.serializer';`);
+
+    // Add options type exports for operations in this service
+    const service = ctx.spec.services.find((s) => s.name === serviceName);
+    if (service) {
+      for (const op of service.operations) {
+        if (op.requestBody || op.queryParams.length > 0) {
+          const optName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+          interfaceExports.push(`export * from './${nodeFileName(optName)}.interface';`);
+          if (op.requestBody) {
+            serializerExports.push(`export * from './${nodeFileName(optName)}.serializer';`);
+          }
+        }
+        if (op.idempotent && op.httpMethod === 'post') {
+          const reqOptsName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+          interfaceExports.push(`export * from './${nodeFileName(reqOptsName)}.interface';`);
+        }
+      }
+    }
+
     files.push({
       path: `src/${nodeFileName(serviceName)}/interfaces/index.ts`,
-      content: serviceModels.map((m) => `export * from './${nodeFileName(m.name)}.interface.js';`).join('\n') + '\n',
+      content: interfaceExports.join('\n') + '\n',
     });
     files.push({
       path: `src/${nodeFileName(serviceName)}/serializers/index.ts`,
-      content: serviceModels.map((m) => `export * from './${nodeFileName(m.name)}.serializer.js';`).join('\n') + '\n',
+      content: serializerExports.join('\n') + '\n',
     });
   }
 
@@ -57,10 +85,10 @@ function generateInterface(
   for (const imp of imports) {
     const impService = serviceMap.get(imp) ?? 'common';
     if (impService === currentService) {
-      lines.push(`import type { ${imp}, ${imp}Response } from './${nodeFileName(imp)}.interface.js';`);
+      lines.push(`import type { ${imp}, ${imp}Response } from './${nodeFileName(imp)}.interface';`);
     } else {
       lines.push(
-        `import type { ${imp}, ${imp}Response } from '../../${nodeFileName(impService)}/interfaces/${nodeFileName(imp)}.interface.js';`,
+        `import type { ${imp}, ${imp}Response } from '../../${nodeFileName(impService)}/interfaces/${nodeFileName(imp)}.interface';`,
       );
     }
   }
@@ -108,7 +136,7 @@ function generateSerializer(
 
   // Import the interfaces
   lines.push(
-    `import type { ${className}, ${className}Response } from '../interfaces/${nodeFileName(model.name)}.interface.js';`,
+    `import type { ${className}, ${className}Response } from '../interfaces/${nodeFileName(model.name)}.interface';`,
   );
 
   // Import nested deserializers
@@ -116,10 +144,10 @@ function generateSerializer(
   for (const imp of nestedModels) {
     const impService = serviceMap.get(imp) ?? 'common';
     if (impService === currentService) {
-      lines.push(`import { deserialize${imp} } from './${nodeFileName(imp)}.serializer.js';`);
+      lines.push(`import { deserialize${imp} } from './${nodeFileName(imp)}.serializer';`);
     } else {
       lines.push(
-        `import { deserialize${imp} } from '../../${nodeFileName(impService)}/serializers/${nodeFileName(imp)}.serializer.js';`,
+        `import { deserialize${imp} } from '../../${nodeFileName(impService)}/serializers/${nodeFileName(imp)}.serializer';`,
       );
     }
   }

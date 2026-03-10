@@ -7,6 +7,7 @@ import { generateClient } from './client.js';
 import { generateErrors } from './errors.js';
 import { generateConfig } from './config.js';
 import { generateCommon } from './common.js';
+import { generateOptions } from './options.js';
 import { generateTests } from './tests.js';
 
 export const nodeEmitter: Emitter = {
@@ -21,7 +22,7 @@ export const nodeEmitter: Emitter = {
   },
 
   generateResources(services: Service[], ctx: EmitterContext): GeneratedFile[] {
-    return generateResources(services, ctx);
+    return [...generateResources(services, ctx), ...generateOptions(services, ctx)];
   },
 
   generateClient(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
