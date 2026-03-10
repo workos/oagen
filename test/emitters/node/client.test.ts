@@ -30,7 +30,7 @@ describe('generateClient (node)', () => {
     const content = clientFile!.content;
     expect(content).toContain('export class WorkOS {');
     expect(content).toContain('constructor(keyOrOptions?: string | WorkOSOptions)');
-    expect(content).toContain('process.env.WORK_OS_API_KEY');
+    expect(content).toContain('process.env.WORKOS_API_KEY');
   });
 
   it('generates resource accessor properties', () => {

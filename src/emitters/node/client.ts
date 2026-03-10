@@ -1,18 +1,18 @@
 import type { ApiSpec } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { nodeClassName, nodeFileName } from './naming.js';
-import { toCamelCase, toUpperSnakeCase } from '../../utils/naming.js';
+import { toCamelCase } from '../../utils/naming.js';
 
 export function generateClient(_spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;
   const nsKebab = nodeFileName(ctx.namespace);
-  const nsEnvKey = toUpperSnakeCase(ctx.namespace);
+  const nsEnvKey = ctx.namespacePascal.toUpperCase();
 
   const resourceImports = ctx.spec.services
     .map((s) => {
       const className = nodeClassName(s.name);
       const fileName = nodeFileName(s.name);
-      return `import { ${className} } from './${fileName}/${fileName}.js';`;
+      return `import { ${className} } from './${fileName}/${fileName}';`;
     })
     .join('\n');
 
