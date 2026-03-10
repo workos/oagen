@@ -3,7 +3,7 @@ import { nodeFileName } from './naming.js';
 
 export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;
-  const nsKebab = nodeFileName(ctx.namespace);
+  const nsKebab = ctx.namespacePascal.toLowerCase();
 
   const files: GeneratedFile[] = [];
 

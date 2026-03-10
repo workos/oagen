@@ -5,7 +5,7 @@ import { toCamelCase } from '../../utils/naming.js';
 
 export function generateClient(_spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;
-  const nsKebab = nodeFileName(ctx.namespace);
+  const nsKebab = ctx.namespacePascal.toLowerCase();
   const nsEnvKey = ctx.namespacePascal.toUpperCase();
 
   const resourceImports = ctx.spec.services
@@ -280,7 +280,7 @@ export function create${ns}(keyOrOptions?: string | ${ns}Options): ${ns} {
 
 function generateBarrelExport(ctx: EmitterContext): string {
   const ns = ctx.namespacePascal;
-  const nsKebab = nodeFileName(ctx.namespace);
+  const nsKebab = ctx.namespacePascal.toLowerCase();
   const lines: string[] = [];
 
   lines.push(`export { ${ns} } from './${nsKebab}';`);

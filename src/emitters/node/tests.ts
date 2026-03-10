@@ -21,7 +21,7 @@ export function generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile
 
 function generateTestFile(service: Service, ctx: EmitterContext): string {
   const ns = ctx.namespacePascal;
-  const nsFile = nodeFileName(ctx.namespace);
+  const nsFile = ctx.namespacePascal.toLowerCase();
   const lines: string[] = [];
 
   lines.push(`import fetch from 'jest-fetch-mock';`);

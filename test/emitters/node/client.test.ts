@@ -24,7 +24,7 @@ const ctx: EmitterContext = {
 describe('generateClient (node)', () => {
   it('generates client class with constructor accepting string or options', () => {
     const files = generateClient(spec, ctx);
-    const clientFile = files.find((f) => f.path === 'src/work-os.ts');
+    const clientFile = files.find((f) => f.path === 'src/workos.ts');
     expect(clientFile).toBeDefined();
 
     const content = clientFile!.content;
@@ -35,7 +35,7 @@ describe('generateClient (node)', () => {
 
   it('generates resource accessor properties', () => {
     const files = generateClient(spec, ctx);
-    const clientFile = files.find((f) => f.path === 'src/work-os.ts')!;
+    const clientFile = files.find((f) => f.path === 'src/workos.ts')!;
 
     const content = clientFile.content;
     expect(content).toContain('readonly organizations = new Organizations(this);');
@@ -44,7 +44,7 @@ describe('generateClient (node)', () => {
 
   it('generates HTTP methods: get, post, put, patch, delete', () => {
     const files = generateClient(spec, ctx);
-    const content = files.find((f) => f.path === 'src/work-os.ts')!.content;
+    const content = files.find((f) => f.path === 'src/workos.ts')!.content;
 
     expect(content).toContain('async get<Result = any>(');
     expect(content).toContain('async post<Result = any, Entity = any>(');
@@ -55,7 +55,7 @@ describe('generateClient (node)', () => {
 
   it('includes retry logic with exponential backoff', () => {
     const files = generateClient(spec, ctx);
-    const content = files.find((f) => f.path === 'src/work-os.ts')!.content;
+    const content = files.find((f) => f.path === 'src/workos.ts')!.content;
 
     expect(content).toContain('MAX_RETRY_ATTEMPTS');
     expect(content).toContain('BACKOFF_MULTIPLIER');
@@ -66,7 +66,7 @@ describe('generateClient (node)', () => {
 
   it('includes error dispatch by HTTP status', () => {
     const files = generateClient(spec, ctx);
-    const content = files.find((f) => f.path === 'src/work-os.ts')!.content;
+    const content = files.find((f) => f.path === 'src/workos.ts')!.content;
 
     expect(content).toContain('handleHttpError');
     expect(content).toContain('case 400:');
@@ -85,7 +85,7 @@ describe('generateClient (node)', () => {
 
   it('generates idempotency key for POST requests', () => {
     const files = generateClient(spec, ctx);
-    const content = files.find((f) => f.path === 'src/work-os.ts')!.content;
+    const content = files.find((f) => f.path === 'src/workos.ts')!.content;
 
     expect(content).toContain("headers['Idempotency-Key'] = options.idempotencyKey");
     expect(content).toContain('crypto.randomUUID()');
@@ -102,7 +102,7 @@ describe('generateClient (node)', () => {
     const files = generateClient(spec, ctx);
     const index = files.find((f) => f.path === 'src/index.ts');
     expect(index).toBeDefined();
-    expect(index!.content).toContain("export { WorkOS } from './work-os';");
+    expect(index!.content).toContain("export { WorkOS } from './workos';");
     expect(index!.content).toContain("export { createWorkOS } from './factory';");
   });
 });

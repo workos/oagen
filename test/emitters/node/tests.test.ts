@@ -96,7 +96,7 @@ describe('generateTests (node)', () => {
     expect(content).toContain("import fetch from 'jest-fetch-mock'");
     expect(content).toContain('fetchOnce');
     expect(content).toContain('fetchSearchParams');
-    expect(content).toContain("import { WorkOS } from '../work-os'");
+    expect(content).toContain("import { WorkOS } from '../workos'");
   });
 
   it('wraps each operation in a nested describe block', () => {

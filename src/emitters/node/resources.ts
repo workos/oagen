@@ -37,7 +37,7 @@ function generateResource(service: Service, ctx: EmitterContext): string {
 function collectImports(service: Service, ctx: EmitterContext): string[] {
   const lines: string[] = [];
   const ns = ctx.namespacePascal;
-  const nsFile = nodeFileName(ctx.namespace);
+  const nsFile = ctx.namespacePascal.toLowerCase();
 
   lines.push(`import type { ${ns} } from '../${nsFile}';`);
 
