@@ -12,7 +12,7 @@ describe('toPascalCase', () => {
     expect(toPascalCase('HTTPClient')).toBe('HttpClient');
   });
   it('handles numbers', () => {
-    expect(toPascalCase('oauth2_token')).toBe('Oauth2Token');
+    expect(toPascalCase('oauth2_token')).toBe('OAuth2Token');
     expect(toPascalCase('OAuth2Token')).toBe('OAuth2Token');
   });
   it('handles kebab-case', () => {
@@ -28,7 +28,12 @@ describe('toPascalCase', () => {
     expect(toPascalCase('UserProfile')).toBe('UserProfile');
   });
   it('handles APIKey', () => {
-    expect(toPascalCase('APIKey')).toBe('ApiKey');
+    expect(toPascalCase('APIKey')).toBe('APIKey');
+  });
+  it('preserves acronyms like SSO and MFA', () => {
+    expect(toPascalCase('SSO')).toBe('SSO');
+    expect(toPascalCase('sso_connection')).toBe('SSOConnection');
+    expect(toPascalCase('mfa_factor')).toBe('MFAFactor');
   });
 });
 
@@ -41,6 +46,11 @@ describe('toCamelCase', () => {
   });
   it('handles consecutive capitals', () => {
     expect(toCamelCase('HTTPClient')).toBe('httpClient');
+  });
+  it('preserves acronyms in camelCase (non-leading)', () => {
+    expect(toCamelCase('sso_connection')).toBe('ssoConnection');
+    expect(toCamelCase('api_key')).toBe('apiKey');
+    expect(toCamelCase('validate_api_key')).toBe('validateAPIKey');
   });
   it('handles already camelCase', () => {
     expect(toCamelCase('userProfile')).toBe('userProfile');

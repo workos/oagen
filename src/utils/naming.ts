@@ -9,6 +9,7 @@ function splitWords(s: string): string[] {
   if (!s) return [];
 
   return s
+    .replace(/[^a-zA-Z0-9_\-\s.]/g, '_') // replace non-alphanumeric chars with separator
     .replace(/([a-z])([A-Z])/g, '$1\0$2') // camelCase boundary
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1\0$2') // consecutive caps boundary
     .replace(/([a-zA-Z])(\d)/g, '$1\0$2') // letter to number
@@ -17,15 +18,32 @@ function splitWords(s: string): string[] {
     .filter((w) => w.length > 0);
 }
 
+const ACRONYM_SET = new Set(['SSO', 'API', 'MFA', 'SAML', 'SCIM', 'JWT', 'HMAC']);
+
 export function toPascalCase(s: string): string {
   return splitWords(s)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .map((w) => {
+      const upper = w.toUpperCase();
+      if (ACRONYM_SET.has(upper)) return upper;
+      // Special case: OAuth should stay as OAuth, not OAUTH
+      if (upper === 'OAUTH') return 'OAuth';
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
     .join('');
 }
 
 export function toCamelCase(s: string): string {
-  const pascal = toPascalCase(s);
-  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
+  const words = splitWords(s);
+  if (words.length === 0) return '';
+  return words
+    .map((w, i) => {
+      if (i === 0) return w.toLowerCase();
+      const upper = w.toUpperCase();
+      if (ACRONYM_SET.has(upper)) return upper;
+      if (upper === 'OAUTH') return 'OAuth';
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join('');
 }
 
 export function toSnakeCase(s: string): string {

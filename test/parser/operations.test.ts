@@ -179,7 +179,7 @@ describe('extractOperations', () => {
     const op = services[0].operations[0];
     expect(op.response).toEqual({
       kind: 'model',
-      name: 'ApiKeysControllerValidateApiKeyResponse',
+      name: 'APIKeysControllerValidateAPIKeyResponse',
     });
   });
 

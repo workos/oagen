@@ -183,7 +183,7 @@ describe('schemaToTypeRef', () => {
 
   it('resolves $ref to named ModelRef', () => {
     const ref = schemaToTypeRef({ $ref: '#/components/schemas/ValidateApiKeyDto' });
-    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKeyDto' });
+    expect(ref).toEqual({ kind: 'model', name: 'ValidateAPIKeyDto' });
   });
 
   it('resolves $ref with PascalCase name preserved', () => {
@@ -193,7 +193,7 @@ describe('schemaToTypeRef', () => {
 
   it('resolves $ref with kebab-case name to PascalCase', () => {
     const ref = schemaToTypeRef({ $ref: '#/components/schemas/api-key-response' });
-    expect(ref).toEqual({ kind: 'model', name: 'ApiKeyResponse' });
+    expect(ref).toEqual({ kind: 'model', name: 'APIKeyResponse' });
   });
 
   it('$ref takes priority over other schema properties', () => {
