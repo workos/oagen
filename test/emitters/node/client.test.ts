@@ -102,7 +102,7 @@ describe('generateClient (node)', () => {
     const files = generateClient(spec, ctx);
     const index = files.find((f) => f.path === 'src/index.ts');
     expect(index).toBeDefined();
-    expect(index!.content).toContain("export { WorkOS } from './work-os.js';");
-    expect(index!.content).toContain("export { createWorkOS } from './factory.js';");
+    expect(index!.content).toContain("export { WorkOS } from './work-os';");
+    expect(index!.content).toContain("export { createWorkOS } from './factory';");
   });
 });

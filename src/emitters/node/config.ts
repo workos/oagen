@@ -10,6 +10,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
   // {Namespace}Options interface
   files.push({
     path: `src/common/interfaces/${nsKebab}-options.interface.ts`,
+    skipIfExists: true,
     content: `export interface ${ns}Options {
   apiKey?: string;
   baseURL?: string;
@@ -22,6 +23,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
   // HTTP method options interfaces
   files.push({
     path: 'src/common/interfaces/get-options.interface.ts',
+    skipIfExists: true,
     content: `export interface GetOptions {
   query?: Record<string, any>;
   accessToken?: string;
@@ -31,6 +33,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
 
   files.push({
     path: 'src/common/interfaces/post-options.interface.ts',
+    skipIfExists: true,
     content: `export interface PostOptions {
   query?: Record<string, any>;
   idempotencyKey?: string;
@@ -40,6 +43,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
 
   files.push({
     path: 'src/common/interfaces/put-options.interface.ts',
+    skipIfExists: true,
     content: `export interface PutOptions {
   query?: Record<string, any>;
   idempotencyKey?: string;
@@ -49,6 +53,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
 
   files.push({
     path: 'src/common/interfaces/patch-options.interface.ts',
+    skipIfExists: true,
     content: `export interface PatchOptions {
   query?: Record<string, any>;
   idempotencyKey?: string;
@@ -59,6 +64,7 @@ export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
   // List metadata and List interface
   files.push({
     path: 'src/common/interfaces/list.interface.ts',
+    skipIfExists: true,
     content: `export interface ListMetadata {
   before?: string;
   after?: string;
@@ -84,6 +90,7 @@ export interface ListResponse<T> {
   // PaginationOptions
   files.push({
     path: 'src/common/interfaces/pagination-options.interface.ts',
+    skipIfExists: true,
     content: `export interface PaginationOptions {
   limit?: number;
   before?: string;
@@ -96,14 +103,15 @@ export interface ListResponse<T> {
   // Common interfaces barrel
   files.push({
     path: 'src/common/interfaces/index.ts',
-    content: `export * from './${nsKebab}-options.interface.js';
-export * from './get-options.interface.js';
-export * from './post-options.interface.js';
-export * from './put-options.interface.js';
-export * from './patch-options.interface.js';
-export * from './list.interface.js';
-export * from './pagination-options.interface.js';
-export * from './request-exception.interface.js';
+    skipIfExists: true,
+    content: `export * from './${nsKebab}-options.interface';
+export * from './get-options.interface';
+export * from './post-options.interface';
+export * from './put-options.interface';
+export * from './patch-options.interface';
+export * from './list.interface';
+export * from './pagination-options.interface';
+export * from './request-exception.interface';
 `,
   });
 

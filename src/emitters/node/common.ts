@@ -6,7 +6,8 @@ export function generateCommon(_ctx: EmitterContext): GeneratedFile[] {
   // AutoPaginatable
   files.push({
     path: 'src/common/utils/pagination.ts',
-    content: `import type { ListResponse } from '../interfaces/list.interface.js';
+    skipIfExists: true,
+    content: `import type { ListResponse } from '../interfaces/list.interface';
 
 export class AutoPaginatable<T> implements AsyncIterable<T> {
   private data: T[];
@@ -52,8 +53,9 @@ export class AutoPaginatable<T> implements AsyncIterable<T> {
   // fetch-and-deserialize
   files.push({
     path: 'src/common/utils/fetch-and-deserialize.ts',
-    content: `import type { ListResponse } from '../interfaces/list.interface.js';
-import { AutoPaginatable } from './pagination.js';
+    skipIfExists: true,
+    content: `import type { ListResponse } from '../interfaces/list.interface';
+import { AutoPaginatable } from './pagination';
 
 export async function fetchAndDeserialize<TResponse, TPublic>(
   client: { get: (path: string, options?: any) => Promise<{ data: any }> },
@@ -83,6 +85,7 @@ export async function fetchAndDeserialize<TResponse, TPublic>(
   // test-utils
   files.push({
     path: 'src/common/utils/test-utils.ts',
+    skipIfExists: true,
     content: `import fetch from 'jest-fetch-mock';
 
 export function fetchOnce(body: unknown, status = 200): void {
@@ -120,14 +123,16 @@ export function fetchBody(): unknown {
   // Barrel export for utils
   files.push({
     path: 'src/common/utils/index.ts',
-    content: `export { AutoPaginatable } from './pagination.js';
-export { fetchAndDeserialize } from './fetch-and-deserialize.js';
+    skipIfExists: true,
+    content: `export { AutoPaginatable } from './pagination';
+export { fetchAndDeserialize } from './fetch-and-deserialize';
 `,
   });
 
   // Abstract HttpClient
   files.push({
     path: 'src/common/net/http-client.ts',
+    skipIfExists: true,
     content: `export interface HttpClientResponse {
   status: number;
   headers: Record<string, string>;
@@ -148,7 +153,8 @@ export abstract class HttpClient {
   // FetchHttpClient
   files.push({
     path: 'src/common/net/fetch-client.ts',
-    content: `import { HttpClient, type HttpClientResponse } from './http-client.js';
+    skipIfExists: true,
+    content: `import { HttpClient, type HttpClientResponse } from './http-client';
 
 export class FetchHttpClient extends HttpClient {
   async request(
@@ -181,8 +187,9 @@ export class FetchHttpClient extends HttpClient {
   // Net barrel
   files.push({
     path: 'src/common/net/index.ts',
-    content: `export { HttpClient, type HttpClientResponse } from './http-client.js';
-export { FetchHttpClient } from './fetch-client.js';
+    skipIfExists: true,
+    content: `export { HttpClient, type HttpClientResponse } from './http-client';
+export { FetchHttpClient } from './fetch-client';
 `,
   });
 

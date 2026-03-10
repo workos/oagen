@@ -6,6 +6,7 @@ export function generateErrors(_ctx: EmitterContext): GeneratedFile[] {
   // RequestException interface
   files.push({
     path: 'src/common/interfaces/request-exception.interface.ts',
+    skipIfExists: true,
     content: `export interface RequestException {
   readonly status: number;
   readonly name: string;
@@ -18,7 +19,8 @@ export function generateErrors(_ctx: EmitterContext): GeneratedFile[] {
   // GenericServerException
   files.push({
     path: 'src/common/exceptions/generic-server.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class GenericServerException extends Error implements RequestException {
   readonly name: string = 'GenericServerException';
@@ -42,7 +44,8 @@ export class GenericServerException extends Error implements RequestException {
   // UnauthorizedException
   files.push({
     path: 'src/common/exceptions/unauthorized.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class UnauthorizedException extends Error implements RequestException {
   readonly status = 401;
@@ -62,7 +65,8 @@ export class UnauthorizedException extends Error implements RequestException {
   // BadRequestException
   files.push({
     path: 'src/common/exceptions/bad-request.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class BadRequestException extends Error implements RequestException {
   readonly status = 400;
@@ -92,7 +96,8 @@ export class BadRequestException extends Error implements RequestException {
   // NotFoundException
   files.push({
     path: 'src/common/exceptions/not-found.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class NotFoundException extends Error implements RequestException {
   readonly status = 404;
@@ -124,7 +129,8 @@ export class NotFoundException extends Error implements RequestException {
   // ConflictException
   files.push({
     path: 'src/common/exceptions/conflict.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class ConflictException extends Error implements RequestException {
   readonly status = 409;
@@ -154,7 +160,8 @@ export class ConflictException extends Error implements RequestException {
   // UnprocessableEntityException
   files.push({
     path: 'src/common/exceptions/unprocessable-entity.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class UnprocessableEntityException extends Error implements RequestException {
   readonly status = 422;
@@ -194,7 +201,8 @@ export class UnprocessableEntityException extends Error implements RequestExcept
   // RateLimitExceededException
   files.push({
     path: 'src/common/exceptions/rate-limit-exceeded.exception.ts',
-    content: `import type { RequestException } from '../interfaces/request-exception.interface.js';
+    skipIfExists: true,
+    content: `import type { RequestException } from '../interfaces/request-exception.interface';
 
 export class RateLimitExceededException extends Error implements RequestException {
   readonly status = 429;
@@ -224,6 +232,7 @@ export class RateLimitExceededException extends Error implements RequestExceptio
   // ApiKeyRequiredException
   files.push({
     path: 'src/common/exceptions/api-key-required.exception.ts',
+    skipIfExists: true,
     content: `export class ApiKeyRequiredException extends Error {
   readonly status = 403;
   readonly name = 'ApiKeyRequiredException';
@@ -238,14 +247,15 @@ export class RateLimitExceededException extends Error implements RequestExceptio
   // Barrel export
   files.push({
     path: 'src/common/exceptions/index.ts',
-    content: `export { GenericServerException } from './generic-server.exception.js';
-export { UnauthorizedException } from './unauthorized.exception.js';
-export { BadRequestException } from './bad-request.exception.js';
-export { NotFoundException } from './not-found.exception.js';
-export { ConflictException } from './conflict.exception.js';
-export { UnprocessableEntityException } from './unprocessable-entity.exception.js';
-export { RateLimitExceededException } from './rate-limit-exceeded.exception.js';
-export { ApiKeyRequiredException } from './api-key-required.exception.js';
+    skipIfExists: true,
+    content: `export { GenericServerException } from './generic-server.exception';
+export { UnauthorizedException } from './unauthorized.exception';
+export { BadRequestException } from './bad-request.exception';
+export { NotFoundException } from './not-found.exception';
+export { ConflictException } from './conflict.exception';
+export { UnprocessableEntityException } from './unprocessable-entity.exception';
+export { RateLimitExceededException } from './rate-limit-exceeded.exception';
+export { ApiKeyRequiredException } from './api-key-required.exception';
 `,
   });
 

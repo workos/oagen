@@ -24,11 +24,11 @@ export function generateClient(_spec: ApiSpec, ctx: EmitterContext): GeneratedFi
     })
     .join('\n');
 
-  const content = `import type { ${ns}Options } from './common/interfaces/${nsKebab}-options.interface.js';
-import type { GetOptions } from './common/interfaces/get-options.interface.js';
-import type { PostOptions } from './common/interfaces/post-options.interface.js';
-import type { PutOptions } from './common/interfaces/put-options.interface.js';
-import type { PatchOptions } from './common/interfaces/patch-options.interface.js';
+  const content = `import type { ${ns}Options } from './common/interfaces/${nsKebab}-options.interface';
+import type { GetOptions } from './common/interfaces/get-options.interface';
+import type { PostOptions } from './common/interfaces/post-options.interface';
+import type { PutOptions } from './common/interfaces/put-options.interface';
+import type { PatchOptions } from './common/interfaces/patch-options.interface';
 import {
   GenericServerException,
   UnauthorizedException,
@@ -38,9 +38,9 @@ import {
   UnprocessableEntityException,
   RateLimitExceededException,
   ApiKeyRequiredException,
-} from './common/exceptions/index.js';
-import { FetchHttpClient } from './common/net/fetch-client.js';
-import type { HttpClient } from './common/net/http-client.js';
+} from './common/exceptions/index';
+import { FetchHttpClient } from './common/net/fetch-client';
+import type { HttpClient } from './common/net/http-client';
 ${resourceImports}
 
 const MAX_RETRY_ATTEMPTS = 3;
@@ -251,14 +251,16 @@ ${resourceProps}
     {
       path: `src/${nsKebab}.ts`,
       content,
+      skipIfExists: true,
     },
   ];
 
   // Factory function
   files.push({
     path: 'src/factory.ts',
-    content: `import { ${ns} } from './${nsKebab}.js';
-import type { ${ns}Options } from './common/interfaces/${nsKebab}-options.interface.js';
+    skipIfExists: true,
+    content: `import { ${ns} } from './${nsKebab}';
+import type { ${ns}Options } from './common/interfaces/${nsKebab}-options.interface';
 
 export function create${ns}(keyOrOptions?: string | ${ns}Options): ${ns} {
   return new ${ns}(keyOrOptions);
@@ -269,6 +271,7 @@ export function create${ns}(keyOrOptions?: string | ${ns}Options): ${ns} {
   // Main barrel export
   files.push({
     path: 'src/index.ts',
+    skipIfExists: true,
     content: generateBarrelExport(ctx),
   });
 
@@ -280,18 +283,18 @@ function generateBarrelExport(ctx: EmitterContext): string {
   const nsKebab = nodeFileName(ctx.namespace);
   const lines: string[] = [];
 
-  lines.push(`export { ${ns} } from './${nsKebab}.js';`);
-  lines.push(`export { create${ns} } from './factory.js';`);
-  lines.push(`export * from './common/interfaces/index.js';`);
-  lines.push(`export * from './common/exceptions/index.js';`);
-  lines.push(`export * from './common/utils/index.js';`);
+  lines.push(`export { ${ns} } from './${nsKebab}';`);
+  lines.push(`export { create${ns} } from './factory';`);
+  lines.push(`export * from './common/interfaces/index';`);
+  lines.push(`export * from './common/exceptions/index';`);
+  lines.push(`export * from './common/utils/index';`);
 
   for (const service of ctx.spec.services) {
     const className = nodeClassName(service.name);
     const fileName = nodeFileName(service.name);
-    lines.push(`export { ${className} } from './${fileName}/${fileName}.js';`);
-    lines.push(`export * from './${fileName}/interfaces/index.js';`);
-    lines.push(`export * from './${fileName}/serializers/index.js';`);
+    lines.push(`export { ${className} } from './${fileName}/${fileName}';`);
+    lines.push(`export * from './${fileName}/interfaces/index';`);
+    lines.push(`export * from './${fileName}/serializers/index';`);
   }
 
   lines.push('');

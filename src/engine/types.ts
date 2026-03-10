@@ -4,6 +4,7 @@ export interface GeneratedFile {
   path: string;
   content: string;
   header?: string;
+  skipIfExists?: boolean;
 }
 
 export interface EmitterContext {
