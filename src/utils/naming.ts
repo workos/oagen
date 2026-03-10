@@ -18,7 +18,7 @@ function splitWords(s: string): string[] {
     .filter((w) => w.length > 0);
 }
 
-const ACRONYM_SET = new Set(['SSO', 'API', 'MFA', 'SAML', 'SCIM', 'JWT', 'HMAC']);
+const ACRONYM_SET = new Set(['SSO', 'FGA', 'SAML', 'SCIM', 'JWT', 'HMAC']);
 
 export function toPascalCase(s: string): string {
   return splitWords(s)

@@ -9,27 +9,33 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
 
   for (const service of services) {
     for (const op of service.operations) {
-      if (!op.requestBody && op.queryParams.length === 0) continue;
+      const hasBodyOrParams = !!op.requestBody || op.queryParams.length > 0;
+      const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
 
-      const typeName = optionsTypeName(op, service);
+      if (!hasBodyOrParams && !isIdempotentPost) continue;
+
       const serviceName = service.name;
 
-      // Generate interface
-      files.push({
-        path: nodeInterfacePath(serviceName, typeName),
-        content: generateOptionsInterface(op, service, ctx),
-      });
+      if (hasBodyOrParams) {
+        const typeName = optionsTypeName(op, service);
 
-      // Generate serializer (only if there's a request body)
-      if (op.requestBody) {
+        // Generate interface
         files.push({
-          path: nodeSerializerPath(serviceName, typeName),
-          content: generateOptionsSerializer(op, service, ctx),
+          path: nodeInterfacePath(serviceName, typeName),
+          content: generateOptionsInterface(op, service, ctx),
         });
+
+        // Generate serializer (only if there's a request body)
+        if (op.requestBody) {
+          files.push({
+            path: nodeSerializerPath(serviceName, typeName),
+            content: generateOptionsSerializer(op, service, ctx),
+          });
+        }
       }
 
       // Generate request options interface for idempotent POST
-      if (op.idempotent && op.httpMethod === 'post') {
+      if (isIdempotentPost) {
         const reqOptsName = requestOptionsTypeName(op, service);
         files.push({
           path: nodeInterfacePath(serviceName, reqOptsName),

@@ -60,11 +60,11 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
 
     files.push({
       path: `src/${nodeFileName(serviceName)}/interfaces/index.ts`,
-      content: interfaceExports.join('\n') + '\n',
+      content: [...new Set(interfaceExports)].join('\n') + '\n',
     });
     files.push({
       path: `src/${nodeFileName(serviceName)}/serializers/index.ts`,
-      content: serializerExports.join('\n') + '\n',
+      content: [...new Set(serializerExports)].join('\n') + '\n',
     });
   }
 

@@ -128,9 +128,9 @@ describe('classifyAndExtractResponse', () => {
       };
 
       const result = classifyAndExtractResponse(schema, 'CreateApiKeyResponse');
-      expect(result.response).toEqual({ kind: 'model', name: 'APIKey' });
+      expect(result.response).toEqual({ kind: 'model', name: 'ApiKey' });
       expect(result.inlineModels).toHaveLength(1);
-      expect(result.inlineModels[0].name).toBe('APIKey');
+      expect(result.inlineModels[0].name).toBe('ApiKey');
       expect(result.inlineModels[0].fields).toHaveLength(3);
       expect(result.isPaginated).toBe(false);
     });
@@ -156,13 +156,13 @@ describe('classifyAndExtractResponse', () => {
         required: ['api_key'],
       };
 
-      const result = classifyAndExtractResponse(schema, 'ValidateAPIKeyResponse');
+      const result = classifyAndExtractResponse(schema, 'ValidateApiKeyResponse');
       expect(result.response).toEqual({
         kind: 'nullable',
-        inner: { kind: 'model', name: 'APIKey' },
+        inner: { kind: 'model', name: 'ApiKey' },
       });
       expect(result.inlineModels).toHaveLength(1);
-      expect(result.inlineModels[0].name).toBe('APIKey');
+      expect(result.inlineModels[0].name).toBe('ApiKey');
       expect(result.isPaginated).toBe(false);
     });
 

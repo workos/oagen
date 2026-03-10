@@ -28,12 +28,13 @@ describe('toPascalCase', () => {
     expect(toPascalCase('UserProfile')).toBe('UserProfile');
   });
   it('handles APIKey', () => {
-    expect(toPascalCase('APIKey')).toBe('APIKey');
+    expect(toPascalCase('APIKey')).toBe('ApiKey');
   });
-  it('preserves acronyms like SSO and MFA', () => {
+  it('preserves acronyms like SSO and FGA', () => {
     expect(toPascalCase('SSO')).toBe('SSO');
     expect(toPascalCase('sso_connection')).toBe('SSOConnection');
-    expect(toPascalCase('mfa_factor')).toBe('MFAFactor');
+    expect(toPascalCase('FGA')).toBe('FGA');
+    expect(toPascalCase('mfa_factor')).toBe('MfaFactor');
   });
 });
 
@@ -50,7 +51,7 @@ describe('toCamelCase', () => {
   it('preserves acronyms in camelCase (non-leading)', () => {
     expect(toCamelCase('sso_connection')).toBe('ssoConnection');
     expect(toCamelCase('api_key')).toBe('apiKey');
-    expect(toCamelCase('validate_api_key')).toBe('validateAPIKey');
+    expect(toCamelCase('validate_api_key')).toBe('validateApiKey');
   });
   it('handles already camelCase', () => {
     expect(toCamelCase('userProfile')).toBe('userProfile');
