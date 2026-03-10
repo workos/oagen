@@ -205,3 +205,67 @@ export function schemaToTypeRef(schema: any, contextName?: string): TypeRef {
   // Fallback: treat unknown schemas as string
   return { kind: 'primitive', type: 'string' };
 }
+
+/**
+ * Walk all component schemas and extract inline Model definitions for fields
+ * that are objects with properties (or arrays of such objects).
+ * These correspond to the ModelRef entries created by schemaToTypeRef.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function extractInlineModelsFromSchemas(schemas: Record<string, any> | undefined): Model[] {
+  if (!schemas) return [];
+
+  const inlineModels: Model[] = [];
+
+  for (const [, schema] of Object.entries(schemas)) {
+    extractInlineModelsFromProperties(schema, inlineModels);
+  }
+
+  return inlineModels;
+}
+
+function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[]): void {
+  const properties = schema.properties ?? {};
+  const allOfSchemas = schema.allOf ?? [];
+
+  for (const sub of allOfSchemas) {
+    if (sub.properties) {
+      extractInlineModelsFromProperties(sub, results);
+    }
+  }
+
+  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+    // Direct inline object with properties
+    if (fieldSchema.type === 'object' && fieldSchema.properties) {
+      const modelName = toPascalCase(fieldName);
+      results.push(buildInlineModel(modelName, fieldSchema));
+      extractInlineModelsFromProperties(fieldSchema, results);
+    }
+
+    // Array of inline objects
+    if (fieldSchema.type === 'array' && fieldSchema.items) {
+      const items = fieldSchema.items as SchemaObject;
+      if (items.type === 'object' && items.properties) {
+        const modelName = toPascalCase(fieldName);
+        results.push(buildInlineModel(modelName, items));
+        extractInlineModelsFromProperties(items, results);
+      }
+    }
+  }
+}
+
+function buildInlineModel(name: string, schema: SchemaObject): Model {
+  const requiredSet = new Set(schema.required ?? []);
+  const fields: Field[] = [];
+
+  for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
+    fields.push({
+      name: fieldName,
+      type: schemaToTypeRef(fieldSchema, fieldName),
+      required: requiredSet.has(fieldName),
+      description: fieldSchema.description,
+    });
+  }
+
+  return { name, description: schema.description, fields };
+}

@@ -35,7 +35,7 @@ export function nodeTestPath(service: string): string {
 }
 
 export function nodeFixturePath(service: string, operation: string): string {
-  return `src/${toKebabCase(service)}/fixtures/${toSnakeCase(operation)}.json`;
+  return `src/${toKebabCase(service)}/fixtures/${toKebabCase(operation)}.json`;
 }
 
 /**
