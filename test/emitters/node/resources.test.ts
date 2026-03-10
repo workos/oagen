@@ -78,7 +78,7 @@ describe('generateResources (node)', () => {
 
     const files = generateResources(services, ctx);
     const content = files[0].content;
-    expect(content).toContain('async retrieveOrganizations(id: string)');
+    expect(content).toContain('async retrieve(id: string)');
     expect(content).toContain('`organizations/${id}`');
     expect(content).toContain('get<OrganizationResponse>');
     expect(content).toContain('deserializeOrganization(data)');
@@ -108,7 +108,7 @@ describe('generateResources (node)', () => {
 
     const files = generateResources(services, ctx);
     const content = files[0].content;
-    expect(content).toContain('async createOrganizations(');
+    expect(content).toContain('async create(');
     expect(content).toContain('post<OrganizationResponse>');
     expect(content).toContain('requestOptions');
     expect(content).toContain('deserializeOrganization(data)');
@@ -137,7 +137,7 @@ describe('generateResources (node)', () => {
 
     const files = generateResources(services, ctx);
     const content = files[0].content;
-    expect(content).toContain('async deleteOrganizations(id: string): Promise<void>');
+    expect(content).toContain('async delete(id: string): Promise<void>');
     expect(content).toContain('this.workOs.delete(');
   });
 
@@ -165,7 +165,7 @@ describe('generateResources (node)', () => {
 
     const files = generateResources(services, ctx);
     const content = files[0].content;
-    expect(content).toContain('async updateOrganizations(');
+    expect(content).toContain('async update(');
     expect(content).toContain('put<OrganizationResponse>');
     expect(content).toContain('`organizations/${id}`');
   });

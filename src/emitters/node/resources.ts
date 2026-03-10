@@ -1,7 +1,7 @@
 import type { Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { nodeClassName, nodeFileName, nodeMethodName, nodeResourcePath, mergeActionService } from './naming.js';
-import { toCamelCase, toPascalCase } from '../../utils/naming.js';
+import { toCamelCase } from '../../utils/naming.js';
 
 export function generateResources(services: Service[], ctx: EmitterContext): GeneratedFile[] {
   return services.map((service) => ({
@@ -39,16 +39,15 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
   const ns = ctx.namespacePascal;
   const nsFile = nodeFileName(ctx.namespace);
 
-  lines.push(`import type { ${ns} } from '../${nsFile}.js';`);
+  lines.push(`import type { ${ns} } from '../${nsFile}';`);
 
   const modelNames = new Set<string>();
   const needsPagination = service.operations.some((o) => o.paginated);
   const needsFetchAndDeserialize = needsPagination;
 
   for (const op of service.operations) {
-    const responseModel = getResponseModelName(op);
-    if (responseModel !== 'void') {
-      modelNames.add(responseModel);
+    if (isModelResponse(op)) {
+      modelNames.add(getResponseModelName(op));
     }
   }
 
@@ -59,29 +58,36 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
       interfaceImports.push(name, `${name}Response`);
       serializerImports.push(`deserialize${name}`);
     }
-    lines.push(`import type { ${interfaceImports.join(', ')} } from './interfaces/index.js';`);
-    lines.push(`import { ${serializerImports.join(', ')} } from './serializers/index.js';`);
+    lines.push(`import type { ${interfaceImports.join(', ')} } from './interfaces/index';`);
+    lines.push(`import { ${serializerImports.join(', ')} } from './serializers/index';`);
   }
 
   // Collect options interfaces needed
-  const optionImports: string[] = [];
+  const optionTypeImports: string[] = [];
+  const optionValueImports: string[] = [];
   for (const op of service.operations) {
     if (op.requestBody || op.queryParams.length > 0) {
-      optionImports.push(optionsTypeName(op, service));
+      optionTypeImports.push(optionsTypeName(op, service));
     }
     if (op.requestBody) {
-      optionImports.push(`serialize${optionsTypeName(op, service)}`);
+      optionValueImports.push(`serialize${optionsTypeName(op, service)}`);
     }
     if (op.idempotent && op.httpMethod === 'post') {
-      optionImports.push(requestOptionsTypeName(op, service));
+      optionTypeImports.push(requestOptionsTypeName(op, service));
     }
+  }
+  if (optionTypeImports.length > 0) {
+    lines.push(`import type { ${optionTypeImports.join(', ')} } from './interfaces/index';`);
+  }
+  if (optionValueImports.length > 0) {
+    lines.push(`import { ${optionValueImports.join(', ')} } from './serializers/index';`);
   }
 
   if (needsPagination) {
-    lines.push(`import { AutoPaginatable } from '../common/utils/pagination.js';`);
+    lines.push(`import { AutoPaginatable } from '../common/utils/pagination';`);
   }
   if (needsFetchAndDeserialize) {
-    lines.push(`import { fetchAndDeserialize } from '../common/utils/fetch-and-deserialize.js';`);
+    lines.push(`import { fetchAndDeserialize } from '../common/utils/fetch-and-deserialize';`);
   }
 
   return lines;
@@ -89,7 +95,7 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
 
 function generateMethod(op: Operation, service: Service, ctx: EmitterContext): string[] {
   const lines: string[] = [];
-  const methodName = toCamelCase(op.name) + toPascalCase(service.name);
+  const methodName = toCamelCase(op.name);
   const responseModel = getResponseModelName(op);
   const isDelete = op.httpMethod === 'delete';
   const hasBody = !!op.requestBody;
@@ -153,28 +159,50 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
     lines.push(`  await this.${clientVar}.delete(${path});`);
   } else if (hasBody) {
     const serializerName = `serialize${optionsTypeName(op, service)}`;
+    const hasModelResponse = isModelResponse(op);
     if (isIdempotentPost) {
-      lines.push(`  const { data } = await this.${clientVar}.post<${responseModel}Response>(`);
+      if (hasModelResponse) {
+        lines.push(`  const { data } = await this.${clientVar}.post<${responseModel}Response>(`);
+      } else {
+        lines.push(`  await this.${clientVar}.post(`);
+      }
       lines.push(`    ${path}, ${serializerName}(payload), requestOptions,`);
       lines.push(`  );`);
     } else if (op.httpMethod === 'post') {
-      lines.push(`  const { data } = await this.${clientVar}.post<${responseModel}Response>(`);
+      if (hasModelResponse) {
+        lines.push(`  const { data } = await this.${clientVar}.post<${responseModel}Response>(`);
+      } else {
+        lines.push(`  await this.${clientVar}.post(`);
+      }
       lines.push(`    ${path}, ${serializerName}(payload),`);
       lines.push(`  );`);
     } else if (op.httpMethod === 'put') {
-      lines.push(`  const { data } = await this.${clientVar}.put<${responseModel}Response>(`);
+      if (hasModelResponse) {
+        lines.push(`  const { data } = await this.${clientVar}.put<${responseModel}Response>(`);
+      } else {
+        lines.push(`  await this.${clientVar}.put(`);
+      }
       lines.push(`    ${path}, ${serializerName}(payload),`);
       lines.push(`  );`);
     } else if (op.httpMethod === 'patch') {
-      lines.push(`  const { data } = await this.${clientVar}.patch<${responseModel}Response>(`);
+      if (hasModelResponse) {
+        lines.push(`  const { data } = await this.${clientVar}.patch<${responseModel}Response>(`);
+      } else {
+        lines.push(`  await this.${clientVar}.patch(`);
+      }
       lines.push(`    ${path}, ${serializerName}(payload),`);
       lines.push(`  );`);
     }
-    lines.push(`  return deserialize${responseModel}(data);`);
-  } else {
-    // Simple GET
+    if (hasModelResponse) {
+      lines.push(`  return deserialize${responseModel}(data);`);
+    }
+  } else if (isModelResponse(op)) {
+    // Simple GET with model response
     lines.push(`  const { data } = await this.${clientVar}.get<${responseModel}Response>(${path});`);
     lines.push(`  return deserialize${responseModel}(data);`);
+  } else {
+    // Simple GET with no model response
+    lines.push(`  await this.${clientVar}.get(${path});`);
   }
 
   lines.push('}');
@@ -211,5 +239,20 @@ function getResponseModelName(op: Operation): string {
   if (op.response.kind === 'array' && op.response.items.kind === 'model') {
     return op.response.items.name;
   }
-  return 'any';
+  if (op.response.kind === 'nullable' && op.response.inner.kind === 'model') {
+    return op.response.inner.name;
+  }
+  if (op.response.kind === 'union') {
+    const firstModel = op.response.variants.find((v) => v.kind === 'model');
+    if (firstModel && firstModel.kind === 'model') return firstModel.name;
+  }
+  if (op.response.kind === 'primitive') {
+    return 'void'; // primitives don't need deserialization
+  }
+  return 'void';
+}
+
+function isModelResponse(op: Operation): boolean {
+  const name = getResponseModelName(op);
+  return name !== 'void';
 }

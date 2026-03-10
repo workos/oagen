@@ -101,10 +101,10 @@ describe('generateTests (node)', () => {
 
   it('wraps each operation in a nested describe block', () => {
     const content = getTestFile();
-    expect(content).toContain("describe('listOrganizations'");
-    expect(content).toContain("describe('retrieveOrganizations'");
-    expect(content).toContain("describe('createOrganizations'");
-    expect(content).toContain("describe('deleteOrganizations'");
+    expect(content).toContain("describe('list'");
+    expect(content).toContain("describe('retrieve'");
+    expect(content).toContain("describe('create'");
+    expect(content).toContain("describe('delete'");
   });
 
   it('generates CRUD tests with response field validation', () => {
@@ -179,7 +179,7 @@ describe('generateTests (node)', () => {
     const content = getTestFile();
     // The delete test should not have result.id assertions
     // Find the delete describe block content
-    const deleteIdx = content.indexOf("describe('deleteOrganizations'");
+    const deleteIdx = content.indexOf("describe('delete'");
     const nextDescribeIdx = content.indexOf("describe('", deleteIdx + 1);
     const deleteBlock = nextDescribeIdx > -1 ? content.slice(deleteIdx, nextDescribeIdx) : content.slice(deleteIdx);
     expect(deleteBlock).not.toContain('result.id');
