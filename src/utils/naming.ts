@@ -63,3 +63,14 @@ export function toUpperSnakeCase(s: string): string {
     .map((w) => w.toUpperCase())
     .join('_');
 }
+
+const BACKEND_SUFFIXES = ['Dto', 'DTO', 'Controller'];
+
+export function stripBackendSuffixes(name: string): string {
+  for (const suffix of BACKEND_SUFFIXES) {
+    if (name.endsWith(suffix) && name.length > suffix.length) {
+      return name.slice(0, -suffix.length);
+    }
+  }
+  return name;
+}

@@ -1,5 +1,5 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
-import { toPascalCase, toUpperSnakeCase } from '../utils/naming.js';
+import { toPascalCase, toUpperSnakeCase, stripBackendSuffixes } from '../utils/naming.js';
 
 interface SchemaObject {
   type?: string | string[];
@@ -31,7 +31,7 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
   if (!schemas) return { models, enums };
 
   for (const [name, schema] of Object.entries(schemas)) {
-    const pascalName = toPascalCase(name);
+    const pascalName = stripBackendSuffixes(toPascalCase(name));
 
     if (schema.enum) {
       enums.push(extractEnum(pascalName, schema));
@@ -112,7 +112,7 @@ export function schemaToTypeRef(schema: any, contextName?: string): TypeRef {
   if (schema.$ref) {
     const segments = schema.$ref.split('/');
     const rawName = segments[segments.length - 1];
-    return { kind: 'model', name: toPascalCase(rawName) };
+    return { kind: 'model', name: stripBackendSuffixes(toPascalCase(rawName)) };
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]

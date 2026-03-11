@@ -1,4 +1,4 @@
-import { toPascalCase, toCamelCase, toKebabCase, toSnakeCase } from '../../utils/naming.js';
+import { toPascalCase, toCamelCase, toKebabCase } from '../../utils/naming.js';
 
 export function nodeClassName(name: string): string {
   return toPascalCase(name);
@@ -18,10 +18,6 @@ export function nodeFieldName(name: string): string {
 
 export function nodeInterfacePath(service: string, entity: string): string {
   return `src/${toKebabCase(service)}/interfaces/${toKebabCase(entity)}.interface.ts`;
-}
-
-export function nodeSerializerPath(service: string, entity: string): string {
-  return `src/${toKebabCase(service)}/serializers/${toKebabCase(entity)}.serializer.ts`;
 }
 
 export function nodeResourcePath(service: string): string {

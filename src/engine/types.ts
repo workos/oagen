@@ -11,6 +11,7 @@ export interface EmitterContext {
   namespace: string;
   namespacePascal: string;
   spec: ApiSpec;
+  outputDir?: string;
 }
 
 export interface Emitter {

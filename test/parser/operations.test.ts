@@ -35,7 +35,7 @@ describe('extractOperations', () => {
     };
 
     const { services } = extractOperations(paths);
-    expect(services[0].operations[0].name).toBe('list');
+    expect(services[0].operations[0].name).toBe('listUsers');
     expect(services[0].operations[0].httpMethod).toBe('get');
   });
 
@@ -51,7 +51,7 @@ describe('extractOperations', () => {
     };
 
     const { services } = extractOperations(paths);
-    expect(services[0].operations[0].name).toBe('retrieve');
+    expect(services[0].operations[0].name).toBe('getUser');
     expect(services[0].operations[0].pathParams).toHaveLength(1);
     expect(services[0].operations[0].pathParams[0].name).toBe('user_id');
   });
@@ -75,7 +75,7 @@ describe('extractOperations', () => {
     };
 
     const { services } = extractOperations(paths);
-    expect(services[0].operations[0].name).toBe('create');
+    expect(services[0].operations[0].name).toBe('createUser');
     expect(services[0].operations[0].idempotent).toBe(true);
     expect(services[0].operations[0].requestBody).toBeDefined();
   });
@@ -92,7 +92,7 @@ describe('extractOperations', () => {
     };
 
     const { services } = extractOperations(paths);
-    expect(services[0].operations[0].name).toBe('update');
+    expect(services[0].operations[0].name).toBe('updateUser');
   });
 
   it('infers delete for DELETE', () => {
@@ -107,7 +107,7 @@ describe('extractOperations', () => {
     };
 
     const { services } = extractOperations(paths);
-    expect(services[0].operations[0].name).toBe('delete');
+    expect(services[0].operations[0].name).toBe('deleteUser');
   });
 
   it('extracts error responses', () => {
@@ -231,7 +231,7 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     const op = services[0].operations[0];
-    expect(op.response).toEqual({ kind: 'model', name: 'UserDto' });
+    expect(op.response).toEqual({ kind: 'model', name: 'User' });
   });
 
   it('uses operationId for inline request body name', () => {
@@ -277,6 +277,6 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     const op = services[0].operations[0];
-    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserDto' });
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUser' });
   });
 });

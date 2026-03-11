@@ -41,11 +41,8 @@ export const nodeEmitter: Emitter = {
     return []; // TypeScript has inline types, no separate signature files needed
   },
 
-  generateTests(_spec: ApiSpec, _ctx: EmitterContext): GeneratedFile[] {
-    // Test generation is disabled for incremental adoption.
-    // Hand-written tests take precedence; generated tests only work
-    // with a fully generated client that may conflict with existing code.
-    return [];
+  generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
+    return generateTests(spec, ctx);
   },
 
   fileHeader(): string {

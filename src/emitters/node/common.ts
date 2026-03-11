@@ -120,12 +120,48 @@ export function fetchBody(): unknown {
 `,
   });
 
+  // Serialization utilities
+  files.push({
+    path: 'src/common/utils/serialization.ts',
+    skipIfExists: true,
+    content: `function snakeToCamel(s: string): string {
+  return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+function camelToSnake(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+}
+
+function transformKeys(obj: unknown, transform: (key: string) => string): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map((item) => transformKeys(item, transform));
+  if (typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      result[transform(key)] = transformKeys(value, transform);
+    }
+    return result;
+  }
+  return obj;
+}
+
+export function deserialize<T>(data: unknown): T {
+  return transformKeys(data, snakeToCamel) as T;
+}
+
+export function serialize(data: Record<string, unknown>): Record<string, unknown> {
+  return transformKeys(data, camelToSnake) as Record<string, unknown>;
+}
+`,
+  });
+
   // Barrel export for utils
   files.push({
     path: 'src/common/utils/index.ts',
     skipIfExists: true,
     content: `export { AutoPaginatable } from './pagination';
 export { fetchAndDeserialize } from './fetch-and-deserialize';
+export { deserialize, serialize } from './serialization';
 `,
   });
 

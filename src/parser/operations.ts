@@ -88,16 +88,23 @@ function inferServiceName(path: string): string {
 }
 
 function inferOperationName(method: HttpMethod, path: string, operationId?: string): string {
+  // NestJS operationIds follow the pattern: {Resource}Controller_{action}
+  // Extract the action part (after _) which is the actual method name.
+  if (operationId) {
+    const stripped = operationId.replace(/Controller/g, '');
+    const underscoreIdx = stripped.indexOf('_');
+    if (underscoreIdx !== -1) {
+      const action = stripped.slice(underscoreIdx + 1);
+      return toCamelCase(action);
+    }
+    // No underscore — use the full cleaned operationId
+    return toCamelCase(stripped);
+  }
+
+  // Fallback when no operationId is available
   const segments = path.split('/').filter(Boolean);
   const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith('{');
   const isCollectionPath = !hasTrailingParam;
-
-  // Check for nested resource patterns like /widgets/{id}/sub
-  const nonParamSegments = segments.filter((s) => !s.startsWith('{'));
-  if (nonParamSegments.length > 1) {
-    // Nested resource: use operationId if available
-    if (operationId) return toCamelCase(operationId);
-  }
 
   switch (method) {
     case 'get':
@@ -110,7 +117,7 @@ function inferOperationName(method: HttpMethod, path: string, operationId?: stri
     case 'delete':
       return 'delete';
     default:
-      return operationId ? toCamelCase(operationId) : method;
+      return method;
   }
 }
 

@@ -12,6 +12,7 @@ export async function generate(
     namespace: toSnakeCase(options.namespace),
     namespacePascal: options.namespace,
     spec,
+    outputDir: options.outputDir,
   };
 
   const files: GeneratedFile[] = [

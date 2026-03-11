@@ -1,7 +1,7 @@
 import type { Service, Operation, TypeRef } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeClassName, nodeFileName, nodeInterfacePath, nodeSerializerPath, mergeActionService } from './naming.js';
-import { toCamelCase, toSnakeCase } from '../../utils/naming.js';
+import { nodeClassName, nodeInterfacePath, mergeActionService } from './naming.js';
+import { toCamelCase } from '../../utils/naming.js';
 import { mapTypeRefPublic } from './type-map.js';
 
 export function generateOptions(services: Service[], ctx: EmitterContext): GeneratedFile[] {
@@ -11,12 +11,14 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
     for (const op of service.operations) {
       const hasBodyOrParams = !!op.requestBody || op.queryParams.length > 0;
       const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
+      const pathParamsInOptions = op.pathParams.length > 1 ||
+        (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
 
-      if (!hasBodyOrParams && !isIdempotentPost) continue;
+      if (!hasBodyOrParams && !isIdempotentPost && !pathParamsInOptions) continue;
 
       const serviceName = service.name;
 
-      if (hasBodyOrParams) {
+      if (hasBodyOrParams || pathParamsInOptions) {
         const typeName = optionsTypeName(op, service);
 
         // Generate interface
@@ -24,14 +26,6 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
           path: nodeInterfacePath(serviceName, typeName),
           content: generateOptionsInterface(op, service, ctx),
         });
-
-        // Generate serializer (only if there's a request body)
-        if (op.requestBody) {
-          files.push({
-            path: nodeSerializerPath(serviceName, typeName),
-            content: generateOptionsSerializer(op, service, ctx),
-          });
-        }
       }
 
       // Generate request options interface for idempotent POST
@@ -59,8 +53,21 @@ function requestOptionsTypeName(op: Operation, service: { name: string }): strin
 function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
   const typeName = optionsTypeName(op, service);
+  const pathParamsInOptions = op.pathParams.length > 1 ||
+    (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
 
   lines.push(`export interface ${typeName} {`);
+
+  // Path params included in options when combined with body/query or multiple params
+  if (pathParamsInOptions) {
+    for (const p of op.pathParams) {
+      const camelName = toCamelCase(p.name);
+      if (p.description) {
+        lines.push(`  /** ${p.description} */`);
+      }
+      lines.push(`  ${camelName}: string;`);
+    }
+  }
 
   // Fields from request body
   if (op.requestBody && op.requestBody.kind === 'model') {
@@ -89,39 +96,6 @@ function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterC
     lines.push(`  ${camelName}${optional}: ${tsType};`);
   }
 
-  lines.push('}');
-  lines.push('');
-
-  return lines.join('\n');
-}
-
-function generateOptionsSerializer(op: Operation, service: Service, ctx: EmitterContext): string {
-  const lines: string[] = [];
-  const typeName = optionsTypeName(op, service);
-
-  lines.push(`import type { ${typeName} } from '../interfaces/${nodeFileName(typeName)}.interface';`);
-  lines.push('');
-  lines.push(`export function serialize${typeName}(options: ${typeName}): Record<string, unknown> {`);
-  lines.push('  return {');
-
-  if (op.requestBody && op.requestBody.kind === 'model') {
-    const model = ctx.spec.models.find((m) => m.name === op.requestBody!.name);
-    if (model) {
-      for (const field of model.fields) {
-        const camelName = toCamelCase(field.name);
-        const snakeName = toSnakeCase(field.name);
-        if (field.required) {
-          lines.push(`    ${snakeName}: options.${camelName},`);
-        } else {
-          lines.push(
-            `    ...(options.${camelName} !== undefined ? { ${snakeName}: options.${camelName} } : undefined),`,
-          );
-        }
-      }
-    }
-  }
-
-  lines.push('  };');
   lines.push('}');
   lines.push('');
 

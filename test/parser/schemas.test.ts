@@ -1,6 +1,38 @@
 import { describe, it, expect } from 'vitest';
 import { extractSchemas, schemaToTypeRef } from '../../src/parser/schemas.js';
 
+describe('extractSchemas – backend suffix stripping', () => {
+  it('strips Dto suffix from schema names', () => {
+    const { models } = extractSchemas({
+      CreateOrganizationDto: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+      },
+    });
+    expect(models[0].name).toBe('CreateOrganization');
+  });
+
+  it('strips Controller suffix from schema names', () => {
+    const { models } = extractSchemas({
+      OrganizationsController: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+      },
+    });
+    expect(models[0].name).toBe('Organizations');
+  });
+
+  it('does not strip suffix from the middle of a name', () => {
+    const { models } = extractSchemas({
+      DtoValidator: {
+        type: 'object',
+        properties: { valid: { type: 'boolean' } },
+      },
+    });
+    expect(models[0].name).toBe('DtoValidator');
+  });
+});
+
 describe('extractSchemas', () => {
   it('extracts a simple model', () => {
     const schemas = {
@@ -183,7 +215,7 @@ describe('schemaToTypeRef', () => {
 
   it('resolves $ref to named ModelRef', () => {
     const ref = schemaToTypeRef({ $ref: '#/components/schemas/ValidateApiKeyDto' });
-    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKeyDto' });
+    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKey' });
   });
 
   it('resolves $ref with PascalCase name preserved', () => {
@@ -202,7 +234,12 @@ describe('schemaToTypeRef', () => {
       type: 'object',
       properties: { id: { type: 'string' } },
     });
-    expect(ref).toEqual({ kind: 'model', name: 'UserDto' });
+    expect(ref).toEqual({ kind: 'model', name: 'User' });
+  });
+
+  it('strips DTO suffix from $ref targets', () => {
+    const ref = schemaToTypeRef({ $ref: '#/components/schemas/ValidateApiKeyDTO' });
+    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKey' });
   });
 
   it('falls through on malformed $ref with no segments', () => {

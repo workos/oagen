@@ -20,7 +20,7 @@ export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> 
     document,
     config: config.styleguide,
     externalRefResolver: resolver,
-    dereference: true,
+    dereference: false,
   });
 
   if (result.problems.some((p) => p.severity === 'error')) {

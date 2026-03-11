@@ -1,17 +1,17 @@
 {
-  "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode",
+  "editor.defaultFormatter": "oxc.oxc-vscode",
   "editor.formatOnSave": true,
   "[markdown]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode"
   },
   "[typescript]": {
-    "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+    "editor.defaultFormatter": "oxc.oxc-vscode"
   },
   "[json]": {
-    "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+    "editor.defaultFormatter": "vscode.json-language-features"
   },
   "[yaml]": {
-    "editor.defaultFormatter": "nicolo-ribaudo.oxfmt-vscode"
+    "editor.defaultFormatter": "redhat.vscode-yaml"
   },
   "[github-actions-workflow]": {
     "editor.defaultFormatter": "redhat.vscode-yaml"
@@ -24,5 +24,11 @@
   },
   "[jsonc]": {
     "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "[gitignore]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
+  },
+  "[dotenv]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
   }
 }

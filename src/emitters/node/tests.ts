@@ -1,6 +1,8 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { ApiSpec, Service, Operation, TypeRef, Model } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeClassName, nodeFileName, nodeTestPath, nodeFixturePath } from './naming.js';
+import { nodeClassName, nodeFileName, nodeTestPath, nodeFixturePath, nodeResourcePath } from './naming.js';
 import { toCamelCase, toSnakeCase } from '../../utils/naming.js';
 import { generateFixtures } from './fixtures.js';
 
@@ -8,6 +10,13 @@ export function generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile
   const files: GeneratedFile[] = [];
 
   for (const service of spec.services) {
+    // Only generate tests for services whose resource file already exists on disk.
+    // New services won't be wired into the hand-written client, so tests would fail.
+    if (ctx.outputDir) {
+      const resourcePath = path.join(ctx.outputDir, nodeResourcePath(service.name));
+      if (!fs.existsSync(resourcePath)) continue;
+    }
+
     files.push({
       path: nodeTestPath(service.name),
       content: generateTestFile(service, ctx),

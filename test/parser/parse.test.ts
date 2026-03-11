@@ -29,14 +29,14 @@ describe('parseSpec', () => {
     expect(userService).toBeDefined();
     expect(userService!.operations.length).toBeGreaterThanOrEqual(3);
 
-    // Check operation names
+    // Check operation names (derived from operationId)
     const opNames = userService!.operations.map((o) => o.name);
-    expect(opNames).toContain('list');
-    expect(opNames).toContain('create');
-    expect(opNames).toContain('retrieve');
+    expect(opNames).toContain('listUsers');
+    expect(opNames).toContain('createUser');
+    expect(opNames).toContain('getUser');
 
     // Check pagination
-    const listOp = userService!.operations.find((o) => o.name === 'list');
+    const listOp = userService!.operations.find((o) => o.name === 'listUsers');
     expect(listOp!.paginated).toBe(true);
   });
 
@@ -67,14 +67,14 @@ describe('parseSpec', () => {
     const orgService = ir.services.find((s) => s.name === 'Organizations');
     expect(orgService).toBeDefined();
     const orgOpNames = orgService!.operations.map((o) => o.name);
-    expect(orgOpNames).toContain('list');
-    expect(orgOpNames).toContain('create');
-    expect(orgOpNames).toContain('retrieve');
-    expect(orgOpNames).toContain('update');
-    expect(orgOpNames).toContain('delete');
+    expect(orgOpNames).toContain('listOrganizations');
+    expect(orgOpNames).toContain('createOrganization');
+    expect(orgOpNames).toContain('getOrganization');
+    expect(orgOpNames).toContain('updateOrganization');
+    expect(orgOpNames).toContain('deleteOrganization');
 
     // Check error responses
-    const createOp = orgService!.operations.find((o) => o.name === 'create');
+    const createOp = orgService!.operations.find((o) => o.name === 'createOrganization');
     expect(createOp!.errors.length).toBeGreaterThanOrEqual(1);
     expect(createOp!.errors[0].statusCode).toBe(400);
 

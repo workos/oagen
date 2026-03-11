@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toPascalCase, toCamelCase, toSnakeCase, toKebabCase, toUpperSnakeCase } from '../../src/utils/naming.js';
+import { toPascalCase, toCamelCase, toSnakeCase, toKebabCase, toUpperSnakeCase, stripBackendSuffixes } from '../../src/utils/naming.js';
 
 describe('toPascalCase', () => {
   it('converts snake_case', () => {
@@ -85,6 +85,30 @@ describe('toKebabCase', () => {
   });
   it('converts snake_case', () => {
     expect(toKebabCase('user_profile')).toBe('user-profile');
+  });
+});
+
+describe('stripBackendSuffixes', () => {
+  it('strips Dto suffix', () => {
+    expect(stripBackendSuffixes('CreateOrganizationDto')).toBe('CreateOrganization');
+  });
+  it('strips DTO suffix', () => {
+    expect(stripBackendSuffixes('ValidateApiKeyDTO')).toBe('ValidateApiKey');
+  });
+  it('strips Controller suffix', () => {
+    expect(stripBackendSuffixes('OrganizationsController')).toBe('Organizations');
+  });
+  it('does not strip from the middle of a name', () => {
+    expect(stripBackendSuffixes('DtoValidator')).toBe('DtoValidator');
+  });
+  it('does not strip if the name IS the suffix', () => {
+    expect(stripBackendSuffixes('Dto')).toBe('Dto');
+    expect(stripBackendSuffixes('DTO')).toBe('DTO');
+    expect(stripBackendSuffixes('Controller')).toBe('Controller');
+  });
+  it('returns clean names unchanged', () => {
+    expect(stripBackendSuffixes('Organization')).toBe('Organization');
+    expect(stripBackendSuffixes('User')).toBe('User');
   });
 });
 

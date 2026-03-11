@@ -19,7 +19,7 @@ const ctx: EmitterContext = {
 };
 
 describe('generateResources (node)', () => {
-  it('generates a resource with paginated list method', () => {
+  it('generates a resource with paginated list method using generic deserialize', () => {
     const services: Service[] = [
       {
         name: 'Organizations',
@@ -52,10 +52,15 @@ describe('generateResources (node)', () => {
     expect(content).toContain('constructor(private readonly workOs: WorkOS)');
     expect(content).toContain('AutoPaginatable<Organization>');
     expect(content).toContain('fetchAndDeserialize');
-    expect(content).toContain('deserializeOrganization');
+    expect(content).toContain('deserialize<Organization>');
+    // Uses generic deserialize, not per-model
+    expect(content).not.toContain('deserializeOrganization');
+    expect(content).not.toContain('OrganizationResponse');
+    // Imports generic utilities
+    expect(content).toContain("from '../common/utils/serialization'");
   });
 
-  it('generates a resource with retrieve method using path params', () => {
+  it('generates a resource with retrieve method using generic deserialize', () => {
     const services: Service[] = [
       {
         name: 'Organizations',
@@ -80,11 +85,13 @@ describe('generateResources (node)', () => {
     const content = files[0].content;
     expect(content).toContain('async retrieve(id: string)');
     expect(content).toContain('`organizations/${id}`');
-    expect(content).toContain('get<OrganizationResponse>');
-    expect(content).toContain('deserializeOrganization(data)');
+    expect(content).toContain('deserialize<Organization>(data)');
+    // No per-model deserializer or Response type
+    expect(content).not.toContain('OrganizationResponse');
+    expect(content).not.toContain('deserializeOrganization');
   });
 
-  it('generates a resource with create method (body + idempotency)', () => {
+  it('generates a resource with create method using generic serialize/deserialize', () => {
     const services: Service[] = [
       {
         name: 'Organizations',
@@ -109,9 +116,12 @@ describe('generateResources (node)', () => {
     const files = generateResources(services, ctx);
     const content = files[0].content;
     expect(content).toContain('async create(');
-    expect(content).toContain('post<OrganizationResponse>');
+    expect(content).toContain('serialize(payload');
     expect(content).toContain('requestOptions');
-    expect(content).toContain('deserializeOrganization(data)');
+    expect(content).toContain('deserialize<Organization>(data)');
+    // No per-model serializer or Response type
+    expect(content).not.toContain('OrganizationResponse');
+    expect(content).not.toContain('serializeCreateOrganizations');
   });
 
   it('generates a resource with delete method returning void', () => {
@@ -141,7 +151,7 @@ describe('generateResources (node)', () => {
     expect(content).toContain('this.workOs.delete(');
   });
 
-  it('generates a resource with update (put) method', () => {
+  it('generates a resource with update (put) method using generic serialize', () => {
     const services: Service[] = [
       {
         name: 'Organizations',
@@ -165,9 +175,11 @@ describe('generateResources (node)', () => {
 
     const files = generateResources(services, ctx);
     const content = files[0].content;
-    expect(content).toContain('async update(');
-    expect(content).toContain('put<OrganizationResponse>');
-    expect(content).toContain('`organizations/${id}`');
+    expect(content).toContain('async update(payload: UpdateOrganizationsOptions)');
+    expect(content).toContain('serialize(payload');
+    expect(content).toContain('`organizations/${payload.id}`');
+    // No per-model Response type
+    expect(content).not.toContain('OrganizationResponse');
   });
 
   it('generates a resource with array response type for paginated list', () => {
@@ -194,8 +206,10 @@ describe('generateResources (node)', () => {
     const files = generateResources(services, ctx);
     const content = files[0].content;
     expect(content).toContain('AutoPaginatable<Organization>');
-    expect(content).toContain('deserializeOrganization');
-    expect(content).toContain('OrganizationResponse');
+    expect(content).toContain('deserialize<Organization>');
+    // No per-model deserializer or Response type
+    expect(content).not.toContain('OrganizationResponse');
+    expect(content).not.toContain('deserializeOrganization');
   });
 
   it('generates multiple resources as separate files', () => {

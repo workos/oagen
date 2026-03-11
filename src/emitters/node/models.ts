@@ -1,15 +1,13 @@
-import type { Model, Field, TypeRef, Operation } from '../../ir/types.js';
+import type { Model, TypeRef, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { mapTypeRefPublic, mapTypeRefResponse } from './type-map.js';
+import { mapTypeRefPublic } from './type-map.js';
 import {
   nodeClassName,
   nodeFieldName,
   nodeFileName,
   nodeInterfacePath,
-  nodeSerializerPath,
   mergeActionService,
 } from './naming.js';
-import { toSnakeCase, toCamelCase } from '../../utils/naming.js';
 
 export function generateModels(models: Model[], ctx: EmitterContext): GeneratedFile[] {
   const files: GeneratedFile[] = [];
@@ -28,17 +26,12 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
     for (const model of serviceModels) {
       files.push({
         path: nodeInterfacePath(serviceName, model.name),
-        content: generateInterface(model, ctx, serviceMap, serviceName),
-      });
-      files.push({
-        path: nodeSerializerPath(serviceName, model.name),
-        content: generateSerializer(model, ctx, serviceMap, serviceName),
+        content: generateInterface(model, ctx),
       });
     }
 
     // Per-service barrel exports
     const interfaceExports = serviceModels.map((m) => `export * from './${nodeFileName(m.name)}.interface';`);
-    const serializerExports = serviceModels.map((m) => `export * from './${nodeFileName(m.name)}.serializer';`);
 
     // Add options type exports for operations in this service
     const service = ctx.spec.services.find((s) => s.name === serviceName);
@@ -47,9 +40,6 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
         if (op.requestBody || op.queryParams.length > 0) {
           const optName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
           interfaceExports.push(`export * from './${nodeFileName(optName)}.interface';`);
-          if (op.requestBody) {
-            serializerExports.push(`export * from './${nodeFileName(optName)}.serializer';`);
-          }
         }
         if (op.idempotent && op.httpMethod === 'post') {
           const reqOptsName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
@@ -62,39 +52,15 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
       path: `src/${nodeFileName(serviceName)}/interfaces/index.ts`,
       content: [...new Set(interfaceExports)].join('\n') + '\n',
     });
-    files.push({
-      path: `src/${nodeFileName(serviceName)}/serializers/index.ts`,
-      content: [...new Set(serializerExports)].join('\n') + '\n',
-    });
   }
 
   return files;
 }
 
-function generateInterface(
-  model: Model,
-  ctx: EmitterContext,
-  serviceMap: Map<string, string>,
-  currentService: string,
-): string {
+function generateInterface(model: Model, ctx: EmitterContext): string {
   const lines: string[] = [];
   const className = nodeClassName(model.name);
 
-  // Collect imports for model refs
-  const imports = collectModelImports(model, 'public');
-  for (const imp of imports) {
-    const impService = serviceMap.get(imp) ?? 'common';
-    if (impService === currentService) {
-      lines.push(`import type { ${imp}, ${imp}Response } from './${nodeFileName(imp)}.interface';`);
-    } else {
-      lines.push(
-        `import type { ${imp}, ${imp}Response } from '../../${nodeFileName(impService)}/interfaces/${nodeFileName(imp)}.interface';`,
-      );
-    }
-  }
-  if (imports.length > 0) lines.push('');
-
-  // Public interface (camelCase)
   if (model.description) {
     lines.push(`/** ${model.description} */`);
   }
@@ -111,123 +77,7 @@ function generateInterface(
   lines.push('}');
   lines.push('');
 
-  // Response interface (snake_case)
-  lines.push(`export interface ${className}Response {`);
-  for (const field of model.fields) {
-    const tsType = mapTypeRefResponse(field.type, ctx.namespacePascal);
-    const snakeName = toSnakeCase(field.name);
-    const optional = !field.required ? '?' : '';
-    lines.push(`  ${snakeName}${optional}: ${tsType};`);
-  }
-  lines.push('}');
-  lines.push('');
-
   return lines.join('\n');
-}
-
-function generateSerializer(
-  model: Model,
-  ctx: EmitterContext,
-  serviceMap: Map<string, string>,
-  currentService: string,
-): string {
-  const lines: string[] = [];
-  const className = nodeClassName(model.name);
-
-  // Import the interfaces
-  lines.push(
-    `import type { ${className}, ${className}Response } from '../interfaces/${nodeFileName(model.name)}.interface';`,
-  );
-
-  // Import nested deserializers
-  const nestedModels = collectModelImports(model, 'public');
-  for (const imp of nestedModels) {
-    const impService = serviceMap.get(imp) ?? 'common';
-    if (impService === currentService) {
-      lines.push(`import { deserialize${imp} } from './${nodeFileName(imp)}.serializer';`);
-    } else {
-      lines.push(
-        `import { deserialize${imp} } from '../../${nodeFileName(impService)}/serializers/${nodeFileName(imp)}.serializer';`,
-      );
-    }
-  }
-
-  lines.push('');
-
-  // Deserializer function
-  lines.push(`export const deserialize${className} = (`);
-  lines.push(`  response: ${className}Response,`);
-  lines.push(`): ${className} => ({`);
-
-  for (const field of model.fields) {
-    const camelName = nodeFieldName(field.name);
-    const snakeName = toSnakeCase(field.name);
-    const deserExpr = buildDeserializeExpr(field.type, `response.${snakeName}`);
-
-    if (!field.required && !isNullableType(field.type)) {
-      // Optional non-nullable: use spread pattern
-      lines.push(`  ...(typeof response.${snakeName} === 'undefined' ? undefined : { ${camelName}: ${deserExpr} }),`);
-    } else if (isNullableType(field.type)) {
-      lines.push(`  ${camelName}: ${deserExpr},`);
-    } else {
-      lines.push(`  ${camelName}: ${deserExpr},`);
-    }
-  }
-
-  lines.push('});');
-  lines.push('');
-
-  return lines.join('\n');
-}
-
-function buildDeserializeExpr(typeRef: TypeRef, accessor: string): string {
-  switch (typeRef.kind) {
-    case 'model':
-      return `deserialize${typeRef.name}(${accessor})`;
-    case 'array':
-      if (typeRef.items.kind === 'model') {
-        return `${accessor}.map(deserialize${typeRef.items.name})`;
-      }
-      return accessor;
-    case 'nullable':
-      if (typeRef.inner.kind === 'model') {
-        return `${accessor} != null ? deserialize${typeRef.inner.name}(${accessor}) : null`;
-      }
-      return `${accessor} ?? null`;
-    default:
-      return accessor;
-  }
-}
-
-function isNullableType(typeRef: TypeRef): boolean {
-  return typeRef.kind === 'nullable';
-}
-
-function collectModelImports(model: Model, _mode: 'public' | 'response'): string[] {
-  const refs = new Set<string>();
-  for (const field of model.fields) {
-    collectModelRefs(field.type, refs);
-  }
-  // Exclude self-references
-  refs.delete(model.name);
-  return [...refs];
-}
-
-function collectModelRefs(typeRef: TypeRef, refs: Set<string>): void {
-  switch (typeRef.kind) {
-    case 'model':
-      refs.add(typeRef.name);
-      break;
-    case 'array':
-      collectModelRefs(typeRef.items, refs);
-      break;
-    case 'nullable':
-      collectModelRefs(typeRef.inner, refs);
-      break;
-    case 'union':
-      for (const v of typeRef.variants) collectModelRefs(v, refs);
-      break;
-  }
 }
 
 function buildModelServiceMap(ctx: EmitterContext): Map<string, string> {
@@ -255,4 +105,21 @@ function collectAllModelRefsFromOp(op: Operation): Set<string> {
   for (const p of op.queryParams) collectModelRefs(p.type, refs);
   for (const p of op.pathParams) collectModelRefs(p.type, refs);
   return refs;
+}
+
+function collectModelRefs(typeRef: TypeRef, refs: Set<string>): void {
+  switch (typeRef.kind) {
+    case 'model':
+      refs.add(typeRef.name);
+      break;
+    case 'array':
+      collectModelRefs(typeRef.items, refs);
+      break;
+    case 'nullable':
+      collectModelRefs(typeRef.inner, refs);
+      break;
+    case 'union':
+      for (const v of typeRef.variants) collectModelRefs(v, refs);
+      break;
+  }
 }
