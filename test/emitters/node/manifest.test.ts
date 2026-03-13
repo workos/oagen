@@ -115,7 +115,7 @@ describe('generateManifest', () => {
     expect(retrieveEntry.pathParams).toEqual(['id']);
   });
 
-  it('skips services without SDK property mapping', () => {
+  it('includes all services using toCamelCase for SDK property', () => {
     const specWithUnknown: ApiSpec = {
       ...minimalSpec,
       services: [
@@ -141,7 +141,12 @@ describe('generateManifest', () => {
     };
     const files = generateManifest(specWithUnknown, ctx);
     const manifest = JSON.parse(files[0].content);
-    // Only Organizations entries, not UnknownService
-    expect(manifest.entries).toHaveLength(3);
+    // Organizations (3 ops) + UnknownService (1 op)
+    expect(manifest.entries).toHaveLength(4);
+    const unknownEntry = manifest.entries.find(
+      (e: Record<string, unknown>) => e.operationId === 'UnknownService.list',
+    );
+    expect(unknownEntry).toBeDefined();
+    expect(unknownEntry.sdkResourceProperty).toBe('unknownService');
   });
 });
