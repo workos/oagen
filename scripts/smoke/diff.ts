@@ -10,7 +10,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseSpec } from '../../src/parser/parse.js';
-import { SKIP_OPERATIONS, SKIP_SERVICES } from './shared.js';
+import { getSmokeConfig, loadSmokeConfig } from './shared.js';
 import type { SmokeResults, CapturedExchange, ExchangeProvenance } from './shared.js';
 
 // Fields that vary between calls and should be redacted before comparing
@@ -36,15 +36,17 @@ interface DiffFinding {
   provenance?: ExchangeProvenance;
 }
 
-function parseArgs(): { rawPath: string; sdkPath: string; specPath?: string } {
+function parseArgs(): { rawPath: string; sdkPath: string; specPath?: string; smokeConfig?: string } {
   const args = process.argv.slice(2);
   const rawIdx = args.indexOf('--raw');
   const sdkIdx = args.indexOf('--sdk');
+  const configIdx = args.indexOf('--smoke-config');
 
   return {
     rawPath: rawIdx !== -1 && args[rawIdx + 1] ? args[rawIdx + 1] : 'smoke-results-raw.json',
     sdkPath: sdkIdx !== -1 && args[sdkIdx + 1] ? args[sdkIdx + 1] : 'smoke-results-sdk-node.json',
     specPath: process.env.OPENAPI_SPEC,
+    smokeConfig: configIdx !== -1 && args[configIdx + 1] ? args[configIdx + 1] : process.env.SMOKE_CONFIG,
   };
 }
 
@@ -229,7 +231,9 @@ function compareExchanges(raw: CapturedExchange, sdk: CapturedExchange): DiffFin
 }
 
 async function main() {
-  const { rawPath, sdkPath, specPath } = parseArgs();
+  const { rawPath, sdkPath, specPath, smokeConfig } = parseArgs();
+  loadSmokeConfig(smokeConfig);
+  const { skipOperations: SKIP_OPERATIONS, skipServices: SKIP_SERVICES } = getSmokeConfig();
 
   let rawResults: SmokeResults;
   let sdkResults: SmokeResults;
