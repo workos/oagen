@@ -1,12 +1,13 @@
 # Smoke Tests
 
-Smoke tests verify that a generated SDK produces matching request behavior (HTTP method, path, query params, body keys) compared to raw HTTP calls against the real WorkOS API. Response checks (status code, body keys) are INFO-level and non-blocking. Headers are not compared.
+Smoke tests verify that a generated SDK produces matching request behavior (HTTP method, path, query params, body keys) compared to raw HTTP calls against the target API. Response checks (status code, body keys) are INFO-level and non-blocking. Headers are not compared.
 
 ## Prerequisites
 
-- `WORKOS_API_KEY` — set via a `.env` file in the project root (auto-loaded) or as an environment variable
+- `${NAMESPACE}_API_KEY` (or `API_KEY`) — set via a `.env` file in the project root (auto-loaded) or as an environment variable. The namespace is derived from the spec name (e.g. "WorkOS API" → `WORKOS_API_API_KEY`).
 - `OPENAPI_SPEC` — path to the OpenAPI spec file (YAML or JSON), set via `.env` or environment variable
 - For SDK tests: a built copy of the target SDK
+- Optionally: `--smoke-config <path>` (or `SMOKE_CONFIG` env var) pointing to a JSON config file for skip lists, service priority, and service property mappings
 
 ## Two-Phase Workflow
 
@@ -14,7 +15,7 @@ Smoke tests verify that a generated SDK produces matching request behavior (HTTP
 
 Choose one:
 
-**Raw baseline (live API):** Calls the real WorkOS API and captures ground-truth request/response pairs. Re-run only when the API spec changes.
+**Raw baseline (live API):** Calls the target API and captures ground-truth request/response pairs. Re-run only when the API spec changes.
 
 ```bash
 npm run smoke:raw
@@ -34,10 +35,33 @@ Writes `smoke-results-spec-baseline.json`.
 
 ```bash
 # Against raw baseline (default)
-npm run smoke -- --lang node --sdk-path ../backend/workos-node
+npm run smoke -- --lang node --sdk-path ../path/to/sdk
 
 # Against spec-only baseline
-npm run smoke -- --lang node --sdk-path ../backend/workos-node --raw-results smoke-results-spec-baseline.json
+npm run smoke -- --lang node --sdk-path ../path/to/sdk --raw-results smoke-results-spec-baseline.json
+```
+
+---
+
+## Smoke Config
+
+A smoke config JSON file lets you customize skip lists, service priority, and service-to-SDK-property mappings. Pass it via `--smoke-config <path>` or the `SMOKE_CONFIG` env var.
+
+```json
+{
+  "skipOperations": ["operationToSkip"],
+  "skipServices": ["ServiceToSkip"],
+  "servicePriority": { "ImportantService": 10 },
+  "servicePropertyMap": { "IRServiceName": "sdkPropertyName" },
+  "paramServiceMap": { "paramName": "ServiceName" }
+}
+```
+
+Without a config file, no operations or services are skipped, all services have equal priority (50), and SDK properties are resolved via `toCamelCase(serviceName)`.
+
+For WorkOS, use the bundled config:
+```bash
+npm run smoke:raw -- --smoke-config scripts/smoke/smoke.config.workos.json
 ```
 
 ---
@@ -57,7 +81,7 @@ This enables offline verification of CRITICAL checks (method, path, query params
 
 ```bash
 npm run smoke:baseline
-npm run smoke -- --lang node --sdk-path ../backend/workos-node --raw-results smoke-results-spec-baseline.json
+npm run smoke -- --lang node --sdk-path ../path/to/sdk --raw-results smoke-results-spec-baseline.json
 ```
 
 ---
@@ -89,7 +113,7 @@ Outputs `smoke-results-spec-baseline.json`.
 Each language has a self-contained smoke test script that uses the target language's native HTTP interception to capture wire-level request/response pairs.
 
 ```bash
-npm run smoke:sdk:node -- --sdk-path ../backend/workos-node
+npm run smoke:sdk:node -- --sdk-path ../path/to/sdk
 ```
 
 Outputs `smoke-results-sdk-{lang}.json`.
@@ -112,9 +136,10 @@ All variables can be set in a `.env` file in the project root. The smoke scripts
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WORKOS_API_KEY` | (required) | WorkOS API key for authentication |
+| `${NAMESPACE}_API_KEY` or `API_KEY` | (required) | API key for authentication. Namespace is derived from spec name. |
 | `OPENAPI_SPEC` | (required) | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
-| `WORKOS_BASE_URL` | (optional) | Override the API base URL (e.g. `https://api.workos.staging.com`). If unset, the raw script uses the spec's `servers[0].url`. |
+| `${NAMESPACE}_BASE_URL` | spec's `servers[0].url` | Override the API base URL. |
+| `SMOKE_CONFIG` | (optional) | Path to smoke config JSON file. Can also be passed as `--smoke-config <path>`. |
 | `SMOKE_DELAY_MS` | `200` | Delay between requests (rate limiting) |
 
 ---
@@ -171,7 +196,7 @@ Unexpected status codes:
 
 ## Skipped Operations
 
-Operations requiring complex preconditions (OAuth flows, magic auth, password resets, FGA, etc.) are automatically skipped. See the `SKIP_OPERATIONS` and `SKIP_SERVICES` sets in `smoke/shared.ts`.
+Operations requiring complex preconditions (OAuth flows, magic auth, password resets, etc.) can be skipped via the smoke config file. See the `skipOperations` and `skipServices` fields in the config JSON.
 
 ## Asymmetric Skips
 
