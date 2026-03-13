@@ -11,18 +11,32 @@ const program = new Command()
 program
   .command('parse')
   .description('Parse an OpenAPI spec and output IR as JSON')
-  .requiredOption('--spec <path>', 'Path to OpenAPI 3.1 spec file')
-  .action(parseCommand);
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC)')
+  .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC;
+    if (!opts.spec) {
+      console.error('error: --spec <path> or OPENAPI_SPEC env var is required');
+      process.exit(1);
+    }
+    return parseCommand(opts);
+  });
 
 program
   .command('generate')
   .description('Generate SDK code from an OpenAPI spec')
-  .requiredOption('--spec <path>', 'Path to OpenAPI 3.1 spec file')
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC)')
   .requiredOption('--lang <language>', 'Target language')
   .requiredOption('--output <dir>', 'Output directory')
   .option('--namespace <name>', 'SDK namespace/package name')
   .option('--dry-run', 'Preview files without writing')
-  .action(generateCommand);
+  .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC;
+    if (!opts.spec) {
+      console.error('error: --spec <path> or OPENAPI_SPEC env var is required');
+      process.exit(1);
+    }
+    return generateCommand(opts);
+  });
 
 program
   .command('diff')
