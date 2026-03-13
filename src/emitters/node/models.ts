@@ -21,7 +21,7 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
     for (const model of serviceModels) {
       files.push({
         path: nodeInterfacePath(serviceName, model.name),
-        content: generateInterface(model, ctx),
+        content: generateInterface(model),
       });
     }
 
@@ -53,7 +53,7 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
   return files;
 }
 
-function generateInterface(model: Model, ctx: EmitterContext): string {
+function generateInterface(model: Model): string {
   const lines: string[] = [];
   const className = nodeClassName(model.name);
 
@@ -62,7 +62,7 @@ function generateInterface(model: Model, ctx: EmitterContext): string {
   }
   lines.push(`export interface ${className} {`);
   for (const field of model.fields) {
-    const tsType = mapTypeRefPublic(field.type, ctx.namespacePascal);
+    const tsType = mapTypeRefPublic(field.type);
     const camelName = nodeFieldName(field.name);
     const optional = !field.required ? '?' : '';
     if (field.description) {

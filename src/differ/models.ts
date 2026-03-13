@@ -7,13 +7,13 @@ export function diffModels(oldModels: Model[], newModels: Model[]): Change[] {
   const oldByName = new Map(oldModels.map((m) => [m.name, m]));
   const newByName = new Map(newModels.map((m) => [m.name, m]));
 
-  for (const [name, model] of newByName) {
+  for (const [name] of newByName) {
     if (!oldByName.has(name)) {
       changes.push({ kind: 'model-added', name, classification: 'additive' });
     }
   }
 
-  for (const [name, model] of oldByName) {
+  for (const [name] of oldByName) {
     if (!newByName.has(name)) {
       changes.push({ kind: 'model-removed', name, classification: 'breaking' });
     }

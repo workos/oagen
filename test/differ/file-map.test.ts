@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mapChangesToFiles } from '../../src/differ/file-map.js';
 import type { Change } from '../../src/differ/types.js';
 import type { Emitter, EmitterContext } from '../../src/engine/types.js';
-import type { ApiSpec, Model, Service } from '../../src/ir/types.js';
+import type { ApiSpec } from '../../src/ir/types.js';
 
 function mockEmitter(): Emitter {
   return {

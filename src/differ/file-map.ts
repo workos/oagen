@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import type { Emitter, EmitterContext, GeneratedFile } from '../engine/types.js';
+import type { Emitter, EmitterContext } from '../engine/types.js';
 import type { Change } from './types.js';
 
 export interface AffectedFiles {

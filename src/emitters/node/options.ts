@@ -75,7 +75,7 @@ function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterC
     if (model) {
       for (const field of model.fields) {
         const camelName = toCamelCase(field.name);
-        const tsType = mapTypeRefPublic(field.type, ctx.namespacePascal);
+        const tsType = mapTypeRefPublic(field.type);
         const optional = !field.required ? '?' : '';
         if (field.description) {
           lines.push(`  /** ${field.description} */`);

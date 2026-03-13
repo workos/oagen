@@ -1,36 +1,36 @@
 import type { TypeRef } from '../../ir/types.js';
 
-export function mapTypeRefPublic(typeRef: TypeRef, _namespacePascal: string): string {
+export function mapTypeRefPublic(typeRef: TypeRef): string {
   switch (typeRef.kind) {
     case 'primitive':
       return mapPrimitive(typeRef.type);
     case 'array':
-      return `${mapTypeRefPublic(typeRef.items, _namespacePascal)}[]`;
+      return `${mapTypeRefPublic(typeRef.items)}[]`;
     case 'model':
       return typeRef.name;
     case 'enum':
       return typeRef.name;
     case 'nullable':
-      return `${mapTypeRefPublic(typeRef.inner, _namespacePascal)} | null`;
+      return `${mapTypeRefPublic(typeRef.inner)} | null`;
     case 'union':
-      return typeRef.variants.map((v) => mapTypeRefPublic(v, _namespacePascal)).join(' | ');
+      return typeRef.variants.map((v) => mapTypeRefPublic(v)).join(' | ');
   }
 }
 
-export function mapTypeRefResponse(typeRef: TypeRef, _namespacePascal: string): string {
+export function mapTypeRefResponse(typeRef: TypeRef): string {
   switch (typeRef.kind) {
     case 'primitive':
       return mapPrimitive(typeRef.type);
     case 'array':
-      return `${mapTypeRefResponse(typeRef.items, _namespacePascal)}[]`;
+      return `${mapTypeRefResponse(typeRef.items)}[]`;
     case 'model':
       return `${typeRef.name}Response`;
     case 'enum':
       return typeRef.name;
     case 'nullable':
-      return `${mapTypeRefResponse(typeRef.inner, _namespacePascal)} | null`;
+      return `${mapTypeRefResponse(typeRef.inner)} | null`;
     case 'union':
-      return typeRef.variants.map((v) => mapTypeRefResponse(v, _namespacePascal)).join(' | ');
+      return typeRef.variants.map((v) => mapTypeRefResponse(v)).join(' | ');
   }
 }
 

@@ -1,5 +1,5 @@
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
-import { nodeFileName } from './naming.js';
+
 
 export function generateConfig(ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;

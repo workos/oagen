@@ -1,7 +1,7 @@
 import type { Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { planOperation } from '../../engine/operation-plan.js';
-import { nodeClassName, nodeMethodName, nodeResourcePath, mergeActionService } from './naming.js';
+import { nodeClassName, nodeResourcePath, mergeActionService } from './naming.js';
 import { toCamelCase } from '../../utils/naming.js';
 
 export function generateResources(services: Service[], ctx: EmitterContext): GeneratedFile[] {

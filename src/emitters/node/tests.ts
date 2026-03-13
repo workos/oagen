@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { ApiSpec, Service, Operation, TypeRef, Model } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { planOperation } from '../../engine/operation-plan.js';
-import { nodeClassName, nodeFileName, nodeTestPath, nodeFixturePath, nodeResourcePath } from './naming.js';
+import { nodeClassName, nodeFileName, nodeTestPath, nodeResourcePath } from './naming.js';
 import { toCamelCase, toSnakeCase } from '../../utils/naming.js';
 import { generateFixtures } from './fixtures.js';
 
