@@ -56,13 +56,13 @@ Emitters use `planOperation(op)` to compute an `OperationPlan` for each operatio
 
 ```typescript
 interface OperationPlan {
-  operation: Operation;       // back-reference
+  operation: Operation; // back-reference
   isDelete: boolean;
   hasBody: boolean;
   isIdempotentPost: boolean;
   pathParamsInOptions: boolean;
   isPaginated: boolean;
-  responseModelName: string | null;  // null = void/primitive
+  responseModelName: string | null; // null = void/primitive
   isModelResponse: boolean;
   hasQueryParams: boolean;
 }

@@ -82,7 +82,8 @@ function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterC
 
   // Fields from request body
   if (op.requestBody && op.requestBody.kind === 'model') {
-    const model = ctx.spec.models.find((m) => m.name === op.requestBody!.name);
+    const bodyRef = op.requestBody;
+    const model = ctx.spec.models.find((m) => m.name === bodyRef.name);
     if (model) {
       for (const field of model.fields) {
         const camelName = toCamelCase(field.name);

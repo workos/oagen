@@ -60,6 +60,7 @@ A smoke config JSON file lets you customize skip lists, service priority, and se
 Without a config file, no operations or services are skipped, all services have equal priority (50), and SDK properties are resolved via `toCamelCase(serviceName)`.
 
 For WorkOS, use the bundled config:
+
 ```bash
 npm run smoke:raw -- --smoke-config scripts/smoke/smoke.config.workos.json
 ```
@@ -134,13 +135,13 @@ Exit code 0 if no critical mismatches and no operations missing from the SDK, 1 
 
 All variables can be set in a `.env` file in the project root. The smoke scripts auto-load it (existing env vars take precedence).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `${NAMESPACE}_API_KEY` or `API_KEY` | (required) | API key for authentication. Namespace is derived from spec name. |
-| `OPENAPI_SPEC` | (required) | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
-| `${NAMESPACE}_BASE_URL` | spec's `servers[0].url` | Override the API base URL. |
-| `SMOKE_CONFIG` | (optional) | Path to smoke config JSON file. Can also be passed as `--smoke-config <path>`. |
-| `SMOKE_DELAY_MS` | `200` | Delay between requests (rate limiting) |
+| Variable                            | Default                 | Description                                                                          |
+| ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
+| `${NAMESPACE}_API_KEY` or `API_KEY` | (required)              | API key for authentication. Namespace is derived from spec name.                     |
+| `OPENAPI_SPEC`                      | (required)              | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
+| `${NAMESPACE}_BASE_URL`             | spec's `servers[0].url` | Override the API base URL.                                                           |
+| `SMOKE_CONFIG`                      | (optional)              | Path to smoke config JSON file. Can also be passed as `--smoke-config <path>`.       |
+| `SMOKE_DELAY_MS`                    | `200`                   | Delay between requests (rate limiting)                                               |
 
 ---
 
@@ -170,11 +171,11 @@ For TypeScript SDKs, `sdk-test.ts` runs a `tsc --noEmit` pre-flight check before
 
 ## Diff Severity Levels
 
-| Severity | What's Compared |
-|----------|-----------------|
+| Severity     | What's Compared                                    |
+| ------------ | -------------------------------------------------- |
 | **CRITICAL** | HTTP method, path, query params, request body keys |
-| **WARNING** | Request body values (on deterministic fields) |
-| **INFO** | Response status code, response body keys |
+| **WARNING**  | Request body values (on deterministic fields)      |
+| **INFO**     | Response status code, response body keys           |
 
 ## Results File Format
 
@@ -213,6 +214,7 @@ Operations present in one result set but absent from the other are tracked as `m
 Use the skill: `/generate-smoke-test <language>` — it walks through HTTP interception strategy, SERVICE_MAP discovery, method resolution, argument construction, and creates a self-contained `scripts/smoke/sdk-{lang}.ts` script.
 
 Each language's smoke test is a single file that:
+
 1. Imports shared infrastructure from `shared.ts` (operation planning, payload generation, ID registry)
 2. Sets up HTTP interception native to the target language/SDK
 3. Iterates planned operations, calling SDK methods and capturing exchanges
@@ -247,6 +249,7 @@ loop:
 ```
 
 **Mechanical gates:**
+
 - `diff.ts` exits 1 on CRITICALs, `sdk-test.ts` propagates that exit code
 - `diff.ts` always writes `smoke-diff-findings.json` — structured findings that survive across conversations
 

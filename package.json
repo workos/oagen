@@ -19,6 +19,7 @@
     "lint:structure": "tsx scripts/lint-structure.ts",
     "format": "oxfmt --check .",
     "format:fix": "oxfmt --write .",
+    "format:md": "prettier --write '**/*.md'",
     "fix": "oxlint --fix && oxfmt --write .",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -42,6 +43,7 @@
     "dotenv": "^17.3.1",
     "oxfmt": "^0.36.0",
     "oxlint": "^1.51.0",
+    "prettier": "^3.8.1",
     "tsup": "^8.4.0",
     "tsx": "^4.19.0",
     "vitest": "^3.0.0"

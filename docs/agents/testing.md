@@ -7,6 +7,21 @@ Use this guide when changing behavior, generated output, or emitter coverage.
 - `test/` mirrors `src/`
 - Prefer `toMatchInlineSnapshot()` for representative output assertions
 
+## Compat Verification
+
+Compat verification checks that generated SDK code preserves the public API surface of an existing live SDK. It sits between unit tests and smoke tests in the testing pyramid:
+
+- **Unit tests** — verify emitter logic in isolation (fast, no external dependencies)
+- **Compat verification** — verify the API surface (names, signatures, exports) matches the live SDK
+- **Smoke tests** — verify wire-level HTTP behavior against the real API
+
+Compat verification catches regressions like renamed methods, changed parameter signatures, missing exports, and reorganized barrel files — issues that unit tests don't cover because they don't compare against the live SDK, and that smoke tests don't cover because they focus on HTTP behavior rather than API shape.
+
+- Compat extraction: `npm run compat:extract -- --sdk-path <path> --lang <language>`
+- Compat verification: `npm run verify:compat -- --surface api-surface.json --output <path> --lang <language>`
+- Run `/verify-compat <language>` for the full guided workflow
+- See `docs/architecture/extractor-contract.md` for building new language extractors
+
 ## Smoke Tests
 
 Smoke scripts live under `scripts/smoke/`.

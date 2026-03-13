@@ -21,8 +21,8 @@ Parse an OpenAPI spec and output the intermediate representation (IR) as JSON to
 oagen parse --spec path/to/openapi.yml
 ```
 
-| Argument        | Required | Description                                                            |
-| --------------- | -------- | ---------------------------------------------------------------------- |
+| Argument        | Required | Description                                                                            |
+| --------------- | -------- | -------------------------------------------------------------------------------------- |
 | `--spec <path>` | No       | Path to an OpenAPI 3.x spec file (YAML or JSON). Falls back to `OPENAPI_SPEC` env var. |
 
 ### `oagen generate`

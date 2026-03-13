@@ -446,6 +446,14 @@ Generated SDK structure:
 5. **Handle empty inputs** — emitter methods may receive `[]` for models/enums/services. Return `[]` without errors.
 6. **Namespace everywhere** — the `ctx.namespacePascal` and `ctx.namespace` must appear in all generated code (module names, class prefixes, import paths).
 
+## Backwards Compatibility
+
+If the target language has an existing published SDK that requires backwards compatibility, you should also scaffold an extractor so the compat verification workflow can preserve the live SDK's public API surface.
+
+See `docs/architecture/extractor-contract.md` for the `Extractor` interface, `ApiSurface` type, language-specific strategies, and a step-by-step checklist for building a new extractor.
+
+After scaffolding the emitter, run `/verify-compat <language>` to verify the generated output preserves the existing SDK's API surface.
+
 ## Reference: Ruby Emitter File Inventory
 
 > **This inventory is Ruby-specific.** Files like `yard.ts`, `types-rbs.ts`, and `types-rbi.ts` are unique to Ruby — do not replicate them for other languages unless the target language has an equivalent type annotation system. Use this table to understand the purpose of each generator file, not as a universal file list. The scaffold in Step 1 is the actual template.

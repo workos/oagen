@@ -34,7 +34,31 @@ Language-specific extras already exist in some emitters:
 
 IR names use PascalCase. Each emitter is responsible for converting names through its local `naming.ts`.
 
+## Verifying Backwards Compatibility
+
+When regenerating an SDK for a language that already has a published SDK, verify that the generated output preserves the existing public API surface.
+
+**When to use:**
+
+- The target language has an existing SDK with consumers who depend on its public API
+- You're modifying an emitter and need to ensure no regressions in method names, signatures, or exports
+
+**When to skip:**
+
+- The target language is brand new (no existing SDK) — pass `--no-compat-check` to the generate command
+- You're doing a full rewrite where breaking changes are intentional and documented
+
+**How the self-correcting loop works:**
+
+1. Extract the live SDK's API surface (`npm run compat:extract`)
+2. Generate with the overlay (`--api-surface api-surface.json`) so the emitter preserves existing names
+3. Verify the generated output against the baseline (`npm run verify:compat`)
+4. If violations exist, fix the emitter and regenerate — loop mode (`--loop`) automates this cycle
+
+Run `/verify-compat <language>` for the full guided workflow.
+
 ## Source Of Truth
 
 - Per-language design docs: `docs/sdk-designs/{language}.md`
+- Extractor contract: `docs/architecture/extractor-contract.md`
 - Create a new emitter with the `.claude` skill: `/generate-emitter <language>`
