@@ -21,9 +21,9 @@ Parse an OpenAPI spec and output the intermediate representation (IR) as JSON to
 oagen parse --spec path/to/openapi.yml
 ```
 
-| Argument        | Required | Description                                     |
-| --------------- | -------- | ----------------------------------------------- |
-| `--spec <path>` | Yes      | Path to an OpenAPI 3.1 spec file (YAML or JSON) |
+| Argument        | Required | Description                                                            |
+| --------------- | -------- | ---------------------------------------------------------------------- |
+| `--spec <path>` | No       | Path to an OpenAPI 3.x spec file (YAML or JSON). Falls back to `OPENAPI_SPEC` env var. |
 
 ### `oagen generate`
 
@@ -35,7 +35,7 @@ oagen generate --spec openapi.yml --lang ruby --output ./sdk --namespace WorkOS
 
 | Argument             | Required | Default             | Description                                                                                                                                                                                                                                  |
 | -------------------- | -------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--spec <path>`      | Yes      |                     | Path to an OpenAPI 3.1 spec file                                                                                                                                                                                                             |
+| `--spec <path>`      | No       | `OPENAPI_SPEC` env  | Path to an OpenAPI 3.x spec file. Falls back to `OPENAPI_SPEC` env var.                                                                                                                                                                      |
 | `--lang <language>`  | Yes      |                     | Target language emitter (e.g., `ruby`)                                                                                                                                                                                                       |
 | `--output <dir>`     | Yes      |                     | Directory to write generated files into                                                                                                                                                                                                      |
 | `--namespace <name>` | No       | Spec's `info.title` | SDK namespace in PascalCase — used directly for code identifiers (e.g., `WorkOS::Client`) and converted to `snake_case` for file paths (e.g., `lib/work_os/`). Use PascalCase with the exact casing you want (e.g., `WorkOS` not `work_os`). |
@@ -95,7 +95,8 @@ src/
 │   ├── writer.ts            # Write GeneratedFile[] to disk
 │   └── registry.ts          # Register and look up language emitters
 ├── emitters/
-│   └── ruby/                # Ruby language emitter
+│   ├── ruby/                # Ruby language emitter
+│   └── node/                # Node language emitter
 │       ├── index.ts         # Emitter entry point (implements Emitter interface)
 │       ├── type-map.ts      # IR TypeRef → Ruby/RBS/Sorbet type strings
 │       ├── naming.ts        # Ruby naming conventions (PascalCase, snake_case)
@@ -134,7 +135,7 @@ Uses `@redocly/openapi-core` to resolve all `$ref`s, then extracts models, enums
 
 ### Emitters
 
-Each language target implements the `Emitter` interface (9 generator methods + `fileHeader`). The Ruby emitter is the reference implementation. New emitters can be scaffolded using the `/generate-emitter` skill.
+Each language target implements the `Emitter` interface (see `src/engine/types.ts`). The Ruby and Node emitters are the current implementations. New emitters can be scaffolded using the `/generate-emitter` skill.
 
 ## Adding a new language emitter
 
@@ -182,7 +183,7 @@ src/emitters/{language}/                    (emitter source code)
 
 | File                       | What it is                                                                  |
 | -------------------------- | --------------------------------------------------------------------------- |
-| `src/engine/types.ts`      | The `Emitter` interface contract (9 methods + `fileHeader`)                 |
+| `src/engine/types.ts`      | The `Emitter` interface contract                                            |
 | `src/ir/types.ts`          | The IR type system (`ApiSpec`, `Model`, `Enum`, `Service`, `TypeRef`, etc.) |
 | `src/emitters/ruby/`       | Reference emitter implementation                                            |
 | `docs/sdk-designs/ruby.md` | Reference design doc (also the structural template for new languages)       |

@@ -24,7 +24,7 @@ The Ruby emitter at `src/emitters/ruby/` is the reference implementation. Use it
 
 Before starting, read and understand these files:
 
-1. **`src/engine/types.ts`** — The `Emitter` interface contract (9 methods + `fileHeader`)
+1. **`src/engine/types.ts`** — The `Emitter` interface contract
 2. **`src/ir/types.ts`** — The IR type system (`ApiSpec`, `Model`, `Enum`, `Service`, `Operation`, `TypeRef`, etc.)
 3. **`src/emitters/ruby/`** — The reference emitter (study the structure, not the Ruby-specific output)
 4. **`src/engine/registry.ts`** — How emitters are registered
@@ -384,6 +384,9 @@ npx vitest run
 # Build succeeds
 npx tsup
 
+# Structural linter — verify dependency layers, naming, file size, emitter exports
+npm run lint:structure
+
 # Smoke test — generate from Petstore fixture
 npx tsx src/cli/index.ts generate \
   --spec test/fixtures/petstore.yml \
@@ -416,12 +419,13 @@ Files created:
   docs/sdk-designs/{language}.md  — SDK design document
 
 Validation:
-  Type check:     PASS/FAIL
-  Tests:          {N} passed, {N} failed
-  Build:          PASS/FAIL
-  Smoke test:     {N} files generated
-  Determinism:    PASS/FAIL
-  Linter:         PASS/FAIL/N/A
+  Type check:       PASS/FAIL
+  Tests:            {N} passed, {N} failed
+  Build:            PASS/FAIL
+  Structural lint:  PASS/FAIL
+  Smoke test:       {N} files generated
+  Determinism:      PASS/FAIL
+  Linter:           PASS/FAIL/N/A
 
 Generated SDK structure:
   lib/{namespace}/models/      — {N} model files
