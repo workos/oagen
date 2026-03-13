@@ -15,8 +15,11 @@
     "build": "tsup",
     "dev": "tsx src/cli/index.ts",
     "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "lint:structure": "tsx scripts/lint-structure.ts",
     "format": "oxfmt --check .",
     "format:fix": "oxfmt --write .",
+    "fix": "oxlint --fix && oxfmt --write .",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
