@@ -3,7 +3,7 @@ import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { nodeClassName, nodeFileName } from './naming.js';
 import { toCamelCase } from '../../utils/naming.js';
 
-export function generateClient(_spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
+export function generateClient(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
   const ns = ctx.namespacePascal;
   const nsKebab = ctx.namespacePascal.toLowerCase();
   const nsEnvKey = ctx.namespacePascal.toUpperCase();
@@ -66,7 +66,7 @@ ${resourceProps}
     }
 
     this.key = this.key ?? process.env.${nsEnvKey}_API_KEY;
-    this.baseURL = this.options.baseURL ?? 'https://api.${ctx.namespace.replace(/_/g, '')}.com';
+    this.baseURL = this.options.baseURL ?? '${spec.baseUrl || `https://api.${ctx.namespace.replace(/_/g, '')}.com`}';
     this.client = new FetchHttpClient();
 
     if (!this.key) {
