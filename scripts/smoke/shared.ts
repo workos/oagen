@@ -6,6 +6,7 @@
  */
 
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 import { toSnakeCase, toCamelCase } from '../../src/utils/naming.js';
 
@@ -67,46 +68,65 @@ export interface PlannedGroup {
   operations: PlannedOperation[];
 }
 
+// ---------------------------------------------------------------------------
+// Smoke config — mutable state populated by loadSmokeConfig()
+// ---------------------------------------------------------------------------
+
 /** Operations that require complex preconditions and can't be auto-tested */
-export const SKIP_OPERATIONS = new Set([
-  'authenticateWithPassword',
-  'authenticateWithCode',
-  'authenticateWithMagicAuth',
-  'authenticateWithEmailVerification',
-  'authenticateWithTotp',
-  'authenticateWithOrganizationSelection',
-  'getAuthorizationUrl',
-  'getProfileAndToken',
-  'createMagicAuth',
-  'enrollAuthFactor',
-  'resetPassword',
-  'createPasswordReset',
-  'getToken',
-  'check',
-  'batchCheck',
-  'query',
-  'getJwksUrl',
-  'getLogoutUrl',
-  'revokeSession',
-]);
+export let SKIP_OPERATIONS = new Set<string>();
 
 /** Services to skip entirely */
-export const SKIP_SERVICES = new Set(['Pipes', 'Mfa', 'Passwordless', 'Widgets', 'FGA', 'Actions']);
+export let SKIP_SERVICES = new Set<string>();
 
 /**
  * Services that produce IDs other services depend on should run first.
  * Lower number = runs earlier. Unlisted services default to 50.
  */
-const SERVICE_PRIORITY: Record<string, number> = {
-  Organizations: 10,
-  Connections: 15,
-  Directories: 15,
-  DirectoryGroups: 16,
-  DirectoryUsers: 16,
-  OrganizationDomains: 20,
-  UserManagement: 25,
-  // Authorization, FeatureFlags, etc. depend on the above
-};
+let SERVICE_PRIORITY: Record<string, number> = {};
+
+/**
+ * Map IR service names to SDK property names on the client object.
+ * Empty = use toCamelCase(serviceName) as fallback.
+ */
+export let SERVICE_PROPERTY_MAP: Record<string, string> = {};
+
+/**
+ * Map from path param names to the service whose `id` they reference.
+ * Populated by loadSmokeConfig(); read by IdRegistry.resolveFromParamName.
+ */
+export let PARAM_SERVICE_MAP: Record<string, string> = {};
+
+export interface SmokeConfig {
+  skipOperations: string[];
+  skipServices: string[];
+  servicePriority: Record<string, number>;
+  servicePropertyMap: Record<string, string>;
+  paramServiceMap: Record<string, string>;
+}
+
+/** Load smoke test configuration from a JSON file */
+export function loadSmokeConfig(configPath?: string): void {
+  if (!configPath) return;
+  const raw = readFileSync(configPath, 'utf-8');
+  const config: SmokeConfig = JSON.parse(raw);
+
+  if (config.skipOperations) SKIP_OPERATIONS = new Set(config.skipOperations);
+  if (config.skipServices) SKIP_SERVICES = new Set(config.skipServices);
+  if (config.servicePriority) SERVICE_PRIORITY = config.servicePriority;
+  if (config.servicePropertyMap) SERVICE_PROPERTY_MAP = config.servicePropertyMap;
+  if (config.paramServiceMap) PARAM_SERVICE_MAP = config.paramServiceMap;
+}
+
+/** Return the current smoke config values (for diff.ts to consume) */
+export function getSmokeConfig() {
+  return {
+    skipOperations: SKIP_OPERATIONS,
+    skipServices: SKIP_SERVICES,
+    servicePriority: SERVICE_PRIORITY,
+    servicePropertyMap: SERVICE_PROPERTY_MAP,
+    paramServiceMap: PARAM_SERVICE_MAP,
+  };
+}
 
 /**
  * Assign a numeric sort key to an operation so that ID-producing operations
@@ -337,22 +357,6 @@ export class IdRegistry {
     return this.ids.get(`${service}.${field}`);
   }
 
-  /**
-   * Map from path param names to the service whose `id` they reference.
-   * e.g. "organizationId" → "Organizations", so we look up Organizations.id
-   */
-  private static PARAM_SERVICE_MAP: Record<string, string> = {
-    organizationId: 'Organizations',
-    organization_id: 'Organizations',
-    connectionId: 'Connections',
-    connection_id: 'Connections',
-    directoryId: 'Directories',
-    directory_id: 'Directories',
-    organization_membership_id: 'OrganizationMemberships',
-    auditLogExportId: 'AuditLogs',
-    audit_log_export_id: 'AuditLogs',
-  };
-
   /** Resolve path parameters for an operation using stored IDs */
   resolvePathParams(op: Operation, service: string): Record<string, string> | null {
     const resolved: Record<string, string> = {};
@@ -384,8 +388,8 @@ export class IdRegistry {
    * and looking up the pluralized service name.
    */
   private resolveFromParamName(paramName: string): string | undefined {
-    // Check explicit mapping first
-    const mappedService = IdRegistry.PARAM_SERVICE_MAP[paramName];
+    // Check explicit mapping first (from module-level PARAM_SERVICE_MAP)
+    const mappedService = PARAM_SERVICE_MAP[paramName];
     if (mappedService) {
       return this.get(mappedService, 'id') || this.get(mappedService, 'slug');
     }
@@ -523,7 +527,7 @@ export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function parseCliArgs(): { spec: string; sdkPath?: string } {
+export function parseCliArgs(): { spec: string; sdkPath?: string; smokeConfig?: string } {
   const args = process.argv.slice(2);
   const specIdx = args.indexOf('--spec');
   const spec = specIdx !== -1 && args[specIdx + 1] ? args[specIdx + 1] : process.env.OPENAPI_SPEC;
@@ -533,5 +537,7 @@ export function parseCliArgs(): { spec: string; sdkPath?: string } {
   }
   const sdkPathIdx = args.indexOf('--sdk-path');
   const sdkPath = sdkPathIdx !== -1 && args[sdkPathIdx + 1] ? args[sdkPathIdx + 1] : undefined;
-  return { spec, sdkPath };
+  const configIdx = args.indexOf('--smoke-config');
+  const smokeConfig = configIdx !== -1 && args[configIdx + 1] ? args[configIdx + 1] : process.env.SMOKE_CONFIG;
+  return { spec, sdkPath, smokeConfig };
 }

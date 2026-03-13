@@ -1,0 +1,58 @@
+{
+  "skipOperations": [
+    "authenticateWithPassword",
+    "authenticateWithCode",
+    "authenticateWithMagicAuth",
+    "authenticateWithEmailVerification",
+    "authenticateWithTotp",
+    "authenticateWithOrganizationSelection",
+    "getAuthorizationUrl",
+    "getProfileAndToken",
+    "createMagicAuth",
+    "enrollAuthFactor",
+    "resetPassword",
+    "createPasswordReset",
+    "getToken",
+    "check",
+    "batchCheck",
+    "query",
+    "getJwksUrl",
+    "getLogoutUrl",
+    "revokeSession"
+  ],
+  "skipServices": ["Pipes", "Mfa", "Passwordless", "Widgets", "FGA", "Actions"],
+  "servicePriority": {
+    "Organizations": 10,
+    "Connections": 15,
+    "Directories": 15,
+    "DirectoryGroups": 16,
+    "DirectoryUsers": 16,
+    "OrganizationDomains": 20,
+    "UserManagement": 25
+  },
+  "servicePropertyMap": {
+    "Users": "userManagement",
+    "Connections": "sso",
+    "Directories": "directorySync",
+    "DirectoryGroups": "directorySync",
+    "DirectoryUsers": "directorySync",
+    "Roles": "userManagement",
+    "Permissions": "userManagement",
+    "Invitations": "userManagement",
+    "Sessions": "userManagement",
+    "Memberships": "userManagement",
+    "OrganizationMemberships": "userManagement",
+    "SSO": "sso"
+  },
+  "paramServiceMap": {
+    "organizationId": "Organizations",
+    "organization_id": "Organizations",
+    "connectionId": "Connections",
+    "connection_id": "Connections",
+    "directoryId": "Directories",
+    "directory_id": "Directories",
+    "organization_membership_id": "OrganizationMemberships",
+    "auditLogExportId": "AuditLogs",
+    "audit_log_export_id": "AuditLogs"
+  }
+}
