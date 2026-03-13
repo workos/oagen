@@ -24,6 +24,7 @@ export async function generate(
     ...emitter.generateConfig(ctx),
     ...emitter.generateTypeSignatures(spec, ctx),
     ...emitter.generateTests(spec, ctx),
+    ...(emitter.generateManifest?.(spec, ctx) ?? []),
   ];
 
   const header = emitter.fileHeader();

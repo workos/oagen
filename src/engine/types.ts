@@ -33,5 +33,8 @@ export interface Emitter {
 
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
 
+  /** Optional: generate a smoke-manifest.json mapping operationIds to SDK methods */
+  generateManifest?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
+
   fileHeader(): string;
 }

@@ -9,6 +9,7 @@ import { generateConfig } from './config.js';
 import { generateCommon } from './common.js';
 import { generateOptions } from './options.js';
 import { generateTests } from './tests.js';
+import { generateManifest } from './manifest.js';
 
 export const nodeEmitter: Emitter = {
   language: 'node',
@@ -43,6 +44,10 @@ export const nodeEmitter: Emitter = {
 
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
     return generateTests(spec, ctx);
+  },
+
+  generateManifest(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
+    return generateManifest(spec, ctx);
   },
 
   fileHeader(): string {
