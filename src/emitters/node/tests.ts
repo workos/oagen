@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ApiSpec, Service, Operation, TypeRef, Model } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { planOperation } from '../../engine/operation-plan.js';
 import { nodeClassName, nodeFileName, nodeTestPath, nodeFixturePath, nodeResourcePath } from './naming.js';
 import { toCamelCase, toSnakeCase } from '../../utils/naming.js';
 import { generateFixtures } from './fixtures.js';
@@ -72,7 +73,7 @@ function generateTestFile(service: Service, ctx: EmitterContext): string {
     }
 
     // Idempotency tests
-    if (op.idempotent && op.httpMethod === 'post') {
+    if (planOperation(op).isIdempotentPost) {
       lines.push('');
       lines.push(...generateIdempotencyTests(op, service, ctx));
     }
@@ -292,18 +293,9 @@ function stripLeadingSlash(path: string): string {
 }
 
 function getResponseFixtureName(op: Operation, _service: Service): string | undefined {
-  if (op.httpMethod === 'delete') return undefined;
-  if (op.response.kind === 'model') {
-    return nodeFileName(op.response.name);
-  }
-  if (op.response.kind === 'array' && op.response.items.kind === 'model') {
-    return nodeFileName(op.response.items.name);
-  }
-  if (op.response.kind === 'nullable' && op.response.inner.kind === 'model') {
-    return nodeFileName(op.response.inner.name);
-  }
-  if (op.response.kind === 'primitive') return undefined;
-  return undefined;
+  const modelName = planOperation(op).responseModelName;
+  if (!modelName) return undefined;
+  return nodeFileName(modelName);
 }
 
 function findModelByName(name: string, ctx: EmitterContext): Model | undefined {

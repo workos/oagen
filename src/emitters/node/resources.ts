@@ -1,5 +1,6 @@
 import type { Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { planOperation } from '../../engine/operation-plan.js';
 import { nodeClassName, nodeMethodName, nodeResourcePath, mergeActionService } from './naming.js';
 import { toCamelCase } from '../../utils/naming.js';
 
@@ -45,8 +46,9 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
   // Import model types (public only, no Response)
   const modelNames = new Set<string>();
   for (const op of service.operations) {
-    if (isModelResponse(op)) {
-      modelNames.add(getResponseModelName(op));
+    const plan = planOperation(op);
+    if (plan.isModelResponse) {
+      modelNames.add(plan.responseModelName!);
     }
   }
   if (modelNames.size > 0) {
@@ -56,10 +58,11 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
   // Collect options interfaces needed
   const optionTypeImports: string[] = [];
   for (const op of service.operations) {
-    if (op.requestBody || op.queryParams.length > 0) {
+    const plan = planOperation(op);
+    if (plan.hasBody || plan.hasQueryParams) {
       optionTypeImports.push(optionsTypeName(op, service));
     }
-    if (op.idempotent && op.httpMethod === 'post') {
+    if (plan.isIdempotentPost) {
       optionTypeImports.push(requestOptionsTypeName(op, service));
     }
   }
@@ -78,27 +81,25 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
 
 function generateMethod(op: Operation, service: Service, ctx: EmitterContext): string[] {
   const lines: string[] = [];
+  const plan = planOperation(op);
   const methodName = toCamelCase(op.name);
-  const responseModel = getResponseModelName(op);
-  const isDelete = op.httpMethod === 'delete';
-  const hasBody = !!op.requestBody;
-  const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
+  const responseModel = plan.responseModelName ?? 'void';
+  const isDelete = plan.isDelete;
+  const hasBody = plan.hasBody;
+  const isIdempotentPost = plan.isIdempotentPost;
   const clientVar = toCamelCase(ctx.namespace);
 
   // Build return type
   let returnType: string;
   if (isDelete) {
     returnType = 'void';
-  } else if (op.paginated) {
+  } else if (plan.isPaginated) {
     returnType = `AutoPaginatable<${responseModel}>`;
   } else {
     returnType = responseModel;
   }
 
-  // Path params go into the options object when there are multiple path params
-  // or when combined with body/query params (matches standard SDK conventions)
-  const pathParamsInOptions =
-    op.pathParams.length > 1 || (op.pathParams.length > 0 && (hasBody || op.queryParams.length > 0));
+  const pathParamsInOptions = plan.pathParamsInOptions;
   const optionsParamName = hasBody ? 'payload' : 'options';
 
   // Build params
@@ -131,7 +132,7 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
   const pathSource = pathParamsInOptions ? optionsParamName : undefined;
   const path = buildPathExpression(op, pathSource);
 
-  if (op.paginated) {
+  if (plan.isPaginated) {
     if (pathParamsInOptions) {
       lines.push(`  const resolvedPath = ${path};`);
     }
@@ -151,7 +152,7 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
   } else if (isDelete) {
     lines.push(`  await this.${clientVar}.delete(${path});`);
   } else if (hasBody) {
-    const hasModelResponse = isModelResponse(op);
+    const hasModelResponse = plan.isModelResponse;
     if (isIdempotentPost) {
       if (hasModelResponse) {
         lines.push(`  const { data } = await this.${clientVar}.post(`);
@@ -188,7 +189,7 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
     if (hasModelResponse) {
       lines.push(`  return deserialize<${responseModel}>(data);`);
     }
-  } else if (isModelResponse(op)) {
+  } else if (plan.isModelResponse) {
     // Simple GET with model response
     lines.push(`  const { data } = await this.${clientVar}.get(${path});`);
     lines.push(`  return deserialize<${responseModel}>(data);`);
@@ -227,26 +228,3 @@ function requestOptionsTypeName(op: Operation, service: { name: string }): strin
   return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
 }
 
-function getResponseModelName(op: Operation): string {
-  if (op.httpMethod === 'delete') return 'void';
-  if (op.response.kind === 'model') return op.response.name;
-  if (op.response.kind === 'array' && op.response.items.kind === 'model') {
-    return op.response.items.name;
-  }
-  if (op.response.kind === 'nullable' && op.response.inner.kind === 'model') {
-    return op.response.inner.name;
-  }
-  if (op.response.kind === 'union') {
-    const firstModel = op.response.variants.find((v) => v.kind === 'model');
-    if (firstModel && firstModel.kind === 'model') return firstModel.name;
-  }
-  if (op.response.kind === 'primitive') {
-    return 'void'; // primitives don't need deserialization
-  }
-  return 'void';
-}
-
-function isModelResponse(op: Operation): boolean {
-  const name = getResponseModelName(op);
-  return name !== 'void';
-}

@@ -1,5 +1,6 @@
 import type { Service, Operation, TypeRef } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { planOperation } from '../../engine/operation-plan.js';
 import { nodeClassName, nodeInterfacePath, mergeActionService } from './naming.js';
 import { toCamelCase } from '../../utils/naming.js';
 import { mapTypeRefPublic } from './type-map.js';
@@ -9,10 +10,10 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
 
   for (const service of services) {
     for (const op of service.operations) {
-      const hasBodyOrParams = !!op.requestBody || op.queryParams.length > 0;
-      const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
-      const pathParamsInOptions =
-        op.pathParams.length > 1 || (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
+      const plan = planOperation(op);
+      const hasBodyOrParams = plan.hasBody || plan.hasQueryParams;
+      const isIdempotentPost = plan.isIdempotentPost;
+      const pathParamsInOptions = plan.pathParamsInOptions;
 
       if (!hasBodyOrParams && !isIdempotentPost && !pathParamsInOptions) continue;
 
@@ -53,8 +54,7 @@ function requestOptionsTypeName(op: Operation, service: { name: string }): strin
 function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
   const typeName = optionsTypeName(op, service);
-  const pathParamsInOptions =
-    op.pathParams.length > 1 || (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
+  const pathParamsInOptions = planOperation(op).pathParamsInOptions;
 
   lines.push(`export interface ${typeName} {`);
 

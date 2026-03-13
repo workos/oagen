@@ -1,5 +1,6 @@
 import type { Model, TypeRef, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { planOperation } from '../../engine/operation-plan.js';
 import { mapTypeRefPublic } from './type-map.js';
 import { nodeClassName, nodeFieldName, nodeFileName, nodeInterfacePath, mergeActionService } from './naming.js';
 
@@ -31,11 +32,12 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
     const service = ctx.spec.services.find((s) => s.name === serviceName);
     if (service) {
       for (const op of service.operations) {
-        if (op.requestBody || op.queryParams.length > 0) {
+        const plan = planOperation(op);
+        if (plan.hasBody || plan.hasQueryParams) {
           const optName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
           interfaceExports.push(`export * from './${nodeFileName(optName)}.interface';`);
         }
-        if (op.idempotent && op.httpMethod === 'post') {
+        if (plan.isIdempotentPost) {
           const reqOptsName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
           interfaceExports.push(`export * from './${nodeFileName(reqOptsName)}.interface';`);
         }
