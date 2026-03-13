@@ -1,5 +1,6 @@
 import type { ApiSpec, Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { planOperation } from '../../engine/operation-plan.js';
 import { rubyClassName, rubyFileName } from './naming.js';
 import { generateFixtures } from './fixtures.js';
 
@@ -59,7 +60,7 @@ function generateTestFile(service: Service, ctx: EmitterContext): string {
   }
 
   // Idempotency tests
-  const createOp = service.operations.find((o) => o.name === 'create' && o.idempotent);
+  const createOp = service.operations.find((o) => o.name === 'create' && planOperation(o).isIdempotentPost);
   if (createOp) {
     lines.push('');
     lines.push('      # === Idempotency Tests ===');
@@ -119,8 +120,8 @@ function generateCrudTest(op: Operation, service: Service, ctx: EmitterContext):
   } else if (statusCode === 204) {
     lines.push('        assert_nil response');
   } else {
-    const modelName = getResponseModelName(op);
-    if (modelName !== 'Object') {
+    const modelName = planOperation(op).responseModelName;
+    if (modelName) {
       lines.push(`        assert_pattern { response => ${ctx.namespacePascal}::Models::${modelName} }`);
     } else {
       lines.push('        refute_nil response');
@@ -235,12 +236,3 @@ function getResponseFixtureName(op: Operation, service: Service): string {
   return `${resourceName}/${op.name}`;
 }
 
-function getResponseModelName(op: Operation): string {
-  if (op.response.kind === 'model') {
-    return op.response.name;
-  }
-  if (op.response.kind === 'array' && op.response.items.kind === 'model') {
-    return op.response.items.name;
-  }
-  return 'Object';
-}

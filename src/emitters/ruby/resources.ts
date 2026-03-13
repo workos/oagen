@@ -1,5 +1,6 @@
 import type { Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import { planOperation } from '../../engine/operation-plan.js';
 import { rubyClassName, rubyFileName } from './naming.js';
 
 export function generateResources(services: Service[], ctx: EmitterContext): GeneratedFile[] {
@@ -39,12 +40,13 @@ function generateMethod(op: Operation, ctx: EmitterContext): string[] {
   const path = stripLeadingSlash(op.path);
   const convertedPath = convertPath(path);
 
+  const plan = planOperation(op);
   const pathParams = op.pathParams;
-  const hasBody = !!op.requestBody;
-  const hasQuery = op.queryParams.length > 0;
-  const isCreate = op.idempotent && op.httpMethod === 'post';
-  const isDelete = op.httpMethod === 'delete';
-  const responseModelName = getResponseModelName(op);
+  const hasBody = plan.hasBody;
+  const hasQuery = plan.hasQueryParams;
+  const isCreate = plan.isIdempotentPost;
+  const isDelete = plan.isDelete;
+  const responseModelName = plan.responseModelName ?? 'Object';
 
   // YARD documentation
   if (op.description) {
@@ -108,7 +110,7 @@ function generateMethod(op: Operation, ctx: EmitterContext): string[] {
     kwargs.push('body: params');
   }
 
-  if (op.paginated) {
+  if (plan.isPaginated) {
     kwargs.push(`page: ${ctx.namespacePascal}::Internal::CursorPage`);
     kwargs.push(`model: ${ctx.namespacePascal}::Models::${responseModelName}`);
   } else if (isDelete) {
@@ -147,12 +149,3 @@ function convertPath(path: string): string {
   });
 }
 
-function getResponseModelName(op: Operation): string {
-  if (op.response.kind === 'model') {
-    return op.response.name;
-  }
-  if (op.response.kind === 'array' && op.response.items.kind === 'model') {
-    return op.response.items.name;
-  }
-  return 'Object';
-}
