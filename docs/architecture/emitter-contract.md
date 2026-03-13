@@ -48,6 +48,31 @@ interface GeneratedFile {
 
 6. **Composable generators** — Interface methods can compose multiple internal generators. Example: Node's `generateConfig` returns config files plus shared utility files.
 
+## OperationPlan
+
+Source: `src/engine/operation-plan.ts`
+
+Emitters use `planOperation(op)` to compute an `OperationPlan` for each operation, rather than duplicating decision logic inline:
+
+```typescript
+interface OperationPlan {
+  operation: Operation;       // back-reference
+  isDelete: boolean;
+  hasBody: boolean;
+  isIdempotentPost: boolean;
+  pathParamsInOptions: boolean;
+  isPaginated: boolean;
+  responseModelName: string | null;  // null = void/primitive
+  isModelResponse: boolean;
+  hasQueryParams: boolean;
+}
+
+function planOperation(op: Operation): OperationPlan;
+```
+
+- `responseModelName` is `null` for void/primitive responses. Each emitter maps this to its own fallback (`'void'` in Node, `'Object'` in Ruby).
+- `resolveResponseModelName(op)` is also exported for cases that only need the model name.
+
 ## Existing Emitters
 
 | Language | Directory            | Design Doc                 |

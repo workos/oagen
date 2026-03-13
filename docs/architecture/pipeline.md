@@ -67,6 +67,10 @@ generateTests(spec, ctx); // Tests + fixtures
 generateManifest?.(spec, ctx); // Smoke-test manifest (optional)
 ```
 
+### OperationPlan
+
+Before rendering, emitters call `planOperation(op)` from `src/engine/operation-plan.ts` to compute an `OperationPlan` — a flat struct of semantic decisions (`isDelete`, `hasBody`, `isIdempotentPost`, `pathParamsInOptions`, `isPaginated`, `responseModelName`, etc.). This separates _what_ the generated code should do from _how_ it is rendered as a string. The plan is shared across all language emitters.
+
 Each method returns `GeneratedFile[]`. The orchestrator:
 
 1. Collects all files

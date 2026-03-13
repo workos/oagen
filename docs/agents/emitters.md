@@ -28,6 +28,8 @@ Language-specific extras already exist in some emitters:
 - Ruby: `yard.ts`, `types-rbs.ts`, `types-rbi.ts`
 - Node: `options.ts`, `common.ts`, `manifest.ts`
 
+- `src/engine/operation-plan.ts` provides shared operation semantics (`OperationPlan`). Emitters should call `planOperation(op)` rather than duplicating decision logic for `isDelete`, `hasBody`, `isPaginated`, `responseModelName`, etc.
+
 ## Naming
 
 IR names use PascalCase. Each emitter is responsible for converting names through its local `naming.ts`.

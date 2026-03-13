@@ -14,6 +14,7 @@ Use this guide when changing parsing, IR types, orchestration, file writing, or 
 
 - IR types live in `src/ir/types.ts`
 - The emitter interface lives in `src/engine/types.ts`
+- Operation planning lives in `src/engine/operation-plan.ts`
 - Emitter registration lives in `src/engine/registry.ts`
 
 ## Source Of Truth

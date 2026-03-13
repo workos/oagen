@@ -91,6 +91,7 @@ src/
 │   └── pagination.ts        # Detect cursor-based pagination patterns
 ├── engine/
 │   ├── types.ts             # Emitter interface, EmitterContext, GeneratedFile
+│   ├── operation-plan.ts    # Shared operation semantic decisions (OperationPlan)
 │   ├── orchestrator.ts      # Pipeline: IR → emitter → files (with header + dry-run)
 │   ├── writer.ts            # Write GeneratedFile[] to disk
 │   └── registry.ts          # Register and look up language emitters
