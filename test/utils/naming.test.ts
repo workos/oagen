@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { toPascalCase, toCamelCase, toSnakeCase, toKebabCase, toUpperSnakeCase, stripBackendSuffixes } from '../../src/utils/naming.js';
+import {
+  toPascalCase,
+  toCamelCase,
+  toSnakeCase,
+  toKebabCase,
+  toUpperSnakeCase,
+  stripBackendSuffixes,
+} from '../../src/utils/naming.js';
 
 describe('toPascalCase', () => {
   it('converts snake_case', () => {

@@ -1,13 +1,7 @@
 import type { Model, TypeRef, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
 import { mapTypeRefPublic } from './type-map.js';
-import {
-  nodeClassName,
-  nodeFieldName,
-  nodeFileName,
-  nodeInterfacePath,
-  mergeActionService,
-} from './naming.js';
+import { nodeClassName, nodeFieldName, nodeFileName, nodeInterfacePath, mergeActionService } from './naming.js';
 
 export function generateModels(models: Model[], ctx: EmitterContext): GeneratedFile[] {
   const files: GeneratedFile[] = [];

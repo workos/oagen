@@ -11,8 +11,8 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
     for (const op of service.operations) {
       const hasBodyOrParams = !!op.requestBody || op.queryParams.length > 0;
       const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
-      const pathParamsInOptions = op.pathParams.length > 1 ||
-        (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
+      const pathParamsInOptions =
+        op.pathParams.length > 1 || (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
 
       if (!hasBodyOrParams && !isIdempotentPost && !pathParamsInOptions) continue;
 
@@ -53,8 +53,8 @@ function requestOptionsTypeName(op: Operation, service: { name: string }): strin
 function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
   const typeName = optionsTypeName(op, service);
-  const pathParamsInOptions = op.pathParams.length > 1 ||
-    (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
+  const pathParamsInOptions =
+    op.pathParams.length > 1 || (op.pathParams.length > 0 && (!!op.requestBody || op.queryParams.length > 0));
 
   lines.push(`export interface ${typeName} {`);
 

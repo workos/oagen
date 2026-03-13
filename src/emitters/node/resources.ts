@@ -97,8 +97,8 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
 
   // Path params go into the options object when there are multiple path params
   // or when combined with body/query params (matches standard SDK conventions)
-  const pathParamsInOptions = op.pathParams.length > 1 ||
-    (op.pathParams.length > 0 && (hasBody || op.queryParams.length > 0));
+  const pathParamsInOptions =
+    op.pathParams.length > 1 || (op.pathParams.length > 0 && (hasBody || op.queryParams.length > 0));
   const optionsParamName = hasBody ? 'payload' : 'options';
 
   // Build params
@@ -138,7 +138,9 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
     const pathArg = pathParamsInOptions ? 'resolvedPath' : `'${stripLeadingSlash(op.path)}'`;
     lines.push(`  return new AutoPaginatable(`);
     lines.push(`    await fetchAndDeserialize(`);
-    lines.push(`      this.${clientVar}, ${pathArg}, (raw: unknown) => deserialize<${responseModel}>(raw), ${optionsParamName},`);
+    lines.push(
+      `      this.${clientVar}, ${pathArg}, (raw: unknown) => deserialize<${responseModel}>(raw), ${optionsParamName},`,
+    );
     lines.push(`    ),`);
     lines.push(`    (raw: unknown) => deserialize<${responseModel}>(raw),`);
     lines.push(`    (params) => fetchAndDeserialize(`);
