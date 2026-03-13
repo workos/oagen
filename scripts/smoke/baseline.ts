@@ -17,12 +17,14 @@ import {
   generateQueryParams,
   resolvePath,
   parseCliArgs,
+  loadSmokeConfig,
   type CapturedExchange,
   type SmokeResults,
 } from './shared.js';
 
 async function main() {
-  const { spec: specPath } = parseCliArgs();
+  const { spec: specPath, smokeConfig } = parseCliArgs();
+  loadSmokeConfig(smokeConfig);
 
   console.log('Parsing spec...');
   const spec = await parseSpec(specPath);

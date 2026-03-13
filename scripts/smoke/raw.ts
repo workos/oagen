@@ -1,7 +1,7 @@
 /**
  * Raw HTTP smoke test.
  *
- * Calls the real WorkOS API directly via fetch, captures request/response pairs.
+ * Calls the target API directly via fetch, captures request/response pairs.
  *
  * Usage:
  *   OPENAPI_SPEC=path/to/spec.yaml npm run smoke:raw
@@ -16,6 +16,7 @@ import {
   resolvePath,
   delay,
   parseCliArgs,
+  loadSmokeConfig,
   IdRegistry,
   getExpectedStatusCodes,
   isUnexpectedStatus,
@@ -27,16 +28,21 @@ const DELAY_MS = Number(process.env.SMOKE_DELAY_MS ?? '200');
 const TIMEOUT_MS = 30_000;
 
 async function main() {
-  const { spec: specPath } = parseCliArgs();
-  const apiKey = process.env.WORKOS_API_KEY;
-  if (!apiKey) {
-    console.error('WORKOS_API_KEY environment variable is required');
-    process.exit(1);
-  }
+  const { spec: specPath, smokeConfig } = parseCliArgs();
+  loadSmokeConfig(smokeConfig);
 
   console.log('Parsing spec...');
   const spec = await parseSpec(specPath);
-  const baseUrl = process.env.WORKOS_BASE_URL || spec.baseUrl || 'https://api.workos.com';
+
+  // Derive env var namespace from spec name: "WorkOS API" → "WORKOS_API"
+  const ns = spec.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  const apiKey = process.env[`${ns}_API_KEY`] ?? process.env.API_KEY;
+  if (!apiKey) {
+    console.error(`API key is required. Set ${ns}_API_KEY or API_KEY environment variable.`);
+    process.exit(1);
+  }
+
+  const baseUrl = process.env[`${ns}_BASE_URL`] || spec.baseUrl;
 
   console.log(`Base URL: ${baseUrl}`);
   console.log(`Spec: ${spec.name} v${spec.version}`);
