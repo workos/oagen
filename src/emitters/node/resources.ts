@@ -1,5 +1,6 @@
 import type { Service, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import type { OverlayLookup } from '../../compat/types.js';
 import { planOperation } from '../../engine/operation-plan.js';
 import { nodeClassName, nodeResourcePath, mergeActionService } from './naming.js';
 import { toCamelCase } from '../../utils/naming.js';
@@ -60,10 +61,10 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
   for (const op of service.operations) {
     const plan = planOperation(op);
     if (plan.hasBody || plan.hasQueryParams) {
-      optionTypeImports.push(optionsTypeName(op, service));
+      optionTypeImports.push(optionsTypeName(op, service, ctx.overlayLookup));
     }
     if (plan.isIdempotentPost) {
-      optionTypeImports.push(requestOptionsTypeName(op, service));
+      optionTypeImports.push(requestOptionsTypeName(op, service, ctx.overlayLookup));
     }
   }
   if (optionTypeImports.length > 0) {
@@ -79,10 +80,19 @@ function collectImports(service: Service, ctx: EmitterContext): string[] {
   return lines;
 }
 
+function resolveMethodName(op: Operation, overlay?: OverlayLookup): string {
+  if (overlay) {
+    const key = `${op.httpMethod.toUpperCase()} ${op.path}`;
+    const existing = overlay.methodByOperation.get(key);
+    if (existing) return existing.methodName;
+  }
+  return toCamelCase(op.name);
+}
+
 function generateMethod(op: Operation, service: Service, ctx: EmitterContext): string[] {
   const lines: string[] = [];
   const plan = planOperation(op);
-  const methodName = toCamelCase(op.name);
+  const methodName = resolveMethodName(op, ctx.overlayLookup);
   const responseModel = plan.responseModelName ?? 'void';
   const isDelete = plan.isDelete;
   const hasBody = plan.hasBody;
@@ -110,15 +120,15 @@ function generateMethod(op: Operation, service: Service, ctx: EmitterContext): s
     }
   }
   if (hasBody) {
-    const optionsType = optionsTypeName(op, service);
+    const optionsType = optionsTypeName(op, service, ctx.overlayLookup);
     params.push(`payload: ${optionsType}`);
   } else if (pathParamsInOptions || op.queryParams.length > 0) {
-    const optionsType = optionsTypeName(op, service);
+    const optionsType = optionsTypeName(op, service, ctx.overlayLookup);
     const optional = pathParamsInOptions ? '' : '?';
     params.push(`options${optional}: ${optionsType}`);
   }
   if (isIdempotentPost) {
-    const reqOptsType = requestOptionsTypeName(op, service);
+    const reqOptsType = requestOptionsTypeName(op, service, ctx.overlayLookup);
     params.push(`requestOptions: ${reqOptsType} = {}`);
   }
 
@@ -220,11 +230,21 @@ function stripLeadingSlash(path: string): string {
   return path.startsWith('/') ? path.slice(1) : path;
 }
 
-function optionsTypeName(op: Operation, service: { name: string }): string {
-  return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+function optionsTypeName(op: Operation, service: { name: string }, overlay?: OverlayLookup): string {
+  const computed = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+  if (overlay) {
+    const existing = overlay.interfaceByName.get(computed);
+    if (existing) return existing;
+  }
+  return computed;
 }
 
-function requestOptionsTypeName(op: Operation, service: { name: string }): string {
-  return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+function requestOptionsTypeName(op: Operation, service: { name: string }, overlay?: OverlayLookup): string {
+  const computed = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+  if (overlay) {
+    const existing = overlay.interfaceByName.get(computed);
+    if (existing) return existing;
+  }
+  return computed;
 }
 

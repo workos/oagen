@@ -1,5 +1,6 @@
 import type { Service, Operation, TypeRef } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import type { OverlayLookup } from '../../compat/types.js';
 import { planOperation } from '../../engine/operation-plan.js';
 import { nodeClassName, nodeInterfacePath, mergeActionService } from './naming.js';
 import { toCamelCase } from '../../utils/naming.js';
@@ -20,7 +21,7 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
       const serviceName = service.name;
 
       if (hasBodyOrParams || pathParamsInOptions) {
-        const typeName = optionsTypeName(op, service);
+        const typeName = optionsTypeName(op, service, ctx.overlayLookup);
 
         // Generate interface
         files.push({
@@ -31,10 +32,10 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
 
       // Generate request options interface for idempotent POST
       if (isIdempotentPost) {
-        const reqOptsName = requestOptionsTypeName(op, service);
+        const reqOptsName = requestOptionsTypeName(op, service, ctx.overlayLookup);
         files.push({
           path: nodeInterfacePath(serviceName, reqOptsName),
-          content: generateRequestOptionsInterface(op, service),
+          content: generateRequestOptionsInterface(op, service, ctx),
         });
       }
     }
@@ -43,17 +44,27 @@ export function generateOptions(services: Service[], ctx: EmitterContext): Gener
   return files;
 }
 
-function optionsTypeName(op: Operation, service: { name: string }): string {
-  return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+function optionsTypeName(op: Operation, service: { name: string }, overlay?: OverlayLookup): string {
+  const computed = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+  if (overlay) {
+    const existing = overlay.interfaceByName.get(computed);
+    if (existing) return existing;
+  }
+  return computed;
 }
 
-function requestOptionsTypeName(op: Operation, service: { name: string }): string {
-  return `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+function requestOptionsTypeName(op: Operation, service: { name: string }, overlay?: OverlayLookup): string {
+  const computed = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+  if (overlay) {
+    const existing = overlay.interfaceByName.get(computed);
+    if (existing) return existing;
+  }
+  return computed;
 }
 
 function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterContext): string {
   const lines: string[] = [];
-  const typeName = optionsTypeName(op, service);
+  const typeName = optionsTypeName(op, service, ctx.overlayLookup);
   const pathParamsInOptions = planOperation(op).pathParamsInOptions;
 
   lines.push(`export interface ${typeName} {`);
@@ -102,8 +113,8 @@ function generateOptionsInterface(op: Operation, service: Service, ctx: EmitterC
   return lines.join('\n');
 }
 
-function generateRequestOptionsInterface(op: Operation, service: Service): string {
-  const typeName = requestOptionsTypeName(op, service);
+function generateRequestOptionsInterface(op: Operation, service: Service, ctx: EmitterContext): string {
+  const typeName = requestOptionsTypeName(op, service, ctx.overlayLookup);
   return `export interface ${typeName} {
   idempotencyKey?: string;
 }

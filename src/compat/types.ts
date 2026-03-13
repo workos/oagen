@@ -62,6 +62,24 @@ export interface Extractor {
   extract(sdkPath: string): Promise<ApiSurface>;
 }
 
+export interface MethodOverlay {
+  className: string;
+  methodName: string;
+  params: ApiParam[];
+  returnType: string;
+}
+
+export interface OverlayLookup {
+  /** HTTP method + path → existing method info */
+  methodByOperation: Map<string, MethodOverlay>;
+  /** IR interface name → existing interface name */
+  interfaceByName: Map<string, string>;
+  /** IR type alias name → existing type alias name */
+  typeAliasByName: Map<string, string>;
+  /** Barrel file path → symbols that must be exported */
+  requiredExports: Map<string, Set<string>>;
+}
+
 export type ViolationCategory = 'public-api' | 'signature' | 'export-structure' | 'behavioral';
 export type ViolationSeverity = 'breaking' | 'warning';
 

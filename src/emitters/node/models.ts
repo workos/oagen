@@ -1,5 +1,6 @@
 import type { Model, TypeRef, Operation } from '../../ir/types.js';
 import type { EmitterContext, GeneratedFile } from '../../engine/types.js';
+import type { OverlayLookup } from '../../compat/types.js';
 import { planOperation } from '../../engine/operation-plan.js';
 import { mapTypeRefPublic } from './type-map.js';
 import { nodeClassName, nodeFieldName, nodeFileName, nodeInterfacePath, mergeActionService } from './naming.js';
@@ -21,7 +22,7 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
     for (const model of serviceModels) {
       files.push({
         path: nodeInterfacePath(serviceName, model.name),
-        content: generateInterface(model),
+        content: generateInterface(model, ctx.overlayLookup),
       });
     }
 
@@ -34,18 +35,41 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
       for (const op of service.operations) {
         const plan = planOperation(op);
         if (plan.hasBody || plan.hasQueryParams) {
-          const optName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+          let optName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}Options`;
+          if (ctx.overlayLookup) {
+            const existing = ctx.overlayLookup.interfaceByName.get(optName);
+            if (existing) optName = existing;
+          }
           interfaceExports.push(`export * from './${nodeFileName(optName)}.interface';`);
         }
         if (plan.isIdempotentPost) {
-          const reqOptsName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+          let reqOptsName = `${mergeActionService(nodeClassName(op.name), nodeClassName(service.name))}RequestOptions`;
+          if (ctx.overlayLookup) {
+            const existing = ctx.overlayLookup.interfaceByName.get(reqOptsName);
+            if (existing) reqOptsName = existing;
+          }
           interfaceExports.push(`export * from './${nodeFileName(reqOptsName)}.interface';`);
         }
       }
     }
 
+    // Ensure overlay-required exports are included in the barrel
+    const barrelPath = `src/${nodeFileName(serviceName)}/interfaces/index.ts`;
+    if (ctx.overlayLookup) {
+      const required = ctx.overlayLookup.requiredExports.get(barrelPath);
+      if (required) {
+        const existingExports = new Set(interfaceExports);
+        for (const symbol of required) {
+          const exportLine = `export * from './${nodeFileName(symbol)}.interface';`;
+          if (!existingExports.has(exportLine)) {
+            interfaceExports.push(exportLine);
+          }
+        }
+      }
+    }
+
     files.push({
-      path: `src/${nodeFileName(serviceName)}/interfaces/index.ts`,
+      path: barrelPath,
       content: [...new Set(interfaceExports)].join('\n') + '\n',
     });
   }
@@ -53,9 +77,17 @@ export function generateModels(models: Model[], ctx: EmitterContext): GeneratedF
   return files;
 }
 
-function generateInterface(model: Model): string {
+function resolveInterfaceName(irName: string, overlay?: OverlayLookup): string {
+  if (overlay) {
+    const existing = overlay.interfaceByName.get(irName);
+    if (existing) return existing;
+  }
+  return nodeClassName(irName);
+}
+
+function generateInterface(model: Model, overlay?: OverlayLookup): string {
   const lines: string[] = [];
-  const className = nodeClassName(model.name);
+  const className = resolveInterfaceName(model.name, overlay);
 
   if (model.description) {
     lines.push(`/** ${model.description} */`);

@@ -1,18 +1,21 @@
 import type { ApiSpec } from '../ir/types.js';
 import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
+import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { toSnakeCase } from '../utils/naming.js';
 import { writeFiles } from './writer.js';
 
 export async function generate(
   spec: ApiSpec,
   emitter: Emitter,
-  options: { namespace: string; dryRun?: boolean; outputDir: string },
+  options: { namespace: string; dryRun?: boolean; outputDir: string; apiSurface?: ApiSurface; overlayLookup?: OverlayLookup },
 ): Promise<GeneratedFile[]> {
   const ctx: EmitterContext = {
     namespace: toSnakeCase(options.namespace),
     namespacePascal: options.namespace,
     spec,
     outputDir: options.outputDir,
+    apiSurface: options.apiSurface,
+    overlayLookup: options.overlayLookup,
   };
 
   const files: GeneratedFile[] = [

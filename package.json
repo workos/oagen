@@ -29,7 +29,8 @@
     "smoke": "tsx scripts/smoke/sdk-test.ts",
     "smoke:baseline": "tsx scripts/smoke/baseline.ts",
     "smoke:validate": "tsx scripts/smoke/validate.ts",
-    "compat:extract": "tsx scripts/compat-extract.ts"
+    "compat:extract": "tsx scripts/compat-extract.ts",
+    "verify:compat": "tsx scripts/verify-compat.ts"
   },
   "dependencies": {
     "@redocly/openapi-core": "^1.34.3",

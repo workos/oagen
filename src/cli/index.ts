@@ -29,6 +29,8 @@ program
   .requiredOption('--output <dir>', 'Output directory')
   .option('--namespace <name>', 'SDK namespace/package name')
   .option('--dry-run', 'Preview files without writing')
+  .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
+  .option('--no-compat-check', 'Skip compat overlay even if --api-surface is provided')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC;
     if (!opts.spec) {

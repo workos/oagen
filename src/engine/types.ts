@@ -1,4 +1,5 @@
 import type { ApiSpec, Model, Enum, Service } from '../ir/types.js';
+import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 
 export interface GeneratedFile {
   path: string;
@@ -12,6 +13,8 @@ export interface EmitterContext {
   namespacePascal: string;
   spec: ApiSpec;
   outputDir?: string;
+  apiSurface?: ApiSurface;
+  overlayLookup?: OverlayLookup;
 }
 
 export interface Emitter {
