@@ -1,11 +1,11 @@
 /**
- * SDK smoke test for workos-node.
+ * SDK smoke test for Node.
  *
- * Calls the same endpoints via the generated workos-node SDK with fetch
+ * Calls the same endpoints via the generated Node SDK with fetch
  * interception to capture wire-level request/response pairs.
  *
  * Usage:
- *   OPENAPI_SPEC=path/to/spec.yaml npm run smoke:sdk:node -- --sdk-path path/to/workos-node
+ *   OPENAPI_SPEC=path/to/spec.yaml npm run smoke:sdk:node -- --sdk-path path/to/sdk
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -18,6 +18,8 @@ import {
   generateCamelQueryParams,
   delay,
   parseCliArgs,
+  loadSmokeConfig,
+  SERVICE_PROPERTY_MAP,
   IdRegistry,
   getExpectedStatusCodes,
   isUnexpectedStatus,
@@ -204,33 +206,6 @@ function resolveSDKMethod(
   return undefined;
 }
 
-/** Map IR service names to WorkOS SDK property names */
-const SERVICE_MAP: Record<string, string> = {
-  Organizations: 'organizations',
-  OrganizationDomains: 'organizationDomains',
-  Users: 'userManagement',
-  Connections: 'sso',
-  Directories: 'directorySync',
-  DirectoryGroups: 'directorySync',
-  DirectoryUsers: 'directorySync',
-  Events: 'events',
-  AuditLogs: 'auditLogs',
-  AuditLogExports: 'auditLogs',
-  FeatureFlags: 'featureFlags',
-  Webhooks: 'webhooks',
-  Vault: 'vault',
-  ApiKeys: 'apiKeys',
-  Portal: 'portal',
-  Roles: 'userManagement',
-  Permissions: 'userManagement',
-  Invitations: 'userManagement',
-  Sessions: 'userManagement',
-  Memberships: 'userManagement',
-  OrganizationMemberships: 'userManagement',
-  SSO: 'sso',
-  FGA: 'fga',
-};
-
 // ---------------------------------------------------------------------------
 // Fetch interception
 // ---------------------------------------------------------------------------
@@ -282,14 +257,11 @@ function safeParseJson(body: string): unknown {
 }
 
 async function main() {
-  const { spec: specPath, sdkPath } = parseCliArgs();
+  const { spec: specPath, sdkPath, smokeConfig } = parseCliArgs();
+  loadSmokeConfig(smokeConfig);
+
   if (!sdkPath) {
-    console.error('--sdk-path is required (path to workos-node SDK root, e.g. ../backend/workos-node)');
-    process.exit(1);
-  }
-  const apiKey = process.env.WORKOS_API_KEY;
-  if (!apiKey) {
-    console.error('WORKOS_API_KEY environment variable is required');
+    console.error('--sdk-path is required (path to Node SDK root)');
     process.exit(1);
   }
 
@@ -297,30 +269,48 @@ async function main() {
   const spec = await parseSpec(specPath);
   console.log(`Spec: ${spec.name} v${spec.version}`);
 
+  // Derive env var namespace from spec name: "WorkOS API" → "WORKOS_API"
+  const ns = spec.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  const apiKey = process.env[`${ns}_API_KEY`] ?? process.env.API_KEY;
+  if (!apiKey) {
+    console.error(`API key is required. Set ${ns}_API_KEY or API_KEY environment variable.`);
+    process.exit(1);
+  }
+
   // Load smoke manifest if available
   loadManifest(sdkPath);
 
-  // Resolve SDK entry point and load WorkOS after fetch interception is set up.
+  // Resolve SDK entry point after fetch interception is set up.
   // The SDK's .js files are CommonJS but its package.json has "type": "module",
   // so we use createRequire rooted at the SDK entry point, so the SDK's own
   // node_modules are used for all transitive requires.
   const { createRequire } = await import('node:module');
-  // Load from lib/index.js which exports WorkOSNode (the Node-specific
-  // subclass) as `WorkOS`.
   const sdkIndex = resolve(sdkPath, 'lib/index.js');
   const sdkRequire = createRequire(sdkIndex);
-  const { WorkOS } = sdkRequire(sdkIndex);
+  const sdkModule = sdkRequire(sdkIndex);
 
-  // Support WORKOS_BASE_URL for staging/local environments
-  const baseUrl = process.env.WORKOS_BASE_URL;
-  const workosOptions: Record<string, unknown> = {};
+  // Dynamic SDK class loading: look for PascalCase namespace, then default export
+  const namespacePascal = spec.name
+    .replace(/[^a-zA-Z0-9 ]/g, '')
+    .split(/\s+/)
+    .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join('');
+  const SdkClass = sdkModule[namespacePascal] ?? sdkModule.default;
+  if (!SdkClass) {
+    console.error(`Could not find SDK class "${namespacePascal}" or default export in ${sdkIndex}`);
+    process.exit(1);
+  }
+
+  // Support base URL override via env var for staging/local environments
+  const baseUrl = process.env[`${ns}_BASE_URL`];
+  const clientOptions: Record<string, unknown> = {};
   if (baseUrl) {
     const parsed = new URL(baseUrl);
-    workosOptions.apiHostname = parsed.host;
-    workosOptions.https = parsed.protocol === 'https:';
+    clientOptions.apiHostname = parsed.host;
+    clientOptions.https = parsed.protocol === 'https:';
     console.log(`Base URL override: ${baseUrl}`);
   }
-  const workos = new WorkOS(apiKey, workosOptions);
+  const client = new SdkClass(apiKey, clientOptions);
 
   const groups = planOperations(spec);
   const ids = new IdRegistry();
@@ -332,9 +322,22 @@ async function main() {
   );
 
   for (const group of groups) {
-    const sdkProp = SERVICE_MAP[group.service];
+    // Resolve SDK property: check manifest first, then config map, then toCamelCase fallback
+    let sdkProp: string | undefined;
+    if (manifestMap) {
+      // Check if any manifest entry for this service specifies the resource property
+      const manifestEntry = Array.from(manifestMap.values()).find(
+        (e) => e.operationId.startsWith(`${group.service}.`),
+      );
+      if (manifestEntry) sdkProp = manifestEntry.sdkResourceProperty;
+    }
     if (!sdkProp) {
-      console.log(`\n--- ${group.service} (no SDK mapping, skipping) ---`);
+      sdkProp = SERVICE_PROPERTY_MAP[group.service] || toCamelCase(group.service);
+    }
+
+    const resource = (client as unknown as Record<string, unknown>)[sdkProp];
+    if (!resource || typeof resource !== 'object') {
+      console.log(`\n--- ${group.service} (SDK property "${sdkProp}" not found, skipping) ---`);
       for (const planned of group.operations) {
         exchanges.push({
           operationId: `${group.service}.${planned.operation.name}`,
@@ -348,20 +351,14 @@ async function main() {
           },
           response: { status: 0, body: null },
           outcome: 'skipped',
-          error: `No SDK mapping for service "${group.service}"`,
+          error: `SDK property "${sdkProp}" not found on client`,
           durationMs: 0,
         });
       }
       continue;
     }
 
-    const resource = (workos as unknown as Record<string, unknown>)[sdkProp];
-    if (!resource || typeof resource !== 'object') {
-      console.log(`\n--- ${group.service} (SDK property "${sdkProp}" not found, skipping) ---`);
-      continue;
-    }
-
-    console.log(`\n--- ${group.service} → workos.${sdkProp} ---`);
+    console.log(`\n--- ${group.service} → client.${sdkProp} ---`);
 
     for (const planned of group.operations) {
       const op = planned.operation;
