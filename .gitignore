@@ -1,3 +1,5 @@
 node_modules/
 dist/
 .claude/ideation/
+.env
+smoke-*.json
