@@ -4,11 +4,25 @@ import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
 import { verifyCommand } from './verify.js';
+import { loadConfig } from './config-loader.js';
+import { applyConfig } from './plugin-loader.js';
 
 function handleError(err: unknown): never {
   const message = err instanceof Error ? err.message : String(err);
   console.error(message);
   process.exit(1);
+}
+
+// Load config synchronously at startup so user-provided emitters/extractors are
+// registered before any command runs. loadConfig is async (dynamic import), so
+// we use top-level await.
+const config = await loadConfig();
+let configSmokeRunners: Record<string, string> | undefined;
+let configSmokeRunnerLegacy: string | undefined;
+if (config) {
+  applyConfig(config);
+  configSmokeRunners = config.smokeRunners;
+  configSmokeRunnerLegacy = config.smokeRunner;
 }
 
 const program = new Command()
@@ -57,6 +71,7 @@ program
   .option('--output <dir>', 'Output directory')
   .option('--report', 'Output diff report as JSON')
   .option('--force', 'Allow file deletions without confirmation')
+  .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
   .action((opts) => {
     diffCommand(opts).catch(handleError);
   });
@@ -70,12 +85,15 @@ program
   .option('--api-surface <path>', 'Baseline API surface JSON — enables compat verification')
   .option('--raw-results <path>', 'Path to an existing smoke baseline file to diff against')
   .option('--smoke-config <path>', 'Path to smoke config JSON for skip lists and service mappings')
+  .option('--smoke-runner <path>', 'Path to a custom smoke runner script (overrides built-in sdk-test.ts)')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     if (!opts.spec) {
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
+    // CLI --smoke-runner takes precedence, then per-language smokeRunners map, then legacy single string
+    opts.smokeRunner ??= configSmokeRunners?.[opts.lang] ?? configSmokeRunnerLegacy;
     verifyCommand(opts).catch(handleError);
   });
 

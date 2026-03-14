@@ -39,9 +39,20 @@ export type {
   ParamChange,
 } from './differ/types.js';
 
+export type {
+  ApiSurface, ApiClass, ApiMethod, ApiParam, ApiProperty,
+  ApiInterface, ApiField, ApiTypeAlias, ApiEnum,
+  Extractor, MethodOverlay, OverlayLookup,
+  ViolationCategory, ViolationSeverity, Violation, Addition, DiffResult,
+} from './compat/types.js';
+
 export { parseSpec } from './parser/parse.js';
 export { generate } from './engine/orchestrator.js';
 export { getEmitter, registerEmitter } from './engine/registry.js';
+export { getExtractor, registerExtractor } from './compat/extractor-registry.js';
 export { diffSpecs } from './differ/diff.js';
 export { mapChangesToFiles } from './differ/file-map.js';
 export { generateIncremental } from './engine/incremental.js';
+export { buildOverlayLookup, patchOverlay } from './compat/overlay.js';
+export { diffSurfaces } from './compat/differ.js';
+export { toSnakeCase, toCamelCase, toPascalCase } from './utils/naming.js';

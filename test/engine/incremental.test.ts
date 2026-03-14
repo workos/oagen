@@ -1,13 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { generateIncremental } from '../../src/engine/incremental.js';
-import type { Emitter } from '../../src/engine/types.js';
+import type { Emitter, EmitterContext } from '../../src/engine/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import type { ApiSurface, OverlayLookup } from '../../src/compat/types.js';
 
-function mockEmitter(): Emitter {
+function mockEmitter(ctxCapture?: { ctx?: EmitterContext }): Emitter {
   return {
     language: 'mock',
-    generateModels: (models) =>
-      models.map((m) => ({ path: `models/${m.name.toLowerCase()}.rb`, content: `class ${m.name}; end` })),
+    generateModels: (models, ctx) => {
+      if (ctxCapture) ctxCapture.ctx = ctx;
+      return models.map((m) => ({ path: `models/${m.name.toLowerCase()}.rb`, content: `class ${m.name}; end` }));
+    },
     generateEnums: (enums) =>
       enums.map((e) => ({ path: `models/${e.name.toLowerCase()}.rb`, content: `class ${e.name}; end` })),
     generateResources: (services) =>
@@ -188,5 +191,93 @@ describe('generateIncremental', () => {
     expect(result.diff.oldVersion).toBe('1.0.0');
     expect(result.diff.newVersion).toBe('2.0.0');
     expect(result.diff.summary.added).toBeGreaterThan(0);
+  });
+
+  it('passes compat overlay fields through EmitterContext', async () => {
+    const v2: ApiSpec = {
+      ...v1,
+      version: '2.0.0',
+      models: [
+        ...v1.models,
+        { name: 'Team', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      ],
+    };
+
+    const fakeApiSurface: ApiSurface = {
+      language: 'mock',
+      extractedFrom: '/fake',
+      extractedAt: '2024-01-01',
+      classes: {},
+      interfaces: {},
+      typeAliases: {},
+      enums: {},
+      exports: {},
+    };
+
+    const fakeOverlay: OverlayLookup = {
+      methodByOperation: new Map(),
+      interfaceByName: new Map(),
+      typeAliasByName: new Map(),
+      requiredExports: new Map(),
+    };
+
+    const ctxCapture: { ctx?: EmitterContext } = {};
+    const result = await generateIncremental(v1, v2, mockEmitter(ctxCapture), {
+      namespace: 'Test',
+      outputDir: '/tmp/test-inc',
+      dryRun: true,
+      apiSurface: fakeApiSurface,
+      overlayLookup: fakeOverlay,
+    });
+
+    expect(ctxCapture.ctx).toBeDefined();
+    expect(ctxCapture.ctx!.outputDir).toBe('/tmp/test-inc');
+    expect(ctxCapture.ctx!.apiSurface).toBe(fakeApiSurface);
+    expect(ctxCapture.ctx!.overlayLookup).toBe(fakeOverlay);
+  });
+
+  it('defaults skipIfExists to true on generated files', async () => {
+    const v2: ApiSpec = {
+      ...v1,
+      version: '2.0.0',
+      models: [
+        ...v1.models,
+        { name: 'Team', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      ],
+    };
+
+    const result = await generateIncremental(v1, v2, mockEmitter(), {
+      namespace: 'Test',
+      outputDir: '/tmp/test-inc',
+      dryRun: true,
+    });
+
+    for (const f of result.generated) {
+      expect(f.skipIfExists).toBe(true);
+    }
+  });
+
+  it('calls generateManifest when available', async () => {
+    const v2: ApiSpec = {
+      ...v1,
+      version: '2.0.0',
+      models: [
+        ...v1.models,
+        { name: 'Team', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      ],
+    };
+
+    const emitter = mockEmitter();
+    emitter.generateManifest = vi.fn().mockReturnValue([
+      { path: 'smoke-manifest.json', content: '{}' },
+    ]);
+
+    await generateIncremental(v1, v2, emitter, {
+      namespace: 'Test',
+      outputDir: '/tmp/test-inc',
+      dryRun: true,
+    });
+
+    expect(emitter.generateManifest).toHaveBeenCalled();
   });
 });

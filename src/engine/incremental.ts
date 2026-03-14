@@ -1,5 +1,6 @@
 import type { ApiSpec } from '../ir/types.js';
 import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
+import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { diffSpecs } from '../differ/diff.js';
 import { mapChangesToFiles } from '../differ/file-map.js';
 import { toSnakeCase } from '../utils/naming.js';
@@ -16,6 +17,8 @@ export async function generateIncremental(
     outputDir: string;
     dryRun?: boolean;
     force?: boolean;
+    apiSurface?: ApiSurface;
+    overlayLookup?: OverlayLookup;
   },
 ): Promise<{ generated: GeneratedFile[]; deleted: string[]; diff: ReturnType<typeof diffSpecs> }> {
   const diff = diffSpecs(oldSpec, newSpec);
@@ -28,6 +31,9 @@ export async function generateIncremental(
     namespace: toSnakeCase(options.namespace),
     namespacePascal: options.namespace,
     spec: newSpec,
+    outputDir: options.outputDir,
+    apiSurface: options.apiSurface,
+    overlayLookup: options.overlayLookup,
   };
 
   const affected = mapChangesToFiles(diff.changes, emitter, ctx);
@@ -43,6 +49,7 @@ export async function generateIncremental(
     ...emitter.generateConfig(ctx),
     ...emitter.generateTypeSignatures(newSpec, ctx),
     ...emitter.generateTests(newSpec, ctx),
+    ...(emitter.generateManifest?.(newSpec, ctx) ?? []),
   ];
 
   const header = emitter.fileHeader();
@@ -52,6 +59,7 @@ export async function generateIncremental(
     .map((f) => ({
       ...f,
       content: f.path.endsWith('.json') ? f.content : header + '\n\n' + f.content,
+      skipIfExists: f.skipIfExists ?? true,
     }));
 
   if (!options.dryRun) {

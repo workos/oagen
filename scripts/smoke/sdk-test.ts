@@ -13,7 +13,11 @@
 
 import { existsSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const args = process.argv.slice(2);
 
@@ -38,14 +42,13 @@ if (rawResultsIdx !== -1 && forwardedArgs[rawResultsIdx + 1]) {
   forwardedArgs.splice(rawResultsIdx, 2);
 }
 
-// Resolve the SDK runner script
-const sdkScript = `scripts/smoke/sdk-${lang}.ts`;
+// Resolve the SDK runner script relative to this file's directory
+const sdkScript = resolve(__dirname, `sdk-${lang}.ts`);
 if (!existsSync(sdkScript)) {
   console.error(`No smoke runner found for language "${lang}" (expected ${sdkScript})`);
   console.error(`Available runners:`);
-  // List available runners by convention
   const { readdirSync } = await import('node:fs');
-  for (const f of readdirSync('scripts/smoke')) {
+  for (const f of readdirSync(__dirname)) {
     const match = f.match(/^sdk-(.+)\.ts$/);
     if (match && match[1] !== 'test') {
       console.error(`  --lang ${match[1]}`);
@@ -87,7 +90,7 @@ if (sdkPathValue) {
 
 const steps: [string, string[]][] = [
   [sdkScript, forwardedArgs],
-  ['scripts/smoke/diff.ts', diffArgs],
+  [resolve(__dirname, 'diff.ts'), diffArgs],
 ];
 
 for (const [script, scriptArgs] of steps) {

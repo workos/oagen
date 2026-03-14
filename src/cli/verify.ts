@@ -17,6 +17,12 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import * as path from 'node:path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const scriptsDir = path.resolve(__dirname, '..', '..', 'scripts');
 
 const separator = '='.repeat(60);
 
@@ -27,8 +33,9 @@ export async function verifyCommand(opts: {
   apiSurface?: string;
   rawResults?: string;
   smokeConfig?: string;
+  smokeRunner?: string;
 }): Promise<void> {
-  const { spec, lang, output, apiSurface, rawResults, smokeConfig } = opts;
+  const { spec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner } = opts;
 
   let stepNum = 1;
 
@@ -41,7 +48,7 @@ export async function verifyCommand(opts: {
     try {
       execFileSync(
         'npx',
-        ['tsx', 'scripts/verify-compat.ts', '--surface', apiSurface, '--output', output, '--lang', lang],
+        ['tsx', path.join(scriptsDir, 'verify-compat.ts'), '--surface', apiSurface, '--output', output, '--lang', lang],
         { stdio: 'inherit', env: process.env },
       );
       console.log('Compat: passed');
@@ -61,7 +68,7 @@ export async function verifyCommand(opts: {
     console.log(separator);
 
     try {
-      execFileSync('npx', ['tsx', 'scripts/smoke/baseline.ts', '--spec', spec], {
+      execFileSync('npx', ['tsx', path.join(scriptsDir, 'smoke', 'baseline.ts'), '--spec', spec], {
         stdio: 'inherit',
         env: process.env,
       });
@@ -78,9 +85,10 @@ export async function verifyCommand(opts: {
   console.log(`Step ${stepNum}: Smoke test + diff`);
   console.log(separator);
 
+  const smokeScript = smokeRunner ?? path.join(scriptsDir, 'smoke', 'sdk-test.ts');
   const smokeArgs = [
     'tsx',
-    'scripts/smoke/sdk-test.ts',
+    smokeScript,
     '--lang',
     lang,
     '--sdk-path',
