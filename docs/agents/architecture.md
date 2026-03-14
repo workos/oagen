@@ -28,6 +28,6 @@ Use this guide when changing parsing, IR types, orchestration, file writing, or 
 
 - `src/parser/`: OpenAPI to IR
 - `src/engine/`: orchestration, writer, registry, shared engine types
-- `src/emitters/`: language-specific emitters
+- Language-specific emitters live in the separate `oagen-emitters` project (import from `@workos/oagen`)
 - `src/differ/`: incremental diff engine
 - `src/cli/`: CLI entry points

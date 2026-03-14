@@ -47,6 +47,8 @@ npm run smoke -- --lang node --sdk-path ../path/to/sdk --raw-results smoke-resul
 
 A smoke config JSON file lets you customize skip lists, service priority, and service-to-SDK-property mappings. Pass it via `--smoke-config <path>` or the `SMOKE_CONFIG` env var.
 
+To use a custom smoke runner script, pass `--smoke-runner <path>` to `oagen verify` or set `smokeRunners` (a per-language map) in `oagen.config.ts`. The CLI flag takes precedence over the config.
+
 ```json
 {
   "skipOperations": ["operationToSkip"],
@@ -111,11 +113,7 @@ Outputs `smoke-results-spec-baseline.json`.
 
 ### SDK Test (`smoke/sdk-{lang}.ts`)
 
-Each language has a self-contained smoke test script that uses the target language's native HTTP interception to capture wire-level request/response pairs.
-
-```bash
-npm run smoke:sdk:node -- --sdk-path ../path/to/sdk
-```
+Each language has a self-contained smoke test script (in the emitter project) that uses the target language's native HTTP interception to capture wire-level request/response pairs. Run via `oagen verify --lang <language> --output <path>` or with a custom runner via `--smoke-runner`.
 
 Outputs `smoke-results-sdk-{lang}.json`.
 
@@ -211,79 +209,66 @@ Operations present in one result set but absent from the other are tracked as `m
 
 ## Adding a New Language
 
-Use the skill: `/generate-smoke-test <language>` — it walks through HTTP interception strategy, SERVICE_MAP discovery, method resolution, argument construction, and creates a self-contained `scripts/smoke/sdk-{lang}.ts` script.
+Use the skill: `/generate-smoke-test <language>` — it walks through HTTP interception strategy, SERVICE_MAP discovery, method resolution, argument construction, and creates a self-contained `smoke/sdk-{lang}.ts` script in the emitter project.
 
 Each language's smoke test is a single file that:
 
-1. Imports shared infrastructure from `shared.ts` (operation planning, payload generation, ID registry)
+1. Imports shared infrastructure from `@workos/oagen/smoke` (operation planning, payload generation, ID registry)
 2. Sets up HTTP interception native to the target language/SDK
 3. Iterates planned operations, calling SDK methods and capturing exchanges
 4. Writes `smoke-results-sdk-{lang}.json`
 
-The `sdk-test.ts` orchestrator auto-discovers scripts by convention: `--lang ruby` resolves to `scripts/smoke/sdk-ruby.ts`.
+Smoke runners are registered via `smokeRunners` (a per-language map) in `oagen.config.ts` or the `--smoke-runner` CLI flag.
 
 ---
 
-## Verify-and-Fix Loop
+## Spec Update Pipeline
 
-After generating with `oagen generate`, use `oagen verify` to run smoke tests (and optional compat check):
+When a new spec version arrives, regenerate the SDK and verify:
 
 ```bash
-oagen generate --lang {lang} --output {sdk-path} --spec {spec} --namespace {ns}
-oagen verify --lang {lang} --output {sdk-path} --spec {spec}
-
-# With compat verification (Scenario A):
-oagen verify --lang {lang} --output {sdk-path} --spec {spec} \
-  --api-surface api-surface.json
+oagen diff --old v1.yml --new v2.yml --report         # review what changed
+oagen generate --spec v2.yml --lang {lang} --output {sdk-path}
+oagen verify --spec v2.yml --lang {lang} --output {sdk-path}
 ```
 
-If no baseline exists, a spec-only baseline is generated automatically (offline, no API key needed). To use a specific baseline:
+If no baseline exists, `verify` auto-generates a spec-only baseline (offline, no API key needed). To use a specific baseline:
 
 ```bash
 oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.json
 ```
 
-**Exit codes:**
+**Exit codes from `oagen verify`:**
 
-| Code | Meaning                                                                    | Structured output           |
-| ---- | -------------------------------------------------------------------------- | --------------------------- |
-| 0    | Clean — all checks passed                                                  | —                           |
-| 1    | Findings — CRITICAL mismatches, compat violations, or missing operations   | `smoke-diff-findings.json`  |
-| 2    | Compile error — SDK failed type check                                      | `smoke-compile-errors.json` |
-
-**Agent loop:**
-
-```
-while true:
-  oagen generate --lang {lang} --output {sdk-path} --spec {spec}
-  oagen verify --lang {lang} --output {sdk-path} --spec {spec}
-  # exits 0? done
-  # exits 1/2? read findings, fix emitter, re-run
-```
+| Code | Meaning                                                                  | Structured output           |
+| ---- | ------------------------------------------------------------------------ | --------------------------- |
+| 0    | Clean — all checks passed                                                | —                           |
+| 1    | Findings — CRITICAL mismatches, compat violations, or missing operations | `smoke-diff-findings.json`  |
+| 2    | Compile error — SDK failed type check                                    | `smoke-compile-errors.json` |
 
 > **Legacy:** `npm run smoke:loop` still works as an alternative entry point.
 
+## Emitter-Fixing Loop (during /add-language only)
+
+When first building an emitter, generate + verify may fail because the emitter
+doesn't produce correct output yet. Fix the emitter, re-run, repeat until
+verify exits 0. Once the emitter is stable, this loop is no longer needed —
+the spec update pipeline above takes over.
+
 **Remediation guide** (printed on failure, also here for reference):
 
-| Finding                          | Fix location                                                            |
-| -------------------------------- | ----------------------------------------------------------------------- |
-| "HTTP method differs"            | `src/emitters/{lang}/resources.ts` — method generation                  |
-| "Request path structure differs" | `src/emitters/{lang}/resources.ts` — path interpolation                 |
-| "Query parameters differ"        | `src/emitters/{lang}/resources.ts` — query param serialization          |
-| "Request body key sets differ"   | `src/emitters/{lang}/models.ts` or `resources.ts` — model serialization |
-| "Skipped in SDK"                 | `scripts/smoke/sdk-{lang}.ts` — method resolution                       |
-| "Missing from SDK"               | `scripts/smoke/sdk-{lang}.ts` — method mapping                          |
+| Finding                          | Fix location                                                              |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| "HTTP method differs"            | Emitter's `resources.ts` — method generation (in emitter project)         |
+| "Request path structure differs" | Emitter's `resources.ts` — path interpolation (in emitter project)        |
+| "Query parameters differ"        | Emitter's `resources.ts` — query param serialization (in emitter project) |
+| "Request body key sets differ"   | Emitter's `models.ts` or `resources.ts` — model serialization             |
+| "Skipped in SDK"                 | Smoke runner `smoke/sdk-{lang}.ts` — method resolution                    |
+| "Missing from SDK"               | Smoke runner `smoke/sdk-{lang}.ts` — method mapping                       |
 
-**Mechanical gates:**
+**Cross-session handoff:** The findings file (`smoke-diff-findings.json`) is the
+primary handoff state. It includes CRITICAL/WARNING/INFO findings, `missingFromSdk`
+and `missingFromRaw` operation lists, a `configuration` block, and a `coverage`
+summary. Read it to see what's broken, fix those emitter files, re-run.
 
-- `diff.ts` exits 1 on CRITICALs, `sdk-test.ts` propagates that exit code
-- `diff.ts` always writes `smoke-diff-findings.json` — structured findings that survive across conversations
-
-**Cross-session handoff:** If context gets noisy after many iterations, start a fresh conversation. The findings file is the primary handoff state — it includes CRITICAL/WARNING/INFO findings plus `missingFromSdk` and `missingFromRaw` operation lists, a `configuration` block (listing `skipOperations` and `skipServices` sets), and a `coverage` summary (total operations, exercised count, skip count, percentages). Read it to see what's broken, fix those emitter files, re-run the loop.
-
-For offline iteration (no API key needed), `oagen verify` auto-generates a spec-only baseline when no raw baseline exists. Or generate one explicitly:
-
-```bash
-npm run smoke:baseline
-oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-spec-baseline.json
-```
+See [Workflows](../../docs/architecture/workflows.md) for the full workflow diagram.

@@ -2,6 +2,23 @@
 
 Use this guide when changing behavior, generated output, or emitter coverage.
 
+## Quick Start: Spec Update Pipeline
+
+When a new spec version arrives:
+
+```bash
+oagen diff --old v1.yml --new v2.yml --report         # review what changed
+oagen generate --spec v2.yml --lang node --output ./sdk
+oagen verify --spec v2.yml --lang node --output ./sdk
+
+# With custom smoke runner
+oagen verify --spec v2.yml --lang node --output ./sdk --smoke-runner ./my-runner.ts
+```
+
+Exit 0 = all passed. Exit 1 = findings (`smoke-diff-findings.json`). Exit 2 = compile error (`smoke-compile-errors.json`).
+
+See [Workflows](../architecture/workflows.md) for the full workflow diagram (setup vs. ongoing).
+
 ## Unit And Integration Tests
 
 - `test/` mirrors `src/`
@@ -19,6 +36,7 @@ Compat verification catches regressions like renamed methods, changed parameter 
 
 - Compat extraction: `npm run compat:extract -- --sdk-path <path> --lang <language>`
 - Compat verification: `npm run verify:compat -- --surface api-surface.json --output <path> --lang <language>`
+- Unified verify (includes compat): `oagen verify --api-surface api-surface.json --lang <language> --output <path>`
 - Run `/verify-compat <language>` for the full guided workflow
 - See `docs/architecture/extractor-contract.md` for building new language extractors
 
@@ -26,11 +44,13 @@ Compat verification catches regressions like renamed methods, changed parameter 
 
 Smoke scripts live under `scripts/smoke/`.
 
+- **Verify (recommended):** `oagen verify --lang <language> --output <path>` (after `oagen generate`)
+- **Custom smoke runner:** `oagen verify --lang <language> --output <path> --smoke-runner ./my-runner.ts` or set `smokeRunners` (per-language map) in `oagen.config.ts`
 - General smoke runner: `npm run smoke`
 - Raw baseline generation: `npm run smoke:raw`
-- Node SDK smoke test: `npm run smoke:sdk:node`
+- Spec-only baseline: `npm run smoke:baseline`
+- Per-language SDK smoke tests: registered via `smokeRunners` in `oagen.config.ts`
 - Diffing: `npm run smoke:diff`
-- Baseline generation: `npm run smoke:baseline`
 - Validation: `npm run smoke:validate`
 
 ## Source Of Truth

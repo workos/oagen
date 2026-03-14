@@ -8,7 +8,7 @@ Emitters transform IR into `GeneratedFile[]`. Keep generator methods pure: no I/
 
 ## Common Emitter Layout
 
-Most emitters in `src/emitters/{lang}/` are organized around:
+Emitters live in the separate `oagen-emitters` project and import types from `@workos/oagen`. Most emitters are organized around:
 
 - `index.ts`: emitter entry point
 - `type-map.ts`: `TypeRef` to target-language type mapping
@@ -55,11 +55,13 @@ When regenerating an SDK for a language that already has a published SDK, verify
 3. Verify the generated output against the baseline (`npm run verify:compat`)
 4. If violations exist, fix the emitter and regenerate — loop mode (`--loop`) automates this cycle
 
+The `--api-surface` flag is supported by both `oagen generate` and `oagen diff` (for incremental generation with compat overlay).
+
 Run `/generate-extractor <language>` to scaffold the extractor, then `/verify-compat <language>` for the full guided workflow.
 
 ## Source Of Truth
 
-- Per-language design docs: `docs/sdk-designs/{language}.md`
+- Per-language design docs: `docs/{language}.md` in the emitter project
 - Extractor contract: `docs/architecture/extractor-contract.md`
 - Create a new emitter: `/generate-emitter <language>`
 - Create a new extractor: `/generate-extractor <language>`

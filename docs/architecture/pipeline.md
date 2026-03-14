@@ -94,11 +94,15 @@ Every generator method receives:
 
 ## Emitter Registry (`src/engine/registry.ts`)
 
-Simple map from language name → `Emitter` instance. CLI commands register emitters at startup:
+Simple map from language name → `Emitter` instance. Emitters are registered at startup via `oagen.config.ts`:
 
 ```typescript
-registerEmitter(rubyEmitter); // "ruby"
-registerEmitter(nodeEmitter); // "node"
+// In oagen.config.ts (emitter project)
+import { nodeEmitter, rubyEmitter } from "./src/index.js";
+
+export default {
+  emitters: [nodeEmitter, rubyEmitter],
+};
 ```
 
 ## Diff Engine (`src/differ/`)

@@ -20,7 +20,10 @@
   },
   "files": [
     "dist",
-    "scripts"
+    "scripts",
+    "skills",
+    ".claude-plugin",
+    "docs"
   ],
   "scripts": {
     "build": "tsup",

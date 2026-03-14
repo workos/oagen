@@ -7,12 +7,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '../../src/cli/index.ts');
 const FIXTURES = resolve(__dirname, '../fixtures');
 
-function run(args: string[], env?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
+function run(
+  args: string[],
+  env?: Record<string, string>,
+  opts?: { cwd?: string },
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile(
       'npx',
       ['tsx', CLI, ...args],
       {
+        cwd: opts?.cwd,
         env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined, DOTENV_CONFIG_PATH: '/dev/null' },
       },
       (error, stdout, stderr) => {
@@ -70,16 +75,20 @@ describe('CLI', () => {
     });
 
     it('--dry-run lists files without writing to disk', async () => {
-      const result = await run([
-        'generate',
-        '--spec',
-        `${FIXTURES}/minimal.yml`,
-        '--lang',
-        'node',
-        '--output',
-        '/tmp/oagen-dry-run-test',
-        '--dry-run',
-      ]);
+      const result = await run(
+        [
+          'generate',
+          '--spec',
+          `${FIXTURES}/minimal.yml`,
+          '--lang',
+          'node',
+          '--output',
+          '/tmp/oagen-dry-run-test',
+          '--dry-run',
+        ],
+        undefined,
+        { cwd: FIXTURES },
+      );
 
       expect(result.code).toBe(0);
       expect(result.stdout).toMatch(/\.ts/);

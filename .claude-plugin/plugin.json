@@ -1,0 +1,12 @@
+{
+  "name": "oagen",
+  "version": "0.0.1",
+  "description": "Skills for building language emitters, extractors, and smoke tests for the oagen OpenAPI SDK generator",
+  "author": {
+    "name": "WorkOS",
+    "url": "https://github.com/workos"
+  },
+  "repository": "https://github.com/workos/oagen",
+  "license": "MIT",
+  "keywords": ["openapi", "sdk", "codegen", "emitter"]
+}

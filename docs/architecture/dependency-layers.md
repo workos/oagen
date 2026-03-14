@@ -7,29 +7,23 @@ Layer 0: ir/types        ← Pure type definitions, no imports from other layers
 Layer 1: utils           ← Only imports from Layer 0
 Layer 2: parser          ← Imports from Layers 0-1
 Layer 3: engine, differ  ← Imports from Layers 0-1 (differ may also import engine/types)
-Layer 4: emitters        ← Imports from Layers 0-1, 3
-Layer 5: cli             ← Imports from Layers 0-4
+Layer 4: cli             ← Imports from Layers 0-3
 ```
 
 ## Allowed Imports
 
-| File in...      | Can import from...                                  | Cannot import from...         |
-| --------------- | --------------------------------------------------- | ----------------------------- |
-| `src/ir/`       | (nothing in src/)                                   | everything                    |
-| `src/utils/`    | `src/ir/`                                           | parser, engine, emitters, cli |
-| `src/parser/`   | `src/ir/`, `src/utils/`                             | engine, emitters, cli         |
-| `src/engine/`   | `src/ir/`, `src/utils/`                             | parser, emitters, cli         |
-| `src/differ/`   | `src/ir/`, `src/utils/`, `src/engine/` (types only) | parser, emitters, cli         |
-| `src/emitters/` | `src/ir/`, `src/utils/`, `src/engine/`              | parser, cli, other emitters   |
-| `src/cli/`      | anything in `src/`                                  | (top level, can import all)   |
+| File in...    | Can import from...                                  | Cannot import from...         |
+| ------------- | --------------------------------------------------- | ----------------------------- |
+| `src/ir/`     | (nothing in src/)                                   | everything                    |
+| `src/utils/`  | `src/ir/`                                           | parser, engine, emitters, cli |
+| `src/parser/` | `src/ir/`, `src/utils/`                             | engine, emitters, cli         |
+| `src/engine/` | `src/ir/`, `src/utils/`                             | parser, emitters, cli         |
+| `src/differ/` | `src/ir/`, `src/utils/`, `src/engine/` (types only) | parser, emitters, cli         |
+| `src/cli/`    | anything in `src/`                                  | (top level, can import all)   |
 
-## Key Constraint: Emitters Cannot Import Parser
+## Emitters Are External
 
-Emitters only receive IR nodes via their method signatures. They never call the parser directly. This keeps them pure and testable.
-
-## Key Constraint: Emitters Cannot Import Other Emitters
-
-Each emitter is self-contained. No cross-emitter dependencies. This allows independent development and testing of each language target.
+Emitters live in a separate project (`oagen-emitters`) and import from `@workos/oagen`. They receive IR nodes via their method signatures and never call the parser directly. Each emitter is self-contained with no cross-emitter dependencies.
 
 ## Enforcement
 

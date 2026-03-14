@@ -8,6 +8,9 @@ arguments:
   - name: sdk_design_path
     description: Path to an SDK_DESIGN.md or existing SDK to use as the reference for idiomatic patterns (optional)
     required: false
+  - name: project
+    description: Path to the emitter project (overrides oagen.config.ts emitterProject)
+    required: false
 ---
 
 # /generate-emitter
@@ -16,20 +19,33 @@ Scaffold a complete language emitter for oagen that translates the intermediate 
 
 ## Overview
 
-oagen has a plugin architecture for code generation. Each target language is an **emitter** — a TypeScript module that implements the `Emitter` interface from `src/engine/types.ts`. An emitter receives parsed IR nodes (models, enums, services, etc.) and returns `GeneratedFile[]` — arrays of `{ path, content }` pairs. The engine orchestrator calls each emitter method, prepends a file header, and writes the results to disk.
+oagen has a plugin architecture for code generation. Each target language is an **emitter** — a TypeScript module that implements the `Emitter` interface. An emitter receives parsed IR nodes (models, enums, services, etc.) and returns `GeneratedFile[]` — arrays of `{ path, content }` pairs. The engine orchestrator calls each emitter method, prepends a file header, and writes the results to disk.
 
-The Ruby emitter at `src/emitters/ruby/` is the reference implementation. Use it as a structural template, but generate **idiomatic** code for the target language.
+Emitters live in **external projects** (not inside the oagen core repo). Emitters import all oagen types from `@workos/oagen` and register via `oagen.config.ts` in their project.
+
+## Resolve Emitter Project
+
+Before doing anything else, determine the emitter project path:
+
+1. If the `project` argument was provided, use that.
+2. Otherwise, read `oagen.config.ts` in the current directory and check for `emitterProject`.
+3. If neither exists, use `AskUserQuestion` to ask: "Where is your emitter project? (path relative to this repo, e.g. `../my-emitters`)"
+
+All generated files go into this project path. Store it for use in all subsequent steps.
+
+The **reference emitter** is at `{emitterProject}/src/ruby/` (if it exists). If the emitter project doesn't have a Ruby emitter, study the Node emitter at `{emitterProject}/src/node/` instead.
 
 ## Prerequisites
 
 Before starting, read and understand these files:
 
-1. **`src/engine/types.ts`** — The `Emitter` interface contract
-2. **`src/ir/types.ts`** — The IR type system (`ApiSpec`, `Model`, `Enum`, `Service`, `Operation`, `TypeRef`, etc.)
-3. **`src/emitters/ruby/`** — The reference emitter (study the structure, not the Ruby-specific output)
-4. **`src/engine/registry.ts`** — How emitters are registered
-5. **`src/cli/generate.ts`** — How emitters are wired into the CLI
-6. **`src/cli/diff.ts`** — Also registers emitters for the diff command
+1. **oagen core types** — Import everything from `@workos/oagen`:
+   - `Emitter`, `EmitterContext`, `GeneratedFile` — the emitter interface contract
+   - `ApiSpec`, `Model`, `Enum`, `Service`, `Operation`, `TypeRef` — the IR type system
+   - `planOperation`, `OperationPlan` — operation analysis helpers
+   - `toPascalCase`, `toSnakeCase`, `toCamelCase`, `toKebabCase`, `toUpperSnakeCase` — naming utilities
+2. **`{emitterProject}/src/ruby/`** — The reference emitter (study the structure, not the Ruby-specific output)
+3. **`oagen.config.ts`** (in the emitter project) — How emitters are registered via the plugin system
 
 If an `sdk_design_path` argument is provided, read that file to understand the target language's idiomatic patterns, naming conventions, and architecture. If a path to an existing SDK repo is given instead, explore its structure to extract patterns.
 
@@ -39,7 +55,7 @@ Before writing any code, you must ask the user to confirm the tooling and patter
 
 ### 0a. Load Known Defaults
 
-Check if a `docs/sdk-designs/{language}.md` already exists for this language. If it does, its structural guidelines section is the source of truth — confirm with the user whether any changes are needed. If no design doc exists yet, propose sensible choices based on your knowledge of the language ecosystem.
+Check if a `docs/{language}.md` already exists in the emitter project. If it does, its structural guidelines section is the source of truth — confirm with the user whether any changes are needed. If no design doc exists yet, propose sensible choices based on your knowledge of the language ecosystem.
 
 ### 0b. Present the Structural Guidelines Table
 
@@ -76,7 +92,7 @@ The user may confirm all at once, override specific categories, or provide a com
 
 ### 0c. Create SDK Design Document
 
-With the structural guidelines confirmed, write the full SDK design document to `docs/sdk-designs/{language}.md`. This document is the **single source of truth** for the emitter, including the confirmed structural guidelines table.
+With the structural guidelines confirmed, write the full SDK design document to `docs/{language}.md` **in the emitter project**.
 
 If an `sdk_design_path` argument was provided, read that file to extract idiomatic patterns. Otherwise, use the confirmed structural guidelines plus your knowledge of the language to determine:
 
@@ -88,7 +104,7 @@ If an `sdk_design_path` argument was provided, read that file to extract idiomat
 6. **Nullable/optional types**: How are they expressed?
 7. **Path interpolation**: How are format strings done? (f-strings, fmt.Sprintf, String.format)
 
-The design doc must include these sections (see `docs/sdk-designs/ruby.md` for a worked example):
+The design doc must include these sections (see `{emitterProject}/docs/ruby.md` for a worked example):
 
 - Architecture overview
 - Naming conventions (OpenAPI → target language)
@@ -104,10 +120,10 @@ The design doc must include these sections (see `docs/sdk-designs/ruby.md` for a
 
 ## Step 1: Scaffold Emitter Files
 
-Create the following files under `src/emitters/{language}/`:
+Create the following files under `src/{language}/` **in the emitter project**:
 
 ```
-src/emitters/{language}/
+{project}/src/{language}/
 ├── index.ts          # Emitter entry point, implements Emitter interface
 ├── type-map.ts       # IR TypeRef → target language type string mapping
 ├── naming.ts         # Target-language naming conventions
@@ -130,6 +146,23 @@ Not every language needs every file, and some languages may need **additional** 
 - The Node emitter adds a `common.ts` file for shared utilities like pagination, wired through `generateConfig()` — other languages may need similar shared utility generators
 
 Omit files that don't apply, and add language-specific utility files as needed. The `index.ts` must still implement all `Emitter` interface methods (return `[]` for inapplicable ones).
+
+### Import Convention
+
+All emitter files import oagen types from the `@workos/oagen` package:
+
+```typescript
+import type { Model, TypeRef, Operation } from "@workos/oagen";
+import type { EmitterContext, GeneratedFile } from "@workos/oagen";
+import { planOperation, toCamelCase, toKebabCase } from "@workos/oagen";
+```
+
+Local imports within the emitter use relative paths:
+
+```typescript
+import { mapTypeRef } from "./type-map.js";
+import { className, fileName } from "./naming.js";
+```
 
 ## Step 2: Implement Type Mapping (`type-map.ts`)
 
@@ -160,7 +193,7 @@ If the language has a separate type annotation system, also export mapping funct
 
 ### Reference: Ruby Type Map
 
-Study `src/emitters/ruby/type-map.ts` for the pattern. It exports `mapTypeRef` (for Ruby source), `mapTypeRefForRbs` (for RBS signatures), and `mapTypeRefForSorbet` (for Sorbet RBI).
+Study `{emitterProject}/src/ruby/type-map.ts` for the pattern. It exports `mapTypeRef` (for Ruby source), `mapTypeRefForRbs` (for RBS signatures), and `mapTypeRefForSorbet` (for Sorbet RBI).
 
 ## Step 3: Implement Naming Conventions (`naming.ts`)
 
@@ -195,13 +228,13 @@ export function modulePath(
 | `listUsers` (method)  | `list_users`      | `list_users`      | `ListUsers`       | `listUsers`      |
 | `user_id` (field)     | `user_id`         | `user_id`         | `UserID`          | `userId`         |
 
-Use the shared utilities from `src/utils/naming.ts` (`toPascalCase`, `toSnakeCase`, `toCamelCase`, `toKebabCase`, `toUpperSnakeCase`) as building blocks.
+Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `toCamelCase`, `toKebabCase`, `toUpperSnakeCase`) as building blocks.
 
 ## Step 4: Implement Each Generator
 
 For each generator file, follow this pattern:
 
-1. **Read the corresponding Ruby file** to understand the structure
+1. **Read the corresponding Ruby file** in `{emitterProject}/src/ruby/` to understand the structure
 2. **Translate the output patterns** to the target language's idioms
 3. **Use `GeneratedFile[]` return type** — each function receives IR nodes + `EmitterContext` and returns file path/content pairs
 
@@ -289,7 +322,7 @@ Wire everything together by implementing the `Emitter` interface. Note that:
 - Return `[]` for inapplicable methods (e.g., `generateTypeSignatures` for languages with inline types)
 
 ```typescript
-import type { Emitter } from "../../engine/types.js";
+import type { Emitter } from '@workos/oagen';
 // ... import all generators ...
 
 export const {language}Emitter: Emitter = {
@@ -308,28 +341,30 @@ export const {language}Emitter: Emitter = {
 
 ## Step 6: Register Emitter
 
-Add the emitter to **both** CLI entry points:
-
-**`src/cli/generate.ts`:**
+Add the emitter to the project's `oagen.config.ts`:
 
 ```typescript
-import { {language}Emitter } from "../emitters/{language}/index.js";
-registerEmitter({language}Emitter);
+import { {language}Emitter } from './src/{language}/index.js';
+import type { OagenConfig } from '@workos/oagen';
+
+const config: OagenConfig = {
+  emitters: [/* existing emitters, */ {language}Emitter],
+};
+export default config;
 ```
 
-**`src/cli/diff.ts`:**
+Also add a re-export to the project's barrel `src/index.ts`:
 
 ```typescript
-import { {language}Emitter } from "../emitters/{language}/index.js";
-registerEmitter({language}Emitter);
+export { {language}Emitter } from './{language}/index.js';
 ```
 
 ## Step 7: Create Tests
 
-Create test files under `test/emitters/{language}/`:
+Create test files under `test/{language}/` **in the emitter project**:
 
 ```
-test/emitters/{language}/
+{project}/test/{language}/
 ├── models.test.ts      # Model generation tests
 ├── enums.test.ts       # Enum generation tests
 ├── resources.test.ts   # Resource generation tests
@@ -348,6 +383,15 @@ For each generator, test:
 4. **Content snapshots** — use `toMatchInlineSnapshot()` for at least one representative case per generator
 5. **Multiple items** — generates separate files for multiple models/services
 6. **Edge cases** — nullable, union, nested model refs, enum refs, arrays of models
+
+### Import Convention for Tests
+
+```typescript
+import { describe, it, expect } from "vitest";
+import type { EmitterContext } from "@workos/oagen";
+import type { Model, ApiSpec } from "@workos/oagen";
+import { generateModels } from "../../src/{language}/models.js";
+```
 
 ### Shared Test Context
 
@@ -375,17 +419,18 @@ const ctx: EmitterContext = {
 Run the following checks after implementation:
 
 ```bash
-# Type check — no TypeScript errors
-npx tsc --noEmit
+# In the emitter project:
 
-# All tests pass (existing + new)
+# All tests pass
 npx vitest run
 
-# Build succeeds
-npx tsup
+# In the oagen core repo:
 
-# Structural linter — verify dependency layers, naming, file size, emitter exports
-npm run lint:structure
+# Type check
+npx tsc --noEmit
+
+# Build
+npx tsup
 
 # Smoke test — generate from Petstore fixture
 npx tsx src/cli/index.ts generate \
@@ -413,16 +458,15 @@ After validation, produce this report:
 
 ```
 === Emitter: {language} ===
-Files created:
-  src/emitters/{language}/*.ts    — {N} files ({N} lines)
-  test/emitters/{language}/*.ts   — {N} files ({N} lines)
-  docs/sdk-designs/{language}.md  — SDK design document
+Files created (in {project}):
+  src/{language}/*.ts    — {N} files ({N} lines)
+  test/{language}/*.ts   — {N} files ({N} lines)
+  docs/{language}.md     — SDK design document
 
 Validation:
-  Type check:       PASS/FAIL
   Tests:            {N} passed, {N} failed
+  Type check:       PASS/FAIL
   Build:            PASS/FAIL
-  Structural lint:  PASS/FAIL
   Smoke test:       {N} files generated
   Determinism:      PASS/FAIL
   Linter:           PASS/FAIL/N/A
@@ -442,7 +486,7 @@ Generated SDK structure:
 1. **Don't copy Ruby idioms** — `frozen_string_literal`, `module ... end` wrapping, symbol enums, etc. are Ruby-specific. Use the target language's conventions.
 2. **Don't forget path interpolation** — each language handles format strings differently (`%s`, `f"{id}"`, `fmt.Sprintf`, `${id}`, etc.)
 3. **Keep generators pure** — they receive IR and return strings. No file I/O, no side effects.
-4. **Match the existing test patterns** — look at `test/emitters/ruby/*.test.ts` for the test structure conventions used in this project.
+4. **Match the existing test patterns** — look at `{emitterProject}/test/ruby/*.test.ts` for the test structure conventions used in this project.
 5. **Handle empty inputs** — emitter methods may receive `[]` for models/enums/services. Return `[]` without errors.
 6. **Namespace everywhere** — the `ctx.namespacePascal` and `ctx.namespace` must appear in all generated code (module names, class prefixes, import paths).
 

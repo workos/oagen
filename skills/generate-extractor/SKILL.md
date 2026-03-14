@@ -8,6 +8,9 @@ arguments:
   - name: sdk_path
     description: Path to an existing SDK to use as the reference for discovering public surface patterns (optional — used for exploration, not modification)
     required: false
+  - name: project
+    description: Path to the emitter project (overrides oagen.config.ts emitterProject)
+    required: false
 ---
 
 # /generate-extractor
@@ -22,23 +25,43 @@ The compat verification pipeline is:
 Live SDK → Extractor → ApiSurface JSON → Differ ← Generated SDK → Violations
 ```
 
-Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface from `src/compat/types.ts` and is registered in the extraction script.
+Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface and is registered via `oagen.config.ts` in the emitter project.
 
-The Node extractor at `src/compat/extractors/node.ts` is the reference implementation. Use it as a structural template, but implement language-appropriate analysis for the target language.
+The Node extractor in the oagen core package is the reference implementation. Use it as a structural template, but implement language-appropriate analysis for the target language.
+
+## Resolve oagen Core Path
+
+Some steps below reference files in the oagen core package. Resolve the path once:
+
+1. If `node_modules/@workos/oagen/` exists, use that as `{oagen}`.
+2. If the current directory has `src/engine/types.ts`, you're in the oagen repo — use `.` as `{oagen}`.
+3. Otherwise, ask: "Where is the @workos/oagen package installed?"
+
+## Resolve Emitter Project
+
+Before doing anything else, determine the emitter project path:
+
+1. If the `project` argument was provided, use that.
+2. Otherwise, read `oagen.config.ts` in the current directory and check for `emitterProject`.
+3. If neither exists, use `AskUserQuestion` to ask: "Where is your emitter project? (path relative to this repo, e.g. `../my-emitters`)"
+
+Store it for use in all subsequent steps.
 
 ## Prerequisites
 
 Before starting, read and understand these files:
 
-1. **`src/compat/types.ts`** — The `Extractor` interface, `ApiSurface` type, and all sub-types (`ApiClass`, `ApiMethod`, `ApiParam`, `ApiProperty`, `ApiInterface`, `ApiField`, `ApiTypeAlias`, `ApiEnum`)
-2. **`src/compat/extractors/node.ts`** — The reference extractor (study the structure, not the TypeScript-specific analysis)
-3. **`src/compat/extractor-registry.ts`** — How extractors are registered (`registerExtractor` / `getExtractor`)
-4. **`scripts/compat-extract.ts`** — The CLI script that imports and registers extractors
-5. **`test/compat/extractors/node.test.ts`** — The reference test suite (study the test structure and assertions)
-6. **`test/fixtures/sample-sdk/`** — The Node fixture SDK (study the structure to understand what a fixture looks like)
-7. **`docs/architecture/extractor-contract.md`** — The full contract specification with language-specific strategies
+1. **oagen core types** — Import from `@workos/oagen`:
+   - `Extractor`, `ApiSurface`, `ApiClass`, `ApiMethod`, `ApiParam`, `ApiProperty`, `ApiInterface`, `ApiField`, `ApiTypeAlias`, `ApiEnum` — the extractor interface and surface types
+   - `registerExtractor`, `getExtractor` — extractor registry
+2. **`{oagen}/src/compat/extractors/node.ts`** — The reference extractor (study the structure, not the TypeScript-specific analysis)
+3. **`{oagen}/test/compat/extractors/node.test.ts`** — The reference test suite
+4. **`{oagen}/test/fixtures/sample-sdk/`** — The Node fixture SDK
+5. **`{oagen}/docs/architecture/extractor-contract.md`** — The full contract specification with language-specific strategies
 
 If an `sdk_path` argument is provided, explore that SDK to understand its public surface patterns (entry points, export mechanisms, type annotation files, documentation conventions).
+
+Extractors live in the **emitter project** alongside the emitters. This keeps language-specific code together. The extractor is registered via the project's `oagen.config.ts`.
 
 ## Step 0: Determine Language-Specific Analysis Strategy
 
@@ -58,7 +81,7 @@ Each language has different mechanisms for declaring public API surfaces. Determ
 
 ### 0b. Determine Implementation Strategy
 
-Extractors run as TypeScript code inside the oagen codebase. For non-TypeScript/JavaScript SDKs, the extractor typically needs to:
+Extractors run as TypeScript code. For non-TypeScript/JavaScript SDKs, the extractor typically needs to:
 
 1. **Native analysis (preferred)**: Use a TypeScript/JavaScript parser or AST library that can analyze the target language (e.g., a Ruby parser written in JS, Python AST parser in JS)
 2. **Subprocess delegation**: Shell out to a target-language script that performs the analysis and returns JSON. The TypeScript extractor wrapper calls `child_process.execSync()` with a helper script.
@@ -72,7 +95,7 @@ If the extractor needs npm packages (e.g., a Ruby parser), or target-language to
 
 ## Step 1: Create the Extractor
 
-Create `src/compat/extractors/{language}.ts`.
+Create `src/compat/extractors/{language}.ts` **in the emitter project**.
 
 ### Required Shape
 
@@ -88,7 +111,7 @@ import type {
   ApiField,
   ApiTypeAlias,
   ApiEnum,
-} from '../types.js';
+} from '@workos/oagen';
 
 export const {language}Extractor: Extractor = {
   language: '{language}',
@@ -118,7 +141,7 @@ export const {language}Extractor: Extractor = {
 
 1. **Deterministic output** — Running the extractor twice on the same SDK must produce identical JSON. Sort all record keys and array members consistently. Use `sortRecord()` (see the Node extractor's helper).
 
-2. **Public surface only** — Extract only public/exported symbols. Skip private methods, internal modules, and unexported types. Each language defines "public" differently:
+2. **Public surface only** — Extract only public/exported symbols. Skip private methods, internal modules, and unexported utilities. Each language defines "public" differently:
    - **Node**: Exported from entry point
    - **Ruby**: Not marked `private` or `protected`; or listed in public API annotations
    - **Python**: Listed in `__all__`, or non-underscore-prefixed names
@@ -138,7 +161,7 @@ export const {language}Extractor: Extractor = {
 
 ### Language-Specific Strategies
 
-Reference `docs/architecture/extractor-contract.md` for detailed strategies per language. Key patterns:
+Reference `{oagen}/docs/architecture/extractor-contract.md` for detailed strategies per language. Key patterns:
 
 **Ruby:**
 
@@ -168,18 +191,22 @@ Reference `docs/architecture/extractor-contract.md` for detailed strategies per 
 
 ## Step 2: Register the Extractor
 
-Add the new extractor's import and registration to `scripts/compat-extract.ts`:
+Add the extractor to the project's `oagen.config.ts`:
 
 ```typescript
-import { {language}Extractor } from '../src/compat/extractors/{language}.js';
-registerExtractor({language}Extractor);
-```
+import { {language}Extractor } from './src/compat/extractors/{language}.js';
+import type { OagenConfig } from '@workos/oagen';
 
-This is the only registration point — the extraction script imports all known extractors at startup.
+const config: OagenConfig = {
+  emitters: [/* ... */],
+  extractors: [{language}Extractor],
+};
+export default config;
+```
 
 ## Step 3: Create a Fixture SDK
 
-Create a minimal but representative fixture SDK at `test/fixtures/sample-sdk-{language}/`. The fixture must include:
+Create a minimal but representative fixture SDK at `test/fixtures/sample-sdk-{language}/` **in the emitter project**. The fixture must include:
 
 1. **A client class** with at least 3 methods (list, get, delete) demonstrating:
    - Required and optional parameters
@@ -191,25 +218,13 @@ Create a minimal but representative fixture SDK at `test/fixtures/sample-sdk-{la
 5. **A clear entry point** that re-exports all public symbols
 6. **Properties** — at least one readonly property on the client class
 
-The fixture should mirror the Node fixture at `test/fixtures/sample-sdk/` in terms of what it tests, but use the target language's idioms. Read the Node fixture files to understand the expected surface:
-
-- `SampleClient` class with `getOrganization(id)`, `listOrganizations(limit?)`, `deleteOrganization(id)` methods
-- `Organization` interface with `id`, `name`, `status` fields
-- `ClientOptions` interface with `apiKey` (required), `baseUrl` (optional)
-- `ListResponse<T>` generic interface
-- `Status` enum with `Active`/`Inactive` members
-- `StatusType` type alias
-- `ExtendedClient` subclass with `createOrganization(name)` method
-- `baseUrl` readonly property on `SampleClient`
-- Barrel export from entry point
+The fixture should mirror the Node fixture at `{oagen}/test/fixtures/sample-sdk/` in terms of what it tests, but use the target language's idioms.
 
 ## Step 4: Create Tests
 
-Create `test/compat/extractors/{language}.test.ts` following the test structure in `test/compat/extractors/node.test.ts`.
+Create `test/compat/extractors/{language}.test.ts` **in the emitter project**.
 
 ### Required Test Cases
-
-Every extractor test suite must include:
 
 ```typescript
 import { describe, it, expect } from 'vitest';
@@ -234,67 +249,38 @@ describe('{language}Extractor', () => {
 });
 ```
 
-Adapt test assertions to the target language's conventions. For example:
-
-- Ruby: method names are snake_case (`get_organization` not `getOrganization`)
-- Python: method names are snake_case, type hints differ from TypeScript
-- Go: method names are PascalCase, no optional params (use option structs)
-
-Use `toMatchObject` for partial assertions and `toMatchInlineSnapshot()` for at least one representative snapshot per category.
+Adapt test assertions to the target language's conventions. Use `toMatchObject` for partial assertions and `toMatchInlineSnapshot()` for at least one representative snapshot per category.
 
 ## Step 5: Validate
 
 Run the following checks after implementation:
 
 ```bash
-# Type check — no TypeScript errors
-npx tsc --noEmit
+# In the emitter project:
 
-# All tests pass (existing + new)
+# All tests pass
 npx vitest run
 
-# Build succeeds
-npx tsup
-
-# Structural linter — verify dependency layers
-npm run lint:structure
-
 # Manual extraction test — run against the fixture
-npx tsx scripts/compat-extract.ts \
-  --sdk-path test/fixtures/sample-sdk-{language} \
-  --lang {language} \
-  --output /tmp/test-{language}-surface.json
+npx tsx -e "
+  import { {language}Extractor } from './src/compat/extractors/{language}.js';
+  const surface = await {language}Extractor.extract('test/fixtures/sample-sdk-{language}');
+  console.log(JSON.stringify(surface, null, 2));
+" > /tmp/test-{language}-surface.json
 
-# Inspect the output — verify it looks correct
-cat /tmp/test-{language}-surface.json | head -50
+# Inspect the output
+head -50 /tmp/test-{language}-surface.json
 
 # Determinism — extracting twice produces identical output
-npx tsx scripts/compat-extract.ts \
-  --sdk-path test/fixtures/sample-sdk-{language} \
-  --lang {language} \
-  --output /tmp/test-{language}-surface-2.json
+npx tsx -e "
+  import { {language}Extractor } from './src/compat/extractors/{language}.js';
+  const surface = await {language}Extractor.extract('test/fixtures/sample-sdk-{language}');
+  console.log(JSON.stringify(surface, null, 2));
+" > /tmp/test-{language}-surface-2.json
 diff /tmp/test-{language}-surface.json /tmp/test-{language}-surface-2.json
 ```
 
-If an `sdk_path` argument was provided, also test against the real SDK:
-
-```bash
-npx tsx scripts/compat-extract.ts \
-  --sdk-path {sdk_path} \
-  --lang {language} \
-  --output /tmp/real-{language}-surface.json
-
-# Verify non-empty and reasonable
-cat /tmp/real-{language}-surface.json | python3 -c "
-import json, sys
-s = json.load(sys.stdin)
-print(f'Classes: {len(s[\"classes\"])}')
-print(f'Interfaces: {len(s[\"interfaces\"])}')
-print(f'Type aliases: {len(s[\"typeAliases\"])}')
-print(f'Enums: {len(s[\"enums\"])}')
-print(f'Export files: {len(s[\"exports\"])}')
-"
-```
+If an `sdk_path` argument was provided, also test against the real SDK.
 
 ## Step 6: Verification Report
 
@@ -302,19 +288,16 @@ After validation, produce this report:
 
 ```
 === Extractor: {language} ===
-Files created:
+Files created (in {project}):
   src/compat/extractors/{language}.ts          — extractor implementation
   test/compat/extractors/{language}.test.ts    — test suite
   test/fixtures/sample-sdk-{language}/         — fixture SDK ({N} files)
 
 Modified:
-  scripts/compat-extract.ts                    — registered new extractor
+  oagen.config.ts                              — registered new extractor
 
 Validation:
-  Type check:       PASS/FAIL
   Tests:            {N} passed, {N} failed
-  Build:            PASS/FAIL
-  Structural lint:  PASS/FAIL
   Fixture extract:  {N} symbols extracted
   Determinism:      PASS/FAIL
   Real SDK extract: {N} symbols / SKIPPED (no sdk_path)

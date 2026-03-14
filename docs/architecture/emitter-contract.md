@@ -30,7 +30,7 @@ interface GeneratedFile {
   path: string; // Relative path within output directory
   content: string; // File content (header prepended by orchestrator)
   header?: string; // Optional override of the default file header
-  skipIfExists?: boolean; // Don't overwrite if file already exists on disk
+  skipIfExists?: boolean; // Don't overwrite if file already exists on disk (defaults to true in both full and incremental generation)
 }
 ```
 
@@ -75,17 +75,21 @@ function planOperation(op: Operation): OperationPlan;
 
 ## Existing Emitters
 
-| Language | Directory            | Design Doc                 |
-| -------- | -------------------- | -------------------------- |
-| Ruby     | `src/emitters/ruby/` | `docs/sdk-designs/ruby.md` |
-| Node     | `src/emitters/node/` | `docs/sdk-designs/node.md` |
+Emitters live in the separate `oagen-emitters` project and import types from `@workos/oagen`.
+
+| Language | Location (in oagen-emitters) | Design Doc (in oagen-emitters) |
+| -------- | ---------------------------- | ------------------------------ |
+| Ruby     | `src/ruby/`                  | `docs/ruby.md`                 |
+| Node     | `src/node/`                  | `docs/node.md`                 |
 
 ## Adding a New Emitter
 
-1. Create design doc at `docs/sdk-designs/{language}.md`
-2. Scaffold files under `src/emitters/{language}/`
+1. Create design doc at `docs/{language}.md` in the emitter project
+2. Scaffold files under `src/{language}/` in the emitter project
 3. Implement all `Emitter` methods
-4. Register in `src/cli/generate.ts` and `src/cli/diff.ts`
-5. Add tests under `test/emitters/{language}/`
+4. Register in the emitter project's `oagen.config.ts`
+5. Add tests under `test/{language}/` in the emitter project
 
 Or use: `/generate-emitter <language>`
+
+Emitters are registered via `oagen.config.ts` — no need to modify CLI source. See the Configuration section in the README.

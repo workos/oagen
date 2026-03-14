@@ -24,11 +24,19 @@ This is the middle tier of the three-tier testing pyramid:
 - **Compat verification** — verify the API surface (names, signatures, exports) matches the live SDK
 - **Smoke tests** — verify wire-level HTTP behavior against the real API
 
+## Resolve oagen Core Path
+
+Some steps below reference files in the oagen core package. Resolve the path once:
+
+1. If `node_modules/@workos/oagen/` exists, use that as `{oagen}`.
+2. If the current directory has `src/engine/types.ts`, you're in the oagen repo — use `.` as `{oagen}`.
+3. Otherwise, ask: "Where is the @workos/oagen package installed?"
+
 ## Prerequisites
 
 - An emitter exists for `<language>` (run `/generate-emitter` first)
 - The live SDK is accessible at `--sdk-path`
-- An extractor exists for `<language>` (see `docs/architecture/extractor-contract.md` to build one)
+- An extractor exists for `<language>` (see `{oagen}/docs/architecture/extractor-contract.md` to build one)
 - The emitter has been run at least once to produce generated output
 
 ## Step 1: Extract Baseline
@@ -136,8 +144,8 @@ npm run dev -- generate --spec <spec> --lang <language> --output <path> --no-com
 
 ## Reference
 
-- Extractor contract: `docs/architecture/extractor-contract.md`
-- Compat types: `src/compat/types.ts`
-- Node extractor (reference): `src/compat/extractors/node.ts`
-- Overlay logic: `src/compat/overlay.ts`
-- Differ: `src/compat/differ.ts`
+- Extractor contract: `{oagen}/docs/architecture/extractor-contract.md`
+- Compat types: `{oagen}/src/compat/types.ts`
+- Node extractor (reference): `{oagen}/src/compat/extractors/node.ts`
+- Overlay logic: `{oagen}/src/compat/overlay.ts`
+- Differ: `{oagen}/src/compat/differ.ts`
