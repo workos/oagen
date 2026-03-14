@@ -34,8 +34,8 @@ async function main() {
   console.log('Parsing spec...');
   const spec = await parseSpec(specPath);
 
-  // Derive env var namespace from spec name: "WorkOS API" → "WORKOS_API"
-  const ns = spec.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+  // Derive env var namespace from spec name: "WorkOS API" → "WORKOS"
+  const ns = spec.name.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_?API$/, '');
   const apiKey = process.env[`${ns}_API_KEY`] ?? process.env.API_KEY;
   if (!apiKey) {
     console.error(`API key is required. Set ${ns}_API_KEY or API_KEY environment variable.`);

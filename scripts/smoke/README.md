@@ -4,7 +4,7 @@ Smoke tests verify that a generated SDK produces matching request behavior (HTTP
 
 ## Prerequisites
 
-- `${NAMESPACE}_API_KEY` (or `API_KEY`) — set via a `.env` file in the project root (auto-loaded) or as an environment variable. The namespace is derived from the spec name (e.g. "WorkOS API" → `WORKOS_API_API_KEY`).
+- `${NAMESPACE}_API_KEY` (or `API_KEY`) — set via a `.env` file in the project root (auto-loaded) or as an environment variable. The namespace is derived from the spec name (e.g. "WorkOS API" → `WORKOS_API_KEY`).
 - `OPENAPI_SPEC_PATH` — path to the OpenAPI spec file (YAML or JSON), set via `.env` or environment variable
 - For SDK tests: a built copy of the target SDK
 - Optionally: `--smoke-config <path>` (or `SMOKE_CONFIG` env var) pointing to a JSON config file for skip lists, service priority, and service property mappings
