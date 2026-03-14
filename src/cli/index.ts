@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
+import { verifyCommand } from './verify.js';
 
 function handleError(err: unknown): never {
   const message = err instanceof Error ? err.message : String(err);
@@ -58,6 +59,24 @@ program
   .option('--force', 'Allow file deletions without confirmation')
   .action((opts) => {
     diffCommand(opts).catch(handleError);
+  });
+
+program
+  .command('verify')
+  .description('Run smoke tests (and optional compat check) against an already-generated SDK')
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
+  .requiredOption('--lang <language>', 'Target language')
+  .requiredOption('--output <dir>', 'Path to the generated SDK')
+  .option('--api-surface <path>', 'Baseline API surface JSON — enables compat verification')
+  .option('--raw-results <path>', 'Path to an existing smoke baseline file to diff against')
+  .option('--smoke-config <path>', 'Path to smoke config JSON for skip lists and service mappings')
+  .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
+    if (!opts.spec) {
+      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
+      process.exit(1);
+    }
+    verifyCommand(opts).catch(handleError);
   });
 
 program.parse();
