@@ -12,7 +12,7 @@ function run(args: string[], env?: Record<string, string>): Promise<{ code: numb
     execFile('npx', ['tsx', CLI, ...args], {
       env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined },
     }, (error, stdout, stderr) => {
-      resolve({ code: error?.code ?? 0, stdout, stderr });
+      resolve({ code: typeof error?.code === 'number' ? error.code : error ? 1 : 0, stdout, stderr });
     });
   });
 }
