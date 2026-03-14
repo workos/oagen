@@ -45,7 +45,7 @@ function parseArgs(): { rawPath: string; sdkPath: string; specPath?: string; smo
   return {
     rawPath: rawIdx !== -1 && args[rawIdx + 1] ? args[rawIdx + 1] : 'smoke-results-raw.json',
     sdkPath: sdkIdx !== -1 && args[sdkIdx + 1] ? args[sdkIdx + 1] : 'smoke-results-sdk-node.json',
-    specPath: process.env.OPENAPI_SPEC,
+    specPath: process.env.OPENAPI_SPEC_PATH,
     smokeConfig: configIdx !== -1 && args[configIdx + 1] ? args[configIdx + 1] : process.env.SMOKE_CONFIG,
   };
 }

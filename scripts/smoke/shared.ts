@@ -530,9 +530,9 @@ export function delay(ms: number): Promise<void> {
 export function parseCliArgs(): { spec: string; sdkPath?: string; smokeConfig?: string } {
   const args = process.argv.slice(2);
   const specIdx = args.indexOf('--spec');
-  const spec = specIdx !== -1 && args[specIdx + 1] ? args[specIdx + 1] : process.env.OPENAPI_SPEC;
+  const spec = specIdx !== -1 && args[specIdx + 1] ? args[specIdx + 1] : process.env.OPENAPI_SPEC_PATH;
   if (!spec) {
-    console.error('OpenAPI spec path is required. Set OPENAPI_SPEC env var or pass --spec <path>.');
+    console.error('OpenAPI spec path is required. Set OPENAPI_SPEC_PATH env var or pass --spec <path>.');
     process.exit(1);
   }
   const sdkPathIdx = args.indexOf('--sdk-path');

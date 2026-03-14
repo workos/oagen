@@ -6,7 +6,7 @@
  *   npm run smoke -- --lang ruby --sdk-path path/to/workos-ruby
  *   npm run smoke -- --lang node --sdk-path path/to/workos-node --raw-results custom-baseline.json
  *
- * Requires OPENAPI_SPEC env var (or --spec <path>) pointing to the OpenAPI spec.
+ * Requires OPENAPI_SPEC_PATH env var (or --spec <path>) pointing to the OpenAPI spec.
  * The --lang flag is required and selects which SDK runner to use
  * (e.g. "node" → scripts/smoke/sdk-node.ts).
  */

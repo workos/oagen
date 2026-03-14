@@ -5,7 +5,7 @@ Smoke tests verify that a generated SDK produces matching request behavior (HTTP
 ## Prerequisites
 
 - `${NAMESPACE}_API_KEY` (or `API_KEY`) — set via a `.env` file in the project root (auto-loaded) or as an environment variable. The namespace is derived from the spec name (e.g. "WorkOS API" → `WORKOS_API_API_KEY`).
-- `OPENAPI_SPEC` — path to the OpenAPI spec file (YAML or JSON), set via `.env` or environment variable
+- `OPENAPI_SPEC_PATH` — path to the OpenAPI spec file (YAML or JSON), set via `.env` or environment variable
 - For SDK tests: a built copy of the target SDK
 - Optionally: `--smoke-config <path>` (or `SMOKE_CONFIG` env var) pointing to a JSON config file for skip lists, service priority, and service property mappings
 
@@ -138,7 +138,7 @@ All variables can be set in a `.env` file in the project root. The smoke scripts
 | Variable                            | Default                 | Description                                                                          |
 | ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
 | `${NAMESPACE}_API_KEY` or `API_KEY` | (required)              | API key for authentication. Namespace is derived from spec name.                     |
-| `OPENAPI_SPEC`                      | (required)              | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
+| `OPENAPI_SPEC_PATH`                      | (required)              | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
 | `${NAMESPACE}_BASE_URL`             | spec's `servers[0].url` | Override the API base URL.                                                           |
 | `SMOKE_CONFIG`                      | (optional)              | Path to smoke config JSON file. Can also be passed as `--smoke-config <path>`.       |
 | `SMOKE_DELAY_MS`                    | `200`                   | Delay between requests (rate limiting)                                               |

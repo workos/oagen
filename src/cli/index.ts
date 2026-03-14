@@ -11,11 +11,11 @@ const program = new Command()
 program
   .command('parse')
   .description('Parse an OpenAPI spec and output IR as JSON')
-  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC)')
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
   .action((opts) => {
-    opts.spec ??= process.env.OPENAPI_SPEC;
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     if (!opts.spec) {
-      console.error('error: --spec <path> or OPENAPI_SPEC env var is required');
+      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
     return parseCommand(opts);
@@ -24,7 +24,7 @@ program
 program
   .command('generate')
   .description('Generate SDK code from an OpenAPI spec')
-  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC)')
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
   .requiredOption('--lang <language>', 'Target language')
   .requiredOption('--output <dir>', 'Output directory')
   .option('--namespace <name>', 'SDK namespace/package name')
@@ -32,9 +32,9 @@ program
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
   .option('--no-compat-check', 'Skip compat overlay even if --api-surface is provided')
   .action((opts) => {
-    opts.spec ??= process.env.OPENAPI_SPEC;
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     if (!opts.spec) {
-      console.error('error: --spec <path> or OPENAPI_SPEC env var is required');
+      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
     return generateCommand(opts);

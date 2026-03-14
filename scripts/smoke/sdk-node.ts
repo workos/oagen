@@ -5,7 +5,7 @@
  * interception to capture wire-level request/response pairs.
  *
  * Usage:
- *   OPENAPI_SPEC=path/to/spec.yaml npm run smoke:sdk:node -- --sdk-path path/to/sdk
+ *   OPENAPI_SPEC_PATH=path/to/spec.yaml npm run smoke:sdk:node -- --sdk-path path/to/sdk
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';

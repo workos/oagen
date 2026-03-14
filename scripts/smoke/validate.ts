@@ -5,7 +5,7 @@
  * and validates SDK smoke results against it.
  *
  * Usage:
- *   OPENAPI_SPEC=path/to/spec.yaml npm run smoke:validate
+ *   OPENAPI_SPEC_PATH=path/to/spec.yaml npm run smoke:validate
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -31,9 +31,9 @@ interface SpecOperation {
 }
 
 function parseArgs(): { specPath: string; resultsPath: string } {
-  const specPath = process.env.OPENAPI_SPEC;
+  const specPath = process.env.OPENAPI_SPEC_PATH;
   if (!specPath) {
-    console.error('OPENAPI_SPEC environment variable is required');
+    console.error('OPENAPI_SPEC_PATH environment variable is required');
     process.exit(1);
   }
 

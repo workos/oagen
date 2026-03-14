@@ -4,7 +4,7 @@
  * Calls the target API directly via fetch, captures request/response pairs.
  *
  * Usage:
- *   OPENAPI_SPEC=path/to/spec.yaml npm run smoke:raw
+ *   OPENAPI_SPEC_PATH=path/to/spec.yaml npm run smoke:raw
  */
 
 import { writeFileSync } from 'node:fs';

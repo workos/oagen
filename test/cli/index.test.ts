@@ -10,7 +10,7 @@ const FIXTURES = resolve(__dirname, '../fixtures');
 function run(args: string[], env?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile('npx', ['tsx', CLI, ...args], {
-      env: { ...process.env, ...env, OPENAPI_SPEC: undefined },
+      env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined },
     }, (error, stdout, stderr) => {
       resolve({ code: error?.code ?? 0, stdout, stderr });
     });
@@ -19,11 +19,11 @@ function run(args: string[], env?: Record<string, string>): Promise<{ code: numb
 
 describe('CLI', () => {
   describe('parse', () => {
-    it('exits 1 with error when --spec is missing and OPENAPI_SPEC is unset', async () => {
-      const result = await run(['parse'], { OPENAPI_SPEC: '' });
+    it('exits 1 with error when --spec is missing and OPENAPI_SPEC_PATH is unset', async () => {
+      const result = await run(['parse'], { OPENAPI_SPEC_PATH: '' });
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain('--spec <path> or OPENAPI_SPEC env var is required');
+      expect(result.stderr).toContain('--spec <path> or OPENAPI_SPEC_PATH env var is required');
     });
 
     it('parses a valid spec and outputs JSON', async () => {
@@ -43,11 +43,11 @@ describe('CLI', () => {
   });
 
   describe('generate', () => {
-    it('exits 1 with error when --spec is missing and OPENAPI_SPEC is unset', async () => {
-      const result = await run(['generate', '--lang', 'node', '--output', '/tmp/test-out'], { OPENAPI_SPEC: '' });
+    it('exits 1 with error when --spec is missing and OPENAPI_SPEC_PATH is unset', async () => {
+      const result = await run(['generate', '--lang', 'node', '--output', '/tmp/test-out'], { OPENAPI_SPEC_PATH: '' });
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain('--spec <path> or OPENAPI_SPEC env var is required');
+      expect(result.stderr).toContain('--spec <path> or OPENAPI_SPEC_PATH env var is required');
     });
 
     it('exits 1 when --lang is missing', async () => {
