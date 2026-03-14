@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { Command } from 'commander';
 import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
