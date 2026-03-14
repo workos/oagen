@@ -78,7 +78,10 @@ function resolveEntryPoint(sdkPath: string, program: ts.Program): string {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
     // Check "exports" field first
     if (pkg.exports) {
-      const mainExport = typeof pkg.exports === 'string' ? pkg.exports : pkg.exports['.']?.import ?? pkg.exports['.']?.default ?? pkg.exports['.'];
+      const mainExport =
+        typeof pkg.exports === 'string'
+          ? pkg.exports
+          : (pkg.exports['.']?.import ?? pkg.exports['.']?.default ?? pkg.exports['.']);
       if (typeof mainExport === 'string') {
         const resolved = resolveSourceFile(sdkPath, mainExport, program);
         if (resolved) return resolved;
@@ -154,7 +157,9 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
     if (propDeclarations && propDeclarations.length > 0) {
       const decl = propDeclarations[0];
       const modifiers = ts.canHaveModifiers(decl) ? ts.getModifiers(decl) : undefined;
-      if (modifiers?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword || m.kind === ts.SyntaxKind.ProtectedKeyword)) {
+      if (
+        modifiers?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword || m.kind === ts.SyntaxKind.ProtectedKeyword)
+      ) {
         continue;
       }
     }
@@ -273,11 +278,7 @@ function extractEnum(sym: ts.Symbol, checker: ts.TypeChecker): ApiEnum {
   };
 }
 
-function buildExportMap(
-  sourceFile: ts.SourceFile,
-  checker: ts.TypeChecker,
-  sdkPath: string,
-): Record<string, string[]> {
+function buildExportMap(sourceFile: ts.SourceFile, checker: ts.TypeChecker, sdkPath: string): Record<string, string[]> {
   const exports: Record<string, string[]> = {};
   const relPath = relative(sdkPath, sourceFile.fileName);
 

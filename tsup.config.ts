@@ -17,4 +17,12 @@ export default defineConfig([
       js: '#!/usr/bin/env node',
     },
   },
+  {
+    entry: { smoke: 'scripts/smoke/shared.ts' },
+    format: ['esm'],
+    dts: true,
+    clean: false,
+    target: 'node20',
+    external: ['node:fs', 'node:path', 'node:url', 'dotenv/config'],
+  },
 ]);

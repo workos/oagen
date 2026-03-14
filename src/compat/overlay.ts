@@ -34,10 +34,7 @@ function findClassForProperty(surface: ApiSurface, sdkResourceProperty: string):
   return undefined;
 }
 
-export function buildOverlayLookup(
-  surface: ApiSurface,
-  manifest?: ManifestEntry[],
-): OverlayLookup {
+export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry[]): OverlayLookup {
   const lookup: OverlayLookup = {
     methodByOperation: new Map(),
     interfaceByName: new Map(),
@@ -85,18 +82,12 @@ export function buildOverlayLookup(
  * Adds explicit name mappings for symbols that were generated with wrong names.
  * Returns a new OverlayLookup (immutable).
  */
-export function patchOverlay(
-  overlay: OverlayLookup,
-  violations: Violation[],
-  baseline: ApiSurface,
-): OverlayLookup {
+export function patchOverlay(overlay: OverlayLookup, violations: Violation[], baseline: ApiSurface): OverlayLookup {
   const patched: OverlayLookup = {
     methodByOperation: new Map(overlay.methodByOperation),
     interfaceByName: new Map(overlay.interfaceByName),
     typeAliasByName: new Map(overlay.typeAliasByName),
-    requiredExports: new Map(
-      Array.from(overlay.requiredExports.entries()).map(([k, v]) => [k, new Set(v)]),
-    ),
+    requiredExports: new Map(Array.from(overlay.requiredExports.entries()).map(([k, v]) => [k, new Set(v)])),
   };
 
   for (const v of violations) {

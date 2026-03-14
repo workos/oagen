@@ -18,11 +18,9 @@ import { buildOverlayLookup, patchOverlay } from '../src/compat/overlay.js';
 import type { ApiSurface, DiffResult } from '../src/compat/types.js';
 import { parseSpec } from '../src/parser/parse.js';
 import { generate } from '../src/engine/orchestrator.js';
-import { getEmitter, registerEmitter } from '../src/engine/registry.js';
-import { nodeEmitter } from '../src/emitters/node/index.js';
+import { getEmitter } from '../src/engine/registry.js';
 
 registerExtractor(nodeExtractor);
-registerEmitter(nodeEmitter);
 
 const { values } = parseArgs({
   options: {

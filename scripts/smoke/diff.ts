@@ -446,7 +446,9 @@ async function main() {
 
 // Only run when executed directly (not when imported for testing)
 const isDirectRun =
-  typeof process !== 'undefined' && process.argv[1] && (process.argv[1].endsWith('diff.ts') || process.argv[1].endsWith('diff.js'));
+  typeof process !== 'undefined' &&
+  process.argv[1] &&
+  (process.argv[1].endsWith('diff.ts') || process.argv[1].endsWith('diff.js'));
 if (isDirectRun) {
   main();
 }

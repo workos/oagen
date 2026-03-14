@@ -25,13 +25,10 @@ describe('loadConfig', () => {
   });
 
   it('loads oagen.config.mjs and returns config object', async () => {
-    writeFileSync(
-      path.join(tmpDir, 'oagen.config.mjs'),
-      `export default { smokeRunner: './my-runner.ts' };`,
-    );
+    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { emitterProject: '../my-emitters' };`);
     const config = await loadConfig(tmpDir);
     expect(config).not.toBeNull();
-    expect(config!.smokeRunner).toBe('./my-runner.ts');
+    expect(config!.emitterProject).toBe('../my-emitters');
   });
 
   it('loads smokeRunners map from config', async () => {

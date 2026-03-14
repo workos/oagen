@@ -86,16 +86,7 @@ export async function verifyCommand(opts: {
   console.log(separator);
 
   const smokeScript = smokeRunner ?? path.join(scriptsDir, 'smoke', 'sdk-test.ts');
-  const smokeArgs = [
-    'tsx',
-    smokeScript,
-    '--lang',
-    lang,
-    '--sdk-path',
-    output,
-    '--raw-results',
-    baselinePath,
-  ];
+  const smokeArgs = ['tsx', smokeScript, '--lang', lang, '--sdk-path', output, '--raw-results', baselinePath];
   if (smokeConfig) smokeArgs.push('--smoke-config', smokeConfig);
 
   try {
@@ -109,12 +100,12 @@ export async function verifyCommand(opts: {
     console.error('\nSmoke test findings — read smoke-diff-findings.json for details');
     console.error(`
 Remediation guide (by finding type):
-  "HTTP method differs"               → fix src/emitters/${lang}/resources.ts
-  "Request path structure differs"     → fix src/emitters/${lang}/resources.ts
-  "Query parameters differ"            → fix src/emitters/${lang}/resources.ts
-  "Request body key sets differ"       → fix src/emitters/${lang}/models.ts or resources.ts
-  "Skipped in SDK"                     → fix scripts/smoke/sdk-${lang}.ts
-  "Missing from SDK"                   → fix scripts/smoke/sdk-${lang}.ts`);
+  "HTTP method differs"               → fix ${lang} emitter resources.ts (in emitter project)
+  "Request path structure differs"     → fix ${lang} emitter resources.ts (in emitter project)
+  "Query parameters differ"            → fix ${lang} emitter resources.ts (in emitter project)
+  "Request body key sets differ"       → fix ${lang} emitter models.ts or resources.ts (in emitter project)
+  "Skipped in SDK"                     → fix smoke/sdk-${lang}.ts (in emitter project)
+  "Missing from SDK"                   → fix smoke/sdk-${lang}.ts (in emitter project)`);
     process.exit(1);
   }
 

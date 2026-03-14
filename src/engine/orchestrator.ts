@@ -7,7 +7,13 @@ import { writeFiles } from './writer.js';
 export async function generate(
   spec: ApiSpec,
   emitter: Emitter,
-  options: { namespace: string; dryRun?: boolean; outputDir: string; apiSurface?: ApiSurface; overlayLookup?: OverlayLookup },
+  options: {
+    namespace: string;
+    dryRun?: boolean;
+    outputDir: string;
+    apiSurface?: ApiSurface;
+    overlayLookup?: OverlayLookup;
+  },
 ): Promise<GeneratedFile[]> {
   const ctx: EmitterContext = {
     namespace: toSnakeCase(options.namespace),

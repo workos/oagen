@@ -1,10 +1,20 @@
 {
-  "name": "oagen",
+  "name": "@workos/oagen",
   "version": "0.0.1",
   "description": "Generate SDKs from OpenAPI 3.1 specifications",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./smoke": {
+      "types": "./dist/smoke.d.ts",
+      "import": "./dist/smoke.js"
+    }
+  },
   "bin": {
     "oagen": "dist/cli/index.js"
   },
@@ -26,8 +36,6 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "smoke:raw": "tsx scripts/smoke/raw.ts",
-    "smoke:sdk:node": "tsx scripts/smoke/sdk-node.ts",
-    "smoke:sdk:ruby": "tsx scripts/smoke/sdk-ruby.ts",
     "smoke:diff": "tsx scripts/smoke/diff.ts",
     "smoke": "tsx scripts/smoke/sdk-test.ts",
     "smoke:baseline": "tsx scripts/smoke/baseline.ts",

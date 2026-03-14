@@ -1,10 +1,4 @@
-import type {
-  ApiSurface,
-  ApiMethod,
-  DiffResult,
-  Violation,
-  Addition,
-} from './types.js';
+import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition } from './types.js';
 
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffResult {
   const violations: Violation[] = [];

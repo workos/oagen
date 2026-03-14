@@ -23,7 +23,12 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            get: { name: 'get', params: [{ name: 'id', type: 'string', optional: false }], returnType: 'Promise<Organization>', async: true },
+            get: {
+              name: 'get',
+              params: [{ name: 'id', type: 'string', optional: false }],
+              returnType: 'Promise<Organization>',
+              async: true,
+            },
           },
           properties: {},
           constructorParams: [],
@@ -125,7 +130,12 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            list: { name: 'list', params: [{ name: 'id', type: 'string', optional: false }], returnType: 'void', async: false },
+            list: {
+              name: 'list',
+              params: [{ name: 'id', type: 'string', optional: false }],
+              returnType: 'void',
+              async: false,
+            },
           },
           properties: {},
           constructorParams: [],

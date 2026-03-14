@@ -84,7 +84,16 @@ console.log(`\n${'='.repeat(60)}`);
 console.log('Running smoke test + diff');
 console.log('='.repeat(60));
 
-const smokeArgs = ['tsx', 'scripts/smoke/sdk-test.ts', '--lang', lang, '--sdk-path', sdkPath, '--raw-results', baselinePath];
+const smokeArgs = [
+  'tsx',
+  'scripts/smoke/sdk-test.ts',
+  '--lang',
+  lang,
+  '--sdk-path',
+  sdkPath,
+  '--raw-results',
+  baselinePath,
+];
 if (smokeConfig) smokeArgs.push('--smoke-config', smokeConfig);
 
 try {
@@ -100,12 +109,12 @@ try {
 
   console.error(`
 Remediation guide (by finding type):
-  "HTTP method differs"               → fix method generation in src/emitters/${lang}/resources.ts
-  "Request path structure differs"     → fix path interpolation in src/emitters/${lang}/resources.ts
-  "Query parameters differ"            → fix query param serialization in src/emitters/${lang}/resources.ts
-  "Request body key sets differ"       → fix model serialization in src/emitters/${lang}/models.ts or resources.ts
-  "Skipped in SDK"                     → fix method resolution in scripts/smoke/sdk-${lang}.ts
-  "Missing from SDK"                   → add SDK method mapping in scripts/smoke/sdk-${lang}.ts`);
+  "HTTP method differs"               → fix method generation in ${lang} emitter resources.ts (in emitter project)
+  "Request path structure differs"     → fix path interpolation in ${lang} emitter resources.ts (in emitter project)
+  "Query parameters differ"            → fix query param serialization in ${lang} emitter resources.ts (in emitter project)
+  "Request body key sets differ"       → fix model serialization in ${lang} emitter models.ts or resources.ts (in emitter project)
+  "Skipped in SDK"                     → fix method resolution in smoke/sdk-${lang}.ts (in emitter project)
+  "Missing from SDK"                   → add SDK method mapping in smoke/sdk-${lang}.ts (in emitter project)`);
 
   process.exit(1);
 }

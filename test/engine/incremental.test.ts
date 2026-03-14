@@ -268,9 +268,7 @@ describe('generateIncremental', () => {
     };
 
     const emitter = mockEmitter();
-    emitter.generateManifest = vi.fn().mockReturnValue([
-      { path: 'smoke-manifest.json', content: '{}' },
-    ]);
+    emitter.generateManifest = vi.fn().mockReturnValue([{ path: 'smoke-manifest.json', content: '{}' }]);
 
     await generateIncremental(v1, v2, emitter, {
       namespace: 'Test',

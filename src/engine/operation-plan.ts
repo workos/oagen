@@ -17,8 +17,7 @@ export function planOperation(op: Operation): OperationPlan {
   const hasBody = !!op.requestBody;
   const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
   const hasQueryParams = op.queryParams.length > 0;
-  const pathParamsInOptions =
-    op.pathParams.length > 1 || (op.pathParams.length > 0 && (hasBody || hasQueryParams));
+  const pathParamsInOptions = op.pathParams.length > 1 || (op.pathParams.length > 0 && (hasBody || hasQueryParams));
   const isPaginated = op.paginated;
   const responseModelName = resolveResponseModelName(op);
   const isModelResponse = responseModelName !== null;

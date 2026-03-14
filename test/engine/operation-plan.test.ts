@@ -51,9 +51,7 @@ describe('planOperation', () => {
   });
 
   it('GET with model response', () => {
-    const plan = planOperation(
-      makeOp({ response: { kind: 'model', name: 'Organization' } }),
-    );
+    const plan = planOperation(makeOp({ response: { kind: 'model', name: 'Organization' } }));
     expect(plan).toMatchInlineSnapshot(`
       {
         "hasBody": false,

@@ -114,10 +114,7 @@ function pathMatchesTemplate(concretePath: string, template: string): boolean {
   });
 }
 
-function validateExchange(
-  exchange: CapturedExchange,
-  specOps: Map<string, SpecOperation>,
-): ValidationFinding[] {
+function validateExchange(exchange: CapturedExchange, specOps: Map<string, SpecOperation>): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
   const opId = exchange.operationId;
 

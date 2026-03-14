@@ -18,11 +18,9 @@ function handleError(err: unknown): never {
 // we use top-level await.
 const config = await loadConfig();
 let configSmokeRunners: Record<string, string> | undefined;
-let configSmokeRunnerLegacy: string | undefined;
 if (config) {
   applyConfig(config);
   configSmokeRunners = config.smokeRunners;
-  configSmokeRunnerLegacy = config.smokeRunner;
 }
 
 const program = new Command()
@@ -92,8 +90,8 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    // CLI --smoke-runner takes precedence, then per-language smokeRunners map, then legacy single string
-    opts.smokeRunner ??= configSmokeRunners?.[opts.lang] ?? configSmokeRunnerLegacy;
+    // CLI --smoke-runner takes precedence, then per-language smokeRunners map from config
+    opts.smokeRunner ??= configSmokeRunners?.[opts.lang];
     verifyCommand(opts).catch(handleError);
   });
 

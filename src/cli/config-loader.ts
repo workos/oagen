@@ -7,10 +7,10 @@ import type { Extractor } from '../compat/types.js';
 export interface OagenConfig {
   emitters?: Emitter[];
   extractors?: Extractor[];
+  /** Path to the emitter project (where skills scaffold new emitters, tests, smoke runners). */
+  emitterProject?: string;
   /** Map from language key to custom smoke runner script path. */
   smokeRunners?: Record<string, string>;
-  /** @deprecated Use `smokeRunners` (per-language map) instead. */
-  smokeRunner?: string;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];

@@ -1,15 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { parseSpec } from '../parser/parse.js';
 import { generate } from '../engine/orchestrator.js';
-import { getEmitter, registerEmitter } from '../engine/registry.js';
-import { rubyEmitter } from '../emitters/ruby/index.js';
-import { nodeEmitter } from '../emitters/node/index.js';
+import { getEmitter } from '../engine/registry.js';
 import { buildOverlayLookup } from '../compat/overlay.js';
 import type { ApiSurface } from '../compat/types.js';
-
-// Register built-in emitters
-registerEmitter(rubyEmitter);
-registerEmitter(nodeEmitter);
 
 export async function generateCommand(opts: {
   spec: string;

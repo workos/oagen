@@ -203,9 +203,7 @@ describe('patchOverlay', () => {
     ];
 
     const patched = patchOverlay(overlay, violations, emptySurface());
-    expect(patched.requiredExports.get('src/orgs/interfaces/index.ts')).toEqual(
-      new Set(['ListOrgsOptions']),
-    );
+    expect(patched.requiredExports.get('src/orgs/interfaces/index.ts')).toEqual(new Set(['ListOrgsOptions']));
   });
 
   it('adds interface name mappings from public-api violations', () => {
@@ -260,13 +258,31 @@ describe('patchOverlay', () => {
 
     overlay = patchOverlay(
       overlay,
-      [{ category: 'public-api', severity: 'breaking', symbolPath: 'Org', baseline: 'Org', candidate: '(missing)', message: '' }],
+      [
+        {
+          category: 'public-api',
+          severity: 'breaking',
+          symbolPath: 'Org',
+          baseline: 'Org',
+          candidate: '(missing)',
+          message: '',
+        },
+      ],
       baseline,
     );
 
     overlay = patchOverlay(
       overlay,
-      [{ category: 'public-api', severity: 'breaking', symbolPath: 'User', baseline: 'User', candidate: '(missing)', message: '' }],
+      [
+        {
+          category: 'public-api',
+          severity: 'breaking',
+          symbolPath: 'User',
+          baseline: 'User',
+          candidate: '(missing)',
+          message: '',
+        },
+      ],
       baseline,
     );
 

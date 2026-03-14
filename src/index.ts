@@ -40,10 +40,23 @@ export type {
 } from './differ/types.js';
 
 export type {
-  ApiSurface, ApiClass, ApiMethod, ApiParam, ApiProperty,
-  ApiInterface, ApiField, ApiTypeAlias, ApiEnum,
-  Extractor, MethodOverlay, OverlayLookup,
-  ViolationCategory, ViolationSeverity, Violation, Addition, DiffResult,
+  ApiSurface,
+  ApiClass,
+  ApiMethod,
+  ApiParam,
+  ApiProperty,
+  ApiInterface,
+  ApiField,
+  ApiTypeAlias,
+  ApiEnum,
+  Extractor,
+  MethodOverlay,
+  OverlayLookup,
+  ViolationCategory,
+  ViolationSeverity,
+  Violation,
+  Addition,
+  DiffResult,
 } from './compat/types.js';
 
 export { parseSpec } from './parser/parse.js';
@@ -55,4 +68,8 @@ export { mapChangesToFiles } from './differ/file-map.js';
 export { generateIncremental } from './engine/incremental.js';
 export { buildOverlayLookup, patchOverlay } from './compat/overlay.js';
 export { diffSurfaces } from './compat/differ.js';
-export { toSnakeCase, toCamelCase, toPascalCase } from './utils/naming.js';
+export { toSnakeCase, toCamelCase, toPascalCase, toKebabCase, toUpperSnakeCase } from './utils/naming.js';
+
+export { planOperation } from './engine/operation-plan.js';
+export type { OperationPlan } from './engine/operation-plan.js';
+export type { OagenConfig } from './cli/config-loader.js';

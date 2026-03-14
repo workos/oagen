@@ -10,6 +10,11 @@ import { readFileSync } from 'node:fs';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 import { toSnakeCase, toCamelCase } from '../../src/utils/naming.js';
 
+// Re-export types and functions that external smoke runners need from oagen core.
+// External runners import from '@workos/oagen/smoke' which bundles this module.
+export { parseSpec } from '../../src/parser/parse.js';
+export { toCamelCase, toSnakeCase } from '../../src/utils/naming.js';
+
 // ---------------------------------------------------------------------------
 // Capture format
 // ---------------------------------------------------------------------------

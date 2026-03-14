@@ -227,7 +227,7 @@ function checkEmitterExports(files: string[]): Violation[] {
         line: 0,
         rule: 'emitter-contract',
         message: `Emitter index.ts for "${lang}" does not reference the Emitter interface`,
-        fix: `The index.ts must import { Emitter } from "../../engine/types.js" and export a const that satisfies the Emitter interface. See src/emitters/ruby/index.ts for reference.`,
+        fix: `The index.ts must import { Emitter } from "@workos/oagen" and export a const that satisfies the Emitter interface.`,
       });
     }
 
@@ -251,7 +251,7 @@ function checkEmitterExports(files: string[]): Violation[] {
           line: 0,
           rule: 'emitter-contract',
           message: `Emitter "${lang}" missing required method: ${method}`,
-          fix: `Add ${method} to the emitter object. It must match the signature in src/engine/types.ts. If the method is not applicable for this language, return []. See src/emitters/ruby/index.ts for reference.`,
+          fix: `Add ${method} to the emitter object. It must match the signature in src/engine/types.ts. If the method is not applicable for this language, return [].`,
         });
       }
     }

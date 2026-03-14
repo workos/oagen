@@ -9,11 +9,16 @@ const FIXTURES = resolve(__dirname, '../fixtures');
 
 function run(args: string[], env?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile('npx', ['tsx', CLI, ...args], {
-      env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined },
-    }, (error, stdout, stderr) => {
-      resolve({ code: typeof error?.code === 'number' ? error.code : error ? 1 : 0, stdout, stderr });
-    });
+    execFile(
+      'npx',
+      ['tsx', CLI, ...args],
+      {
+        env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined },
+      },
+      (error, stdout, stderr) => {
+        resolve({ code: typeof error?.code === 'number' ? error.code : error ? 1 : 0, stdout, stderr });
+      },
+    );
   });
 }
 
@@ -67,9 +72,12 @@ describe('CLI', () => {
     it('--dry-run lists files without writing to disk', async () => {
       const result = await run([
         'generate',
-        '--spec', `${FIXTURES}/minimal.yml`,
-        '--lang', 'node',
-        '--output', '/tmp/oagen-dry-run-test',
+        '--spec',
+        `${FIXTURES}/minimal.yml`,
+        '--lang',
+        'node',
+        '--output',
+        '/tmp/oagen-dry-run-test',
         '--dry-run',
       ]);
 
