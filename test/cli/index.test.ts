@@ -13,7 +13,7 @@ function run(args: string[], env?: Record<string, string>): Promise<{ code: numb
       'npx',
       ['tsx', CLI, ...args],
       {
-        env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined },
+        env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined, DOTENV_CONFIG_PATH: '/dev/null' },
       },
       (error, stdout, stderr) => {
         resolve({ code: typeof error?.code === 'number' ? error.code : error ? 1 : 0, stdout, stderr });
