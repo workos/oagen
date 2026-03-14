@@ -448,11 +448,7 @@ Generated SDK structure:
 
 ## Backwards Compatibility
 
-If the target language has an existing published SDK that requires backwards compatibility, you should also scaffold an extractor so the compat verification workflow can preserve the live SDK's public API surface.
-
-See `docs/architecture/extractor-contract.md` for the `Extractor` interface, `ApiSurface` type, language-specific strategies, and a step-by-step checklist for building a new extractor.
-
-After scaffolding the emitter, run `/verify-compat <language>` to verify the generated output preserves the existing SDK's API surface.
+If the target language has an existing published SDK that requires backwards compatibility, scaffold an extractor with `/generate-extractor <language>`, then run `/verify-compat <language>` to verify the generated output preserves the existing SDK's API surface.
 
 ## Reference: Ruby Emitter File Inventory
 

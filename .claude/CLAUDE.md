@@ -35,5 +35,6 @@ Start here when working on a specific area:
 ## Skills
 
 - `/generate-emitter <language>` — scaffold a new language emitter
+- `/generate-extractor <language>` — scaffold an API surface extractor for compat verification
 - `/generate-smoke-test <language>` — create smoke tests for a generated SDK
 - `/verify-compat <language>` — verify emitter output preserves BC with a live SDK

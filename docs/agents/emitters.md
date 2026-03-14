@@ -55,10 +55,11 @@ When regenerating an SDK for a language that already has a published SDK, verify
 3. Verify the generated output against the baseline (`npm run verify:compat`)
 4. If violations exist, fix the emitter and regenerate — loop mode (`--loop`) automates this cycle
 
-Run `/verify-compat <language>` for the full guided workflow.
+Run `/generate-extractor <language>` to scaffold the extractor, then `/verify-compat <language>` for the full guided workflow.
 
 ## Source Of Truth
 
 - Per-language design docs: `docs/sdk-designs/{language}.md`
 - Extractor contract: `docs/architecture/extractor-contract.md`
-- Create a new emitter with the `.claude` skill: `/generate-emitter <language>`
+- Create a new emitter: `/generate-emitter <language>`
+- Create a new extractor: `/generate-extractor <language>`
