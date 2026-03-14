@@ -138,7 +138,7 @@ All variables can be set in a `.env` file in the project root. The smoke scripts
 | Variable                            | Default                 | Description                                                                          |
 | ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
 | `${NAMESPACE}_API_KEY` or `API_KEY` | (required)              | API key for authentication. Namespace is derived from spec name.                     |
-| `OPENAPI_SPEC_PATH`                      | (required)              | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
+| `OPENAPI_SPEC_PATH`                 | (required)              | Path to the OpenAPI spec file (YAML or JSON). Can also be passed as `--spec <path>`. |
 | `${NAMESPACE}_BASE_URL`             | spec's `servers[0].url` | Override the API base URL.                                                           |
 | `SMOKE_CONFIG`                      | (optional)              | Path to smoke config JSON file. Can also be passed as `--smoke-config <path>`.       |
 | `SMOKE_DELAY_MS`                    | `200`                   | Delay between requests (rate limiting)                                               |
@@ -226,27 +226,53 @@ The `sdk-test.ts` orchestrator auto-discovers scripts by convention: `--lang rub
 
 ## Verify-and-Fix Loop
 
-The iterative pattern for verifying a generated SDK against the API:
+After generating with `oagen generate`, use `oagen verify` to run smoke tests (and optional compat check):
+
+```bash
+oagen generate --lang {lang} --output {sdk-path} --spec {spec} --namespace {ns}
+oagen verify --lang {lang} --output {sdk-path} --spec {spec}
+
+# With compat verification (Scenario A):
+oagen verify --lang {lang} --output {sdk-path} --spec {spec} \
+  --api-surface api-surface.json
+```
+
+If no baseline exists, a spec-only baseline is generated automatically (offline, no API key needed). To use a specific baseline:
+
+```bash
+oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.json
+```
+
+**Exit codes:**
+
+| Code | Meaning                                                                    | Structured output           |
+| ---- | -------------------------------------------------------------------------- | --------------------------- |
+| 0    | Clean — all checks passed                                                  | —                           |
+| 1    | Findings — CRITICAL mismatches, compat violations, or missing operations   | `smoke-diff-findings.json`  |
+| 2    | Compile error — SDK failed type check                                      | `smoke-compile-errors.json` |
+
+**Agent loop:**
 
 ```
-loop:
-  1. Generate SDK:
-     oagen generate --lang {lang} --spec {spec} --output {sdk-path} --namespace {ns}
-
-  2. Run smoke test + diff:
-     npm run smoke -- --lang {lang} --sdk-path {path}
-     (exits 0 = clean, exits 1 = CRITICAL findings)
-
-  3. If exit code 1, read smoke-diff-findings.json. Each CRITICAL maps to an emitter fix:
-     - "HTTP method differs" → fix resources.ts method generation
-     - "Request path structure differs" → fix path interpolation in resources.ts
-     - "Query parameters differ" → fix query param serialization
-     - "Request body key sets differ" → fix model serialization or payload construction
-
-  4. Fix the emitter code in src/emitters/{lang}/
-
-  5. Go to step 1
+while true:
+  oagen generate --lang {lang} --output {sdk-path} --spec {spec}
+  oagen verify --lang {lang} --output {sdk-path} --spec {spec}
+  # exits 0? done
+  # exits 1/2? read findings, fix emitter, re-run
 ```
+
+> **Legacy:** `npm run smoke:loop` still works as an alternative entry point.
+
+**Remediation guide** (printed on failure, also here for reference):
+
+| Finding                          | Fix location                                                            |
+| -------------------------------- | ----------------------------------------------------------------------- |
+| "HTTP method differs"            | `src/emitters/{lang}/resources.ts` — method generation                  |
+| "Request path structure differs" | `src/emitters/{lang}/resources.ts` — path interpolation                 |
+| "Query parameters differ"        | `src/emitters/{lang}/resources.ts` — query param serialization          |
+| "Request body key sets differ"   | `src/emitters/{lang}/models.ts` or `resources.ts` — model serialization |
+| "Skipped in SDK"                 | `scripts/smoke/sdk-{lang}.ts` — method resolution                       |
+| "Missing from SDK"               | `scripts/smoke/sdk-{lang}.ts` — method mapping                          |
 
 **Mechanical gates:**
 
@@ -255,9 +281,9 @@ loop:
 
 **Cross-session handoff:** If context gets noisy after many iterations, start a fresh conversation. The findings file is the primary handoff state — it includes CRITICAL/WARNING/INFO findings plus `missingFromSdk` and `missingFromRaw` operation lists, a `configuration` block (listing `skipOperations` and `skipServices` sets), and a `coverage` summary (total operations, exercised count, skip count, percentages). Read it to see what's broken, fix those emitter files, re-run the loop.
 
-For offline iteration (no API key needed), use the spec-only baseline instead of the raw baseline:
+For offline iteration (no API key needed), `oagen verify` auto-generates a spec-only baseline when no raw baseline exists. Or generate one explicitly:
 
 ```bash
 npm run smoke:baseline
-npm run smoke -- --lang {lang} --sdk-path {path} --raw-results smoke-results-spec-baseline.json
+oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-spec-baseline.json
 ```

@@ -26,10 +26,12 @@
     "typecheck": "tsc --noEmit",
     "smoke:raw": "tsx scripts/smoke/raw.ts",
     "smoke:sdk:node": "tsx scripts/smoke/sdk-node.ts",
+    "smoke:sdk:ruby": "tsx scripts/smoke/sdk-ruby.ts",
     "smoke:diff": "tsx scripts/smoke/diff.ts",
     "smoke": "tsx scripts/smoke/sdk-test.ts",
     "smoke:baseline": "tsx scripts/smoke/baseline.ts",
     "smoke:validate": "tsx scripts/smoke/validate.ts",
+    "smoke:loop": "tsx scripts/smoke/loop.ts",
     "compat:extract": "tsx scripts/compat-extract.ts",
     "verify:compat": "tsx scripts/verify-compat.ts"
   },
