@@ -4,6 +4,12 @@ import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
 
+function handleError(err: unknown): never {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(message);
+  process.exit(1);
+}
+
 const program = new Command()
   .name('oagen')
   .description('Generate SDKs from OpenAPI 3.1 specifications')
@@ -38,7 +44,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    return generateCommand(opts);
+    generateCommand(opts).catch(handleError);
   });
 
 program
@@ -50,6 +56,8 @@ program
   .option('--output <dir>', 'Output directory')
   .option('--report', 'Output diff report as JSON')
   .option('--force', 'Allow file deletions without confirmation')
-  .action(diffCommand);
+  .action((opts) => {
+    diffCommand(opts).catch(handleError);
+  });
 
 program.parse();
