@@ -139,6 +139,16 @@ Mostly static code with namespace interpolation. Must include:
 - Resource accessor methods (one per service) with return type documentation
 - Per-request options support for extra headers and timeout overrides
 
+### SDK Scaffolding Files
+
+`generateClient` must also emit the project scaffolding that makes the generated SDK self-contained and analyzable:
+
+- **Barrel entry point** (e.g., `src/index.ts`) — re-exports all public types, models, enums, exceptions, and the main client. This is what `oagen verify` (via the extractor) uses to discover the SDK's public surface.
+- **Project config** (e.g., `tsconfig.json`) — so the SDK can be type-checked and built.
+- **Package manifest** (e.g., `package.json`) — with correct `main`, `types`, and `exports` fields so tooling resolves the entry point.
+
+Without these, `oagen verify` will fail with "No entry point found" because the extractor cannot discover the SDK's public surface.
+
 **For Scenario A:** The client architecture must match the existing SDK. If the client uses constructor overloads, has a specific initialization pattern, or delegates to a separate HTTP transport layer, replicate that. The design doc's client architecture section is authoritative.
 
 ---

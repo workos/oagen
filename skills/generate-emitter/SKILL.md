@@ -110,6 +110,16 @@ Not every language needs every file, and some languages may need **additional** 
 
 Omit files that don't apply, and add language-specific utility files as needed. The `index.ts` must still implement all `Emitter` interface methods (return `[]` for inapplicable ones).
 
+### SDK Output Scaffolding (required)
+
+The emitter must produce a **self-contained, usable SDK**. In addition to source files, `generateClient` (or another appropriate method) **must** emit these scaffolding files:
+
+1. **Entry point barrel** (e.g., `src/index.ts`) — re-exports all public types, models, enums, exceptions, and the main client class. This is what the extractor and consumers use as the SDK's public surface.
+2. **Project config** (e.g., `tsconfig.json`, `setup.py`, `Gemfile`) — whatever the target language needs so the generated SDK can be type-checked, built, or imported without manual setup.
+3. **Package manifest** (e.g., `package.json`, `*.gemspec`, `pyproject.toml`) — with correct entry points (`main`, `types`, `exports`) so tooling can discover the SDK's public surface.
+
+Without these, `oagen verify` (compat verification) will fail because the extractor cannot find the SDK's entry point. The generated output must be analyzable by the extractor without any manual intervention.
+
 ### Import Convention
 
 All emitter files import oagen types from `@workos/oagen`:
