@@ -30,9 +30,57 @@ interface GeneratedFile {
   path: string; // Relative path within output directory
   content: string; // File content (header prepended by orchestrator)
   header?: string; // Optional override of the default file header
-  skipIfExists?: boolean; // Don't overwrite if file already exists on disk (defaults to true in both full and incremental generation)
+  skipIfExists?: boolean; // Don't overwrite if file already exists on disk (defaults to false)
 }
 ```
+
+## EmitterContext
+
+Every generator method receives an `EmitterContext`:
+
+```typescript
+interface EmitterContext {
+  namespace: string;        // snake_case namespace for file paths
+  namespacePascal: string;  // PascalCase namespace for code identifiers
+  spec: ApiSpec;            // The full parsed IR spec
+  outputDir?: string;       // Output directory path
+  apiSurface?: ApiSurface;  // Baseline API surface (when --api-surface is provided)
+  overlayLookup?: OverlayLookup; // Name preservation overlay (when --api-surface is provided)
+}
+```
+
+## Overlay Integration
+
+When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engine builds an `OverlayLookup` and passes it to emitters via `ctx.overlayLookup`. Emitters should check the overlay before generating default names to preserve backwards compatibility with an existing SDK.
+
+**When it's present:** The user has an existing live SDK and wants the generated output to preserve its public API (method names, type names, exports).
+
+**How emitters should use it:**
+
+1. **Method names:** Before generating a method name, check `methodByOperation` using the HTTP key:
+   ```typescript
+   const httpKey = `${op.httpMethod.toUpperCase()} ${op.path}`;
+   const existing = ctx.overlayLookup?.methodByOperation.get(httpKey);
+   if (existing) {
+     // Use existing.methodName instead of generating a new name
+   }
+   ```
+
+2. **Type names:** Check `interfaceByName` and `typeAliasByName` for existing names before applying naming conventions.
+
+3. **Barrel exports:** Check `requiredExports` to ensure all expected symbols are re-exported.
+
+**`OverlayLookup` fields:**
+
+| Field               | Type                            | Purpose                                          |
+| ------------------- | ------------------------------- | ------------------------------------------------ |
+| `methodByOperation` | `Map<string, MethodOverlay>`    | HTTP key → existing method info (name, params)   |
+| `httpKeyByMethod`   | `Map<string, string>`           | Reverse map: "Class.method" → HTTP key           |
+| `interfaceByName`   | `Map<string, string>`           | IR interface name → existing interface name      |
+| `typeAliasByName`   | `Map<string, string>`           | IR type alias name → existing type alias name    |
+| `requiredExports`   | `Map<string, Set<string>>`      | Barrel file path → symbols that must be exported |
+
+The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
 
 ## Rules
 

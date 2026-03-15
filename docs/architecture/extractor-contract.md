@@ -58,20 +58,24 @@ The `exports` field maps file paths to their exported symbol names, capturing th
 
 ## Registration
 
-Extractors use a simple Map-based registry (`src/compat/extractor-registry.ts`):
+Extractors are registered via `oagen.config.ts` in the consumer project. The CLI loads the config at startup and registers all extractors automatically before any command runs.
+
+```typescript
+// oagen.config.ts
+import { myExtractor } from './src/compat/extractors/my-language.js';
+import type { OagenConfig } from '@workos/oagen';
+
+const config: OagenConfig = {
+  extractors: [myExtractor],
+};
+export default config;
+```
+
+Under the hood, the config loader calls `registerExtractor()` for each entry, populating a Map-based registry (`src/compat/extractor-registry.ts`):
 
 ```typescript
 registerExtractor(extractor: Extractor): void
 getExtractor(language: string): Extractor
-```
-
-Registration happens at the script level. For example, `scripts/compat-extract.ts` imports the Node extractor and registers it before use:
-
-```typescript
-import { nodeExtractor } from "../src/compat/extractors/node.js";
-import { registerExtractor } from "../src/compat/extractor-registry.js";
-
-registerExtractor(nodeExtractor);
 ```
 
 ## Language-Specific Strategies
@@ -112,15 +116,25 @@ registerExtractor(nodeExtractor);
 
 ## Building a New Extractor
 
-1. Create `src/compat/extractors/{language}.ts`
+1. Create the extractor in your **emitter project** (not oagen core), e.g., `src/compat/extractors/{language}.ts`
 2. Implement the `Extractor` interface — export a named constant (e.g., `export const rubyExtractor: Extractor = { ... }`)
-3. Register in the extraction script: import and call `registerExtractor()` in `scripts/compat-extract.ts`
+3. Register in the emitter project's `oagen.config.ts`:
+   ```typescript
+   import { rubyExtractor } from './src/compat/extractors/ruby.js';
+   const config: OagenConfig = {
+     extractors: [rubyExtractor],
+   };
+   ```
 4. Add tests in `test/compat/extractors/{language}.test.ts`
 5. Create a fixture SDK in `test/fixtures/sample-sdk-{language}/` with known classes, methods, and exports
 6. Verify deterministic output: extracting twice produces identical JSON
 
+Use `/generate-extractor <language>` for a guided workflow.
+
 ## Existing Extractors
 
-| Language | File                            | Status                              |
-| -------- | ------------------------------- | ----------------------------------- |
-| Node     | `src/compat/extractors/node.ts` | Complete — reference implementation |
+| Language | Location                                   | Status                              |
+| -------- | ------------------------------------------ | ----------------------------------- |
+| Node     | `src/compat/extractors/node.ts` (in core)  | Complete — reference implementation |
+
+Additional extractors live in emitter projects and are registered via `oagen.config.ts`.
