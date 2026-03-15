@@ -25,4 +25,14 @@ export default defineConfig([
     target: 'node20',
     external: ['node:fs', 'node:path', 'node:url', 'dotenv/config'],
   },
+  {
+    entry: {
+      'scripts/smoke/baseline': 'scripts/smoke/baseline.ts',
+      'scripts/smoke/sdk-test': 'scripts/smoke/sdk-test.ts',
+    },
+    format: ['esm'],
+    clean: false,
+    target: 'node20',
+    external: ['node:fs', 'node:path', 'node:url', 'node:util', 'dotenv/config'],
+  },
 ]);

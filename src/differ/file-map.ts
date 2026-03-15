@@ -159,6 +159,61 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
     }
   }
 
+  // Build model-to-model dependency graph for transitive closure
+  const modelDeps = new Map<string, Set<string>>();
+
+  function collectDeps(typeRef: TypeRef, deps: Set<string>) {
+    switch (typeRef.kind) {
+      case 'model':
+        deps.add(typeRef.name);
+        break;
+      case 'enum':
+        deps.add(typeRef.name);
+        break;
+      case 'array':
+        collectDeps(typeRef.items, deps);
+        break;
+      case 'nullable':
+        collectDeps(typeRef.inner, deps);
+        break;
+      case 'union':
+        typeRef.variants.forEach((v) => collectDeps(v, deps));
+        break;
+    }
+  }
+
+  for (const model of spec.models) {
+    const deps = new Set<string>();
+    for (const field of model.fields) {
+      collectDeps(field.type, deps);
+    }
+    deps.delete(model.name); // remove self-references
+    if (deps.size > 0) {
+      modelDeps.set(model.name, deps);
+    }
+  }
+
+  // Propagate: if service S uses model A, and model A depends on model B,
+  // then S also depends on B. Use fixed-point loop for transitive closure.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [modelName, services] of refs) {
+      const deps = modelDeps.get(modelName);
+      if (!deps) continue;
+      for (const dep of deps) {
+        if (!refs.has(dep)) refs.set(dep, new Set());
+        const depServices = refs.get(dep)!;
+        for (const svc of services) {
+          if (!depServices.has(svc)) {
+            depServices.add(svc);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
   const result = new Map<string, string[]>();
   for (const [name, svcSet] of refs) {
     result.set(name, [...svcSet]);

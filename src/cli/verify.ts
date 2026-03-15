@@ -16,18 +16,67 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
+import { getExtractor } from '../compat/extractor-registry.js';
+import { diffSurfaces } from '../compat/differ.js';
+import type { ApiSurface } from '../compat/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const scriptsDir = path.resolve(__dirname, '..', '..', 'scripts');
 
 const separator = '='.repeat(60);
 
+/**
+ * Resolve a smoke script path. Prefers compiled JS in dist/ (npm consumer),
+ * falls back to TS source (dev mode).
+ */
+function resolveScript(scriptRelPath: string): { bin: string; script: string } {
+  // Check for compiled JS in dist/scripts/ relative to the package root
+  const distScript = path.resolve(__dirname, '..', '..', 'dist', 'scripts', scriptRelPath.replace(/\.ts$/, '.js'));
+  if (existsSync(distScript)) {
+    return { bin: 'node', script: distScript };
+  }
+  // Fall back to TS source via tsx
+  const srcScript = path.resolve(__dirname, '..', '..', 'scripts', scriptRelPath);
+  return { bin: 'npx', script: srcScript };
+}
+
+function runScript(scriptRelPath: string, args: string[]): void {
+  const { bin, script } = resolveScript(scriptRelPath);
+  const fullArgs = bin === 'npx' ? ['tsx', script, ...args] : [script, ...args];
+  execFileSync(bin, fullArgs, { stdio: 'inherit', env: process.env });
+}
+
+/**
+ * Run compat check directly (no subprocess). Uses the extractor registry
+ * which is already populated by config-loader at CLI startup.
+ */
+async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang: string): Promise<boolean> {
+  const extractor = getExtractor(lang);
+  const candidate = await extractor.extract(outputDir);
+  const diff = diffSurfaces(baseline, candidate);
+
+  const pct = diff.preservationScore;
+  const total = diff.totalBaselineSymbols;
+  const kept = diff.preservedSymbols;
+
+  console.log(`compat: ${pct}% (${kept}/${total} symbols preserved)`);
+  if (diff.violations.length > 0) {
+    for (const v of diff.violations) {
+      console.log(`  [${v.category}] ${v.severity}: ${v.symbolPath} — ${v.message}`);
+    }
+    return false;
+  }
+  if (diff.additions.length > 0) {
+    console.log(`  + ${diff.additions.length} new symbols added`);
+  }
+  return true;
+}
+
 export async function verifyCommand(opts: {
-  spec: string;
+  spec?: string;
   lang: string;
   output: string;
   apiSurface?: string;
@@ -45,14 +94,10 @@ export async function verifyCommand(opts: {
     console.log(`Step ${stepNum}: Compat verification`);
     console.log(separator);
 
-    try {
-      execFileSync(
-        'npx',
-        ['tsx', path.join(scriptsDir, 'verify-compat.ts'), '--surface', apiSurface, '--output', output, '--lang', lang],
-        { stdio: 'inherit', env: process.env },
-      );
+    const passed = await runCompatCheckInner(JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface, output, lang);
+    if (passed) {
       console.log('Compat: passed');
-    } catch {
+    } else {
       console.error('\nCompat violations found — fix the emitter and re-run `oagen verify`.');
       process.exit(1);
     }
@@ -63,15 +108,17 @@ export async function verifyCommand(opts: {
   let baselinePath = rawResults ?? 'smoke-results-raw.json';
 
   if (!rawResults && !existsSync('smoke-results-raw.json')) {
+    if (!spec) {
+      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required when no raw baseline exists');
+      process.exit(1);
+    }
+
     console.log(`\n${separator}`);
     console.log(`Step ${stepNum}: Generating spec-only baseline (no raw baseline found)`);
     console.log(separator);
 
     try {
-      execFileSync('npx', ['tsx', path.join(scriptsDir, 'smoke', 'baseline.ts'), '--spec', spec], {
-        stdio: 'inherit',
-        env: process.env,
-      });
+      runScript('smoke/baseline.ts', ['--spec', spec]);
     } catch {
       console.error('Baseline generation failed');
       process.exit(1);
@@ -85,12 +132,18 @@ export async function verifyCommand(opts: {
   console.log(`Step ${stepNum}: Smoke test + diff`);
   console.log(separator);
 
-  const smokeScript = smokeRunner ?? path.join(scriptsDir, 'smoke', 'sdk-test.ts');
-  const smokeArgs = ['tsx', smokeScript, '--lang', lang, '--sdk-path', output, '--raw-results', baselinePath];
+  const smokeArgs = ['--lang', lang, '--sdk-path', output, '--raw-results', baselinePath];
   if (smokeConfig) smokeArgs.push('--smoke-config', smokeConfig);
 
   try {
-    execFileSync('npx', smokeArgs, { stdio: 'inherit', env: process.env });
+    if (smokeRunner) {
+      // Custom smoke runner — run directly
+      const bin = smokeRunner.endsWith('.ts') ? 'npx' : 'node';
+      const fullArgs = bin === 'npx' ? ['tsx', smokeRunner, ...smokeArgs] : [smokeRunner, ...smokeArgs];
+      execFileSync(bin, fullArgs, { stdio: 'inherit', env: process.env });
+    } else {
+      runScript('smoke/sdk-test.ts', smokeArgs);
+    }
   } catch {
     if (existsSync('smoke-compile-errors.json')) {
       console.error('\nSDK compile errors — read smoke-compile-errors.json for details');

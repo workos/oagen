@@ -72,6 +72,8 @@ export interface MethodOverlay {
 export interface OverlayLookup {
   /** HTTP method + path → existing method info */
   methodByOperation: Map<string, MethodOverlay>;
+  /** Reverse map: "ClassName.methodName" → HTTP key for patchOverlay */
+  httpKeyByMethod: Map<string, string>;
   /** IR interface name → existing interface name */
   interfaceByName: Map<string, string>;
   /** IR type alias name → existing type alias name */

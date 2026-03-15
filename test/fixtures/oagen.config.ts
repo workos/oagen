@@ -1,4 +1,6 @@
 /** Test-only config that registers a minimal emitter for CLI dry-run tests. */
+import type { ApiSpec, EmitterContext } from '../../src/index.js';
+
 export default {
   emitters: [
     {
@@ -6,7 +8,9 @@ export default {
       generateModels: () => [],
       generateEnums: () => [],
       generateResources: () => [],
-      generateClient: (_spec, ctx) => [{ path: `${ctx.namespace}/client.ts`, content: '// client' }],
+      generateClient: (_spec: ApiSpec, ctx: EmitterContext) => [
+        { path: `${ctx.namespace}/client.ts`, content: '// client' },
+      ],
       generateErrors: () => [],
       generateConfig: () => [],
       generateTypeSignatures: () => [],

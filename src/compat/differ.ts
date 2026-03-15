@@ -283,6 +283,12 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
   };
 }
 
+/**
+ * Compare method signatures using raw type strings.
+ * NOTE: This only produces meaningful results when both surfaces were extracted
+ * by the same extractor for the same language. Cross-language or cross-extractor
+ * comparisons will always fail because type representations differ.
+ */
 function signaturesMatch(baseline: ApiMethod, candidate: ApiMethod): boolean {
   // Return type must match
   if (baseline.returnType !== candidate.returnType) return false;

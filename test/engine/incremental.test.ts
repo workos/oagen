@@ -216,6 +216,7 @@ describe('generateIncremental', () => {
 
     const fakeOverlay: OverlayLookup = {
       methodByOperation: new Map(),
+      httpKeyByMethod: new Map(),
       interfaceByName: new Map(),
       typeAliasByName: new Map(),
       requiredExports: new Map(),
@@ -236,7 +237,7 @@ describe('generateIncremental', () => {
     expect(ctxCapture.ctx!.overlayLookup).toBe(fakeOverlay);
   });
 
-  it('defaults skipIfExists to true on generated files', async () => {
+  it('defaults skipIfExists to false on generated files', async () => {
     const v2: ApiSpec = {
       ...v1,
       version: '2.0.0',
@@ -253,7 +254,7 @@ describe('generateIncremental', () => {
     });
 
     for (const f of result.generated) {
-      expect(f.skipIfExists).toBe(true);
+      expect(f.skipIfExists).toBe(false);
     }
   });
 
