@@ -3,3 +3,4 @@ dist/
 .claude/ideation/
 .env
 smoke-*.json
+src/emitters

@@ -40,11 +40,11 @@ Every generator method receives an `EmitterContext`:
 
 ```typescript
 interface EmitterContext {
-  namespace: string;        // snake_case namespace for file paths
-  namespacePascal: string;  // PascalCase namespace for code identifiers
-  spec: ApiSpec;            // The full parsed IR spec
-  outputDir?: string;       // Output directory path
-  apiSurface?: ApiSurface;  // Baseline API surface (when --api-surface is provided)
+  namespace: string; // snake_case namespace for file paths
+  namespacePascal: string; // PascalCase namespace for code identifiers
+  spec: ApiSpec; // The full parsed IR spec
+  outputDir?: string; // Output directory path
+  apiSurface?: ApiSurface; // Baseline API surface (when --api-surface is provided)
   overlayLookup?: OverlayLookup; // Name preservation overlay (when --api-surface is provided)
 }
 ```
@@ -58,6 +58,7 @@ When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engi
 **How emitters should use it:**
 
 1. **Method names:** Before generating a method name, check `methodByOperation` using the HTTP key:
+
    ```typescript
    const httpKey = `${op.httpMethod.toUpperCase()} ${op.path}`;
    const existing = ctx.overlayLookup?.methodByOperation.get(httpKey);
@@ -72,13 +73,13 @@ When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engi
 
 **`OverlayLookup` fields:**
 
-| Field               | Type                            | Purpose                                          |
-| ------------------- | ------------------------------- | ------------------------------------------------ |
-| `methodByOperation` | `Map<string, MethodOverlay>`    | HTTP key → existing method info (name, params)   |
-| `httpKeyByMethod`   | `Map<string, string>`           | Reverse map: "Class.method" → HTTP key           |
-| `interfaceByName`   | `Map<string, string>`           | IR interface name → existing interface name      |
-| `typeAliasByName`   | `Map<string, string>`           | IR type alias name → existing type alias name    |
-| `requiredExports`   | `Map<string, Set<string>>`      | Barrel file path → symbols that must be exported |
+| Field               | Type                         | Purpose                                          |
+| ------------------- | ---------------------------- | ------------------------------------------------ |
+| `methodByOperation` | `Map<string, MethodOverlay>` | HTTP key → existing method info (name, params)   |
+| `httpKeyByMethod`   | `Map<string, string>`        | Reverse map: "Class.method" → HTTP key           |
+| `interfaceByName`   | `Map<string, string>`        | IR interface name → existing interface name      |
+| `typeAliasByName`   | `Map<string, string>`        | IR type alias name → existing type alias name    |
+| `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported |
 
 The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
 

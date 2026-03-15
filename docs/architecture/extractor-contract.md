@@ -62,8 +62,8 @@ Extractors are registered via `oagen.config.ts` in the consumer project. The CLI
 
 ```typescript
 // oagen.config.ts
-import { myExtractor } from './src/compat/extractors/my-language.js';
-import type { OagenConfig } from '@workos/oagen';
+import { myExtractor } from "./src/compat/extractors/my-language.js";
+import type { OagenConfig } from "@workos/oagen";
 
 const config: OagenConfig = {
   extractors: [myExtractor],
@@ -120,7 +120,7 @@ getExtractor(language: string): Extractor
 2. Implement the `Extractor` interface — export a named constant (e.g., `export const rubyExtractor: Extractor = { ... }`)
 3. Register in the emitter project's `oagen.config.ts`:
    ```typescript
-   import { rubyExtractor } from './src/compat/extractors/ruby.js';
+   import { rubyExtractor } from "./src/compat/extractors/ruby.js";
    const config: OagenConfig = {
      extractors: [rubyExtractor],
    };
@@ -133,8 +133,8 @@ Use `/generate-extractor <language>` for a guided workflow.
 
 ## Existing Extractors
 
-| Language | Location                                   | Status                              |
-| -------- | ------------------------------------------ | ----------------------------------- |
-| Node     | `src/compat/extractors/node.ts` (in core)  | Complete — reference implementation |
+| Language | Location                                  | Status                              |
+| -------- | ----------------------------------------- | ----------------------------------- |
+| Node     | `src/compat/extractors/node.ts` (in core) | Complete — reference implementation |
 
 Additional extractors live in emitter projects and are registered via `oagen.config.ts`.

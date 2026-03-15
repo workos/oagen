@@ -45,7 +45,7 @@ between the generated SDK and the live SDK's API surface.
 shape, missing exports). Those require changing emitter code — the loop exits 1
 and the emitter-fixing loop takes over.
 
-**Code:** `scripts/verify-compat.ts` lines 100-139
+**Code:** `src/cli/verify.ts` (compat check) and `src/compat/overlay.ts` (patch loop)
 
 ### Emitter-fixing loop (Phase 1 only)
 

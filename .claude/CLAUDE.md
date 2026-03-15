@@ -10,10 +10,10 @@ Two phases: one-time setup (`/add-language` — scaffold emitter, verify compat 
 
 ## Critical Rules
 
-- **Dependency layers are one-way:** `ir/types → utils → parser → engine → cli`. Never import rightward into leftward layers. Emitters live in a separate project directory and import from `@workos/oagen`.
+- **Dependency layers are one-way:** `ir → utils → parser → engine/differ → cli` (compat is used by engine and cli). Never import rightward into leftward layers. Emitters live in a separate project directory and import from `@workos/oagen`.
 - **Emitters are pure:** receive IR, return `GeneratedFile[]`. No I/O, no side effects.
 - **Never remove or edit existing tests.**
-- **Tests:** use `toMatchInlineSnapshot()` for representative cases. `test/` mirrors `src/` structure.
+- **Tests:** prefer `toMatchInlineSnapshot()` for complex output; most tests use standard assertions. `test/` mirrors `src/` structure.
 - **Naming:** IR uses PascalCase. Each emitter converts to target conventions via its `naming.ts`.
 - **Git:** commit after each complete feature.
 
