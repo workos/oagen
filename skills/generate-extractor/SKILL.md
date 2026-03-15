@@ -59,7 +59,7 @@ Before starting, read and understand these files:
 4. **`{oagen}/test/fixtures/sample-sdk/`** — The Node fixture SDK
 5. **`{oagen}/docs/architecture/extractor-contract.md`** — The full contract specification with language-specific strategies
 
-If an `sdk_path` argument is provided, explore that SDK to understand its public surface patterns (entry points, export mechanisms, type annotation files, documentation conventions).
+If an `sdk_path` argument is provided, you MUST explore that SDK thoroughly to understand its public surface patterns (entry points, export mechanisms, type annotation files, documentation conventions). The real SDK is the ground truth for what the extractor must capture — do not guess based on generic conventions.
 
 Extractors live in the **emitter project** alongside the emitters. This keeps language-specific code together. The extractor is registered via the project's `oagen.config.ts`.
 
@@ -280,7 +280,27 @@ npx tsx -e "
 diff /tmp/test-{language}-surface.json /tmp/test-{language}-surface-2.json
 ```
 
-If an `sdk_path` argument was provided, also test against the real SDK.
+If an `sdk_path` argument was provided, also test against the real SDK. This is critical — the fixture SDK is a simplified test harness, but the real SDK is what matters. Run the extractor against the real SDK and verify:
+
+1. All public classes are captured
+2. Method signatures match reality (parameter names, types, optionality)
+3. The export map reflects the actual barrel export structure
+4. No private/internal symbols leak through
+
+```bash
+# Test against real SDK
+npx tsx -e "
+  import { {language}Extractor } from './src/compat/extractors/{language}.js';
+  const surface = await {language}Extractor.extract('{sdk_path}');
+  console.log('Classes:', Object.keys(surface.classes).length);
+  console.log('Interfaces:', Object.keys(surface.interfaces).length);
+  console.log('Enums:', Object.keys(surface.enums).length);
+  console.log('Exports:', Object.keys(surface.exports).length);
+  console.log(JSON.stringify(surface, null, 2));
+" > /tmp/real-{language}-surface.json
+```
+
+Manually inspect the output to verify it matches the real SDK's public API.
 
 ## Step 6: Verification Report
 

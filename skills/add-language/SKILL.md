@@ -43,6 +43,16 @@ Use `AskUserQuestion` to determine which scenario applies. Present both with a o
 
 If an `sdk_path` argument was provided, default to Scenario A and confirm.
 
+**For Scenario A:** If no `sdk_path` was provided, use `AskUserQuestion` to ask: "Where is the existing SDK? (absolute or relative path, e.g. `../backend/workos-node`)"
+
+Validate the SDK path exists before proceeding:
+
+```bash
+ls {sdk_path}/package.json || ls {sdk_path}/Gemfile || ls {sdk_path}/go.mod || ls {sdk_path}/pyproject.toml
+```
+
+Store `sdk_path` and pass it to all sub-skill invocations.
+
 ## Step 2: Present the Plan
 
 Based on the scenario, present the skill sequence the user will run. Show only the steps that apply.
@@ -50,11 +60,13 @@ Based on the scenario, present the skill sequence the user will run. Show only t
 ### Scenario A — Backwards compatible
 
 ```
-Step 1: /generate-emitter {language}        ← scaffold emitter, design doc, tests
-Step 2: /generate-extractor {language}      ← scaffold extractor for API surface extraction
-Step 3: /verify-compat {language}           ← extract baseline, generate with overlay, verify
-Step 4: /generate-smoke-test {language}     ← wire-level HTTP parity tests
+Step 1: /generate-emitter {language} sdk_path={sdk_path}  ← study existing SDK, scaffold emitter, design doc, tests
+Step 2: /generate-extractor {language} sdk_path={sdk_path} ← scaffold extractor for API surface extraction
+Step 3: /verify-compat {language} sdk_path={sdk_path}      ← extract baseline, generate with overlay, verify
+Step 4: /generate-smoke-test {language}                     ← wire-level HTTP parity tests
 ```
+
+**The `sdk_path` flows through to every sub-skill.** This is how the emitter knows what patterns to replicate, the extractor knows how to analyze the SDK, and the compat verifier knows what to compare against.
 
 ### Scenario B — Fresh
 
@@ -74,7 +86,9 @@ Invoke each skill in order using the `Skill` tool, passing the `project` argumen
 Between skills, run a quick validation to make sure the previous step succeeded:
 
 ```bash
-# After /generate-emitter — verify emitter exists and tests pass
+# After /generate-emitter — verify emitter exists, design doc exists, and tests pass
+ls {project}/docs/{language}.md       # design doc must exist
+ls {project}/src/{language}/index.ts  # emitter entry point must exist
 cd {project} && npx vitest run test/{language}/ 2>&1 | tail -5
 
 # After /generate-extractor — verify extractor is registered
@@ -85,6 +99,13 @@ grep -l "{language}Extractor" {project}/oagen.config.ts
 
 # After /generate-smoke-test — verify script exists
 ls {project}/smoke/sdk-{language}.ts
+```
+
+**For Scenario A:** After `/generate-emitter` completes, also verify the design doc references real SDK patterns:
+
+```bash
+# Design doc should reference the real SDK path and contain code snippets
+grep -c "sdk_path\|existing SDK\|from src/" {project}/docs/{language}.md
 ```
 
 If a skill fails or the user wants to pause, note where they stopped. They can resume by running the remaining skills individually.
@@ -127,6 +148,9 @@ Files created (in {project}):
   test/compat/extractors/{language}.test.ts       (Scenario A)
   test/fixtures/sample-sdk-{language}/            (Scenario A)
   smoke/sdk-{language}.ts                         — smoke test runner
+
+Patterns replicated:       (Scenario A only)
+  [x/!] {list each pattern from the design doc with PASS/NEEDS-WORK}
 
 Next steps:
   - Run the verify-and-fix loop:

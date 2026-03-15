@@ -35,9 +35,10 @@ Some steps below reference files in the oagen core package. Resolve the path onc
 ## Prerequisites
 
 - An emitter exists for `<language>` (run `/generate-emitter` first)
-- The live SDK is accessible at `--sdk-path`
-- An extractor exists for `<language>` (see `{oagen}/docs/architecture/extractor-contract.md` to build one)
+- The live SDK is accessible at `--sdk-path` — this must be the real, published SDK, not a fixture
+- An extractor exists for `<language>` (run `/generate-extractor` first, or see `{oagen}/docs/architecture/extractor-contract.md` to build one)
 - The emitter has been run at least once to produce generated output
+- The emitter's design doc (`docs/{language}.md` in the emitter project) exists and documents the real SDK's patterns — if not, run `/generate-emitter` with `sdk_path` first
 
 ## Step 1: Extract Baseline
 
@@ -82,7 +83,7 @@ oagen verify --lang <language> --output <output-path> --api-surface api-surface.
 
 **Flags:**
 
-- `--surface <path>` — path to the baseline API surface JSON (required)
+- `--api-surface <path>` — path to the baseline API surface JSON (required)
 - `--output <path>` — path to the generated SDK output (required)
 - `--lang <language>` — language identifier (required)
 
