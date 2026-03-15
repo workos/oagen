@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
+import { extractCommand } from './extract.js';
 import { verifyCommand } from './verify.js';
 import { loadConfig } from './config-loader.js';
 import { applyConfig } from './plugin-loader.js';
@@ -50,6 +51,7 @@ program
   .option('--namespace <name>', 'SDK namespace/package name')
   .option('--dry-run', 'Preview files without writing')
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
+  .option('--manifest <path>', 'Path to smoke-manifest.json for method overlay')
   .option('--no-compat-check', 'Skip compat overlay even if --api-surface is provided')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
@@ -70,8 +72,19 @@ program
   .option('--report', 'Output diff report as JSON')
   .option('--force', 'Allow file deletions without confirmation')
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
+  .option('--manifest <path>', 'Path to smoke-manifest.json for method overlay')
   .action((opts) => {
     diffCommand(opts).catch(handleError);
+  });
+
+program
+  .command('extract')
+  .description('Extract public API surface from a live SDK')
+  .requiredOption('--sdk-path <path>', 'Path to the live SDK')
+  .requiredOption('--lang <language>', 'Target language')
+  .option('--output <path>', 'Output file path', 'api-surface.json')
+  .action((opts) => {
+    extractCommand(opts).catch(handleError);
   });
 
 program
@@ -86,10 +99,8 @@ program
   .option('--smoke-runner <path>', 'Path to a custom smoke runner script (overrides built-in sdk-test.ts)')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
-    if (!opts.spec) {
-      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
-      process.exit(1);
-    }
+    // --spec is only required when we need to generate a baseline (no --raw-results
+    // and no existing smoke-results-raw.json). Defer the check to verifyCommand.
     // CLI --smoke-runner takes precedence, then per-language smokeRunners map from config
     opts.smokeRunner ??= configSmokeRunners?.[opts.lang];
     verifyCommand(opts).catch(handleError);

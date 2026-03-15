@@ -50,9 +50,9 @@ When regenerating an SDK for a language that already has a published SDK, verify
 
 **How the self-correcting loop works:**
 
-1. Extract the live SDK's API surface (`npm run compat:extract`)
+1. Extract the live SDK's API surface (`oagen extract --sdk-path <path> --lang <language>`)
 2. Generate with the overlay (`--api-surface api-surface.json`) so the emitter preserves existing names
-3. Verify the generated output against the baseline (`npm run verify:compat`)
+3. Verify the generated output against the baseline (`oagen verify --api-surface api-surface.json --lang <language> --output <path>`)
 4. If violations exist, fix the emitter and regenerate — loop mode (`--loop`) automates this cycle
 
 The `--api-surface` flag is supported by both `oagen generate` and `oagen diff` (for incremental generation with compat overlay).

@@ -34,8 +34,8 @@ Compat verification checks that generated SDK code preserves the public API surf
 
 Compat verification catches regressions like renamed methods, changed parameter signatures, missing exports, and reorganized barrel files — issues that unit tests don't cover because they don't compare against the live SDK, and that smoke tests don't cover because they focus on HTTP behavior rather than API shape.
 
-- Compat extraction: `npm run compat:extract -- --sdk-path <path> --lang <language>`
-- Compat verification: `npm run verify:compat -- --surface api-surface.json --output <path> --lang <language>`
+- Compat extraction: `oagen extract --sdk-path <path> --lang <language>`
+- Compat verification: `oagen verify --api-surface api-surface.json --lang <language> --output <path>`
 - Unified verify (includes compat): `oagen verify --api-surface api-surface.json --lang <language> --output <path>`
 - Run `/verify-compat <language>` for the full guided workflow
 - See `docs/architecture/extractor-contract.md` for building new language extractors

@@ -201,13 +201,11 @@ const config: OagenConfig = {
 
 ```bash
 # Offline validation against spec baseline (no API key needed)
-# From the oagen core repo:
-npm run smoke:baseline
-npm run smoke -- --lang {lang} --sdk-path {path} --raw-results smoke-results-spec-baseline.json
+oagen verify --lang {lang} --output {sdk-path} --spec <spec>
 
-# Live validation against real API
-npm run smoke:raw
-npm run smoke -- --lang {lang} --sdk-path {path}
+# Live validation against real API (requires API key and raw baseline)
+# Generate raw baseline from the oagen core repo, then verify:
+oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.json
 ```
 
 ## Step 8: Emitter-fixing loop (during initial setup)

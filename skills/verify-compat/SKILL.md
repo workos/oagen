@@ -44,7 +44,7 @@ Some steps below reference files in the oagen core package. Resolve the path onc
 Extract the public API surface from the live SDK:
 
 ```bash
-npm run compat:extract -- --sdk-path <path> --lang <language>
+oagen extract --sdk-path <path> --lang <language>
 ```
 
 **Flags:**
@@ -62,7 +62,7 @@ This produces `api-surface.json` — the baseline snapshot of the live SDK's pub
 Run the emitter with the API surface overlay so it preserves existing names:
 
 ```bash
-npm run dev -- generate --spec <spec> --lang <language> --output <output-path> --api-surface api-surface.json
+oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface api-surface.json
 ```
 
 **Flags:**
@@ -77,7 +77,7 @@ The emitter receives the overlay via `EmitterContext` and uses it to preserve ex
 Compare the generated output against the baseline surface:
 
 ```bash
-npm run verify:compat -- --surface api-surface.json --output <output-path> --lang <language>
+oagen verify --lang <language> --output <output-path> --api-surface api-surface.json
 ```
 
 **Flags:**
@@ -118,28 +118,24 @@ When verification fails, the output contains categorized violations:
 
 For automated fix-and-verify cycles, use loop mode:
 
+Repeat Steps 2 and 3 until violations are resolved:
+
 ```bash
-npm run verify:compat -- --surface api-surface.json --output <output-path> --lang <language> --loop --spec <spec> --namespace <namespace>
+oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface api-surface.json
+oagen verify --lang <language> --output <output-path> --api-surface api-surface.json
 ```
 
-**Additional flags for loop mode:**
-
-- `--loop` — enable the self-correcting loop
-- `--max-retries <n>` — maximum regeneration attempts (default: 3)
-- `--spec <path>` — OpenAPI spec for regeneration (required in loop mode)
-- `--namespace <name>` — namespace for regeneration (optional)
-
-The loop regenerates the SDK with the overlay, re-verifies, and repeats until either:
+Each iteration regenerates the SDK with the overlay (preserving existing names) and re-verifies. Continue until either:
 
 - All violations are resolved (exit 0)
-- Max retries reached with no improvement (stall detection, exit 1)
+- No further improvement is possible (fix the emitter manually for remaining violations)
 
 ## When to Skip
 
 For languages where backwards compatibility isn't relevant (full rewrites, new SDKs with no existing consumers), skip compat verification by passing `--no-compat-check` to the generate command:
 
 ```bash
-npm run dev -- generate --spec <spec> --lang <language> --output <path> --no-compat-check
+oagen generate --spec <spec> --lang <language> --output <path> --no-compat-check
 ```
 
 ## Reference

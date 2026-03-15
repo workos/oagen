@@ -114,7 +114,9 @@ async function runLoop(): Promise<void> {
       try {
         const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as ManifestEntry[];
         overlay = buildOverlayLookup(baseline, manifest);
-      } catch { /* keep existing overlay */ }
+      } catch {
+        /* keep existing overlay */
+      }
     }
 
     const diff = await verify(baseline, values.output, values.lang);

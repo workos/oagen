@@ -1,9 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { parseSpec } from '../parser/parse.js';
 import { diffSpecs } from '../differ/diff.js';
 import { generateIncremental } from '../engine/incremental.js';
 import { getEmitter } from '../engine/registry.js';
 import { buildOverlayLookup } from '../compat/overlay.js';
+import type { ManifestEntry } from '../compat/overlay.js';
 import type { ApiSurface } from '../compat/types.js';
 
 export async function diffCommand(opts: {
@@ -14,6 +16,7 @@ export async function diffCommand(opts: {
   report?: boolean;
   force?: boolean;
   apiSurface?: string;
+  manifest?: string;
 }): Promise<void> {
   const oldSpec = await parseSpec(opts.old);
   const newSpec = await parseSpec(opts.new);
@@ -21,7 +24,15 @@ export async function diffCommand(opts: {
   if (opts.report) {
     const diff = diffSpecs(oldSpec, newSpec);
     console.log(JSON.stringify(diff, null, 2));
-    process.exit(diff.summary.breaking > 0 ? 2 : diff.summary.added > 0 ? 1 : 0);
+    process.exit(
+      diff.summary.breaking > 0
+        ? 2
+        : diff.summary.modified > 0 || diff.summary.removed > 0
+          ? 1
+          : diff.summary.added > 0
+            ? 1
+            : 0,
+    );
   }
 
   if (!opts.lang || !opts.output) {
@@ -37,14 +48,28 @@ export async function diffCommand(opts: {
     try {
       raw = readFileSync(opts.apiSurface, 'utf-8');
     } catch {
-      throw new Error(`API surface file not found: ${opts.apiSurface}. Run \`npm run compat:extract\` first.`);
+      throw new Error(`API surface file not found: ${opts.apiSurface}. Run \`oagen extract\` first.`);
     }
     try {
       apiSurface = JSON.parse(raw) as ApiSurface;
     } catch (err) {
       throw new Error(`Failed to parse api-surface.json: ${err instanceof Error ? err.message : String(err)}`);
     }
-    overlayLookup = buildOverlayLookup(apiSurface);
+
+    // Load manifest: explicit flag, or auto-discover in output directory
+    let manifest: ManifestEntry[] | undefined;
+    const manifestPath = opts.manifest ?? (opts.output ? path.join(opts.output, 'smoke-manifest.json') : undefined);
+    if (manifestPath && (opts.manifest || existsSync(manifestPath))) {
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as ManifestEntry[];
+      } catch {
+        if (opts.manifest) {
+          throw new Error(`Failed to read manifest: ${manifestPath}`);
+        }
+      }
+    }
+
+    overlayLookup = buildOverlayLookup(apiSurface, manifest);
   }
 
   const emitter = getEmitter(opts.lang);
