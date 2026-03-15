@@ -4,9 +4,9 @@ Generate idiomatic SDKs from OpenAPI 3.x specs via a language-agnostic IR.
 
 Pipeline: `OpenAPI spec → Parser → IR → Emitter → GeneratedFile[] → Writer → disk`
 
-Two phases: one-time setup (`/generate-sdk` — scaffold emitter, verify compat if preserving an existing SDK, smoke test) then ongoing spec updates (`oagen diff` → `oagen generate` → `oagen verify`). See `docs/architecture/workflows.md`.
+Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if preserving an existing SDK, and always smoke test) then ongoing spec updates (`oagen diff` → `oagen generate` → `oagen verify`). For more information, see `docs/architecture/workflows.md`.
 
-**Plugin system:** External consumers can register custom emitters, extractors, and smoke runners via `oagen.config.ts` in their project root — no need to modify CLI source. See the Configuration section in the README.
+**Plugin system:** External consumers can register custom emitters, extractors, and smoke runners via `oagen.config.ts` in their project root—no need to modify CLI source. See the Configuration section in the README.
 
 ## Critical Rules
 
@@ -34,7 +34,7 @@ Start here when working on a specific area:
 - [Emitter Contract](docs/architecture/emitter-contract.md) — `Emitter` interface, `GeneratedFile` shape, and per-language file structure
 - [IR Types](docs/architecture/ir-types.md) — `ApiSpec`, `TypeRef` discriminated union, `Model`, `Enum`, `Service`, `Operation`
 - [Extractor Contract](docs/architecture/extractor-contract.md) — `Extractor` interface, `ApiSurface` type, and guide for new language extractors
-- SDK design docs: live in the emitter project (e.g. `docs/{language}.md` in `oagen-emitters`)
+- SDK design docs: live in the emitter project (e.g. `docs/sdk-architecture/{language}.md` in `oagen-emitters`)
 
 ## Skills (Claude Code Plugin)
 

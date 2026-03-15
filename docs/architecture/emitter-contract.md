@@ -133,7 +133,7 @@ Emitters live in the separate `oagen-emitters` project and import types from `@w
 
 ## Adding a New Emitter
 
-1. Create design doc at `docs/{language}.md` in the emitter project
+1. Create design doc at `docs/sdk-architecture/{language}.md` in the emitter project
 2. Scaffold files under `src/{language}/` in the emitter project
 3. Implement all `Emitter` methods
 4. Register in the emitter project's `oagen.config.ts`

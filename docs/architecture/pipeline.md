@@ -10,7 +10,7 @@ oagen processes OpenAPI specs in three stages: Parse → Emit → Write.
 │   (YAML/JSON)    │     │                      │     │  (ApiSpec)   │
 └──────────────────┘     └─────────────────────┘      └──────┬───────┘
                                                              │
-                         ┌──────────────────────┐             │
+                         ┌──────────────────────┐            │
                          │  Emitter (per lang)  │◀───────────┘
                          │  generator methods   │
                          └──────────┬───────────┘
@@ -37,12 +37,12 @@ Entry point: `parse.ts` → `parseSpec(specPath: string): Promise<ApiSpec>`
 
 ### Operation Name Inference
 
-If an `operationId` is present, it takes precedence. NestJS-style IDs (`ResourceController_action`) are parsed to extract the action. Otherwise, names are inferred from HTTP method + path pattern:
+If an `operationId` is present, it takes precedence. Names are inferred from HTTP method + path pattern:
 
 | Method | Path Pattern  | Inferred Name |
 | ------ | ------------- | ------------- |
 | GET    | `/users`      | `list`        |
-| GET    | `/users/{id}` | `retrieve`    |
+| GET    | `/users/{id}` | `get`         |
 | POST   | `/users`      | `create`      |
 | PUT    | `/users/{id}` | `update`      |
 | DELETE | `/users/{id}` | `delete`      |

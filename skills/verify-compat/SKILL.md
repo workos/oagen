@@ -1,13 +1,6 @@
 ---
 name: verify-compat
-description: Verify that generated SDK code preserves backwards compatibility with a live SDK. Use when regenerating an SDK for a language that has an existing published SDK, or when asked to check BC, compat, or backwards compatibility.
-arguments:
-  - name: language
-    description: Target language (e.g., "node", "ruby", "python")
-    required: true
-  - name: sdk_path
-    description: Path to the live SDK to verify against
-    required: true
+description: Verify that generated SDK code preserves backwards compatibility with a live SDK. Use when regenerating an SDK for a language that has an existing published SDK, checking for breaking changes, regressions, or API surface drift. Also triggers for "BC check", "backwards compatibility", "compat verification", "breaking change detection", "API surface comparison", or "regression check".
 ---
 
 # /verify-compat
@@ -26,82 +19,51 @@ This is the middle tier of the three-tier testing pyramid:
 
 ## Resolve oagen Core Path
 
-Some steps below reference files in the oagen core package. Resolve the path once:
-
-1. If `node_modules/@workos/oagen/` exists, use that as `{oagen}`.
-2. If the current directory has `src/engine/types.ts`, you're in the oagen repo — use `.` as `{oagen}`.
-3. Otherwise, ask: "Where is the @workos/oagen package installed?"
+Check for `node_modules/@workos/oagen/`, or `src/engine/types.ts` in the current directory, otherwise ask.
 
 ## Prerequisites
 
 - An emitter exists for `<language>` (run `/generate-emitter` first)
-- The live SDK is accessible at `--sdk-path` — this must be the real, published SDK, not a fixture
-- An extractor exists for `<language>` (run `/generate-extractor` first, or see `{oagen}/docs/architecture/extractor-contract.md` to build one)
+- The live SDK is accessible at `--sdk-path` — must be the real, published SDK
+- An extractor exists for `<language>` (run `/generate-extractor` first)
 - The emitter has been run at least once to produce generated output
-- The emitter's design doc (`docs/{language}.md` in the emitter project) exists and documents the real SDK's patterns — if not, run `/generate-emitter` with `sdk_path` first
+- The emitter's design doc (`docs/sdk-architecture/{language}.md`) exists and documents the real SDK's patterns
 
 ## Step 1: Extract Baseline
-
-Extract the public API surface from the live SDK:
 
 ```bash
 oagen extract --sdk-path <path> --lang <language>
 ```
 
-**Flags:**
-
-- `--sdk-path <path>` — path to the live SDK root (required)
-- `--lang <language>` — language identifier matching the extractor (required)
-- `--output <path>` — output file path (default: `api-surface.json`)
-
 This produces `api-surface.json` — the baseline snapshot of the live SDK's public API (classes, methods, interfaces, type aliases, enums, exports).
 
-**Verify the output**: Open `api-surface.json` and spot-check that it contains the expected classes and methods. If the surface looks empty or incomplete, the extractor may need fixes.
+**Verify the output:** Open `api-surface.json` and spot-check that it contains the expected classes and methods. If the surface looks empty or incomplete, the extractor may need fixes — run `/generate-extractor` to debug.
 
 ## Step 2: Generate with Overlay
-
-Run the emitter with the API surface overlay so it preserves existing names:
 
 ```bash
 oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface api-surface.json
 ```
 
-**Flags:**
-
-- `--api-surface <path>` — path to the baseline API surface JSON from Step 1
-- All other flags are the standard generate flags (`--spec`, `--lang`, `--output`, `--namespace`)
-
 The emitter receives the overlay via `EmitterContext` and uses it to preserve existing method names, class names, and type names where possible.
 
 ## Step 3: Verify
-
-Compare the generated output against the baseline surface:
 
 ```bash
 oagen verify --lang <language> --output <output-path> --api-surface api-surface.json
 ```
 
-**Flags:**
-
-- `--api-surface <path>` — path to the baseline API surface JSON (required)
-- `--output <path>` — path to the generated SDK output (required)
-- `--lang <language>` — language identifier (required)
-
-**Interpret the result:**
-
-- **Exit 0** + preservation score = all clear. The generated SDK preserves the live SDK's public API.
-- **Exit 1** + violations = review each violation (see Step 4).
+- **Exit 0** + preservation score = all clear
+- **Exit 1** + violations = review each violation (see Step 4)
 
 ## Step 4: Interpret Results
-
-When verification fails, the output contains categorized violations:
 
 | Category           | Meaning                                                |
 | ------------------ | ------------------------------------------------------ |
 | `public-api`       | A public class, method, or type was renamed or removed |
 | `signature`        | A method's parameter list or return type changed       |
 | `export-structure` | A barrel export is missing or reorganized              |
-| `behavioral`       | A behavioral contract changed (e.g., async → sync)     |
+| `behavioral`       | A behavioral contract changed (e.g., async to sync)    |
 
 | Severity   | Action                                                             |
 | ---------- | ------------------------------------------------------------------ |
@@ -113,11 +75,11 @@ When verification fails, the output contains categorized violations:
 1. Check `symbolPath` to locate the affected symbol
 2. Compare `baseline` vs `candidate` to understand the change
 3. Fix the emitter to preserve the baseline name/signature, OR
-4. If the change is intentional (API evolution), document it as a breaking change
+4. If intentional, document it as a breaking change
 
-## Step 5: Self-Correcting Loop (Advanced)
+**When violations can't be auto-fixed:** Some violations indicate structural emitter issues (wrong method signature shape, missing exports). These require changing emitter code directly — the overlay loop can only fix naming mismatches, not structural problems. Read the violation details to determine whether this is an overlay issue or an emitter issue.
 
-For automated fix-and-verify cycles, use loop mode:
+## Step 5: Self-Correcting Loop
 
 Repeat Steps 2 and 3 until violations are resolved:
 
@@ -126,14 +88,11 @@ oagen generate --spec <spec> --lang <language> --output <output-path> --api-surf
 oagen verify --lang <language> --output <output-path> --api-surface api-surface.json
 ```
 
-Each iteration regenerates the SDK with the overlay (preserving existing names) and re-verifies. Continue until either:
-
-- All violations are resolved (exit 0)
-- No further improvement is possible (fix the emitter manually for remaining violations)
+Continue until either all violations are resolved (exit 0) or no further improvement is possible (fix the emitter manually).
 
 ## When to Skip
 
-For languages where backwards compatibility isn't relevant (full rewrites, new SDKs with no existing consumers), skip compat verification by passing `--no-compat-check` to the generate command:
+For languages where backwards compatibility isn't relevant (full rewrites, new SDKs), skip compat verification:
 
 ```bash
 oagen generate --spec <spec> --lang <language> --output <path> --no-compat-check

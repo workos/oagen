@@ -1,126 +1,97 @@
 ---
 name: generate-sdk
-description: Orchestrate generating an SDK for a target language end-to-end. Determines the right scenario (backwards-compatible or fresh) and guides through the correct sequence of skills. Use when the user wants to generate an SDK, add a language, start a new SDK, or asks "how do I add X support".
-arguments:
-  - name: language
-    description: Target language name (e.g., "python", "go", "kotlin")
-    required: true
-  - name: sdk_path
-    description: Path to an existing live SDK for the language (optional — triggers compat scenario)
-    required: false
-  - name: project
-    description: Path to the emitter project (overrides oagen.config.ts emitterProject)
-    required: false
+description: Orchestrate generating an SDK for a target language end-to-end. Determines the right scenario (backwards-compatible or fresh) and guides through the correct sequence of sub-skills. Use when the user wants to generate an SDK, add a new language, create SDK bindings, start a new language target, or asks "how do I add X support". Also triggers for "new SDK", "language support", or "scaffold SDK".
 ---
 
 # /generate-sdk
 
 Orchestrate the end-to-end workflow for generating an SDK for a target language. This skill does not implement anything itself — it determines the right scenario, sequences the correct skills, and tracks progress across steps.
 
-## Resolve Emitter Project
-
-Before doing anything else, determine the emitter project path:
-
-1. If the `project` argument was provided, use that.
-2. Otherwise, read `oagen.config.ts` in the current directory and check for `emitterProject`.
-3. If neither exists, use `AskUserQuestion` to ask: "Where is your emitter project? (path relative to this repo, e.g. `../my-emitters`)"
-
-Store it and pass it as the `project` argument to every sub-skill invocation.
-
 ## Architecture
 
-Emitters, extractors, smoke tests, and their unit tests all live in the **emitter project**, not in the oagen core repo. The emitter project depends on `@workos/oagen` for types and shared utilities. Skills in this repo generate files into the emitter project.
+Emitters, extractors, smoke tests, and their unit tests all live in the **emitter project**, not in the oagen core repo. The emitter project depends on `@workos/oagen` for types and shared utilities.
 
-## Step 1: Determine Scenario
+## Step 1: Determine Language
 
-Use `AskUserQuestion` to determine which scenario applies. Present both with a one-line description:
+Use `AskUserQuestion` to determine the target language (e.g., "ruby", "python", "php"). Store `language` and pass it to all sub-skill invocations.
 
-> I need to know which scenario fits this language:
->
-> **A. Backwards compatible** — There's a published SDK with consumers who depend on its public API. The generated SDK must match the existing surface (method names, signatures, exports).
+## Step 2: Determine Scenario
+
+Use `AskUserQuestion` to determine which scenario applies:
+
+> **A. Backwards compatible** — There's a published SDK with consumers who depend on its public API. The generated SDK must match the existing surface.
 >
 > **B. Fresh** — No existing SDK to preserve, or you're intentionally replacing one. No compat constraints.
 
-If an `sdk_path` argument was provided, default to Scenario A and confirm.
+**For Scenario A:** Also ask: "Where is the existing SDK? (absolute or relative path)" Validate the path exists (look for `package.json`, `Gemfile`, `go.mod`, `pyproject.toml`, or similar). Store `sdk_path`.
 
-**For Scenario A:** If no `sdk_path` was provided, use `AskUserQuestion` to ask: "Where is the existing SDK? (absolute or relative path, e.g. `../backend/workos-node`)"
+## Step 3: Determine Project Location
 
-Validate the SDK path exists before proceeding:
+Use `AskUserQuestion`: "Where is your emitter project located? (absolute or relative path, e.g. `../oagen-emitters/node`)"
+
+Validate and create if needed:
 
 ```bash
-ls {sdk_path}/package.json || ls {sdk_path}/Gemfile || ls {sdk_path}/go.mod || ls {sdk_path}/pyproject.toml
+mkdir -p {project}/src/{language} && mkdir -p {project}/test/{language}
 ```
 
-Store `sdk_path` and pass it to all sub-skill invocations.
+Store `project` and pass it to all sub-skill invocations.
 
-## Step 2: Present the Plan
-
-Based on the scenario, present the skill sequence the user will run. Show only the steps that apply.
+## Step 4: Present the Plan
 
 ### Scenario A — Backwards compatible
 
 ```
-Step 1: /generate-emitter {language} sdk_path={sdk_path}  ← study existing SDK, scaffold emitter, design doc, tests
-Step 2: /generate-extractor {language} sdk_path={sdk_path} ← scaffold extractor for API surface extraction
-Step 3: /verify-compat {language} sdk_path={sdk_path}      ← extract baseline, generate with overlay, verify
-Step 4: /generate-smoke-test {language}                     ← wire-level HTTP parity tests
+Step 1: /generate-emitter {language} {project} sdk_path={sdk_path}    — study existing SDK, scaffold emitter
+Step 2: /generate-extractor {language} sdk_path={sdk_path}            — scaffold extractor
+Step 3: /verify-compat {language} sdk_path={sdk_path}                 — extract baseline, verify
+Step 4: /generate-smoke-test {language}                               — wire-level HTTP parity tests
 ```
-
-**The `sdk_path` flows through to every sub-skill.** This is how the emitter knows what patterns to replicate, the extractor knows how to analyze the SDK, and the compat verifier knows what to compare against.
 
 ### Scenario B — Fresh
 
 ```
-Step 1: /generate-emitter {language}        ← scaffold emitter, design doc, tests
-Step 2: /generate-smoke-test {language}     ← wire-level HTTP parity tests
+Step 1: /generate-emitter {project} {language}    — scaffold emitter
+Step 2: /generate-smoke-test {language}            — wire-level HTTP parity tests
 ```
 
-No extractor or compat verification needed.
+Confirm with the user, then invoke the first skill.
 
-After presenting the plan, confirm with the user, then invoke the first skill.
+## Step 5: Run Skills in Sequence
 
-## Step 3: Run Skills in Sequence
-
-Invoke each skill in order using the `Skill` tool, passing the `project` argument through to each sub-skill. After each skill completes, report status and invoke the next one.
-
-Between skills, run a quick validation to make sure the previous step succeeded:
+Invoke each skill in order using the `Skill` tool, passing `project` through. After each skill, validate:
 
 ```bash
-# After /generate-emitter — verify emitter exists, design doc exists, and tests pass
-ls {project}/docs/{language}.md       # design doc must exist
-ls {project}/src/{language}/index.ts  # emitter entry point must exist
+# After /generate-emitter — design doc, entry point, and tests
+ls {project}/docs/sdk-architecture/{language}.md
+ls {project}/src/{language}/index.ts
 cd {project} && npx vitest run test/{language}/ 2>&1 | tail -5
 
-# After /generate-extractor — verify extractor is registered
-grep -l "{language}Extractor" {project}/oagen.config.ts
+# After /generate-extractor — extractor registered
+grep -l "{language}Extractor\|{language}_extractor" {project}/oagen.config.ts
 
-# After /verify-compat — check exit code / preservation score
-# (handled by the skill itself)
+# After /verify-compat — handled by the skill itself
 
-# After /generate-smoke-test — verify script exists
+# After /generate-smoke-test — script exists
 ls {project}/smoke/sdk-{language}.ts
 ```
 
-**For Scenario A:** After `/generate-emitter` completes, also verify the design doc references real SDK patterns:
+**For Scenario A:** After `/generate-emitter`, also verify the design doc references real SDK patterns:
 
 ```bash
-# Design doc should reference the real SDK path and contain code snippets
-grep -c "sdk_path\|existing SDK\|from src/" {project}/docs/{language}.md
+grep -c "existing SDK\|from src/" {project}/docs/sdk-architecture/{language}.md
 ```
 
 If a skill fails or the user wants to pause, note where they stopped. They can resume by running the remaining skills individually.
 
-## Step 4: Final Checklist
+## Step 6: Final Checklist
 
-After all skills complete, run the full validation suite and present results:
+Run the full validation suite:
 
 ```bash
-# In the emitter project:
-cd {project} && npx vitest run
-
-# In oagen core:
-npx tsc --noEmit
-npx tsup
+cd {project} && npx vitest run    # emitter project
+npx tsc --noEmit                  # oagen core type check
+npx tsup                          # oagen core build
 ```
 
 Then present the summary:
@@ -140,20 +111,8 @@ Validation:
   Type check:       PASS/FAIL
   Build:            PASS/FAIL
 
-Files created (in {project}):
-  docs/{language}.md                              — SDK design document
-  src/{language}/*.ts                             — emitter ({N} files)
-  test/{language}/*.test.ts                       — emitter tests ({N} files)
-  src/compat/extractors/{language}.ts             (Scenario A)
-  test/compat/extractors/{language}.test.ts       (Scenario A)
-  test/fixtures/sample-sdk-{language}/            (Scenario A)
-  smoke/sdk-{language}.ts                         — smoke test runner
-
-Patterns replicated:       (Scenario A only)
-  [x/!] {list each pattern from the design doc with PASS/NEEDS-WORK}
-
 Next steps:
-  - Run the verify-and-fix loop:
-    oagen generate --lang {language} --output ./sdk --spec <spec> --namespace <ns>
-    oagen verify --lang {language} --output ./sdk --spec <spec>
+  cd {project}
+  oagen generate --lang {language} --output ./sdk --spec <spec> --namespace <ns>
+  oagen verify --lang {language} --output ./sdk --spec <spec>
 ```

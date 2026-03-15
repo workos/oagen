@@ -1,6 +1,6 @@
 # Workflows
 
-Two distinct phases: one-time setup (add a language), then ongoing spec-driven
+Two distinct phases: one-time setup (add a new SDK), then ongoing spec-driven
 updates. The emitter-fixing loop only happens during setup.
 
 ---

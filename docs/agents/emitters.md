@@ -61,7 +61,7 @@ Run `/generate-extractor <language>` to scaffold the extractor, then `/verify-co
 
 ## Source Of Truth
 
-- Per-language design docs: `docs/{language}.md` in the emitter project
+- Per-language design docs: `docs/sdk-architecture/{language}.md` in the emitter project
 - Extractor contract: `docs/architecture/extractor-contract.md`
 - Create a new emitter: `/generate-emitter <language>`
 - Create a new extractor: `/generate-extractor <language>`
