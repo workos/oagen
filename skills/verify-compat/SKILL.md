@@ -29,6 +29,15 @@ Check for `node_modules/@workos/oagen/`, or `src/engine/types.ts` in the current
 - The emitter has been run at least once to produce generated output
 - The emitter's design doc (`docs/sdk-architecture/{language}.md`) exists and documents the real SDK's patterns
 
+## Resolve Emitter Project
+
+Determine the location of the OpenAPI spec before doing anything:
+
+1. If the `spec` argument was provided, use that.
+2. Otherwise, use `AskUserQuestion`: "Where is your OpenAPI spec located? (absolute or relative path, e.g. `../openapi.yaml`)"
+
+Store it as `spec`.
+
 ## Step 1: Extract Baseline
 
 ```bash
@@ -37,7 +46,11 @@ oagen extract --sdk-path <path> --lang <language>
 
 This produces `api-surface.json` — the baseline snapshot of the live SDK's public API (classes, methods, interfaces, type aliases, enums, exports).
 
-**Verify the output:** Open `api-surface.json` and spot-check that it contains the expected classes and methods. If the surface looks empty or incomplete, the extractor may need fixes — run `/generate-extractor` to debug.
+**Verify the output via subagent:** Use the `Agent` tool with `subagent_type: Explore` to spot-check the extraction. This keeps the SDK's source out of the main context:
+
+> Explore the SDK at `{sdk_path}`. List all public classes and their public method names. Only report what you actually find — no assumptions.
+
+Compare the subagent's findings against `api-surface.json`. If the surface looks empty or incomplete, the extractor may need fixes — run `/generate-extractor` to debug.
 
 ## Step 2: Generate with Overlay
 

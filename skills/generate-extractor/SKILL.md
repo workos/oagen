@@ -31,7 +31,13 @@ Read and understand these files before starting:
 4. **Fixture SDK:** `{oagen}/test/fixtures/sample-sdk/`
 5. **Contract spec:** `{oagen}/docs/architecture/extractor-contract.md` — includes language-specific strategies
 
-If an `sdk_path` argument is provided, explore that SDK thoroughly to understand its public surface patterns (entry points, export mechanisms, type annotation files). The real SDK is the ground truth.
+If an `sdk_path` argument is provided, **delegate SDK exploration to a subagent** to keep file-reading noise out of the main context:
+
+Use the `Agent` tool with `subagent_type: Explore` and a prompt like:
+
+> Explore the SDK at `{sdk_path}`. Focus on: entry point discovery (main module/package), public surface detection (how public vs private symbols are distinguished), type information sources (compiler API, stubs, annotations), class/method extraction patterns, and file/directory layout. Return structured findings with real code snippets and file paths. Only report what you actually find.
+
+The real SDK is the ground truth.
 
 ## Step 0: Determine Analysis Strategy
 

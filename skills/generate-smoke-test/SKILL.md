@@ -25,7 +25,11 @@ Read and understand these files before writing any code:
 
 1. **`@workos/oagen/smoke`** (exported from `{oagen}/scripts/smoke/shared.ts`) — `parseSpec()`, `planOperations()`, `generatePayload()` / `generateCamelPayload()`, `generateQueryParams()` / `generateCamelQueryParams()`, `IdRegistry`, `getExpectedStatusCodes()` / `isUnexpectedStatus()`, `resolvePath()`, `CapturedExchange`, `SmokeResults`
 
-2. **Existing smoke scripts** — Check `{emitterProject}/smoke/` for any existing scripts (e.g., `sdk-node.ts`, `sdk-ruby.ts`). Study the closest one to your target language. The Node script is the canonical reference (~630 lines) covering:
+2. **Existing smoke scripts (read via subagent)** — Use the `Agent` tool with `subagent_type: Explore` to study the closest existing smoke script. This keeps ~630+ lines of reference source out of the main context:
+
+   > Read the smoke scripts in `{emitterProject}/smoke/` (e.g., `sdk-node.ts`, `sdk-ruby.ts`). For the closest one to {language}, return: purpose, exported function signatures, structural pattern (setup → intercept → iterate → capture → cleanup), key abstractions (MethodResolution, SERVICE_MAP, interceptFetch, buildArgs), and which parts are language-specific vs. reusable. Be concise.
+
+   The Node script is the canonical reference (~630 lines) covering:
    - `MethodResolution` interface and 4-tier resolution: manifest, exact match, CRUD prefix, keyword fuzzy
    - `SERVICE_MAP` — IR service names to SDK property names
    - `interceptFetch()` — HTTP interception with provenance capture
@@ -34,6 +38,15 @@ Read and understand these files before writing any code:
 3. **`{oagen}/scripts/smoke/raw.ts`** — raw baseline script
 4. **`{oagen}/scripts/smoke/diff.ts`** — diff tool severity levels (CRITICAL/WARNING/INFO)
 5. **`docs/sdk-architecture/{language}.md`** (in emitter project) — target language patterns and HTTP client
+
+## Resolve Emitter Project
+
+Determine the location of the OpenAPI spec before doing anything:
+
+1. If the `spec` argument was provided, use that.
+2. Otherwise, use `AskUserQuestion`: "Where is your OpenAPI spec located? (absolute or relative path, e.g. `../openapi.yaml`)"
+
+Store it as `spec`.
 
 ## Step 1: Determine HTTP Interception Strategy
 
@@ -49,7 +62,13 @@ The interception code is typically ~20-30 lines. It must capture the request as-
 
 ## Step 2: Build the SERVICE_MAP
 
-Map IR service names to SDK resource accessors. Explore the SDK at `sdk_path` (if provided) to discover the mapping:
+Map IR service names to SDK resource accessors. If `sdk_path` is provided, **delegate the exploration to a subagent** to keep file-reading noise out of the main context:
+
+Use the `Agent` tool with `subagent_type: Explore` and a prompt like:
+
+> Explore the SDK at `{sdk_path}`. Focus specifically on: the main client class, its resource accessor properties/methods, and how they map to domain names. Return a mapping of resource names to accessor names (e.g., Organizations → "organizations", Connections → "sso"). Only report what you actually find.
+
+Then build the mapping:
 
 ```typescript
 const SERVICE_MAP: Record<string, string> = {
@@ -136,10 +155,10 @@ oagen generate --lang {lang} --output {sdk-path} --spec {spec} --namespace {ns}
 oagen verify --lang {lang} --output {sdk-path} --spec {spec}
 ```
 
-| Exit | Meaning             | Output                      | Action                          |
-| ---- | ------------------- | --------------------------- | ------------------------------- |
-| 0    | Clean               | —                           | Done                            |
-| 1    | Findings            | `smoke-diff-findings.json`  | Read findings, fix emitter/smoke script |
-| 2    | Compile error       | `smoke-compile-errors.json` | Read errors, fix emitter        |
+| Exit | Meaning       | Output                      | Action                                  |
+| ---- | ------------- | --------------------------- | --------------------------------------- |
+| 0    | Clean         | —                           | Done                                    |
+| 1    | Findings      | `smoke-diff-findings.json`  | Read findings, fix emitter/smoke script |
+| 2    | Compile error | `smoke-compile-errors.json` | Read errors, fix emitter                |
 
 See `scripts/smoke/README.md` (in oagen core) for the full remediation guide. See [Workflows](../../docs/architecture/workflows.md) for the overall workflow diagram.

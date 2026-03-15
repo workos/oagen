@@ -11,9 +11,20 @@ Orchestrate the end-to-end workflow for generating an SDK for a target language.
 
 Emitters, extractors, smoke tests, and their unit tests all live in the **emitter project**, not in the oagen core repo. The emitter project depends on `@workos/oagen` for types and shared utilities.
 
+## Context Management
+
+Sub-skills use **subagents** (via the built-in `Explore` agent type) to keep the main context lean. Read-heavy exploration — studying existing SDKs, reading reference implementations — is delegated to isolated agents that return only structured summaries. This prevents context rot during the write-heavy generation steps that follow.
+
+Each sub-skill documents where it uses subagents:
+
+- `/generate-emitter` — Step 0a (SDK exploration) and Steps 2-4 (reference emitter reading)
+- `/generate-extractor` — Prerequisites (SDK exploration)
+- `/generate-smoke-test` — Prerequisites (reference smoke script reading) and Step 2 (SDK SERVICE_MAP)
+- `/verify-compat` — Step 1 (baseline extraction spot-check)
+
 ## Step 1: Determine Language
 
-Use `AskUserQuestion` to determine the target language (e.g., "ruby", "python", "php"). Store `language` and pass it to all sub-skill invocations.
+Use `AskUserQuestion` to determine the target language (e.g., "ruby", "python", "php", "node"). Store `language` and pass it to all sub-skill invocations.
 
 ## Step 2: Determine Scenario
 
@@ -37,7 +48,13 @@ mkdir -p {project}/src/{language} && mkdir -p {project}/test/{language}
 
 Store `project` and pass it to all sub-skill invocations.
 
-## Step 4: Present the Plan
+## Step 4: Determine OpenAPI spec Location
+
+Use `AskUserQuestion`: "Where is your OpenAPI spec located? (absolute or relative path, e.g. `../openapi.yaml`)"
+
+Store as `spec` and pass it to all sub-skill invocations.
+
+## Step 5: Present the Plan
 
 ### Scenario A — Backwards compatible
 
@@ -57,7 +74,7 @@ Step 2: /generate-smoke-test {language}            — wire-level HTTP parity te
 
 Confirm with the user, then invoke the first skill.
 
-## Step 5: Run Skills in Sequence
+## Step 6: Run Skills in Sequence
 
 Invoke each skill in order using the `Skill` tool, passing `project` through. After each skill, validate:
 
@@ -84,7 +101,7 @@ grep -c "existing SDK\|from src/" {project}/docs/sdk-architecture/{language}.md
 
 If a skill fails or the user wants to pause, note where they stopped. They can resume by running the remaining skills individually.
 
-## Step 6: Final Checklist
+## Step 7: Final Checklist
 
 Run the full validation suite:
 
@@ -113,6 +130,19 @@ Validation:
 
 Next steps:
   cd {project}
-  oagen generate --lang {language} --output ./sdk --spec <spec> --namespace <ns>
-  oagen verify --lang {language} --output ./sdk --spec <spec>
+
+  # Generate SDK from spec
+  npx tsx ../oagen/src/cli/index.ts generate \
+    --spec {spec} \
+    --lang {language} --output ./sdk-{language} --namespace <ns>
+
+  # Verify compat
+  npx tsx ../oagen/src/cli/index.ts verify \
+    --lang {language} --output ./sdk-{language} \
+    --api-surface /tmp/<ns>-{language}-api-surface.json
+
+  # Run smoke tests
+  npx tsx smoke/sdk-{language}.ts \
+    --spec {spec} \
+    --sdk-path ./sdk-{language}
 ```

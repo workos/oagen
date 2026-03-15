@@ -47,28 +47,25 @@ Before writing any code, establish the exact patterns the emitter will replicate
 
 The existing SDK is the **sole source of truth**. Study it thoroughly before making any design decisions.
 
-#### 0a. Explore the Existing SDK
+#### 0a. Explore the Existing SDK (via subagent)
 
-Read at least 10 representative files from the SDK to extract its actual architecture. For each of these pattern categories, find the real code and document what you see:
+**Delegate this to a subagent to keep file-reading noise out of the main context.**
 
-- **Client architecture** — Constructor, HTTP methods, resource accessors, method overloads
-- **Model/data types** — How data classes are defined, field types, optionality
-- **Request/response types** — Whether the SDK has separate input/output/options types
-- **Serialization** — Whether serialize/deserialize functions exist between wire/domain
-- **Resource classes** — Method signatures, parameter patterns, return types, delegation
-- **Pagination** — How paginated responses are handled (iterator, page object, etc.)
-- **Error handling** — Error class hierarchy, status code mapping
-- **Testing** — Test framework, mocking approach, test structure, fixture patterns
-- **Entry point** — Barrel exports, what's publicly exposed, re-export structure
-- **Utilities/common** — Shared helpers, common types, pagination base classes
-- **File/directory layout** — How the SDK organizes files by feature/domain
-- **Constructor/factory** — How the client is instantiated, config patterns, overloads
+Use the `Agent` tool with `subagent_type: Explore` and a prompt like:
+
+> Explore the SDK at `{sdk_path}`. Read at least 10 representative files spanning different concerns. For each of the following pattern categories, find the real code and return: a 1-2 sentence description, a real code snippet, and the source file path.
+>
+> Categories: client architecture (constructor, HTTP methods, resource accessors), model/data types (field types, optionality), request/response types (separate input/output/options types?), serialization (wire/domain conversion?), resource classes (method signatures, parameter patterns, return types), pagination (iterator, page object, etc.), error handling (error hierarchy, status code mapping), testing patterns (framework, mocking, fixtures), entry point/exports (barrel exports, public surface), utilities/common (shared helpers, base classes), file/directory layout (tree structure), constructor/factory (instantiation, config patterns).
+>
+> Only report patterns actually found — never invent. If a category doesn't apply, say so.
+
+The subagent reads 10+ files and returns only the structured findings — intermediate file reads stay out of context.
 
 **Do NOT skip this step.** The entire emitter is derived from these findings.
 
 #### 0b. Present Findings
 
-After studying the SDK, present a structured summary to the user. For each pattern, include the pattern name, a 1–2 sentence description, a real code snippet from the SDK, and the source file path.
+After receiving the subagent's structured summary, present it to the user. For each pattern, include the pattern name, a 1–2 sentence description, a real code snippet from the SDK, and the source file path.
 
 Ask the user to confirm the findings are complete and accurate.
 
@@ -134,9 +131,26 @@ import { className, fileName } from "./naming.js";
 
 Read `references/generator-guide.md` for detailed instructions on implementing each generator file: type-map.ts, naming.ts, models.ts, enums.ts, resources.ts, serializers.ts (if applicable), client.ts, errors.ts, config.ts, common.ts (if applicable), type signatures, tests.ts, and fixtures.ts.
 
-For each generator, follow this pattern:
+### Read reference implementations via subagent
 
-1. **Read the corresponding file** in a reference emitter (`{emitterProject}/src/ruby/` or `{emitterProject}/src/node/`) to understand the structure
+Before implementing generators, use the `Agent` tool with `subagent_type: Explore` to study the reference emitter files you'll be adapting. This keeps ~20K+ tokens of reference source out of the main context.
+
+> Read these files from the reference emitter at `{emitterProject}/src/{reference_language}/`:
+> type-map.ts, naming.ts, models.ts, enums.ts, resources.ts, client.ts, errors.ts, config.ts, tests.ts, fixtures.ts
+>
+> For each file, return:
+> - **Purpose:** one-line description
+> - **Exports:** function/constant signatures
+> - **Pattern:** structural flow (setup → transform → output)
+> - **IR inputs:** which IR types (Model, Enum, Service, Operation, TypeRef) it consumes
+> - **Output shape:** what GeneratedFile paths/content look like
+> - **Language-specific details (do NOT replicate):** parts specific to the reference language that must be adapted
+>
+> Be concise — the consumer needs the pattern, not a line-by-line walkthrough.
+
+Then, for each generator, follow this pattern:
+
+1. **Consult the subagent's summary** for the structural pattern of the corresponding reference file
 2. **Consult the design doc** (`docs/sdk-architecture/{language}.md`) for the exact output patterns to produce
 3. **Use `GeneratedFile[]` return type** — each function receives IR nodes + `EmitterContext` and returns file path/content pairs
 
@@ -205,8 +219,12 @@ import { describe, it, expect } from "vitest";
 import type { EmitterContext, ApiSpec } from "@workos/oagen";
 
 const emptySpec: ApiSpec = {
-  name: "Test", version: "1.0.0", baseUrl: "",
-  services: [], models: [], enums: [],
+  name: "Test",
+  version: "1.0.0",
+  baseUrl: "",
+  services: [],
+  models: [],
+  enums: [],
 };
 const ctx: EmitterContext = {
   namespace: "{snake_case_namespace}",
