@@ -37,6 +37,7 @@ function findClassForProperty(surface: ApiSurface, sdkResourceProperty: string):
 export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry[]): OverlayLookup {
   const lookup: OverlayLookup = {
     methodByOperation: new Map(),
+    httpKeyByMethod: new Map(),
     interfaceByName: new Map(),
     typeAliasByName: new Map(),
     requiredExports: new Map(),
@@ -56,6 +57,7 @@ export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry
             params: method.params,
             returnType: method.returnType,
           });
+          lookup.httpKeyByMethod.set(`${className}.${entry.sdkMethodName}`, key);
         }
       }
     }
@@ -85,6 +87,7 @@ export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry
 export function patchOverlay(overlay: OverlayLookup, violations: Violation[], baseline: ApiSurface): OverlayLookup {
   const patched: OverlayLookup = {
     methodByOperation: new Map(overlay.methodByOperation),
+    httpKeyByMethod: new Map(overlay.httpKeyByMethod),
     interfaceByName: new Map(overlay.interfaceByName),
     typeAliasByName: new Map(overlay.typeAliasByName),
     requiredExports: new Map(Array.from(overlay.requiredExports.entries()).map(([k, v]) => [k, new Set(v)])),
@@ -99,11 +102,21 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
         // Check if this is a method on a class in the baseline
         const baseClass = baseline.classes[className];
         if (baseClass && baseClass.methods[methodName]) {
-          // TODO: Method-level public-api violations cannot be patched here because
-          // the overlay maps by HTTP method + path, but the violation only provides
-          // the symbol path (ClassName.methodName). Without the HTTP key, we cannot
-          // add a method mapping. This is a known limitation — method violations
-          // should be resolved by providing a manifest during buildOverlayLookup.
+          // Use reverse map to resolve the HTTP key for this method.
+          // NOTE: httpKeyByMethod is only populated when a manifest was provided
+          // to buildOverlayLookup. Without a manifest, method-level violations
+          // cannot be patched via overlay — the emitter must implement
+          // generateManifest for the self-correcting loop to resolve these.
+          const httpKey = overlay.httpKeyByMethod.get(`${className}.${methodName}`);
+          if (httpKey) {
+            const method = baseClass.methods[methodName];
+            patched.methodByOperation.set(httpKey, {
+              className,
+              methodName,
+              params: method.params,
+              returnType: method.returnType,
+            });
+          }
         }
         // Also check if it's an interface field
         const baseIface = baseline.interfaces[className];

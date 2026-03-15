@@ -10,17 +10,21 @@
  */
 
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
-import { getExtractor, registerExtractor } from '../src/compat/extractor-registry.js';
-import { nodeExtractor } from '../src/compat/extractors/node.js';
+import { readFileSync, existsSync } from 'node:fs';
+import * as path from 'node:path';
+import { getExtractor } from '../src/compat/extractor-registry.js';
 import { diffSurfaces } from '../src/compat/differ.js';
 import { buildOverlayLookup, patchOverlay } from '../src/compat/overlay.js';
+import type { ManifestEntry } from '../src/compat/overlay.js';
 import type { ApiSurface, DiffResult } from '../src/compat/types.js';
 import { parseSpec } from '../src/parser/parse.js';
 import { generate } from '../src/engine/orchestrator.js';
 import { getEmitter } from '../src/engine/registry.js';
+import { loadConfig } from '../src/cli/config-loader.js';
+import { applyConfig } from '../src/cli/plugin-loader.js';
 
-registerExtractor(nodeExtractor);
+const config = await loadConfig();
+if (config) applyConfig(config);
 
 const { values } = parseArgs({
   options: {
@@ -103,6 +107,15 @@ async function runLoop(): Promise<void> {
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     await regenerateWithOverlay(values.spec, values.lang, values.output, overlay, baseline, values.namespace);
+
+    // Reload manifest if the emitter generated one — enables method-level overlay
+    const manifestPath = path.join(values.output, 'smoke-manifest.json');
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as ManifestEntry[];
+        overlay = buildOverlayLookup(baseline, manifest);
+      } catch { /* keep existing overlay */ }
+    }
 
     const diff = await verify(baseline, values.output, values.lang);
 

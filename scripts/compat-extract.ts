@@ -10,10 +10,12 @@
 
 import { parseArgs } from 'node:util';
 import { writeFileSync } from 'node:fs';
-import { registerExtractor, getExtractor } from '../src/compat/extractor-registry.js';
-import { nodeExtractor } from '../src/compat/extractors/node.js';
+import { getExtractor } from '../src/compat/extractor-registry.js';
+import { loadConfig } from '../src/cli/config-loader.js';
+import { applyConfig } from '../src/cli/plugin-loader.js';
 
-registerExtractor(nodeExtractor);
+const config = await loadConfig();
+if (config) applyConfig(config);
 
 async function main() {
   const { values } = parseArgs({
