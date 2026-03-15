@@ -11,7 +11,7 @@
  *
  * Usage:
  *   oagen verify --lang node --output ./sdk --spec openapi.yml
- *   oagen verify --lang node --output ./sdk --spec openapi.yml --api-surface api-surface.json
+ *   oagen verify --lang node --output ./sdk --spec openapi.yml --api-surface sdk-node-surface.json
  *   oagen verify --lang node --output ./sdk --raw-results smoke-results-raw.json
  */
 

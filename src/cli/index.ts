@@ -82,8 +82,9 @@ program
   .description('Extract public API surface from a live SDK')
   .requiredOption('--sdk-path <path>', 'Path to the live SDK')
   .requiredOption('--lang <language>', 'Target language')
-  .option('--output <path>', 'Output file path', 'api-surface.json')
+  .option('--output <path>', 'Output file path')
   .action((opts) => {
+    opts.output ??= `sdk-${opts.lang}-surface.json`;
     extractCommand(opts).catch(handleError);
   });
 

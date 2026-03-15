@@ -41,21 +41,27 @@ Store it as `spec`.
 ## Step 1: Extract Baseline
 
 ```bash
-oagen extract --sdk-path <path> --lang <language>
+oagen extract --sdk-path <path> --lang <language> --output <output-path>/sdk-{language}-surface.json
 ```
 
-This produces `api-surface.json` — the baseline snapshot of the live SDK's public API (classes, methods, interfaces, type aliases, enums, exports).
+This produces `sdk-{language}-surface.json` inside the output directory — the baseline snapshot of the live SDK's public API (classes, methods, interfaces, type aliases, enums, exports).
+
+**Gitignore it** — it's a derived artifact. Ensure `sdk-*-surface.json` is in the output project's `.gitignore`:
+
+```bash
+grep -q 'sdk-\*-surface.json' <output-path>/.gitignore 2>/dev/null || echo 'sdk-*-surface.json' >> <output-path>/.gitignore
+```
 
 **Verify the output via subagent:** Use the `Agent` tool with `subagent_type: Explore` to spot-check the extraction. This keeps the SDK's source out of the main context:
 
 > Explore the SDK at `{sdk_path}`. List all public classes and their public method names. Only report what you actually find — no assumptions.
 
-Compare the subagent's findings against `api-surface.json`. If the surface looks empty or incomplete, the extractor may need fixes — run `/generate-extractor` to debug.
+Compare the subagent's findings against `<output-path>/sdk-{language}-surface.json`. If the surface looks empty or incomplete, the extractor may need fixes — run `/generate-extractor` to debug.
 
 ## Step 2: Generate with Overlay
 
 ```bash
-oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface api-surface.json
+oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
 ```
 
 The emitter receives the overlay via `EmitterContext` and uses it to preserve existing method names, class names, and type names where possible.
@@ -63,7 +69,7 @@ The emitter receives the overlay via `EmitterContext` and uses it to preserve ex
 ## Step 3: Verify
 
 ```bash
-oagen verify --lang <language> --output <output-path> --api-surface api-surface.json
+oagen verify --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
 ```
 
 - **Exit 0** + preservation score = all clear
@@ -97,8 +103,8 @@ oagen verify --lang <language> --output <output-path> --api-surface api-surface.
 Repeat Steps 2 and 3 until violations are resolved:
 
 ```bash
-oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface api-surface.json
-oagen verify --lang <language> --output <output-path> --api-surface api-surface.json
+oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
+oagen verify --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
 ```
 
 Continue until either all violations are resolved (exit 0) or no further improvement is possible (fix the emitter manually).

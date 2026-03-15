@@ -46,7 +46,7 @@ oagen diff --old v1.yml --new v2.yml --lang node --output ./sdk  # regenerate
 Extract the public API surface from an existing SDK. Produces a JSON file used as input for compat overlay and verification.
 
 ```bash
-oagen extract --sdk-path ./existing-sdk --lang ruby
+oagen extract --sdk-path ./existing-sdk --lang ruby --output ./sdk/sdk-ruby-surface.json
 oagen extract --sdk-path ./existing-sdk --lang ruby --output my-surface.json
 ```
 
@@ -54,7 +54,7 @@ oagen extract --sdk-path ./existing-sdk --lang ruby --output my-surface.json
 | ------------------- | -------- | ------------------ | -------------------- |
 | `--sdk-path <path>` | Yes      |                    | Path to the live SDK |
 | `--lang <language>` | Yes      |                    | Target language      |
-| `--output <path>`   | No       | `api-surface.json` | Output file path     |
+| `--output <path>`   | No       | `sdk-{lang}-surface.json` | Output file path (recommend writing to your output dir, e.g. `./sdk/sdk-ruby-surface.json`, and gitignoring it) |
 
 ## `oagen verify`
 
@@ -65,7 +65,7 @@ oagen verify --lang node --output ./sdk --spec openapi.yml
 
 # With compat check
 oagen verify --lang node --output ./sdk --spec openapi.yml \
-  --api-surface api-surface.json
+  --api-surface ./sdk/sdk-node-surface.json
 ```
 
 | Argument                | Required | Default                 | Description                                                   |

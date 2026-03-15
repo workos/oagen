@@ -34,7 +34,7 @@ export async function generateCommand(opts: {
     try {
       apiSurface = JSON.parse(raw) as ApiSurface;
     } catch (err) {
-      throw new Error(`Failed to parse api-surface.json: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`Failed to parse API surface JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Load manifest: explicit flag, or auto-discover in output directory

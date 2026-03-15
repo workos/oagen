@@ -30,7 +30,7 @@ Mechanical, automated. The overlay patches itself to resolve naming mismatches
 between the generated SDK and the live SDK's API surface.
 
 1. Generate SDK with compat overlay applied
-2. Diff generated output against baseline `api-surface.json`
+2. Diff generated output against baseline `<output>/sdk-{language}-surface.json`
 3. If violations found, `patchOverlay()` adjusts the overlay
 4. Regenerate with the patched overlay
 5. Repeat
@@ -95,7 +95,7 @@ oagen verify --spec v2.yml --lang ruby --output ./sdk
 For Scenario A (backwards-compat), pass `--api-surface` to preserve the overlay:
 
 ```bash
-oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk --api-surface api-surface.json
+oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk --api-surface ./sdk/sdk-{language}-surface.json
 ```
 
 **External consumers** configure emitters and extractors via `oagen.config.ts`

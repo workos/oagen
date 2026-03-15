@@ -139,7 +139,7 @@ Next steps:
   # Verify compat
   npx tsx ../oagen/src/cli/index.ts verify \
     --lang {language} --output ./sdk-{language} \
-    --api-surface /tmp/<ns>-{language}-api-surface.json
+    --api-surface ./sdk-{language}/sdk-{language}-surface.json
 
   # Run smoke tests
   npx tsx smoke/sdk-{language}.ts \
