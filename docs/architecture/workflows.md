@@ -5,7 +5,7 @@ updates. The emitter-fixing loop only happens during setup.
 
 ---
 
-## Phase 1: /add-language (one-time setup)
+## Phase 1: /generate-sdk (one-time setup)
 
 Build and validate a new language emitter. This is the only time emitter code
 gets written or fixed.
@@ -49,7 +49,7 @@ and the emitter-fixing loop takes over.
 
 ### Emitter-fixing loop (Phase 1 only)
 
-This loop only runs during `/add-language` setup, after all skills complete.
+This loop only runs during `/generate-sdk` setup, after all skills complete.
 Its purpose is to get the new emitter producing correct output for the first time:
 
 1. `oagen generate --spec {spec} --lang {lang} --output {sdk-path}`

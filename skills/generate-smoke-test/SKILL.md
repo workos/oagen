@@ -211,7 +211,7 @@ oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.j
 ## Step 8: Emitter-fixing loop (during initial setup)
 
 Run `oagen generate` then `oagen verify` until verify exits 0. This loop is
-part of `/add-language` setup — once the emitter is stable, it's no longer needed.
+part of `/generate-sdk` setup — once the emitter is stable, it's no longer needed.
 
 ```bash
 oagen generate --lang {lang} --output {sdk-path} --spec {spec} --namespace {ns}

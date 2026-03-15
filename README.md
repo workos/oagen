@@ -94,7 +94,7 @@ This makes the following skills available:
 
 | Skill                               | Description                                                                  |
 | ----------------------------------- | ---------------------------------------------------------------------------- |
-| `/oagen:add-language <lang>`        | End-to-end orchestrator — determines scenario and sequences the skills below |
+| `/oagen:generate-sdk <lang>`        | End-to-end orchestrator — determines scenario and sequences the skills below |
 | `/oagen:generate-emitter <lang>`    | Scaffold a new language emitter                                              |
 | `/oagen:generate-extractor <lang>`  | Scaffold an API surface extractor for compat verification                    |
 | `/oagen:generate-smoke-test <lang>` | Create smoke tests for a generated SDK                                       |

@@ -1,6 +1,6 @@
 ---
-name: add-language
-description: Orchestrate adding a new target language to oagen end-to-end. Determines the right scenario (backwards-compatible or fresh) and guides through the correct sequence of skills. Use when the user wants to add a language, start a new SDK, or asks "how do I add X support".
+name: generate-sdk
+description: Orchestrate generating an SDK for a target language end-to-end. Determines the right scenario (backwards-compatible or fresh) and guides through the correct sequence of skills. Use when the user wants to generate an SDK, add a language, start a new SDK, or asks "how do I add X support".
 arguments:
   - name: language
     description: Target language name (e.g., "python", "go", "kotlin")
@@ -13,9 +13,9 @@ arguments:
     required: false
 ---
 
-# /add-language
+# /generate-sdk
 
-Orchestrate the end-to-end workflow for adding a new target language to oagen. This skill does not implement anything itself — it determines the right scenario, sequences the correct skills, and tracks progress across steps.
+Orchestrate the end-to-end workflow for generating an SDK for a target language. This skill does not implement anything itself — it determines the right scenario, sequences the correct skills, and tracks progress across steps.
 
 ## Resolve Emitter Project
 

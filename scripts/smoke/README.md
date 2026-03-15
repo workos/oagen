@@ -246,7 +246,7 @@ oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.j
 | 1    | Findings — CRITICAL mismatches, compat violations, or missing operations | `smoke-diff-findings.json`  |
 | 2    | Compile error — SDK failed type check                                    | `smoke-compile-errors.json` |
 
-## Emitter-Fixing Loop (during /add-language only)
+## Emitter-Fixing Loop (during /generate-sdk only)
 
 When first building an emitter, generate + verify may fail because the emitter
 doesn't produce correct output yet. Fix the emitter, re-run, repeat until
