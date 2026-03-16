@@ -82,7 +82,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     }
   }
 
-  return {
+  const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',
     version: spec.info?.version ?? '0.0.0',
     description: spec.info?.description,
@@ -91,6 +91,10 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     models: finalModels,
     enums,
   };
+
+  validateModelRefs(result);
+
+  return result;
 }
 
 function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
@@ -111,6 +115,60 @@ function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<st
   } else if (ref.kind === 'union') {
     for (const v of ref.variants) {
       collectInlineEnumsFromTypeRef(v, enums, seen);
+    }
+  } else if (ref.kind === 'map') {
+    collectInlineEnumsFromTypeRef(ref.valueType, enums, seen);
+  }
+}
+
+/**
+ * Walk all TypeRefs in the spec and warn about ModelRef nodes that point to
+ * model/enum names that don't exist. This catches refs broken by name cleaning.
+ */
+function validateModelRefs(spec: ApiSpec): void {
+  const knownNames = new Set<string>();
+  for (const m of spec.models) knownNames.add(m.name);
+  for (const e of spec.enums) knownNames.add(e.name);
+
+  function walkRef(ref: TypeRef, context: string): void {
+    switch (ref.kind) {
+      case 'model':
+        if (!knownNames.has(ref.name)) {
+          console.warn(`[oagen] Warning: Unresolved model reference "${ref.name}" (context: ${context})`);
+        }
+        break;
+      case 'array':
+        walkRef(ref.items, context);
+        break;
+      case 'nullable':
+        walkRef(ref.inner, context);
+        break;
+      case 'union':
+        for (const v of ref.variants) walkRef(v, context);
+        break;
+      case 'map':
+        walkRef(ref.valueType, context);
+        break;
+      case 'enum':
+      case 'primitive':
+      case 'literal':
+        break;
+    }
+  }
+
+  for (const model of spec.models) {
+    for (const field of model.fields) {
+      walkRef(field.type, `${model.name}.${field.name}`);
+    }
+  }
+
+  for (const service of spec.services) {
+    for (const op of service.operations) {
+      for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams]) {
+        walkRef(p.type, `${service.name}.${op.name}.${p.name}`);
+      }
+      if (op.requestBody) walkRef(op.requestBody, `${service.name}.${op.name}.requestBody`);
+      walkRef(op.response, `${service.name}.${op.name}.response`);
     }
   }
 }
