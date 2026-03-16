@@ -106,6 +106,8 @@ export function typeRefsEqual(a: TypeRef, b: TypeRef): boolean {
       if (aKeys.length !== bKeys.length) return false;
       return aKeys.every((k, i) => k === bKeys[i] && a.discriminator!.mapping[k] === b.discriminator!.mapping[k]);
     }
+    case 'map':
+      return b.kind === 'map' && typeRefsEqual(a.valueType, b.valueType);
   }
   return assertNever(a);
 }

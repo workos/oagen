@@ -30,6 +30,7 @@ Every type in the IR is a `TypeRef`, discriminated on the `kind` field:
 | `enum`      | `EnumRef`       | `{ kind: "enum", name: "Status" }`                                   |
 | `union`     | `UnionType`     | `{ kind: "union", variants: [...], discriminator?: {...} }`          |
 | `nullable`  | `NullableType`  | `{ kind: "nullable", inner: { kind: "primitive", type: "string" } }` |
+| `map`       | `MapType`       | `{ kind: "map", valueType: { kind: "primitive", type: "string" } }`  |
 
 ### Primitive Formats
 

@@ -325,6 +325,24 @@ describe('typeRefsEqual', () => {
     ).toBe(true);
   });
 
+  it('compares map types with same value type', () => {
+    expect(
+      typeRefsEqual(
+        { kind: 'map', valueType: { kind: 'primitive', type: 'string' } },
+        { kind: 'map', valueType: { kind: 'primitive', type: 'string' } },
+      ),
+    ).toBe(true);
+  });
+
+  it('compares map types with different value types', () => {
+    expect(
+      typeRefsEqual(
+        { kind: 'map', valueType: { kind: 'primitive', type: 'string' } },
+        { kind: 'map', valueType: { kind: 'primitive', type: 'integer' } },
+      ),
+    ).toBe(false);
+  });
+
   it('returns true when both unions have no discriminator', () => {
     expect(
       typeRefsEqual(

@@ -1,5 +1,5 @@
 /** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
-export const IR_VERSION = 1;
+export const IR_VERSION = 2;
 
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
@@ -45,7 +45,7 @@ export interface Parameter {
 }
 
 /** Type reference — the core type system of the IR */
-export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType | NullableType | LiteralType;
+export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType | NullableType | LiteralType | MapType;
 
 export interface PrimitiveType {
   kind: 'primitive';
@@ -83,6 +83,11 @@ export interface UnionType {
 export interface NullableType {
   kind: 'nullable';
   inner: TypeRef;
+}
+
+export interface MapType {
+  kind: 'map';
+  valueType: TypeRef;
 }
 
 /** Model definition (maps to an SDK model/data class) */

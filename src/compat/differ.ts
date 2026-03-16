@@ -59,6 +59,9 @@ function collectTypeRefNames(ref: TypeRef, out: Set<string>): void {
     case 'union':
       ref.variants.forEach((v) => collectTypeRefNames(v, out));
       break;
+    case 'map':
+      collectTypeRefNames(ref.valueType, out);
+      break;
     case 'literal':
     case 'primitive':
       break;
@@ -99,6 +102,20 @@ export function filterSurface(surface: ApiSurface, allowedNames: Set<string>): A
     enums,
     exports: {}, // exports are structural, not symbol-level — skip for scoped comparison
   };
+}
+
+/**
+ * Returns true if the only difference between two type strings is the presence
+ * of `| null`. E.g. `string` vs `string | null` or `Foo | null` vs `Foo`.
+ */
+function isNullableOnlyDifference(a: string, b: string): boolean {
+  const stripNull = (s: string) =>
+    s
+      .split('|')
+      .map((p) => p.trim())
+      .filter((p) => p !== 'null')
+      .join(' | ');
+  return stripNull(a) === stripNull(b);
 }
 
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffResult {
@@ -178,9 +195,10 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
         continue;
       }
       if (baseProp.type !== candProp.type) {
+        const nullableOnly = isNullableOnlyDifference(baseProp.type, candProp.type);
         violations.push({
           category: 'signature',
-          severity: 'breaking',
+          severity: nullableOnly ? 'warning' : 'breaking',
           symbolPath: `${name}.${propName}`,
           baseline: baseProp.type,
           candidate: candProp.type,
@@ -239,9 +257,10 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
         continue;
       }
       if (baseField.type !== candField.type) {
+        const nullableOnly = isNullableOnlyDifference(baseField.type, candField.type);
         violations.push({
           category: 'signature',
-          severity: 'breaking',
+          severity: nullableOnly ? 'warning' : 'breaking',
           symbolPath: `${name}.${fieldName}`,
           baseline: baseField.type,
           candidate: candField.type,
@@ -283,9 +302,10 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
       continue;
     }
     if (baseAlias.value !== candAlias.value) {
+      const nullableOnly = isNullableOnlyDifference(baseAlias.value, candAlias.value);
       violations.push({
         category: 'signature',
-        severity: 'breaking',
+        severity: nullableOnly ? 'warning' : 'breaking',
         symbolPath: name,
         baseline: baseAlias.value,
         candidate: candAlias.value,

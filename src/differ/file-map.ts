@@ -147,6 +147,9 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
       case 'union':
         typeRef.variants.forEach((v) => trackRef(v, serviceName));
         break;
+      case 'map':
+        trackRef(typeRef.valueType, serviceName);
+        break;
       case 'literal':
         break;
       case 'primitive':
@@ -186,6 +189,9 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
         break;
       case 'union':
         typeRef.variants.forEach((v) => collectDeps(v, deps));
+        break;
+      case 'map':
+        collectDeps(typeRef.valueType, deps);
         break;
       case 'literal':
         break;

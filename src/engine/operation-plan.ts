@@ -53,6 +53,7 @@ function extractModelName(ref: TypeRef): string | null {
       const firstModel = ref.variants.find((v) => v.kind === 'model');
       return firstModel && firstModel.kind === 'model' ? firstModel.name : null;
     }
+    case 'map':
     case 'enum':
     case 'primitive':
     case 'literal':
