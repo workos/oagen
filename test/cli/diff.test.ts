@@ -170,6 +170,19 @@ describe('diffCommand', () => {
     expect(consoleSpy).toHaveBeenCalled();
   });
 
+  it('prints force hint when diff has removed operations', async () => {
+    // Lines 91-93: when changes contain -removed kinds, suggest --force
+    const V2_BREAKING = resolve(FIXTURES, 'v2-breaking.yml');
+    await diffCommand({
+      old: V1,
+      new: V2_BREAKING,
+      lang: 'test-lang',
+      output: tmpDir,
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('--force'));
+  });
+
   it('loads API surface when --api-surface is provided', async () => {
     const surfacePath = resolve(tmpDir, 'surface.json');
     writeFileSync(surfacePath, JSON.stringify(EMPTY_SURFACE));

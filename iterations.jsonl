@@ -7,3 +7,4 @@
 {"iteration":7,"before":90.08,"after":90.7,"action":"Add operations no-operationId tests, schemas multi-type/literal/patternProperties tests","result":"kept","note":"6 new tests — lines 89.4→90.03%, branches 85.74→86.74%"}
 {"iteration":8,"before":90.7,"after":91.41,"action":"Add compat class/interface field diffs, verify baseline gen, responses nested array tests","result":"kept","note":"6 new tests — lines 90.03→91.03%, branches 86.74→87.45%"}
 {"iteration":9,"before":91.41,"after":91.84,"action":"Add diff report exit codes, no-changes, class method/property diffs","result":"kept","note":"5 new tests — lines 91.03→91.57%, branches 87.45→87.97%"}
+{"iteration":10,"before":91.84,"after":92.04,"action":"Add singularize -ses branch, diff --force hint, config-loader .ts hint tests","result":"kept","note":"3 new tests — score 91.84→92.04, target reached"}

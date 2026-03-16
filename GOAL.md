@@ -139,9 +139,23 @@ File: `iterations.jsonl` (append-only, one JSON object per line)
 
 ```
 Starting score: 80.15
-Ending score:   NN.N
-Iterations:     N
-Changes made:   (list)
-Remaining gaps: (list)
-Next actions:   (what a human or future agent should do next)
+Ending score:   92.04
+Iterations:     10
+Changes made:
+  - CLI command unit tests (generate, parse, extract, diff, verify)
+  - Engine tests (writer skipIfExists, orchestrator non-dry-run, registry error paths)
+  - IR assertNever test
+  - Compat tests (overlay patchOverlay branches, differ field/enum/export diffs, extractor registry, model-name mapping)
+  - Parser tests (inline enums in arrays/nullable/union/map, multi-type unions, literal types, patternProperties, no-operationId inference, nested response arrays)
+  - Utility tests (singularize -ses branch)
+  - Config loader .ts hint branch
+Remaining gaps:
+  - src/cli/index.ts (0% — Commander entrypoint with top-level await, hard to test in-process)
+  - src/index.ts (0% — barrel re-export, no logic)
+  - differ/file-map.ts TypeRef switch branches (literal/primitive/default — structural, unreachable)
+  - compat/extractors/node.ts remaining branches (requires real TS project fixtures)
+Next actions:
+  - Consider integration tests for cli/index.ts via subprocess (won't count for coverage but validates behavior)
+  - Add a fixture emitter for end-to-end generate+verify tests
+  - Target remaining compat/overlay and parser/parse branches with more complex spec fixtures
 ```
