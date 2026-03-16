@@ -1,4 +1,5 @@
-import type { ApiSpec } from '../ir/types.js';
+import type { ApiSpec, Enum, TypeRef } from '../ir/types.js';
+import { toUpperSnakeCase } from '../utils/naming.js';
 import { loadAndBundleSpec } from './refs.js';
 import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
 import { extractOperations } from './operations.js';
@@ -41,6 +42,14 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
   const deduplicatedFieldModels = fieldInlineModels.filter((m) => !allModelNames.has(m.name));
   const finalModels = [...allModels, ...deduplicatedFieldModels];
 
+  // Collect inline enums from all models (including inline models from responses)
+  const enumNames = new Set(enums.map(e => e.name));
+  for (const model of finalModels) {
+    for (const field of model.fields) {
+      collectInlineEnumsFromTypeRef(field.type, enums, enumNames);
+    }
+  }
+
   return {
     name: spec.info?.title ?? 'Unknown API',
     version: spec.info?.version ?? '0.0.0',
@@ -50,4 +59,26 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     models: finalModels,
     enums,
   };
+}
+
+function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
+  if (ref.kind === 'enum' && ref.values && !seen.has(ref.name)) {
+    seen.add(ref.name);
+    enums.push({
+      name: ref.name,
+      values: ref.values.map(v => ({
+        name: toUpperSnakeCase(v),
+        value: v,
+        description: undefined,
+      })),
+    });
+  } else if (ref.kind === 'array') {
+    collectInlineEnumsFromTypeRef(ref.items, enums, seen);
+  } else if (ref.kind === 'nullable') {
+    collectInlineEnumsFromTypeRef(ref.inner, enums, seen);
+  } else if (ref.kind === 'union') {
+    for (const v of ref.variants) {
+      collectInlineEnumsFromTypeRef(v, enums, seen);
+    }
+  }
 }

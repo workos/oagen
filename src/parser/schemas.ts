@@ -1,5 +1,5 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
-import { toPascalCase, toUpperSnakeCase, stripBackendSuffixes } from '../utils/naming.js';
+import { toPascalCase, toUpperSnakeCase, stripBackendSuffixes, stripBackendPrefixes } from '../utils/naming.js';
 
 interface SchemaObject {
   type?: string | string[];
@@ -31,7 +31,7 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
   if (!schemas) return { models, enums };
 
   for (const [name, schema] of Object.entries(schemas)) {
-    const pascalName = stripBackendSuffixes(toPascalCase(name));
+    const pascalName = stripBackendPrefixes(stripBackendSuffixes(toPascalCase(name)));
 
     if (schema.enum) {
       enums.push(extractEnum(pascalName, schema));
@@ -40,7 +40,45 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
     }
   }
 
+  // Collect inline enums from model fields
+  for (const model of models) {
+    collectInlineEnums(model.fields, enums);
+  }
+
   return { models, enums };
+}
+
+/**
+ * Walk model fields and extract inline enum refs as top-level enum definitions.
+ * This ensures type alias files are generated for inline enums.
+ */
+function collectInlineEnums(fields: Field[], enums: Enum[]): void {
+  const existingNames = new Set(enums.map(e => e.name));
+  for (const field of fields) {
+    walkTypeRefForEnums(field.type, enums, existingNames);
+  }
+}
+
+function walkTypeRefForEnums(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
+  if (ref.kind === 'enum' && ref.values && !seen.has(ref.name)) {
+    seen.add(ref.name);
+    enums.push({
+      name: ref.name,
+      values: ref.values.map(v => ({
+        name: toUpperSnakeCase(v),
+        value: v,
+        description: undefined,
+      })),
+    });
+  } else if (ref.kind === 'array') {
+    walkTypeRefForEnums(ref.items, enums, seen);
+  } else if (ref.kind === 'nullable') {
+    walkTypeRefForEnums(ref.inner, enums, seen);
+  } else if (ref.kind === 'union') {
+    for (const v of ref.variants) {
+      walkTypeRefForEnums(v, enums, seen);
+    }
+  }
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
@@ -64,7 +102,7 @@ function extractModel(name: string, schema: SchemaObject): Model {
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     fields.push({
       name: fieldName,
-      type: schemaToTypeRef(fieldSchema, fieldName),
+      type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
       description: fieldSchema.description,
     });
@@ -85,7 +123,7 @@ function extractAllOfModel(name: string, schema: SchemaObject): Model {
       for (const [fieldName, fieldSchema] of Object.entries(subSchema.properties)) {
         fields.push({
           name: fieldName,
-          type: schemaToTypeRef(fieldSchema, fieldName),
+          type: schemaToTypeRef(fieldSchema, fieldName, name),
           required: false, // will be set below
           description: fieldSchema.description,
         });
@@ -107,12 +145,12 @@ function extractAllOfModel(name: string, schema: SchemaObject): Model {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function schemaToTypeRef(schema: any, contextName?: string): TypeRef {
+export function schemaToTypeRef(schema: any, contextName?: string, parentModelName?: string): TypeRef {
   // Handle $ref → ModelRef
   if (schema.$ref) {
     const segments = schema.$ref.split('/');
     const rawName = segments[segments.length - 1];
-    return { kind: 'model', name: stripBackendSuffixes(toPascalCase(rawName)) };
+    return { kind: 'model', name: stripBackendPrefixes(stripBackendSuffixes(toPascalCase(rawName))) };
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
@@ -161,11 +199,25 @@ export function schemaToTypeRef(schema: any, contextName?: string): TypeRef {
     return union;
   }
 
+  // Handle const or single-value enum → LiteralType
+  if (schema.const !== undefined && typeof schema.const === 'string') {
+    return { kind: 'literal', value: schema.const };
+  }
+  if (schema.enum && schema.enum.length === 1) {
+    return { kind: 'literal', value: schema.enum[0] };
+  }
+
   // Handle enum
   if (schema.enum) {
+    const baseName = toPascalCase(contextName ?? 'UnknownEnum');
+    // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
+    const qualifiedName = parentModelName && !baseName.startsWith(parentModelName)
+      ? `${parentModelName}${baseName}`
+      : baseName;
     return {
       kind: 'enum',
-      name: toPascalCase(contextName ?? 'UnknownEnum'),
+      name: qualifiedName,
+      values: schema.enum as string[],
     };
   }
 

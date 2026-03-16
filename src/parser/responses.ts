@@ -228,7 +228,7 @@ function extractInlineModel(name: string, schema: Record<string, unknown>): Mode
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     fields.push({
       name: fieldName,
-      type: schemaToTypeRef(fieldSchema, fieldName),
+      type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
       description: (fieldSchema.description as string) ?? undefined,
     });

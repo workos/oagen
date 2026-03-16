@@ -74,3 +74,7 @@ export function stripBackendSuffixes(name: string): string {
   }
   return name;
 }
+
+export function stripBackendPrefixes(name: string): string {
+  return name.replace(/Userland/g, '').replace(/Controller/g, '');
+}

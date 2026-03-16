@@ -210,7 +210,7 @@ describe('schemaToTypeRef', () => {
 
   it('maps enum schema to EnumRef', () => {
     const ref = schemaToTypeRef({ type: 'string', enum: ['a', 'b'] }, 'status');
-    expect(ref).toEqual({ kind: 'enum', name: 'Status' });
+    expect(ref).toEqual({ kind: 'enum', name: 'Status', values: ['a', 'b'] });
   });
 
   it('resolves $ref to named ModelRef', () => {
