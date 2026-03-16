@@ -298,4 +298,58 @@ describe('diffOperations', () => {
       expect(changes[0].classification).toBe('breaking');
     }
   });
+
+  it('classifies as breaking when error code added AND removed simultaneously (breaking wins)', () => {
+    const old: Operation = {
+      ...getUser,
+      errors: [{ statusCode: 401, type: { kind: 'model', name: 'UnauthorizedError' } }],
+    };
+    const modified: Operation = {
+      ...getUser,
+      errors: [{ statusCode: 404, type: { kind: 'model', name: 'NotFoundError' } }],
+    };
+    const changes = diffOperations('Users', [old], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].errorsChanged).toBe(true);
+      expect(changes[0].classification).toBe('breaking');
+    }
+  });
+
+  it('classifies as breaking when shared error code has type added where none existed', () => {
+    const old: Operation = {
+      ...getUser,
+      errors: [{ statusCode: 422 }],
+    };
+    const modified: Operation = {
+      ...getUser,
+      errors: [{ statusCode: 422, type: { kind: 'model', name: 'ValidationError' } }],
+    };
+    const changes = diffOperations('Users', [old], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].errorsChanged).toBe(true);
+      expect(changes[0].classification).toBe('breaking');
+    }
+  });
+
+  it('detects no change when shared error code has both types undefined', () => {
+    const old: Operation = {
+      ...getUser,
+      errors: [{ statusCode: 500 }],
+    };
+    const modified: Operation = {
+      ...getUser,
+      errors: [{ statusCode: 500 }],
+    };
+    const changes = diffOperations('Users', [old], [modified]);
+    expect(changes).toHaveLength(0);
+  });
+
+  it('detects no change when both error arrays are empty', () => {
+    const old: Operation = { ...getUser, errors: [] };
+    const modified: Operation = { ...getUser, errors: [] };
+    const changes = diffOperations('Users', [old], [modified]);
+    expect(changes).toHaveLength(0);
+  });
 });

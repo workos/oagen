@@ -278,6 +278,55 @@ describe('typeRefsEqual', () => {
   it('compares different kinds', () => {
     expect(typeRefsEqual({ kind: 'primitive', type: 'string' }, { kind: 'model', name: 'User' })).toBe(false);
   });
+
+  it('returns false when union discriminator mappings have different number of keys', () => {
+    expect(
+      typeRefsEqual(
+        {
+          kind: 'union',
+          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+          discriminator: { property: 'type', mapping: { a: 'A', b: 'B' } },
+        },
+        {
+          kind: 'union',
+          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+          discriminator: { property: 'type', mapping: { a: 'A' } },
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('returns true when union discriminator mapping keys are in different order', () => {
+    expect(
+      typeRefsEqual(
+        {
+          kind: 'union',
+          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'Z' }],
+          discriminator: { property: 'type', mapping: { z: 'Z', a: 'A' } },
+        },
+        {
+          kind: 'union',
+          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'Z' }],
+          discriminator: { property: 'type', mapping: { a: 'A', z: 'Z' } },
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true when both unions have no discriminator', () => {
+    expect(
+      typeRefsEqual(
+        {
+          kind: 'union',
+          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+        },
+        {
+          kind: 'union',
+          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+        },
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('diffModels edge cases', () => {
