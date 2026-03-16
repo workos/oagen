@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { loadConfig } from '../../src/cli/config-loader.js';
 import { applyConfig } from '../../src/cli/plugin-loader.js';
-import { getEmitter, registerEmitter } from '../../src/engine/registry.js';
+import { getEmitter } from '../../src/engine/registry.js';
 import type { Emitter } from '../../src/engine/types.js';
 
 describe('loadConfig', () => {

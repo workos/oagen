@@ -27,7 +27,7 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<OagenConf
       if (config.irVersion !== undefined && config.irVersion !== IR_VERSION) {
         console.error(
           `IR version mismatch: config declares irVersion ${config.irVersion} but oagen uses IR_VERSION ${IR_VERSION}. ` +
-          `Update your emitter to match the installed @workos/oagen version.`
+            `Update your emitter to match the installed @workos/oagen version.`,
         );
         process.exit(1);
       }

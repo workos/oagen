@@ -284,12 +284,18 @@ describe('typeRefsEqual', () => {
       typeRefsEqual(
         {
           kind: 'union',
-          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
           discriminator: { property: 'type', mapping: { a: 'A', b: 'B' } },
         },
         {
           kind: 'union',
-          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
           discriminator: { property: 'type', mapping: { a: 'A' } },
         },
       ),
@@ -301,12 +307,18 @@ describe('typeRefsEqual', () => {
       typeRefsEqual(
         {
           kind: 'union',
-          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'Z' }],
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'Z' },
+          ],
           discriminator: { property: 'type', mapping: { z: 'Z', a: 'A' } },
         },
         {
           kind: 'union',
-          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'Z' }],
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'Z' },
+          ],
           discriminator: { property: 'type', mapping: { a: 'A', z: 'Z' } },
         },
       ),
@@ -318,11 +330,17 @@ describe('typeRefsEqual', () => {
       typeRefsEqual(
         {
           kind: 'union',
-          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
         },
         {
           kind: 'union',
-          variants: [{ kind: 'model', name: 'A' }, { kind: 'model', name: 'B' }],
+          variants: [
+            { kind: 'model', name: 'A' },
+            { kind: 'model', name: 'B' },
+          ],
         },
       ),
     ).toBe(true);

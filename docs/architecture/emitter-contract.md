@@ -46,7 +46,7 @@ interface EmitterContext {
   outputDir?: string; // Output directory path
   apiSurface?: ApiSurface; // Baseline API surface (when --api-surface is provided)
   overlayLookup?: OverlayLookup; // Name preservation overlay (when --api-surface is provided)
-  irVersion: number;            // IR contract version — see ir-types.md Versioning section
+  irVersion: number; // IR contract version — see ir-types.md Versioning section
 }
 ```
 
@@ -90,13 +90,14 @@ Emitters can optionally declare `contractVersion` to indicate which IR version t
 
 ```typescript
 const emitter: Emitter = {
-  language: 'ruby',
+  language: "ruby",
   contractVersion: 1,
   // ...
 };
 ```
 
 When registered, the CLI compares `contractVersion` against the current `IR_VERSION`:
+
 - **Lower** than current: warning — the emitter may not handle new TypeRef variants
 - **Higher** than current: error — the emitter expects a newer IR than this CLI provides
 

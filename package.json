@@ -33,7 +33,7 @@
     "format": "oxfmt --check .",
     "format:fix": "oxfmt --write .",
     "format:md": "prettier --write '**/*.md'",
-    "fix": "oxlint --fix && oxfmt --write . && prettier --write '**/*.md'",
+    "lint:all": "oxlint --fix && oxfmt --write . && prettier --write '**/*.md'",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

@@ -110,7 +110,7 @@ describe('parseSpec', () => {
       expect(fieldNames).toContain('description');
       // The warning was emitted for the collision
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Inline model "Detail" has different fields than component schema')
+        expect.stringContaining('Inline model "Detail" has different fields than component schema'),
       );
     } finally {
       warnSpy.mockRestore();

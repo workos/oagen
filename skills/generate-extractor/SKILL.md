@@ -43,13 +43,13 @@ The real SDK is the ground truth.
 
 Before writing any code, determine how to analyze the target language's SDK:
 
-| Decision                     | What it controls                                                                        |
-| ---------------------------- | --------------------------------------------------------------------------------------- |
-| **Entry point discovery**    | How to find the SDK's main module/package                                               |
-| **Public surface detection** | How to distinguish public from private symbols                                          |
-| **Type information source**  | Where types come from (compiler API, stubs, annotations)                                |
-| **Class/method extraction**  | How to extract classes, methods, params, return types                                   |
-| **Analysis tooling**         | What npm packages or subprocess calls are needed                                        |
+| Decision                     | What it controls                                         |
+| ---------------------------- | -------------------------------------------------------- |
+| **Entry point discovery**    | How to find the SDK's main module/package                |
+| **Public surface detection** | How to distinguish public from private symbols           |
+| **Type information source**  | Where types come from (compiler API, stubs, annotations) |
+| **Class/method extraction**  | How to extract classes, methods, params, return types    |
+| **Analysis tooling**         | What npm packages or subprocess calls are needed         |
 
 ### Implementation Strategy
 

@@ -38,7 +38,8 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     const existing = schemaModelsByName.get(m.name)!;
     const existingFieldNames = new Set(existing.fields.map((f) => f.name));
     const inlineFieldNames = new Set(m.fields.map((f) => f.name));
-    const hasDifference = m.fields.some((f) => !existingFieldNames.has(f.name)) ||
+    const hasDifference =
+      m.fields.some((f) => !existingFieldNames.has(f.name)) ||
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
     if (hasDifference) {
       console.warn(
@@ -61,7 +62,8 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     const existing = allModelsByName.get(m.name)!;
     const existingFieldNames = new Set(existing.fields.map((f) => f.name));
     const inlineFieldNames = new Set(m.fields.map((f) => f.name));
-    const hasDifference = m.fields.some((f) => !existingFieldNames.has(f.name)) ||
+    const hasDifference =
+      m.fields.some((f) => !existingFieldNames.has(f.name)) ||
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
     if (hasDifference) {
       console.warn(
@@ -73,7 +75,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
   const finalModels = [...allModels, ...deduplicatedFieldModels];
 
   // Collect inline enums from all models (including inline models from responses)
-  const enumNames = new Set(enums.map(e => e.name));
+  const enumNames = new Set(enums.map((e) => e.name));
   for (const model of finalModels) {
     for (const field of model.fields) {
       collectInlineEnumsFromTypeRef(field.type, enums, enumNames);
@@ -96,7 +98,7 @@ function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<st
     seen.add(ref.name);
     enums.push({
       name: ref.name,
-      values: ref.values.map(v => ({
+      values: ref.values.map((v) => ({
         name: toUpperSnakeCase(v),
         value: v,
         description: undefined,

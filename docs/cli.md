@@ -50,10 +50,10 @@ oagen extract --sdk-path ./existing-sdk --lang ruby --output ./sdk/sdk-ruby-surf
 oagen extract --sdk-path ./existing-sdk --lang ruby --output my-surface.json
 ```
 
-| Argument            | Required | Default            | Description          |
-| ------------------- | -------- | ------------------ | -------------------- |
-| `--sdk-path <path>` | Yes      |                    | Path to the live SDK |
-| `--lang <language>` | Yes      |                    | Target language      |
+| Argument            | Required | Default                   | Description                                                                                                     |
+| ------------------- | -------- | ------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `--sdk-path <path>` | Yes      |                           | Path to the live SDK                                                                                            |
+| `--lang <language>` | Yes      |                           | Target language                                                                                                 |
 | `--output <path>`   | No       | `sdk-{lang}-surface.json` | Output file path (recommend writing to your output dir, e.g. `./sdk/sdk-ruby-surface.json`, and gitignoring it) |
 
 ## `oagen verify`
@@ -68,17 +68,17 @@ oagen verify --lang node --output ./sdk --spec openapi.yml \
   --api-surface ./sdk/sdk-node-surface.json
 ```
 
-| Argument                | Required | Default                 | Description                                                   |
-| ----------------------- | -------- | ----------------------- | ------------------------------------------------------------- |
-| `--lang <language>`     | Yes      |                         | Target language                                               |
-| `--output <dir>`        | Yes      |                         | Path to the generated SDK                                     |
-| `--spec <path>`         | No       | `OPENAPI_SPEC_PATH` env | Path to an OpenAPI 3.x spec file                              |
-| `--api-surface <path>`  | No       |                         | Baseline API surface JSON — enables compat verification       |
-| `--raw-results <path>`  | No       | auto-generated          | Path to an existing smoke baseline file to diff against       |
-| `--smoke-config <path>` | No       |                         | Smoke config JSON for skip lists and service mappings         |
-| `--smoke-runner <path>` | No       |                         | Custom smoke runner script (overrides built-in `sdk-test.ts`) |
+| Argument                | Required | Default                         | Description                                                                                                   |
+| ----------------------- | -------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `--lang <language>`     | Yes      |                                 | Target language                                                                                               |
+| `--output <dir>`        | Yes      |                                 | Path to the generated SDK                                                                                     |
+| `--spec <path>`         | No       | `OPENAPI_SPEC_PATH` env         | Path to an OpenAPI 3.x spec file                                                                              |
+| `--api-surface <path>`  | No       |                                 | Baseline API surface JSON — enables compat verification                                                       |
+| `--raw-results <path>`  | No       | auto-generated                  | Path to an existing smoke baseline file to diff against                                                       |
+| `--smoke-config <path>` | No       |                                 | Smoke config JSON for skip lists and service mappings                                                         |
+| `--smoke-runner <path>` | No       |                                 | Custom smoke runner script (overrides built-in `sdk-test.ts`)                                                 |
 | `--scope <mode>`        | No       | `spec-only` when `--spec` given | Compat scope: `full` compares all baseline symbols, `spec-only` only compares symbols derivable from the spec |
-| `--diagnostics`         | No       | `false`                 | Output `verify-diagnostics.json` with structured violation breakdown |
+| `--diagnostics`         | No       | `false`                         | Output `verify-diagnostics.json` with structured violation breakdown                                          |
 
 **Exit codes:**
 

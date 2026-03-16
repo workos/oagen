@@ -224,7 +224,7 @@ describe('generateIncremental', () => {
     };
 
     const ctxCapture: { ctx?: EmitterContext } = {};
-    const result = await generateIncremental(v1, v2, mockEmitter(ctxCapture), {
+    const _result = await generateIncremental(v1, v2, mockEmitter(ctxCapture), {
       namespace: 'Test',
       outputDir: '/tmp/test-inc',
       dryRun: true,

@@ -158,7 +158,12 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef, irVersion: 1 };
+    const ctxWithRef: EmitterContext = {
+      namespace: 'test',
+      namespacePascal: 'Test',
+      spec: specWithEnumRef,
+      irVersion: 1,
+    };
     const changes: Change[] = [
       {
         kind: 'enum-modified',
@@ -195,7 +200,12 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef, irVersion: 1 };
+    const ctxWithRef: EmitterContext = {
+      namespace: 'test',
+      namespacePascal: 'Test',
+      spec: specWithEnumRef,
+      irVersion: 1,
+    };
     const changes: Change[] = [{ kind: 'enum-removed', name: 'Status', classification: 'breaking' }];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxWithRef);
     expect(result.delete).toContain('models/status.rb');
@@ -242,7 +252,12 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxMulti: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: multiServiceSpec, irVersion: 1 };
+    const ctxMulti: EmitterContext = {
+      namespace: 'test',
+      namespacePascal: 'Test',
+      spec: multiServiceSpec,
+      irVersion: 1,
+    };
     const changes: Change[] = [
       {
         kind: 'model-modified',
@@ -334,7 +349,12 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxTransitive: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: transitiveSpec, irVersion: 1 };
+    const ctxTransitive: EmitterContext = {
+      namespace: 'test',
+      namespacePascal: 'Test',
+      spec: transitiveSpec,
+      irVersion: 1,
+    };
     const changes: Change[] = [
       {
         kind: 'model-modified',
@@ -439,7 +459,12 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxCircular: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: circularSpec, irVersion: 1 };
+    const ctxCircular: EmitterContext = {
+      namespace: 'test',
+      namespacePascal: 'Test',
+      spec: circularSpec,
+      irVersion: 1,
+    };
     const changes: Change[] = [
       {
         kind: 'model-modified',

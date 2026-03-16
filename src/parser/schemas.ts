@@ -53,7 +53,7 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
  * This ensures type alias files are generated for inline enums.
  */
 function collectInlineEnums(fields: Field[], enums: Enum[]): void {
-  const existingNames = new Set(enums.map(e => e.name));
+  const existingNames = new Set(enums.map((e) => e.name));
   for (const field of fields) {
     walkTypeRefForEnums(field.type, enums, existingNames);
   }
@@ -64,7 +64,7 @@ function walkTypeRefForEnums(ref: TypeRef, enums: Enum[], seen: Set<string>): vo
     seen.add(ref.name);
     enums.push({
       name: ref.name,
-      values: ref.values.map(v => ({
+      values: ref.values.map((v) => ({
         name: toUpperSnakeCase(v),
         value: v,
         description: undefined,
@@ -211,9 +211,8 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
   if (schema.enum) {
     const baseName = toPascalCase(contextName ?? 'UnknownEnum');
     // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
-    const qualifiedName = parentModelName && !baseName.startsWith(parentModelName)
-      ? `${parentModelName}${baseName}`
-      : baseName;
+    const qualifiedName =
+      parentModelName && !baseName.startsWith(parentModelName) ? `${parentModelName}${baseName}` : baseName;
     return {
       kind: 'enum',
       name: qualifiedName,

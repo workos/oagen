@@ -80,7 +80,12 @@ interface CompatCheckResult {
   scopedSymbolCount?: number;
 }
 
-async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang: string, spec?: ApiSpec): Promise<CompatCheckResult> {
+async function runCompatCheckInner(
+  baseline: ApiSurface,
+  outputDir: string,
+  lang: string,
+  spec?: ApiSpec,
+): Promise<CompatCheckResult> {
   const extractor = getExtractor(lang);
   const candidate = await extractor.extract(outputDir);
 
@@ -92,10 +97,16 @@ async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang
     const allowed = specDerivedNames(spec);
     scopedBaseline = filterSurface(baseline, allowed);
     scopedToSpec = true;
-    const totalBefore = Object.keys(baseline.interfaces).length + Object.keys(baseline.classes).length +
-      Object.keys(baseline.typeAliases).length + Object.keys(baseline.enums).length;
-    scopedSymbolCount = Object.keys(scopedBaseline.interfaces).length + Object.keys(scopedBaseline.classes).length +
-      Object.keys(scopedBaseline.typeAliases).length + Object.keys(scopedBaseline.enums).length;
+    const totalBefore =
+      Object.keys(baseline.interfaces).length +
+      Object.keys(baseline.classes).length +
+      Object.keys(baseline.typeAliases).length +
+      Object.keys(baseline.enums).length;
+    scopedSymbolCount =
+      Object.keys(scopedBaseline.interfaces).length +
+      Object.keys(scopedBaseline.classes).length +
+      Object.keys(scopedBaseline.typeAliases).length +
+      Object.keys(scopedBaseline.enums).length;
     console.log(`(scoped to spec: ${scopedSymbolCount}/${totalBefore} baseline symbols in scope)`);
   }
 
@@ -150,7 +161,12 @@ export async function verifyCommand(opts: {
       process.exit(1);
     }
 
-    const compatResult = await runCompatCheckInner(JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface, output, lang, parsedSpec);
+    const compatResult = await runCompatCheckInner(
+      JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface,
+      output,
+      lang,
+      parsedSpec,
+    );
 
     if (diagnostics) {
       const violationsByCategory: Record<string, number> = {};

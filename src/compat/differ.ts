@@ -57,7 +57,7 @@ function collectTypeRefNames(ref: TypeRef, out: Set<string>): void {
       collectTypeRefNames(ref.inner, out);
       break;
     case 'union':
-      ref.variants.forEach(v => collectTypeRefNames(v, out));
+      ref.variants.forEach((v) => collectTypeRefNames(v, out));
       break;
     case 'literal':
     case 'primitive':

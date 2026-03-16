@@ -410,9 +410,7 @@ describe('buildOverlayLookup', () => {
       models: [
         {
           name: 'TinyModel',
-          fields: [
-            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
-          ],
+          fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
     };

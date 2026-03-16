@@ -98,7 +98,10 @@ program
   .option('--raw-results <path>', 'Path to an existing smoke baseline file to diff against')
   .option('--smoke-config <path>', 'Path to smoke config JSON for skip lists and service mappings')
   .option('--smoke-runner <path>', 'Path to a custom smoke runner script (overrides built-in sdk-test.ts)')
-  .option('--scope <mode>', 'Compat scope: "full" compares all baseline symbols, "spec-only" compares only symbols derivable from the OpenAPI spec (default: spec-only when --spec is provided)')
+  .option(
+    '--scope <mode>',
+    'Compat scope: "full" compares all baseline symbols, "spec-only" compares only symbols derivable from the OpenAPI spec (default: spec-only when --spec is provided)',
+  )
   .option('--diagnostics', 'Output verify-diagnostics.json with structured violation breakdown')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;

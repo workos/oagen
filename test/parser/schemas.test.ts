@@ -253,7 +253,7 @@ describe('schemaToTypeRef', () => {
       const ref = schemaToTypeRef({}, 'unknownField');
       expect(ref).toEqual({ kind: 'primitive', type: 'string' });
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Unknown schema shape treated as string (context: unknownField)')
+        expect.stringContaining('Unknown schema shape treated as string (context: unknownField)'),
       );
     } finally {
       warnSpy.mockRestore();
@@ -263,16 +263,17 @@ describe('schemaToTypeRef', () => {
   it('warns on ignored additionalProperties with object schema', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const ref = schemaToTypeRef({
-        type: 'object',
-        properties: { id: { type: 'string' } },
-        additionalProperties: { type: 'string' },
-      }, 'myField');
+      const ref = schemaToTypeRef(
+        {
+          type: 'object',
+          properties: { id: { type: 'string' } },
+          additionalProperties: { type: 'string' },
+        },
+        'myField',
+      );
       // Model fields are still extracted correctly
       expect(ref).toEqual({ kind: 'model', name: 'MyField' });
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('additionalProperties with object schema ignored')
-      );
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('additionalProperties with object schema ignored'));
     } finally {
       warnSpy.mockRestore();
     }

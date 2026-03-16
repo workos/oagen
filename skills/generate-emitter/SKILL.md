@@ -149,6 +149,7 @@ Before implementing generators, use the `Agent` tool with `subagent_type: Explor
 > type-map.ts, naming.ts, models.ts, enums.ts, resources.ts, client.ts, errors.ts, config.ts, tests.ts, fixtures.ts
 >
 > For each file, return:
+>
 > - **Purpose:** one-line description
 > - **Exports:** function/constant signatures
 > - **Pattern:** structural flow (setup → transform → output)

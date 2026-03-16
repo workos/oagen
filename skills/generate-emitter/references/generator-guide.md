@@ -14,7 +14,7 @@ Detailed instructions for implementing each generator file in a language emitter
 - [Errors (errors.ts)](#errors)
 - [Config (config.ts)](#config)
 - [Common/Utilities (common.ts)](#common-utilities)
-- [Type Signatures (types-*.ts)](#type-signatures)
+- [Type Signatures (types-\*.ts)](#type-signatures)
 - [Tests (tests.ts) and Fixtures (fixtures.ts)](#tests-and-fixtures)
 
 ---
@@ -58,7 +58,11 @@ Map oagen's PascalCase IR names to the target language's conventions.
 export function className(name: string): string;
 export function fileName(name: string): string;
 export function methodName(name: string): string;
-export function modulePath(namespace: string, category: string, name: string): string;
+export function modulePath(
+  namespace: string,
+  category: string,
+  name: string,
+): string;
 ```
 
 ### Examples by Language

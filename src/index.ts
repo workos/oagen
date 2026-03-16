@@ -71,7 +71,14 @@ export { mapChangesToFiles } from './differ/file-map.js';
 export { generateIncremental } from './engine/incremental.js';
 export { buildOverlayLookup, patchOverlay } from './compat/overlay.js';
 export { diffSurfaces, specDerivedNames, filterSurface } from './compat/differ.js';
-export { toSnakeCase, toCamelCase, toPascalCase, toKebabCase, toUpperSnakeCase, stripBackendPrefixes } from './utils/naming.js';
+export {
+  toSnakeCase,
+  toCamelCase,
+  toPascalCase,
+  toKebabCase,
+  toUpperSnakeCase,
+  stripBackendPrefixes,
+} from './utils/naming.js';
 
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';
