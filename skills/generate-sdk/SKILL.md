@@ -131,18 +131,18 @@ Validation:
 Next steps:
   cd {project}
 
-  # Generate SDK from spec
-  npx tsx ../oagen/src/cli/index.ts generate \
-    --spec {spec} \
-    --lang {language} --output ./sdk-{language} --namespace <ns>
+  # Use oagen skills directly from the emitter project:
+  claude --plugin-dir node_modules/@workos/oagen
+  # (or: claude --plugin-dir ../oagen)
+  #
+  # Then run the compat-fixing loop:
+  #   /oagen:verify-compat {language}
+  #
+  # This iterates: generate → verify → fix emitter → repeat
+  # until the preservation score stops improving.
 
-  # Verify compat
-  npx tsx ../oagen/src/cli/index.ts verify \
-    --lang {language} --output ./sdk-{language} \
-    --api-surface ./sdk-{language}/sdk-{language}-surface.json
-
-  # Run smoke tests
-  npx tsx smoke/sdk-{language}.ts \
-    --spec {spec} \
-    --sdk-path ./sdk-{language}
+  # Or run manually:
+  oagen extract --sdk-path {sdk_path} --lang {language} --output sdk-{language}-surface.json
+  oagen generate --spec {spec} --lang {language} --output ./sdk --namespace <ns> --api-surface sdk-{language}-surface.json
+  oagen verify --lang {language} --output ./sdk --api-surface sdk-{language}-surface.json
 ```

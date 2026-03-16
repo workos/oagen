@@ -31,12 +31,19 @@ Check for `node_modules/@workos/oagen/`, or `src/engine/types.ts` in the current
 
 ## Resolve Emitter Project
 
-Determine the location of the OpenAPI spec before doing anything:
+Determine the location of the OpenAPI spec and live SDK before doing anything:
 
 1. If the `spec` argument was provided, use that.
 2. Otherwise, use `AskUserQuestion`: "Where is your OpenAPI spec located? (absolute or relative path, e.g. `../openapi.yaml`)"
 
 Store it as `spec`.
+
+3. If the `sdk-path` argument was provided, use that.
+4. Otherwise, use `AskUserQuestion`: "Where is the live, published SDK? This must be the real SDK repository, not a generated output directory. (absolute path, e.g. `../backend/workos-node`)"
+
+Store it as `sdk-path`.
+
+**Validation**: The `sdk-path` MUST NOT be the same as or inside the `--output` directory. If it is, reject it and ask again — extracting from the generation target produces a meaningless self-comparison. The purpose of compat verification is to compare generated output against an independently maintained SDK.
 
 ## Step 1: Extract Baseline
 
@@ -57,6 +64,17 @@ grep -q 'sdk-\*-surface.json' <output-path>/.gitignore 2>/dev/null || echo 'sdk-
 > Explore the SDK at `{sdk_path}`. List all public classes and their public method names. Only report what you actually find — no assumptions.
 
 Compare the subagent's findings against `<output-path>/sdk-{language}-surface.json`. If the surface looks empty or incomplete, the extractor may need fixes — run `/generate-extractor` to debug.
+
+**Scope to API-relevant symbols:** The live SDK may export hand-written classes and interfaces that are not derivable from the OpenAPI spec (e.g., `CookieSession`, `PKCE`, `Webhooks`, signature verification utilities, HTTP client abstractions). These are out of scope for compat verification — the emitter isn't expected to generate them.
+
+After extraction, cross-reference the baseline surface against the OpenAPI spec's operations. Symbols that have no corresponding OpenAPI operation should be noted but excluded from the compat score. Report them separately so the user knows what's excluded:
+
+```
+Out of scope (not in OpenAPI spec): CookieSession, PKCE, Webhooks, ...
+In scope (API-derived): 280 classes, 1200 interfaces, ...
+```
+
+This prevents the compat score from being diluted by symbols the emitter can't possibly generate. The goal is to measure how well the emitter preserves the API surface, not how completely it replicates hand-written SDK features.
 
 ## Step 2: Generate with Overlay
 
