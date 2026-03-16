@@ -80,6 +80,8 @@ export interface OverlayLookup {
   typeAliasByName: Map<string, string>;
   /** Barrel file path → symbols that must be exported */
   requiredExports: Map<string, Set<string>>;
+  /** IR model name → SDK interface name (auto-inferred from field structure) */
+  modelNameByIR: Map<string, string>;
 }
 
 export type ViolationCategory = 'public-api' | 'signature' | 'export-structure' | 'behavioral';

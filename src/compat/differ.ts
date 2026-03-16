@@ -1,4 +1,105 @@
+import type { ApiSpec, TypeRef } from '../ir/types.js';
 import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition } from './types.js';
+
+/**
+ * Compute the set of symbol names that are derivable from the OpenAPI spec.
+ * Only these names should be compared during compat verification — everything
+ * else in the baseline is hand-written and out of scope for generation.
+ */
+export function specDerivedNames(spec: ApiSpec): Set<string> {
+  const names = new Set<string>();
+
+  // Service classes
+  for (const service of spec.services) {
+    names.add(service.name);
+    for (const op of service.operations) {
+      // Operation methods are matched by the class diff, not by name here
+      collectTypeRefNames(op.response, names);
+      if (op.requestBody) collectTypeRefNames(op.requestBody, names);
+      for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams]) {
+        collectTypeRefNames(p.type, names);
+      }
+    }
+  }
+
+  // Models → domain interface + Response interface + Serialized variant
+  for (const model of spec.models) {
+    names.add(model.name);
+    names.add(`${model.name}Response`);
+    names.add(`Serialized${model.name}`);
+    for (const field of model.fields) {
+      collectTypeRefNames(field.type, names);
+    }
+  }
+
+  // Enums → type aliases
+  for (const e of spec.enums) {
+    names.add(e.name);
+  }
+
+  return names;
+}
+
+function collectTypeRefNames(ref: TypeRef, out: Set<string>): void {
+  switch (ref.kind) {
+    case 'model':
+      out.add(ref.name);
+      out.add(`${ref.name}Response`);
+      out.add(`Serialized${ref.name}`);
+      break;
+    case 'enum':
+      out.add(ref.name);
+      break;
+    case 'array':
+      collectTypeRefNames(ref.items, out);
+      break;
+    case 'nullable':
+      collectTypeRefNames(ref.inner, out);
+      break;
+    case 'union':
+      ref.variants.forEach(v => collectTypeRefNames(v, out));
+      break;
+    case 'literal':
+    case 'primitive':
+      break;
+  }
+}
+
+/**
+ * Filter an ApiSurface to only include symbols whose names appear in the
+ * allowed set. Symbols not in the set are dropped entirely — they won't
+ * count toward the total or produce violations.
+ */
+export function filterSurface(surface: ApiSurface, allowedNames: Set<string>): ApiSurface {
+  const classes: typeof surface.classes = {};
+  for (const [name, cls] of Object.entries(surface.classes)) {
+    if (allowedNames.has(name)) classes[name] = cls;
+  }
+
+  const interfaces: typeof surface.interfaces = {};
+  for (const [name, iface] of Object.entries(surface.interfaces)) {
+    if (allowedNames.has(name)) interfaces[name] = iface;
+  }
+
+  const typeAliases: typeof surface.typeAliases = {};
+  for (const [name, alias] of Object.entries(surface.typeAliases)) {
+    if (allowedNames.has(name)) typeAliases[name] = alias;
+  }
+
+  const enums: typeof surface.enums = {};
+  for (const [name, e] of Object.entries(surface.enums)) {
+    if (allowedNames.has(name)) enums[name] = e;
+  }
+
+  return {
+    ...surface,
+    classes,
+    interfaces,
+    typeAliases,
+    enums,
+    exports: {}, // exports are structural, not symbol-level — skip for scoped comparison
+  };
+}
 
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffResult {
   const violations: Violation[] = [];

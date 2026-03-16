@@ -51,7 +51,7 @@ export async function generateCommand(opts: {
       }
     }
 
-    overlayLookup = buildOverlayLookup(apiSurface, manifest);
+    overlayLookup = buildOverlayLookup(apiSurface, manifest, ir);
   }
 
   const files = await generate(ir, emitter, {

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { buildOverlayLookup, patchOverlay } from '../../src/compat/overlay.js';
 import type { ManifestEntry } from '../../src/compat/overlay.js';
 import type { ApiSurface, Violation } from '../../src/compat/types.js';
+import type { ApiSpec } from '../../src/ir/types.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -128,6 +129,7 @@ describe('buildOverlayLookup', () => {
     expect(lookup.interfaceByName.size).toBe(0);
     expect(lookup.typeAliasByName.size).toBe(0);
     expect(lookup.requiredExports.size).toBe(0);
+    expect(lookup.modelNameByIR.size).toBe(0);
   });
 
   it('normalizes httpMethod to uppercase for key lookup', () => {
@@ -185,6 +187,205 @@ describe('buildOverlayLookup', () => {
 
     const lookup = buildOverlayLookup(surface, manifest);
     expect(lookup.methodByOperation.size).toBe(0);
+  });
+
+  it('infers model names from field structure matching', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Organization: {
+          name: 'Organization',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+            createdAt: { name: 'createdAt', type: 'string', optional: false },
+            updatedAt: { name: 'updatedAt', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'WorkOsControllerOrganizationResponse',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'created_at', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'updated_at', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('WorkOsControllerOrganizationResponse')).toBe('Organization');
+  });
+
+  it('does not match models with low field overlap', () => {
+    const surface = emptySurface({
+      interfaces: {
+        User: {
+          name: 'User',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            email: { name: 'email', type: 'string', optional: false },
+            firstName: { name: 'firstName', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'TotallyDifferentModel',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'color', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'size', type: { kind: 'primitive', type: 'integer' }, required: true },
+            { name: 'weight', type: { kind: 'primitive', type: 'number' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('TotallyDifferentModel')).toBeUndefined();
+  });
+
+  it('infers model names from operation return types when manifest is available', () => {
+    const surface = emptySurface({
+      classes: {
+        Organizations: {
+          name: 'Organizations',
+          methods: {
+            getOrganization: {
+              name: 'getOrganization',
+              params: [{ name: 'id', type: 'string', optional: false }],
+              returnType: 'Promise<Organization>',
+              async: true,
+            },
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+      interfaces: {
+        Organization: {
+          name: 'Organization',
+          fields: { id: { name: 'id', type: 'string', optional: false } },
+          extends: [],
+        },
+      },
+    });
+
+    const manifest: ManifestEntry[] = [
+      {
+        operationId: 'Organizations.GetOrganization',
+        sdkResourceProperty: 'organizations',
+        sdkMethodName: 'getOrganization',
+        httpMethod: 'GET',
+        path: '/organizations/{id}',
+        pathParams: ['id'],
+        bodyFields: [],
+        queryFields: [],
+      },
+    ];
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Organizations',
+          operations: [
+            {
+              name: 'GetOrganization',
+              httpMethod: 'get',
+              path: '/organizations/{id}',
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'ControllerOrgResponse' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [
+        {
+          name: 'ControllerOrgResponse',
+          fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, manifest, spec);
+    expect(lookup.modelNameByIR.get('ControllerOrgResponse')).toBe('Organization');
+  });
+
+  it('does not produce duplicate mappings', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Org: {
+          name: 'Org',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+            slug: { name: 'slug', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'OrgModelA',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'slug', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+        {
+          name: 'OrgModelB',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'slug', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    // Only one IR model should claim "Org" — first match wins
+    const mappedToOrg = [...lookup.modelNameByIR.entries()].filter(([, v]) => v === 'Org');
+    expect(mappedToOrg).toHaveLength(1);
   });
 });
 

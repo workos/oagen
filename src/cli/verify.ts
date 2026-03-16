@@ -20,7 +20,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
 import { getExtractor } from '../compat/extractor-registry.js';
-import { diffSurfaces } from '../compat/differ.js';
+import { diffSurfaces, specDerivedNames, filterSurface } from '../compat/differ.js';
+import { parseSpec } from '../parser/parse.js';
+import type { ApiSpec } from '../ir/types.js';
 import type { ApiSurface } from '../compat/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -53,10 +55,23 @@ function runScript(scriptRelPath: string, args: string[]): void {
  * Run compat check directly (no subprocess). Uses the extractor registry
  * which is already populated by config-loader at CLI startup.
  */
-async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang: string): Promise<boolean> {
+async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang: string, spec?: ApiSpec): Promise<boolean> {
   const extractor = getExtractor(lang);
   const candidate = await extractor.extract(outputDir);
-  const diff = diffSurfaces(baseline, candidate);
+
+  // If spec is provided, scope the comparison to only spec-derived symbols
+  let scopedBaseline = baseline;
+  if (spec) {
+    const allowed = specDerivedNames(spec);
+    scopedBaseline = filterSurface(baseline, allowed);
+    const totalBefore = Object.keys(baseline.interfaces).length + Object.keys(baseline.classes).length +
+      Object.keys(baseline.typeAliases).length + Object.keys(baseline.enums).length;
+    const totalAfter = Object.keys(scopedBaseline.interfaces).length + Object.keys(scopedBaseline.classes).length +
+      Object.keys(scopedBaseline.typeAliases).length + Object.keys(scopedBaseline.enums).length;
+    console.log(`(scoped to spec: ${totalAfter}/${totalBefore} baseline symbols in scope)`);
+  }
+
+  const diff = diffSurfaces(scopedBaseline, candidate);
 
   const pct = diff.preservationScore;
   const total = diff.totalBaselineSymbols;
@@ -83,8 +98,9 @@ export async function verifyCommand(opts: {
   rawResults?: string;
   smokeConfig?: string;
   smokeRunner?: string;
+  scope?: 'full' | 'spec-only';
 }): Promise<void> {
-  const { spec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner } = opts;
+  const { spec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope } = opts;
 
   let stepNum = 1;
 
@@ -94,7 +110,17 @@ export async function verifyCommand(opts: {
     console.log(`Step ${stepNum}: Compat verification`);
     console.log(separator);
 
-    const passed = await runCompatCheckInner(JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface, output, lang);
+    // Determine compat scope: spec-only (default when --spec given) or full
+    const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
+    let parsedSpec: ApiSpec | undefined;
+    if (effectiveScope === 'spec-only' && spec) {
+      parsedSpec = await parseSpec(spec);
+    } else if (effectiveScope === 'spec-only' && !spec) {
+      console.error('error: --scope spec-only requires --spec <path>');
+      process.exit(1);
+    }
+
+    const passed = await runCompatCheckInner(JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface, output, lang, parsedSpec);
     if (passed) {
       console.log('Compat: passed');
     } else {

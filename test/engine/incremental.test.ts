@@ -220,6 +220,7 @@ describe('generateIncremental', () => {
       interfaceByName: new Map(),
       typeAliasByName: new Map(),
       requiredExports: new Map(),
+      modelNameByIR: new Map(),
     };
 
     const ctxCapture: { ctx?: EmitterContext } = {};
