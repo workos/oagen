@@ -246,9 +246,13 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
 
   // Handle freeform object with additionalProperties or patternProperties → Map<string, T>
   if (schema.type === 'object' && !schema.properties) {
-    let valueType: TypeRef = { kind: 'primitive', type: 'string' };
+    let valueType: TypeRef = { kind: 'primitive', type: 'unknown' };
     if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
-      valueType = schemaToTypeRef(schema.additionalProperties, contextName);
+      // Empty additionalProperties ({}) means "any value" — keep as unknown
+      const apKeys = Object.keys(schema.additionalProperties);
+      if (apKeys.length > 0) {
+        valueType = schemaToTypeRef(schema.additionalProperties, contextName);
+      }
     } else if (schema.patternProperties) {
       // patternProperties: { "pattern": schema } → use the first pattern's schema as value type
       const patterns = Object.values(schema.patternProperties);

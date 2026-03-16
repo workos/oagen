@@ -1,5 +1,5 @@
 /** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
-export const IR_VERSION = 2;
+export const IR_VERSION = 3;
 
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
@@ -49,7 +49,7 @@ export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType
 
 export interface PrimitiveType {
   kind: 'primitive';
-  type: 'string' | 'integer' | 'number' | 'boolean';
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'unknown';
   format?: string;
 }
 

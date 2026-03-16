@@ -279,9 +279,9 @@ describe('schemaToTypeRef', () => {
     }
   });
 
-  it('maps freeform object to MapType with string value', () => {
+  it('maps freeform object to MapType with unknown value', () => {
     const ref = schemaToTypeRef({ type: 'object' });
-    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'string' } });
+    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } });
   });
 
   it('maps object with additionalProperties schema to MapType', () => {
@@ -292,12 +292,12 @@ describe('schemaToTypeRef', () => {
     expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'integer' } });
   });
 
-  it('maps object with additionalProperties: true to MapType with string value', () => {
+  it('maps object with additionalProperties: true to MapType with unknown value', () => {
     const ref = schemaToTypeRef({
       type: 'object',
       additionalProperties: true,
     });
-    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'string' } });
+    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } });
   });
 
   it('handles combined OAS 3.1 type array and 3.0 nullable without double-wrapping', () => {
