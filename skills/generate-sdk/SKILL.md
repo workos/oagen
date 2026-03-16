@@ -127,7 +127,11 @@ Validation:
   Emitter tests:    {N} passed, {N} failed
   Type check:       PASS/FAIL
   Build:            PASS/FAIL
+```
 
+Only include this next section in the output if this is Scenario A:
+
+```
 Next steps:
   cd {project}
 
@@ -145,4 +149,18 @@ Next steps:
   oagen extract --sdk-path {sdk_path} --lang {language} --output sdk-{language}-surface.json
   oagen generate --spec {spec} --lang {language} --output ./sdk --namespace <ns> --api-surface sdk-{language}-surface.json
   oagen verify --lang {language} --output ./sdk --api-surface sdk-{language}-surface.json
+```
+
+Otherwise, also include this section on running smoke tests:
+
+```Next steps:
+  cd {project}
+
+  # Use oagen skills directly from the emitter project:
+  claude --plugin-dir node_modules/@workos/oagen
+  # (or: claude --plugin-dir ../oagen)
+  # Then run the emitter-smoke-test loop:
+  #   /oagen:generate-smoke-test {language}
+  # This iterates: generate → run smoke tests → fix emitter → repeat
+  # until the smoke tests pass without emitter changes.
 ```
