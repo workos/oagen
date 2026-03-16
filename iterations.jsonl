@@ -3,3 +3,4 @@
 {"iteration":3,"before":84.5,"after":87.69,"action":"Add 15 verify command tests covering compat, smoke, diagnostics paths","result":"kept","note":"verify.ts from 0%→high coverage — lines 81.04→86.82%"}
 {"iteration":4,"before":87.69,"after":88.52,"action":"Add branch-coverage tests for overlay, differ, parser","result":"kept","note":"14 new tests hitting uncovered branches in overlay patchOverlay, differ exports/enums, parser inline models, schemas"}
 {"iteration":5,"before":88.52,"after":88.89,"action":"Add type-alias/enum differ, plugin-loader extractor, orchestrator write tests","result":"kept","note":"9 new tests — branches 83.6→84.23%"}
+{"iteration":6,"before":88.89,"after":90.08,"action":"Add parser inline enum collection tests, overlay request-body model mapping tests","result":"kept","note":"7 new tests — lines 88.26→89.4%, branches 84.23→85.74%, functions 97.47→98.31%"}
