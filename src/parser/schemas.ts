@@ -36,7 +36,7 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
     if (schema.enum) {
       enums.push(extractEnum(pascalName, schema));
     } else {
-      models.push(extractModel(pascalName, schema));
+      models.push(extractModel(pascalName, schema, schemas));
     }
   }
 
@@ -93,9 +93,10 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
   return { name, values };
 }
 
-function extractModel(name: string, schema: SchemaObject): Model {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, any>): Model {
   if (schema.allOf) {
-    return extractAllOfModel(name, schema);
+    return extractAllOfModel(name, schema, schemas);
   }
 
   const requiredSet = new Set(schema.required ?? []);
@@ -113,22 +114,42 @@ function extractModel(name: string, schema: SchemaObject): Model {
   return { name, description: schema.description, fields };
 }
 
-function extractAllOfModel(name: string, schema: SchemaObject): Model {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, any>): Model {
   const fields: Field[] = [];
   const requiredSet = new Set<string>();
 
   for (const subSchema of schema.allOf ?? []) {
-    if (subSchema.required) {
-      for (const r of subSchema.required) requiredSet.add(r);
+    // Resolve $ref sub-schemas by looking up the referenced component schema
+    let resolved = subSchema;
+    if (subSchema.$ref && schemas) {
+      const segments = (subSchema.$ref as string).split('/');
+      const refName = segments[segments.length - 1];
+      if (refName && schemas[refName]) {
+        resolved = schemas[refName] as SchemaObject;
+      }
     }
-    if (subSchema.properties) {
-      for (const [fieldName, fieldSchema] of Object.entries(subSchema.properties)) {
-        fields.push({
-          name: fieldName,
-          type: schemaToTypeRef(fieldSchema, fieldName, name),
-          required: false, // will be set below
-          description: fieldSchema.description,
-        });
+
+    // If the resolved schema is itself an allOf, recursively extract its fields
+    if (resolved.allOf) {
+      const nested = extractAllOfModel(name, resolved, schemas);
+      for (const f of nested.fields) {
+        fields.push({ ...f, required: false }); // will be re-set below
+        if (f.required) requiredSet.add(f.name);
+      }
+    } else {
+      if (resolved.required) {
+        for (const r of resolved.required) requiredSet.add(r);
+      }
+      if (resolved.properties) {
+        for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
+          fields.push({
+            name: fieldName,
+            type: schemaToTypeRef(fieldSchema, fieldName, name),
+            required: false, // will be set below
+            description: fieldSchema.description,
+          });
+        }
       }
     }
   }

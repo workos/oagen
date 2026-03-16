@@ -1,0 +1,607 @@
+openapi: '3.1.0'
+info:
+  title: Conformance API
+  version: '1.0.0'
+  description: Comprehensive spec for parser conformance testing
+servers:
+  - url: https://api.conformance.test
+
+paths:
+  # ── List endpoint with cursor pagination ──────────────────────────────────
+  /widgets:
+    get:
+      operationId: listWidgets
+      summary: List widgets with pagination
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [active, archived]
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      list_metadata:
+                        type: object
+                        properties:
+                          after:
+                            type: string
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Widget'
+    post:
+      operationId: createWidget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWidget'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+        '422':
+          description: Validation error
+
+  # ── Single-resource with path-level params ────────────────────────────────
+  /widgets/{widget_id}:
+    parameters:
+      - name: widget_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getWidget
+      parameters:
+        - name: X-Request-Id
+          in: header
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A widget
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+    put:
+      operationId: updateWidget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWidget'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+    delete:
+      operationId: deleteWidget
+      responses:
+        '204':
+          description: Deleted
+
+  # ── Flat list envelope (no allOf) ─────────────────────────────────────────
+  /gadgets:
+    get:
+      operationId: listGadgets
+      parameters:
+        - name: after
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flat list envelope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Gadget'
+                  list_metadata:
+                    type: object
+                    properties:
+                      after:
+                        type: string
+
+  # ── No-operationId endpoint ───────────────────────────────────────────────
+  /items:
+    get:
+      summary: List items (no operationId)
+      responses:
+        '200':
+          description: Items list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Gadget'
+    post:
+      summary: Create item (no operationId)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          description: Created
+
+  # ── Single-resource wrapper with object const ─────────────────────────────
+  /resources/{id}/wrapped:
+    get:
+      operationId: getWrappedResource
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Single-resource wrapper
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resource]
+                properties:
+                  resource:
+                    type: object
+                    properties:
+                      object:
+                        type: string
+                        const: wrapped_resource
+                      id:
+                        type: string
+                      name:
+                        type: string
+
+  # ── Non-paginated endpoint (no cursor params) ────────────────────────────
+  /configs:
+    get:
+      operationId: listConfigs
+      responses:
+        '200':
+          description: Plain array response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  # ── Inline object response ────────────────────────────────────────────────
+  /status:
+    get:
+      operationId: getStatus
+      responses:
+        '200':
+          description: Inline status object
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [healthy]
+                properties:
+                  healthy:
+                    type: boolean
+                  version:
+                    type: string
+                  uptime_seconds:
+                    type: integer
+
+  # ── Query param with array type ────────────────────────────────────────────
+  /search:
+    get:
+      operationId: searchWidgets
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: tags
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Widget'
+
+  # ── Inline request body (not $ref) ───────────────────────────────────────
+  /actions:
+    post:
+      operationId: performAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action_type]
+              properties:
+                action_type:
+                  type: string
+                payload:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: Action result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+
+  # ── allOf with $ref sub-schemas ───────────────────────────────────────────
+  /extended:
+    get:
+      operationId: getExtended
+      responses:
+        '200':
+          description: Extended resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtendedWidget'
+
+components:
+  schemas:
+    # ── Basic model with diverse field types ────────────────────────────────
+    Widget:
+      type: object
+      required: [id, name, kind]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          $ref: '#/components/schemas/WidgetKind'
+        count:
+          type: integer
+        score:
+          type: number
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        tags:
+          type: array
+          items:
+            type: string
+        related_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        parent_id:
+          type: [string, 'null']
+        settings:
+          type: object
+          properties:
+            theme:
+              type: string
+            notifications:
+              type: boolean
+
+    CreateWidget:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        kind:
+          $ref: '#/components/schemas/WidgetKind'
+
+    UpdateWidget:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+
+    # ── Standalone enum ─────────────────────────────────────────────────────
+    WidgetKind:
+      type: string
+      enum: [standard, premium, enterprise]
+
+    # ── Model with OAS 3.0 nullable field ───────────────────────────────────
+    Gadget:
+      type: object
+      required: [id, type]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [sensor, actuator, controller]
+        value:
+          type: number
+          nullable: true
+
+    # ── allOf composition (inline sub-schemas only) ─────────────────────────
+    ComposedModel:
+      allOf:
+        - type: object
+          required: [id]
+          properties:
+            id:
+              type: string
+        - type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+        - type: object
+          properties:
+            label:
+              type: string
+
+    # ── allOf with $ref sub-schema ──────────────────────────────────────────
+    BaseWidget:
+      type: object
+      required: [id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    ExtendedWidget:
+      allOf:
+        - $ref: '#/components/schemas/BaseWidget'
+        - type: object
+          required: [extension_field]
+          properties:
+            extension_field:
+              type: string
+            extra_data:
+              type: integer
+
+    # ── oneOf with discriminator ────────────────────────────────────────────
+    Event:
+      oneOf:
+        - $ref: '#/components/schemas/ClickEvent'
+        - $ref: '#/components/schemas/ViewEvent'
+      discriminator:
+        propertyName: event_type
+        mapping:
+          click: '#/components/schemas/ClickEvent'
+          view: '#/components/schemas/ViewEvent'
+
+    ClickEvent:
+      type: object
+      required: [event_type, x, y]
+      properties:
+        event_type:
+          type: string
+        x:
+          type: integer
+        y:
+          type: integer
+
+    ViewEvent:
+      type: object
+      required: [event_type, page]
+      properties:
+        event_type:
+          type: string
+        page:
+          type: string
+
+    # ── anyOf union ─────────────────────────────────────────────────────────
+    FlexibleValue:
+      anyOf:
+        - type: string
+        - type: integer
+
+    # ── Literals (const and single-value enum) ──────────────────────────────
+    LiteralModel:
+      type: object
+      properties:
+        object:
+          type: string
+          const: literal_model
+        single_option:
+          type: string
+          enum: [only_value]
+        multi_option:
+          type: string
+          enum: [opt_a, opt_b, opt_c]
+
+    # ── Freeform and typed maps ─────────────────────────────────────────────
+    FreeformMap:
+      type: object
+
+    TypedMap:
+      type: object
+      additionalProperties:
+        type: integer
+
+    PatternMap:
+      type: object
+      patternProperties:
+        '^[a-z]+$':
+          type: number
+
+    # ── Nested arrays ───────────────────────────────────────────────────────
+    MatrixModel:
+      type: object
+      properties:
+        matrix:
+          type: array
+          items:
+            type: array
+            items:
+              type: number
+        items_list:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              value: { type: number }
+
+    # ── OAS 3.1 multi-type field ────────────────────────────────────────────
+    MultiTypeModel:
+      type: object
+      properties:
+        flexible:
+          type: [string, integer, number]
+
+    # ── allOf with mixed $ref and inline sub-schemas ────────────────────────
+    MixedAllOf:
+      allOf:
+        - $ref: '#/components/schemas/BaseWidget'
+        - $ref: '#/components/schemas/Gadget'
+        - type: object
+          required: [mixed_extra]
+          properties:
+            mixed_extra:
+              type: string
+
+    # ── Deeply nested allOf (NestedBase is itself allOf) ────────────────────
+    NestedBase:
+      allOf:
+        - type: object
+          required: [base_id]
+          properties:
+            base_id:
+              type: string
+        - type: object
+          properties:
+            base_label:
+              type: string
+
+    DeeplyNested:
+      allOf:
+        - $ref: '#/components/schemas/NestedBase'
+        - type: object
+          required: [deep_field]
+          properties:
+            deep_field:
+              type: integer
+
+    # ── Discriminated union as a field type ──────────────────────────────────
+    EventContainer:
+      type: object
+      required: [id, event]
+      properties:
+        id:
+          type: string
+        event:
+          oneOf:
+            - $ref: '#/components/schemas/ClickEvent'
+            - $ref: '#/components/schemas/ViewEvent'
+          discriminator:
+            propertyName: event_type
+            mapping:
+              click: '#/components/schemas/ClickEvent'
+              view: '#/components/schemas/ViewEvent'
+
+    # ── Map with $ref value type ────────────────────────────────────────────
+    RefMap:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/Gadget'
+
+    # ── Nullable enum field ─────────────────────────────────────────────────
+    NullableEnumModel:
+      type: object
+      properties:
+        status:
+          type: [string, 'null']
+          enum: [active, inactive]
+
+    # ── Empty additionalProperties ──────────────────────────────────────────
+    EmptyAdditionalProps:
+      type: object
+      additionalProperties: {}
+
+    # ── Array of inline enum values ─────────────────────────────────────────
+    TaggedModel:
+      type: object
+      properties:
+        categories:
+          type: array
+          items:
+            type: string
+            enum: [red, green, blue]
