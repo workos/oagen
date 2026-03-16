@@ -12,14 +12,14 @@ describe('extractSchemas – backend suffix stripping', () => {
     expect(models[0].name).toBe('CreateOrganization');
   });
 
-  it('strips Controller suffix from schema names', () => {
+  it('strips Controller suffix and singularizes schema names', () => {
     const { models } = extractSchemas({
       OrganizationsController: {
         type: 'object',
         properties: { id: { type: 'string' } },
       },
     });
-    expect(models[0].name).toBe('Organizations');
+    expect(models[0].name).toBe('Organization');
   });
 
   it('does not strip suffix from the middle of a name', () => {
@@ -260,7 +260,7 @@ describe('schemaToTypeRef', () => {
     }
   });
 
-  it('warns on ignored additionalProperties with object schema', () => {
+  it('warns on ignored additionalProperties with object schema that also has properties', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const ref = schemaToTypeRef(
@@ -277,6 +277,27 @@ describe('schemaToTypeRef', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('maps freeform object to MapType with string value', () => {
+    const ref = schemaToTypeRef({ type: 'object' });
+    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'string' } });
+  });
+
+  it('maps object with additionalProperties schema to MapType', () => {
+    const ref = schemaToTypeRef({
+      type: 'object',
+      additionalProperties: { type: 'integer' },
+    });
+    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'integer' } });
+  });
+
+  it('maps object with additionalProperties: true to MapType with string value', () => {
+    const ref = schemaToTypeRef({
+      type: 'object',
+      additionalProperties: true,
+    });
+    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'string' } });
   });
 
   it('handles combined OAS 3.1 type array and 3.0 nullable without double-wrapping', () => {

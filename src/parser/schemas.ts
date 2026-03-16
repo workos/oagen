@@ -1,5 +1,5 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
-import { toPascalCase, toUpperSnakeCase, stripBackendSuffixes, stripBackendPrefixes } from '../utils/naming.js';
+import { toPascalCase, toUpperSnakeCase, cleanSchemaName } from '../utils/naming.js';
 
 interface SchemaObject {
   type?: string | string[];
@@ -31,7 +31,7 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
   if (!schemas) return { models, enums };
 
   for (const [name, schema] of Object.entries(schemas)) {
-    const pascalName = stripBackendPrefixes(stripBackendSuffixes(toPascalCase(name)));
+    const pascalName = cleanSchemaName(toPascalCase(name));
 
     if (schema.enum) {
       enums.push(extractEnum(pascalName, schema));
@@ -78,6 +78,8 @@ function walkTypeRefForEnums(ref: TypeRef, enums: Enum[], seen: Set<string>): vo
     for (const v of ref.variants) {
       walkTypeRefForEnums(v, enums, seen);
     }
+  } else if (ref.kind === 'map') {
+    walkTypeRefForEnums(ref.valueType, enums, seen);
   }
 }
 
@@ -150,7 +152,7 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
   if (schema.$ref) {
     const segments = schema.$ref.split('/');
     const rawName = segments[segments.length - 1];
-    return { kind: 'model', name: stripBackendPrefixes(stripBackendSuffixes(toPascalCase(rawName))) };
+    return { kind: 'model', name: cleanSchemaName(toPascalCase(rawName)) };
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
@@ -242,12 +244,15 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
     };
   }
 
-  // Handle freeform object with additionalProperties → Record<string, T>
+  // Handle freeform object with additionalProperties → Map<string, T>
   if (schema.type === 'object' && !schema.properties) {
+    let valueType: TypeRef = { kind: 'primitive', type: 'string' };
+    if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+      valueType = schemaToTypeRef(schema.additionalProperties, contextName);
+    }
     return {
-      kind: 'primitive',
-      type: 'string',
-      format: 'record',
+      kind: 'map',
+      valueType,
     };
   }
 

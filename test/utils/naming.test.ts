@@ -6,6 +6,9 @@ import {
   toKebabCase,
   toUpperSnakeCase,
   stripBackendSuffixes,
+  stripListItemMarkers,
+  singularize,
+  cleanSchemaName,
 } from '../../src/utils/naming.js';
 
 describe('toPascalCase', () => {
@@ -116,6 +119,73 @@ describe('stripBackendSuffixes', () => {
   it('returns clean names unchanged', () => {
     expect(stripBackendSuffixes('Organization')).toBe('Organization');
     expect(stripBackendSuffixes('User')).toBe('User');
+  });
+});
+
+describe('stripListItemMarkers', () => {
+  it('removes ListItem from name', () => {
+    expect(stripListItemMarkers('DirectoriesListItemState')).toBe('DirectoriesState');
+  });
+  it('removes ByExternalId from name', () => {
+    expect(stripListItemMarkers('UserByExternalId')).toBe('User');
+  });
+  it('removes ByResourceId from name', () => {
+    expect(stripListItemMarkers('ConnectionByResourceId')).toBe('Connection');
+  });
+  it('removes ForResource from name', () => {
+    expect(stripListItemMarkers('PermissionForResource')).toBe('Permission');
+  });
+  it('leaves clean names unchanged', () => {
+    expect(stripListItemMarkers('Organization')).toBe('Organization');
+  });
+});
+
+describe('singularize', () => {
+  it('converts ies to y', () => {
+    expect(singularize('Directories')).toBe('Directory');
+    expect(singularize('Policies')).toBe('Policy');
+  });
+  it('strips trailing s for words >4 chars', () => {
+    expect(singularize('Organizations')).toBe('Organization');
+    expect(singularize('Users')).toBe('User');
+  });
+  it('does not singularize safe-listed words', () => {
+    expect(singularize('Status')).toBe('Status');
+    expect(singularize('Address')).toBe('Address');
+    expect(singularize('Access')).toBe('Access');
+    expect(singularize('Process')).toBe('Process');
+    expect(singularize('Progress')).toBe('Progress');
+    expect(singularize('Success')).toBe('Success');
+  });
+  it('does not strip s from short words', () => {
+    expect(singularize('Bus')).toBe('Bus');
+    expect(singularize('Gas')).toBe('Gas');
+  });
+  it('does not strip ss endings', () => {
+    expect(singularize('Class')).toBe('Class');
+  });
+});
+
+describe('cleanSchemaName', () => {
+  it('applies all transforms: prefix + suffix + markers + singularize', () => {
+    expect(cleanSchemaName('DirectoriesControllerListItemState')).toBe('DirectoryState');
+  });
+  it('strips Dto and singularizes', () => {
+    expect(cleanSchemaName('OrganizationsDto')).toBe('Organization');
+  });
+  it('is idempotent', () => {
+    const first = cleanSchemaName('DirectoriesControllerListItemState');
+    expect(cleanSchemaName(first)).toBe(first);
+  });
+  it('preserves safe-listed words', () => {
+    expect(cleanSchemaName('StatusDto')).toBe('Status');
+  });
+  it('handles already clean names', () => {
+    expect(cleanSchemaName('Organization')).toBe('Organization');
+    expect(cleanSchemaName('User')).toBe('User');
+  });
+  it('strips Userland prefix', () => {
+    expect(cleanSchemaName('UserlandConnection')).toBe('Connection');
   });
 });
 

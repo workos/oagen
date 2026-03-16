@@ -78,3 +78,79 @@ export function stripBackendSuffixes(name: string): string {
 export function stripBackendPrefixes(name: string): string {
   return name.replace(/Userland/g, '').replace(/Controller/g, '');
 }
+
+/**
+ * Remove ListItem / ByExternalId / ByResourceId / ForResource markers from PascalCase names.
+ * E.g. "DirectoriesListItemState" → "DirectoriesState"
+ */
+export function stripListItemMarkers(name: string): string {
+  return name
+    .replace(/ListItem/g, '')
+    .replace(/ByExternalId/g, '')
+    .replace(/ByResourceId/g, '')
+    .replace(/ForResource/g, '');
+}
+
+/** Words that look plural but must NOT be singularized. */
+const SINGULAR_SAFE_LIST = new Set([
+  'Status',
+  'Address',
+  'Access',
+  'Process',
+  'Progress',
+  'Success',
+  'Widgets',
+  'Radius',
+  'Canvas',
+  'Alias',
+  'Basis',
+  'Bus',
+]);
+
+/**
+ * Conservative singularize for the leading PascalCase word.
+ * Only applied to the first word of a PascalCase name (the resource word).
+ * - `ies` → `y` (e.g. Directories → Directory)
+ * - trailing `s` for words >4 chars (e.g. Organizations → Organization)
+ * Safe-listed words are never singularized.
+ */
+export function singularize(word: string): string {
+  if (SINGULAR_SAFE_LIST.has(word)) return word;
+  if (word.endsWith('ies') && word.length > 4) {
+    return word.slice(0, -3) + 'y';
+  }
+  if (word.endsWith('ses') && word.length > 4) {
+    // e.g. "Processes" — but "Process" is safe-listed, this handles non-safe ones
+    return word.slice(0, -2);
+  }
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 4) {
+    return word.slice(0, -1);
+  }
+  return word;
+}
+
+/**
+ * Compose all backend name cleaning transforms in order:
+ * 1. Strip backend prefixes (Userland, Controller)
+ * 2. Strip backend suffixes (Dto, DTO, Controller)
+ * 3. Strip ListItem / ByExternalId markers
+ * 4. Singularize leading resource word
+ *
+ * Must be idempotent: `cleanSchemaName(cleanSchemaName(x)) === cleanSchemaName(x)`
+ */
+export function cleanSchemaName(name: string): string {
+  let result = stripBackendPrefixes(stripBackendSuffixes(name));
+  result = stripListItemMarkers(result);
+
+  // Singularize the leading PascalCase word
+  const match = result.match(/^([A-Z][a-z]*)/);
+  if (match) {
+    const leadWord = match[1];
+    const singular = singularize(leadWord);
+    if (singular !== leadWord) {
+      result = singular + result.slice(leadWord.length);
+    }
+  }
+
+  return result;
+}

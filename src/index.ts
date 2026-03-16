@@ -12,6 +12,7 @@ export type {
   LiteralType,
   UnionType,
   NullableType,
+  MapType,
   Model,
   Field,
   Enum,
@@ -78,6 +79,7 @@ export {
   toKebabCase,
   toUpperSnakeCase,
   stripBackendPrefixes,
+  cleanSchemaName,
 } from './utils/naming.js';
 
 export { planOperation } from './engine/operation-plan.js';
