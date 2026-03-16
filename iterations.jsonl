@@ -1,1 +1,3 @@
 {"iteration":1,"before":80.15,"after":84.02,"action":"Add CLI command unit tests (generate, parse, extract, diff)","result":"kept","note":"21 new tests covering CLI command functions directly — lines 75.25→80.57%, functions 91.3→96.52%"}
+{"iteration":2,"before":84.02,"after":84.5,"action":"Add tests for writer skipIfExists, assertNever, registries, refs","result":"kept","note":"10 new tests for small utility coverage gaps"}
+{"iteration":3,"before":84.5,"after":87.69,"action":"Add 15 verify command tests covering compat, smoke, diagnostics paths","result":"kept","note":"verify.ts from 0%→high coverage — lines 81.04→86.82%"}
