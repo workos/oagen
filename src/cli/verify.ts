@@ -228,6 +228,7 @@ export async function verifyCommand(opts: {
   console.log(separator);
 
   const smokeArgs = ['--lang', lang, '--sdk-path', output, '--raw-results', baselinePath];
+  if (spec) smokeArgs.push('--spec', spec);
   if (smokeConfig) smokeArgs.push('--smoke-config', smokeConfig);
 
   try {

@@ -118,6 +118,25 @@ function isNullableOnlyDifference(a: string, b: string): boolean {
   return stripNull(a) === stripNull(b);
 }
 
+/**
+ * Returns true if two type alias values are union types with identical members
+ * but in different order. TypeScript's typeToString() doesn't guarantee a
+ * stable ordering for union members, so `"a" | "b"` and `"b" | "a"` should
+ * be considered equivalent.
+ */
+function isUnionReorder(a: string, b: string): boolean {
+  const parseMembers = (s: string) =>
+    s
+      .split('|')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .sort();
+  const membersA = parseMembers(a);
+  const membersB = parseMembers(b);
+  if (membersA.length !== membersB.length || membersA.length < 2) return false;
+  return membersA.every((m, i) => m === membersB[i]);
+}
+
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffResult {
   const violations: Violation[] = [];
   const additions: Addition[] = [];
@@ -302,6 +321,13 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
       continue;
     }
     if (baseAlias.value !== candAlias.value) {
+      // TypeScript's typeToString() doesn't guarantee union member ordering,
+      // so two identical string unions can produce different strings.
+      // Check for order-independent equality before flagging.
+      if (isUnionReorder(baseAlias.value, candAlias.value)) {
+        preserved++;
+        continue;
+      }
       const nullableOnly = isNullableOnlyDifference(baseAlias.value, candAlias.value);
       violations.push({
         category: 'signature',
