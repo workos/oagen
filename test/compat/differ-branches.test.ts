@@ -16,6 +16,39 @@ function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   };
 }
 
+describe('diffSurfaces — type alias branches', () => {
+  it('counts preserved type aliases when values match', () => {
+    // Line 316: type alias preserved
+    const baseline = emptySurface({
+      typeAliases: {
+        UserRole: { name: 'UserRole', value: "'admin' | 'user'" },
+      },
+    });
+    const candidate = emptySurface({
+      typeAliases: {
+        UserRole: { name: 'UserRole', value: "'admin' | 'user'" },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.preservedSymbols).toBe(1);
+    expect(result.violations.length).toBe(0);
+  });
+
+  it('detects new type aliases as additions', () => {
+    // Line 322: new type alias not in baseline
+    const baseline = emptySurface();
+    const candidate = emptySurface({
+      typeAliases: {
+        NewAlias: { name: 'NewAlias', value: 'string' },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.additions).toContainEqual({ symbolPath: 'NewAlias', symbolType: 'type-alias' });
+  });
+});
+
 describe('diffSurfaces — enum and export branches', () => {
   it('detects new enums as additions', () => {
     // Lines 362-364: candidate has enum not in baseline
@@ -67,6 +100,24 @@ describe('diffSurfaces — enum and export branches', () => {
     expect(exportViolations.map((v) => v.symbolPath)).toContainEqual(
       expect.stringContaining('Organization'),
     );
+  });
+
+  it('counts preserved enums when all members match', () => {
+    // Lines 355-357: enum match → preserved++
+    const baseline = emptySurface({
+      enums: {
+        Status: { name: 'Status', members: { ACTIVE: 'active', INACTIVE: 'inactive' } },
+      },
+    });
+    const candidate = emptySurface({
+      enums: {
+        Status: { name: 'Status', members: { ACTIVE: 'active', INACTIVE: 'inactive' } },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.preservedSymbols).toBe(1);
+    expect(result.violations.length).toBe(0);
   });
 
   it('detects enum member mismatches as violations', () => {
