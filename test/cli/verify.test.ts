@@ -1,0 +1,75 @@
+import { describe, it, expect } from 'vitest';
+import type { VerifyDiagnostics } from '../../src/cli/verify.js';
+
+describe('VerifyDiagnostics', () => {
+  it('has the expected shape for compat-only diagnostics', () => {
+    const diag: VerifyDiagnostics = {
+      compatCheck: {
+        totalBaselineSymbols: 50,
+        preservedSymbols: 45,
+        preservationScore: 90,
+        violationsByCategory: { 'public-api': 3, signature: 2 },
+        violationsBySeverity: { breaking: 4, warning: 1 },
+        additions: 5,
+        scopedToSpec: true,
+        scopedSymbolCount: 40,
+      },
+    };
+
+    expect(diag.compatCheck!.preservationScore).toBe(90);
+    expect(diag.compatCheck!.violationsByCategory['public-api']).toBe(3);
+    expect(diag.compatCheck!.scopedToSpec).toBe(true);
+    expect(diag.smokeCheck).toBeUndefined();
+  });
+
+  it('has the expected shape for smoke-only diagnostics', () => {
+    const diag: VerifyDiagnostics = {
+      smokeCheck: {
+        passed: false,
+        findingsCount: 7,
+      },
+    };
+
+    expect(diag.smokeCheck!.passed).toBe(false);
+    expect(diag.smokeCheck!.findingsCount).toBe(7);
+    expect(diag.compatCheck).toBeUndefined();
+  });
+
+  it('has the expected shape for full diagnostics', () => {
+    const diag: VerifyDiagnostics = {
+      compatCheck: {
+        totalBaselineSymbols: 100,
+        preservedSymbols: 100,
+        preservationScore: 100,
+        violationsByCategory: {},
+        violationsBySeverity: {},
+        additions: 3,
+        scopedToSpec: false,
+      },
+      smokeCheck: {
+        passed: true,
+      },
+    };
+
+    expect(diag.compatCheck!.preservationScore).toBe(100);
+    expect(diag.smokeCheck!.passed).toBe(true);
+
+    // Verify JSON serialization round-trips correctly
+    const json = JSON.stringify(diag, null, 2);
+    const parsed = JSON.parse(json) as VerifyDiagnostics;
+    expect(parsed.compatCheck!.totalBaselineSymbols).toBe(100);
+    expect(parsed.smokeCheck!.passed).toBe(true);
+  });
+
+  it('handles compile error smoke result', () => {
+    const diag: VerifyDiagnostics = {
+      smokeCheck: {
+        passed: false,
+        compileErrors: true,
+      },
+    };
+
+    expect(diag.smokeCheck!.compileErrors).toBe(true);
+    expect(diag.smokeCheck!.findingsCount).toBeUndefined();
+  });
+});

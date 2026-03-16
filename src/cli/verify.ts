@@ -16,14 +16,32 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
 import { getExtractor } from '../compat/extractor-registry.js';
 import { diffSurfaces, specDerivedNames, filterSurface } from '../compat/differ.js';
 import { parseSpec } from '../parser/parse.js';
 import type { ApiSpec } from '../ir/types.js';
-import type { ApiSurface } from '../compat/types.js';
+import type { ApiSurface, DiffResult } from '../compat/types.js';
+
+export interface VerifyDiagnostics {
+  compatCheck?: {
+    totalBaselineSymbols: number;
+    preservedSymbols: number;
+    preservationScore: number;
+    violationsByCategory: Record<string, number>;
+    violationsBySeverity: Record<string, number>;
+    additions: number;
+    scopedToSpec: boolean;
+    scopedSymbolCount?: number;
+  };
+  smokeCheck?: {
+    passed: boolean;
+    findingsCount?: number;
+    compileErrors?: boolean;
+  };
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,20 +73,30 @@ function runScript(scriptRelPath: string, args: string[]): void {
  * Run compat check directly (no subprocess). Uses the extractor registry
  * which is already populated by config-loader at CLI startup.
  */
-async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang: string, spec?: ApiSpec): Promise<boolean> {
+interface CompatCheckResult {
+  passed: boolean;
+  diff: DiffResult;
+  scopedToSpec: boolean;
+  scopedSymbolCount?: number;
+}
+
+async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang: string, spec?: ApiSpec): Promise<CompatCheckResult> {
   const extractor = getExtractor(lang);
   const candidate = await extractor.extract(outputDir);
 
   // If spec is provided, scope the comparison to only spec-derived symbols
   let scopedBaseline = baseline;
+  let scopedToSpec = false;
+  let scopedSymbolCount: number | undefined;
   if (spec) {
     const allowed = specDerivedNames(spec);
     scopedBaseline = filterSurface(baseline, allowed);
+    scopedToSpec = true;
     const totalBefore = Object.keys(baseline.interfaces).length + Object.keys(baseline.classes).length +
       Object.keys(baseline.typeAliases).length + Object.keys(baseline.enums).length;
-    const totalAfter = Object.keys(scopedBaseline.interfaces).length + Object.keys(scopedBaseline.classes).length +
+    scopedSymbolCount = Object.keys(scopedBaseline.interfaces).length + Object.keys(scopedBaseline.classes).length +
       Object.keys(scopedBaseline.typeAliases).length + Object.keys(scopedBaseline.enums).length;
-    console.log(`(scoped to spec: ${totalAfter}/${totalBefore} baseline symbols in scope)`);
+    console.log(`(scoped to spec: ${scopedSymbolCount}/${totalBefore} baseline symbols in scope)`);
   }
 
   const diff = diffSurfaces(scopedBaseline, candidate);
@@ -82,12 +110,12 @@ async function runCompatCheckInner(baseline: ApiSurface, outputDir: string, lang
     for (const v of diff.violations) {
       console.log(`  [${v.category}] ${v.severity}: ${v.symbolPath} — ${v.message}`);
     }
-    return false;
+    return { passed: false, diff, scopedToSpec, scopedSymbolCount };
   }
   if (diff.additions.length > 0) {
     console.log(`  + ${diff.additions.length} new symbols added`);
   }
-  return true;
+  return { passed: true, diff, scopedToSpec, scopedSymbolCount };
 }
 
 export async function verifyCommand(opts: {
@@ -99,8 +127,10 @@ export async function verifyCommand(opts: {
   smokeConfig?: string;
   smokeRunner?: string;
   scope?: 'full' | 'spec-only';
+  diagnostics?: boolean;
 }): Promise<void> {
-  const { spec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope } = opts;
+  const { spec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics } = opts;
+  const diagData: VerifyDiagnostics = {};
 
   let stepNum = 1;
 
@@ -120,10 +150,33 @@ export async function verifyCommand(opts: {
       process.exit(1);
     }
 
-    const passed = await runCompatCheckInner(JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface, output, lang, parsedSpec);
-    if (passed) {
+    const compatResult = await runCompatCheckInner(JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface, output, lang, parsedSpec);
+
+    if (diagnostics) {
+      const violationsByCategory: Record<string, number> = {};
+      const violationsBySeverity: Record<string, number> = {};
+      for (const v of compatResult.diff.violations) {
+        violationsByCategory[v.category] = (violationsByCategory[v.category] ?? 0) + 1;
+        violationsBySeverity[v.severity] = (violationsBySeverity[v.severity] ?? 0) + 1;
+      }
+      diagData.compatCheck = {
+        totalBaselineSymbols: compatResult.diff.totalBaselineSymbols,
+        preservedSymbols: compatResult.diff.preservedSymbols,
+        preservationScore: compatResult.diff.preservationScore,
+        violationsByCategory,
+        violationsBySeverity,
+        additions: compatResult.diff.additions.length,
+        scopedToSpec: compatResult.scopedToSpec,
+        ...(compatResult.scopedSymbolCount !== undefined ? { scopedSymbolCount: compatResult.scopedSymbolCount } : {}),
+      };
+    }
+
+    if (compatResult.passed) {
       console.log('Compat: passed');
     } else {
+      if (diagnostics) {
+        writeDiagnostics(diagData);
+      }
       console.error('\nCompat violations found — fix the emitter and re-run `oagen verify`.');
       process.exit(1);
     }
@@ -170,10 +223,28 @@ export async function verifyCommand(opts: {
     } else {
       runScript('smoke/sdk-test.ts', smokeArgs);
     }
+
+    if (diagnostics) {
+      diagData.smokeCheck = { passed: true };
+      writeDiagnostics(diagData);
+    }
   } catch {
     if (existsSync('smoke-compile-errors.json')) {
+      if (diagnostics) {
+        diagData.smokeCheck = { passed: false, compileErrors: true };
+        writeDiagnostics(diagData);
+      }
       console.error('\nSDK compile errors — read smoke-compile-errors.json for details');
       process.exit(2);
+    }
+
+    const findingsCount = existsSync('smoke-diff-findings.json')
+      ? (JSON.parse(readFileSync('smoke-diff-findings.json', 'utf-8')) as unknown[]).length
+      : undefined;
+
+    if (diagnostics) {
+      diagData.smokeCheck = { passed: false, findingsCount };
+      writeDiagnostics(diagData);
     }
 
     console.error('\nSmoke test findings — read smoke-diff-findings.json for details');
@@ -189,4 +260,9 @@ Remediation guide (by finding type):
   }
 
   console.log('\nVerify: all checks passed');
+}
+
+function writeDiagnostics(data: VerifyDiagnostics): void {
+  writeFileSync('verify-diagnostics.json', JSON.stringify(data, null, 2) + '\n');
+  console.log('Diagnostics written to verify-diagnostics.json');
 }

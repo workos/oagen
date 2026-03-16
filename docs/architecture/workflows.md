@@ -108,6 +108,16 @@ handle yet (a new type, an unusual response shape). This is not the same as the
 emitter-fixing loop from Phase 1. Fix the specific gap in the emitter, re-run
 `generate` + `verify`, and move on.
 
+**Diagnostics:** Pass `--diagnostics` to produce `verify-diagnostics.json` with
+a structured breakdown of compat violations and smoke results. This is useful
+for measuring overlay effectiveness per language and tracking preservation scores
+over time.
+
+```bash
+oagen verify --spec v2.yml --lang node --output ./sdk --api-surface surface.json --diagnostics
+# → verify-diagnostics.json
+```
+
 ### Exit codes from `oagen verify`
 
 | Exit code | Meaning                                       | Findings file               |

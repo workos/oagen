@@ -50,6 +50,7 @@ export default {
   extractors: [myGoExtractor],
   smokeRunners: { go: "./smoke/go-runner.ts" },
   emitterProject: "./path/to/emitter-project",
+  irVersion: 1, // pin to the IR version your emitters were built against
 };
 ```
 

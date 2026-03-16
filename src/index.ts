@@ -76,3 +76,4 @@ export { toSnakeCase, toCamelCase, toPascalCase, toKebabCase, toUpperSnakeCase, 
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';
 export type { OagenConfig } from './cli/config-loader.js';
+export type { VerifyDiagnostics } from './cli/verify.js';
