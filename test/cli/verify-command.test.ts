@@ -374,11 +374,7 @@ describe('verifyCommand', () => {
       smokeRunner: '/custom/runner.js',
     });
 
-    expect(execFileSync).toHaveBeenCalledWith(
-      'node',
-      expect.arrayContaining(['/custom/runner.js']),
-      expect.anything(),
-    );
+    expect(execFileSync).toHaveBeenCalledWith('node', expect.arrayContaining(['/custom/runner.js']), expect.anything());
   });
 
   it('passes --smoke-config to smoke script', async () => {

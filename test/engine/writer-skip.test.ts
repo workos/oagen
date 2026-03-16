@@ -12,10 +12,7 @@ describe('writeFiles skipIfExists', () => {
       const filePath = path.join(tmpDir, 'existing.rb');
       await fs.writeFile(filePath, 'original content', 'utf-8');
 
-      await writeFiles(
-        [{ path: 'existing.rb', content: 'new content', skipIfExists: true }],
-        tmpDir,
-      );
+      await writeFiles([{ path: 'existing.rb', content: 'new content', skipIfExists: true }], tmpDir);
 
       const result = await fs.readFile(filePath, 'utf-8');
       expect(result).toBe('original content');
@@ -27,10 +24,7 @@ describe('writeFiles skipIfExists', () => {
   it('writes when file does not exist and skipIfExists is true', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-skip-'));
     try {
-      await writeFiles(
-        [{ path: 'new-file.rb', content: 'fresh content', skipIfExists: true }],
-        tmpDir,
-      );
+      await writeFiles([{ path: 'new-file.rb', content: 'fresh content', skipIfExists: true }], tmpDir);
 
       const result = await fs.readFile(path.join(tmpDir, 'new-file.rb'), 'utf-8');
       expect(result).toBe('fresh content');

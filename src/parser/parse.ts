@@ -69,7 +69,6 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
       const baseName = model.name.slice(0, -4);
       const baseModel = allModelsByNameForJson.get(baseName);
       if (baseModel && model.fields.length > baseModel.fields.length) {
-        const baseFieldNames = new Set(baseModel.fields.map((f) => f.name));
         const isSuperset = baseModel.fields.every((f) => model.fields.some((mf) => mf.name === f.name));
         if (isSuperset) {
           // Replace Foo's fields with FooJson's fields, keep the Foo name

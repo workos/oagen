@@ -90,7 +90,10 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
       ],
       models: [
         { name: 'Organization', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
-        { name: 'CreateOrganization', fields: [{ name: 'name', type: { kind: 'primitive', type: 'string' }, required: true }] },
+        {
+          name: 'CreateOrganization',
+          fields: [{ name: 'name', type: { kind: 'primitive', type: 'string' }, required: true }],
+        },
       ],
       enums: [],
     };
@@ -169,7 +172,10 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
       ],
       models: [
         { name: 'User', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
-        { name: 'GetUserRequest', fields: [{ name: 'user_id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+        {
+          name: 'GetUserRequest',
+          fields: [{ name: 'user_id', type: { kind: 'primitive', type: 'string' }, required: true }],
+        },
       ],
       enums: [],
     };

@@ -257,9 +257,7 @@ describe('diffSurfaces — enum and export branches', () => {
     const result = diffSurfaces(baseline, candidate);
     const exportViolations = result.violations.filter((v) => v.category === 'export-structure');
     expect(exportViolations.length).toBe(2); // Organization and Team missing
-    expect(exportViolations.map((v) => v.symbolPath)).toContainEqual(
-      expect.stringContaining('Organization'),
-    );
+    expect(exportViolations.map((v) => v.symbolPath)).toContainEqual(expect.stringContaining('Organization'));
   });
 
   it('counts preserved enums when all members match', () => {
