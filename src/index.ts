@@ -19,7 +19,7 @@ export type {
   ErrorResponse,
 } from './ir/types.js';
 
-export { assertNever } from './ir/types.js';
+export { assertNever, IR_VERSION } from './ir/types.js';
 
 export type { GeneratedFile, EmitterContext, Emitter } from './engine/types.js';
 

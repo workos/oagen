@@ -44,6 +44,27 @@ describe('loadConfig', () => {
     });
   });
 
+  it('exits with error when irVersion does not match IR_VERSION', async () => {
+    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 9999 };`);
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    const mockError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await loadConfig(tmpDir);
+      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('IR version mismatch'));
+    } finally {
+      mockExit.mockRestore();
+      mockError.mockRestore();
+    }
+  });
+
+  it('loads config successfully when irVersion matches', async () => {
+    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 1 };`);
+    const config = await loadConfig(tmpDir);
+    expect(config).not.toBeNull();
+    expect(config!.irVersion).toBe(1);
+  });
+
   it('exits with error when config file exists but fails to load', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `throw new Error('bad config');`);
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);

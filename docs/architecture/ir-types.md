@@ -110,3 +110,19 @@ interface ErrorResponse {
   type?: TypeRef; // Response body type, if any
 }
 ```
+
+## Versioning
+
+Source: `IR_VERSION` in `src/ir/types.ts`
+
+The IR is versioned with a single integer constant (`IR_VERSION`). This version must be bumped when:
+
+- A new `TypeRef` variant (kind) is added
+- A required field is added to any IR node (Model, Service, Operation, etc.)
+- A field type is changed in an incompatible way
+
+**Compile-time safety:** `assertNever` enforces exhaustive `switch` statements over `TypeRef.kind` at compile time. Adding a new variant causes build failures in any emitter that doesn't handle it.
+
+**Runtime safety:** Pre-compiled emitters (from npm) skip TypeScript checks. `IR_VERSION` lets the config loader detect version mismatches at startup and fail with an actionable error rather than silently producing wrong output.
+
+Consumers can declare `irVersion` in their `oagen.config.ts` to pin the expected IR version. If the installed `@workos/oagen` has a different `IR_VERSION`, the CLI exits with an error.

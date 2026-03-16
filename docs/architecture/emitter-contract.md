@@ -46,6 +46,7 @@ interface EmitterContext {
   outputDir?: string; // Output directory path
   apiSurface?: ApiSurface; // Baseline API surface (when --api-surface is provided)
   overlayLookup?: OverlayLookup; // Name preservation overlay (when --api-surface is provided)
+  irVersion: number;            // IR contract version — see ir-types.md Versioning section
 }
 ```
 
@@ -82,6 +83,24 @@ When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engi
 | `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported |
 
 The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
+
+## Contract Versioning
+
+Emitters can optionally declare `contractVersion` to indicate which IR version they were built against:
+
+```typescript
+const emitter: Emitter = {
+  language: 'ruby',
+  contractVersion: 1,
+  // ...
+};
+```
+
+When registered, the CLI compares `contractVersion` against the current `IR_VERSION`:
+- **Lower** than current: warning — the emitter may not handle new TypeRef variants
+- **Higher** than current: error — the emitter expects a newer IR than this CLI provides
+
+Consumers can also set `irVersion` in `oagen.config.ts` for a project-level version pin.
 
 ## Rules
 

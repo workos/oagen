@@ -15,10 +15,12 @@ export interface EmitterContext {
   outputDir?: string;
   apiSurface?: ApiSurface;
   overlayLookup?: OverlayLookup;
+  irVersion: number;
 }
 
 export interface Emitter {
   language: string;
+  contractVersion?: number;
 
   generateModels(models: Model[], ctx: EmitterContext): GeneratedFile[];
 

@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { Emitter } from '../engine/types.js';
 import type { Extractor } from '../compat/types.js';
+import { IR_VERSION } from '../ir/types.js';
 
 export interface OagenConfig {
   emitters?: Emitter[];
@@ -11,6 +12,7 @@ export interface OagenConfig {
   emitterProject?: string;
   /** Map from language key to custom smoke runner script path. */
   smokeRunners?: Record<string, string>;
+  irVersion?: number;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];
@@ -21,7 +23,15 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<OagenConf
     if (!existsSync(configPath)) continue;
     try {
       const mod = await import(pathToFileURL(configPath).href);
-      return (mod.default ?? mod) as OagenConfig;
+      const config = (mod.default ?? mod) as OagenConfig;
+      if (config.irVersion !== undefined && config.irVersion !== IR_VERSION) {
+        console.error(
+          `IR version mismatch: config declares irVersion ${config.irVersion} but oagen uses IR_VERSION ${IR_VERSION}. ` +
+          `Update your emitter to match the installed @workos/oagen version.`
+        );
+        process.exit(1);
+      }
+      return config;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`Failed to load ${name}: ${message}`);

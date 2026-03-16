@@ -63,6 +63,7 @@ const ctx: EmitterContext = {
   namespace: 'test',
   namespacePascal: 'Test',
   spec,
+  irVersion: 1,
 };
 
 describe('mapChangesToFiles', () => {
@@ -157,7 +158,7 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef };
+    const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef, irVersion: 1 };
     const changes: Change[] = [
       {
         kind: 'enum-modified',
@@ -194,7 +195,7 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef };
+    const ctxWithRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: specWithEnumRef, irVersion: 1 };
     const changes: Change[] = [{ kind: 'enum-removed', name: 'Status', classification: 'breaking' }];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxWithRef);
     expect(result.delete).toContain('models/status.rb');
@@ -241,7 +242,7 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxMulti: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: multiServiceSpec };
+    const ctxMulti: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: multiServiceSpec, irVersion: 1 };
     const changes: Change[] = [
       {
         kind: 'model-modified',
@@ -278,7 +279,7 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxNoRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: noRefSpec };
+    const ctxNoRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: noRefSpec, irVersion: 1 };
     const changes: Change[] = [
       {
         kind: 'model-modified',
@@ -290,5 +291,165 @@ describe('mapChangesToFiles', () => {
     const result = mapChangesToFiles(changes, mockEmitter(), ctxNoRef);
     expect(result.regenerate).toContain('models/user.rb');
     expect(result.regenerate).not.toContain('resources/teams.rb');
+  });
+
+  it('3-level transitive closure: change to leaf model cascades through chain to service', () => {
+    // Model C (Address) ← Model B (Profile) ← Model A (User) ← Service S
+    const transitiveSpec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: 'https://api.example.com',
+      models: [
+        {
+          name: 'Address',
+          fields: [{ name: 'street', type: { kind: 'primitive', type: 'string' }, required: true }],
+        },
+        {
+          name: 'Profile',
+          fields: [{ name: 'address', type: { kind: 'model', name: 'Address' }, required: true }],
+        },
+        {
+          name: 'User',
+          fields: [{ name: 'profile', type: { kind: 'model', name: 'Profile' }, required: true }],
+        },
+      ],
+      enums: [],
+      services: [
+        {
+          name: 'Users',
+          operations: [
+            {
+              name: 'getUser',
+              httpMethod: 'get',
+              path: '/users/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'User' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+    };
+    const ctxTransitive: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: transitiveSpec, irVersion: 1 };
+    const changes: Change[] = [
+      {
+        kind: 'model-modified',
+        name: 'Address',
+        fieldChanges: [{ kind: 'field-added', fieldName: 'city', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
+    const result = mapChangesToFiles(changes, mockEmitter(), ctxTransitive);
+    expect(result.regenerate).toContain('models/address.rb');
+    expect(result.regenerate).toContain('resources/users.rb');
+  });
+
+  it('self-referencing model does not infinite loop and cascades to service', () => {
+    const selfRefSpec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: 'https://api.example.com',
+      models: [
+        {
+          name: 'TreeNode',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'parent', type: { kind: 'model', name: 'TreeNode' }, required: false },
+          ],
+        },
+      ],
+      enums: [],
+      services: [
+        {
+          name: 'Nodes',
+          operations: [
+            {
+              name: 'getNode',
+              httpMethod: 'get',
+              path: '/nodes/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'TreeNode' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+    };
+    const ctxSelfRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: selfRefSpec, irVersion: 1 };
+    const changes: Change[] = [
+      {
+        kind: 'model-modified',
+        name: 'TreeNode',
+        fieldChanges: [{ kind: 'field-added', fieldName: 'children', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
+    const result = mapChangesToFiles(changes, mockEmitter(), ctxSelfRef);
+    expect(result.regenerate).toContain('models/treenode.rb');
+    expect(result.regenerate).toContain('resources/nodes.rb');
+  });
+
+  it('circular model dependency (A→B→A) terminates and cascades to service', () => {
+    const circularSpec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: 'https://api.example.com',
+      models: [
+        {
+          name: 'Author',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'books', type: { kind: 'array', items: { kind: 'model', name: 'Book' } }, required: false },
+          ],
+        },
+        {
+          name: 'Book',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'author', type: { kind: 'model', name: 'Author' }, required: true },
+          ],
+        },
+      ],
+      enums: [],
+      services: [
+        {
+          name: 'Authors',
+          operations: [
+            {
+              name: 'getAuthor',
+              httpMethod: 'get',
+              path: '/authors/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'Author' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+    };
+    const ctxCircular: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: circularSpec, irVersion: 1 };
+    const changes: Change[] = [
+      {
+        kind: 'model-modified',
+        name: 'Book',
+        fieldChanges: [{ kind: 'field-added', fieldName: 'title', classification: 'additive' }],
+        classification: 'additive',
+      },
+    ];
+    const result = mapChangesToFiles(changes, mockEmitter(), ctxCircular);
+    expect(result.regenerate).toContain('models/book.rb');
+    expect(result.regenerate).toContain('resources/authors.rb');
   });
 });

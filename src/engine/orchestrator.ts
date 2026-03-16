@@ -1,3 +1,4 @@
+import { IR_VERSION } from '../ir/types.js';
 import type { ApiSpec } from '../ir/types.js';
 import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
@@ -22,6 +23,7 @@ export async function generate(
     outputDir: options.outputDir,
     apiSurface: options.apiSurface,
     overlayLookup: options.overlayLookup,
+    irVersion: IR_VERSION,
   };
 
   const files: GeneratedFile[] = [

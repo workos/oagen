@@ -1,3 +1,6 @@
+/** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
+export const IR_VERSION = 1;
+
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
   name: string;
