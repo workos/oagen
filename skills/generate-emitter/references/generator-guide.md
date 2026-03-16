@@ -25,20 +25,20 @@ Foundation file. Map every IR `TypeRef` kind to the target language's type repre
 
 ### Required Mappings
 
-| IR TypeRef                                                   | What to Map                    |
-| ------------------------------------------------------------ | ------------------------------ |
-| `{ kind: "primitive", type: "string" }`                      | String type                    |
-| `{ kind: "primitive", type: "string", format: "date" }`      | Date type                      |
-| `{ kind: "primitive", type: "string", format: "date-time" }` | DateTime type                  |
-| `{ kind: "primitive", type: "string", format: "uuid" }`      | String or UUID type            |
-| `{ kind: "primitive", type: "integer" }`                     | Integer type                   |
-| `{ kind: "primitive", type: "number" }`                      | Float/double type              |
-| `{ kind: "primitive", type: "boolean" }`                     | Boolean type                   |
-| `{ kind: "array", items: ... }`                              | Array/list of mapped item type |
-| `{ kind: "model", name: "Foo" }`                             | Reference to model class       |
-| `{ kind: "enum", name: "Foo" }`                              | Reference to enum type         |
-| `{ kind: "nullable", inner: ... }`                           | Optional/nullable wrapper      |
-| `{ kind: "union", variants: [...] }`                         | Union/sum type                 |
+| IR TypeRef                                                   | What to Map                          |
+| ------------------------------------------------------------ | ------------------------------------ |
+| `{ kind: "primitive", type: "string" }`                      | String type                          |
+| `{ kind: "primitive", type: "string", format: "date" }`      | Date type                            |
+| `{ kind: "primitive", type: "string", format: "date-time" }` | DateTime type                        |
+| `{ kind: "primitive", type: "string", format: "uuid" }`      | String or UUID type                  |
+| `{ kind: "primitive", type: "integer" }`                     | Integer type                         |
+| `{ kind: "primitive", type: "number" }`                      | Float/double type                    |
+| `{ kind: "primitive", type: "boolean" }`                     | Boolean type                         |
+| `{ kind: "array", items: ... }`                              | Array/list of mapped item type       |
+| `{ kind: "model", name: "Foo" }`                             | Reference to model class             |
+| `{ kind: "enum", name: "Foo" }`                              | Reference to enum type               |
+| `{ kind: "nullable", inner: ... }`                           | Optional/nullable wrapper            |
+| `{ kind: "union", variants: [...] }`                         | Union/sum type                       |
 | `{ kind: "map", valueType: ... }`                            | Map/dict/Record of mapped value type |
 
 Export a `mapTypeRef(typeRef: TypeRef, namespacePascal: string): string` function.
