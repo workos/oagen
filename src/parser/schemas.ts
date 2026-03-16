@@ -231,9 +231,24 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
 
   // Handle object → ModelRef (if it has properties, it's a named model reference)
   if (schema.type === 'object' && schema.properties) {
+    // Warn when additionalProperties is an object schema — not yet modeled in IR
+    if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+      console.warn(
+        `[oagen] Warning: additionalProperties with object schema ignored (context: ${contextName ?? 'unknown'})`,
+      );
+    }
     return {
       kind: 'model',
       name: toPascalCase(contextName ?? 'UnknownModel'),
+    };
+  }
+
+  // Handle freeform object with additionalProperties → Record<string, T>
+  if (schema.type === 'object' && !schema.properties) {
+    return {
+      kind: 'primitive',
+      type: 'string',
+      format: 'record',
     };
   }
 
@@ -255,6 +270,9 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
   }
 
   // Fallback: treat unknown schemas as string
+  if (contextName) {
+    console.warn(`[oagen] Warning: Unknown schema shape treated as string (context: ${contextName})`);
+  }
   return { kind: 'primitive', type: 'string' };
 }
 

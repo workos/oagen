@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parseSpec } from '../../src/parser/parse.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,5 +93,27 @@ describe('parseSpec', () => {
 
   it('throws on non-existent file', async () => {
     await expect(parseSpec('nonexistent.yml')).rejects.toThrow();
+  });
+
+  it('warns on inline model name collision with different fields', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseSpec(`${FIXTURES}/collision.yml`);
+      // The Detail inline model from Thing.detail has fields {color, size}
+      // The Detail component schema has fields {id, description} — these differ
+      // The component schema Detail should win; only one Detail model in the output
+      const detailModels = ir.models.filter((m) => m.name === 'Detail');
+      expect(detailModels).toHaveLength(1);
+      // The component schema version has {id, description}
+      const fieldNames = detailModels[0].fields.map((f) => f.name);
+      expect(fieldNames).toContain('id');
+      expect(fieldNames).toContain('description');
+      // The warning was emitted for the collision
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Inline model "Detail" has different fields than component schema')
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

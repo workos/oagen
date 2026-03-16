@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { extractSchemas, schemaToTypeRef } from '../../src/parser/schemas.js';
 
 describe('extractSchemas – backend suffix stripping', () => {
@@ -245,5 +245,48 @@ describe('schemaToTypeRef', () => {
   it('falls through on malformed $ref with no segments', () => {
     const ref = schemaToTypeRef({ $ref: '', type: 'string' });
     expect(ref).toEqual({ kind: 'primitive', type: 'string' });
+  });
+
+  it('warns on unknown schema fallback', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ref = schemaToTypeRef({}, 'unknownField');
+      expect(ref).toEqual({ kind: 'primitive', type: 'string' });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown schema shape treated as string (context: unknownField)')
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns on ignored additionalProperties with object schema', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ref = schemaToTypeRef({
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        additionalProperties: { type: 'string' },
+      }, 'myField');
+      // Model fields are still extracted correctly
+      expect(ref).toEqual({ kind: 'model', name: 'MyField' });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('additionalProperties with object schema ignored')
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('handles combined OAS 3.1 type array and 3.0 nullable without double-wrapping', () => {
+    const ref = schemaToTypeRef({ type: ['string', 'null'], nullable: true });
+    expect(ref).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'primitive', type: 'string' },
+    });
+    // Should NOT be double-wrapped as nullable(nullable(string))
+    if (ref.kind === 'nullable') {
+      expect(ref.inner.kind).not.toBe('nullable');
+    }
   });
 });

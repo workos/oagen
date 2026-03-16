@@ -31,7 +31,22 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
 
   // Merge inline models with component schema models, component schemas take precedence
   const schemaModelNames = new Set(models.map((m) => m.name));
-  const deduplicatedInlineModels = inlineModels.filter((m) => !schemaModelNames.has(m.name));
+  const schemaModelsByName = new Map(models.map((m) => [m.name, m]));
+  const deduplicatedInlineModels = inlineModels.filter((m) => {
+    if (!schemaModelNames.has(m.name)) return true;
+    // Warn if inline model has different fields than component schema model
+    const existing = schemaModelsByName.get(m.name)!;
+    const existingFieldNames = new Set(existing.fields.map((f) => f.name));
+    const inlineFieldNames = new Set(m.fields.map((f) => f.name));
+    const hasDifference = m.fields.some((f) => !existingFieldNames.has(f.name)) ||
+      existing.fields.some((f) => !inlineFieldNames.has(f.name));
+    if (hasDifference) {
+      console.warn(
+        `[oagen] Warning: Inline model "${m.name}" has different fields than component schema — using component schema`,
+      );
+    }
+    return false;
+  });
   const allModels = [...models, ...deduplicatedInlineModels];
 
   // Extract inline models from model field definitions (objects/arrays with properties)
@@ -39,7 +54,22 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
   const allModelNames = new Set(allModels.map((m) => m.name));
-  const deduplicatedFieldModels = fieldInlineModels.filter((m) => !allModelNames.has(m.name));
+  const allModelsByName = new Map(allModels.map((m) => [m.name, m]));
+  const deduplicatedFieldModels = fieldInlineModels.filter((m) => {
+    if (!allModelNames.has(m.name)) return true;
+    // Warn if field-extracted inline model has different fields than existing model
+    const existing = allModelsByName.get(m.name)!;
+    const existingFieldNames = new Set(existing.fields.map((f) => f.name));
+    const inlineFieldNames = new Set(m.fields.map((f) => f.name));
+    const hasDifference = m.fields.some((f) => !existingFieldNames.has(f.name)) ||
+      existing.fields.some((f) => !inlineFieldNames.has(f.name));
+    if (hasDifference) {
+      console.warn(
+        `[oagen] Warning: Inline model "${m.name}" has different fields than component schema — using component schema`,
+      );
+    }
+    return false;
+  });
   const finalModels = [...allModels, ...deduplicatedFieldModels];
 
   // Collect inline enums from all models (including inline models from responses)
