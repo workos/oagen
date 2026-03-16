@@ -86,8 +86,10 @@ The emitter receives the overlay via `EmitterContext` and uses it to preserve ex
 
 ## Step 3: Verify
 
+**IMPORTANT:** Always include `--spec` so the comparison is scoped to spec-derivable symbols only. Without it, the score includes hand-written SDK features (webhooks, PKCE, etc.) that the emitter can't generate, producing a misleadingly low compat score.
+
 ```bash
-oagen verify --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
+oagen verify --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
 ```
 
 - **Exit 0** + preservation score = all clear
@@ -122,7 +124,7 @@ Repeat Steps 2 and 3 until violations are resolved:
 
 ```bash
 oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
-oagen verify --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
+oagen verify --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
 ```
 
 Continue until either all violations are resolved (exit 0) or no further improvement is possible (fix the emitter manually).
