@@ -1,5 +1,5 @@
 import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse, Model } from '../ir/types.js';
-import { toPascalCase, toCamelCase } from '../utils/naming.js';
+import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import { schemaToTypeRef } from './schemas.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -176,13 +176,14 @@ function extractRequestBody(body?: RequestBodyObject, op?: OperationObject): Typ
   const jsonContent = body.content['application/json'];
   if (!jsonContent?.schema) return undefined;
 
-  const contextName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
+  const rawName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
+  const contextName = cleanSchemaName(rawName);
   return schemaToTypeRef(jsonContent.schema as Record<string, unknown>, contextName);
 }
 
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
   if (op?.operationId) {
-    return toPascalCase(op.operationId) + 'Response';
+    return cleanSchemaName(toPascalCase(op.operationId) + 'Response');
   }
   const segments = path.split('/').filter(Boolean);
   const resource = segments[0] ?? 'Unknown';
