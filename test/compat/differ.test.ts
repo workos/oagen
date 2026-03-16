@@ -307,6 +307,96 @@ describe('diffSurfaces', () => {
     expect(result.violations[0]).toMatchObject({ category: 'public-api', symbolPath: 'Status' });
   });
 
+  it('downgrades nullable-only field mismatch to warning', () => {
+    const baseline = emptySurface({
+      interfaces: {
+        Org: {
+          name: 'Org',
+          fields: { name: { name: 'name', type: 'string', optional: false } },
+          extends: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      interfaces: {
+        Org: {
+          name: 'Org',
+          fields: { name: { name: 'name', type: 'string | null', optional: false } },
+          extends: [],
+        },
+      },
+    });
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].severity).toBe('warning');
+  });
+
+  it('downgrades nullable-only property mismatch to warning', () => {
+    const baseline = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {},
+          properties: { name: { name: 'name', type: 'string', readonly: true } },
+          constructorParams: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {},
+          properties: { name: { name: 'name', type: 'string | null', readonly: true } },
+          constructorParams: [],
+        },
+      },
+    });
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].severity).toBe('warning');
+  });
+
+  it('downgrades nullable-only type alias mismatch to warning', () => {
+    const baseline = emptySurface({
+      typeAliases: {
+        MyType: { name: 'MyType', value: 'string' },
+      },
+    });
+    const candidate = emptySurface({
+      typeAliases: {
+        MyType: { name: 'MyType', value: 'string | null' },
+      },
+    });
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].severity).toBe('warning');
+  });
+
+  it('keeps non-nullable type mismatch as breaking', () => {
+    const baseline = emptySurface({
+      interfaces: {
+        Org: {
+          name: 'Org',
+          fields: { name: { name: 'name', type: 'string', optional: false } },
+          extends: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      interfaces: {
+        Org: {
+          name: 'Org',
+          fields: { name: { name: 'name', type: 'number', optional: false } },
+          extends: [],
+        },
+      },
+    });
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].severity).toBe('breaking');
+  });
+
   it('detects enum member value change as signature violation', () => {
     const baseline = emptySurface({
       enums: {
