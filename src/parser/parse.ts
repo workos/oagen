@@ -29,19 +29,29 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     spec.paths as Record<string, Record<string, unknown>> | undefined,
   );
 
-  // Merge inline models with component schema models, component schemas take precedence
+  // Merge inline response models with component schema models.
+  // When both exist with same name: prefer whichever has MORE fields, since
+  // component schemas are often request DTOs with fewer fields than the
+  // full response model extracted from endpoint definitions.
   const schemaModelNames = new Set(models.map((m) => m.name));
   const schemaModelsByName = new Map(models.map((m) => [m.name, m]));
   const deduplicatedInlineModels = inlineModels.filter((m) => {
     if (!schemaModelNames.has(m.name)) return true;
-    // Warn if inline model has different fields than component schema model
     const existing = schemaModelsByName.get(m.name)!;
     const existingFieldNames = new Set(existing.fields.map((f) => f.name));
     const inlineFieldNames = new Set(m.fields.map((f) => f.name));
     const hasDifference =
       m.fields.some((f) => !existingFieldNames.has(f.name)) ||
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
-    if (hasDifference) {
+    if (hasDifference && m.fields.length > existing.fields.length) {
+      // Inline response model has more fields — replace the component schema
+      const idx = models.indexOf(existing);
+      if (idx !== -1) models[idx] = m;
+      schemaModelsByName.set(m.name, m);
+      console.warn(
+        `[oagen] Warning: Inline model "${m.name}" has more fields than component schema (${m.fields.length} vs ${existing.fields.length}) — using inline response model`,
+      );
+    } else if (hasDifference) {
       console.warn(
         `[oagen] Warning: Inline model "${m.name}" has different fields than component schema — using component schema`,
       );
@@ -49,6 +59,38 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     return false;
   });
   const allModels = [...models, ...deduplicatedInlineModels];
+
+  // Merge FooJson models into Foo when FooJson is a superset of Foo.
+  // Component schemas sometimes split request DTOs (Foo) from response schemas (FooJson).
+  // When FooJson has strictly more fields, replace Foo with FooJson's fields under the Foo name.
+  const allModelsByNameForJson = new Map(allModels.map((m) => [m.name, m]));
+  for (const model of allModels) {
+    if (model.name.endsWith('Json')) {
+      const baseName = model.name.slice(0, -4);
+      const baseModel = allModelsByNameForJson.get(baseName);
+      if (baseModel && model.fields.length > baseModel.fields.length) {
+        const baseFieldNames = new Set(baseModel.fields.map((f) => f.name));
+        const isSuperset = baseModel.fields.every((f) => model.fields.some((mf) => mf.name === f.name));
+        if (isSuperset) {
+          // Replace Foo's fields with FooJson's fields, keep the Foo name
+          baseModel.fields = model.fields;
+          // Remove the FooJson model from the array
+          const jsonIdx = allModels.indexOf(model);
+          if (jsonIdx !== -1) allModels.splice(jsonIdx, 1);
+          // Rewrite any TypeRef pointing to FooJson → Foo in operations
+          for (const service of services) {
+            for (const op of service.operations) {
+              rewriteModelRefs(op.response, model.name, baseName);
+              if (op.requestBody) rewriteModelRefs(op.requestBody, model.name, baseName);
+            }
+          }
+          console.warn(
+            `[oagen] Warning: Merged "${model.name}" into "${baseName}" (${model.fields.length} fields, superset)`,
+          );
+        }
+      }
+    }
+  }
 
   // Extract inline models from model field definitions (objects/arrays with properties)
   const fieldInlineModels = extractInlineModelsFromSchemas(
@@ -95,6 +137,31 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
   validateModelRefs(result);
 
   return result;
+}
+
+/** Recursively rewrite model references from oldName to newName in a TypeRef tree. */
+function rewriteModelRefs(ref: TypeRef, oldName: string, newName: string): void {
+  switch (ref.kind) {
+    case 'model':
+      if (ref.name === oldName) (ref as { name: string }).name = newName;
+      break;
+    case 'array':
+      rewriteModelRefs(ref.items, oldName, newName);
+      break;
+    case 'nullable':
+      rewriteModelRefs(ref.inner, oldName, newName);
+      break;
+    case 'union':
+      for (const v of ref.variants) rewriteModelRefs(v, oldName, newName);
+      break;
+    case 'map':
+      rewriteModelRefs(ref.valueType, oldName, newName);
+      break;
+    case 'enum':
+    case 'primitive':
+    case 'literal':
+      break;
+  }
 }
 
 function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
