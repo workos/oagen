@@ -50,6 +50,73 @@ describe('diffSurfaces — type alias branches', () => {
 });
 
 describe('diffSurfaces — class and interface field branches', () => {
+  it('detects new class methods as additions', () => {
+    // Lines 177-179: candidate class has methods not in baseline
+    const baseline = emptySurface({
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {
+            list: { name: 'list', params: [], returnType: 'User[]', async: true },
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {
+            list: { name: 'list', params: [], returnType: 'User[]', async: true },
+            create: { name: 'create', params: [], returnType: 'User', async: true },
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.additions).toContainEqual({ symbolPath: 'Users.create', symbolType: 'method' });
+  });
+
+  it('detects missing class properties as violations', () => {
+    // Lines 186-196: baseline class has property, candidate doesn't
+    const baseline = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {},
+          properties: {
+            baseUrl: { name: 'baseUrl', type: 'string', readonly: true },
+            apiKey: { name: 'apiKey', type: 'string', readonly: true },
+          },
+          constructorParams: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {},
+          properties: {
+            baseUrl: { name: 'baseUrl', type: 'string', readonly: true },
+            // apiKey is missing
+          },
+          constructorParams: [],
+        },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    const propViolations = result.violations.filter((v) => v.symbolPath === 'Client.apiKey');
+    expect(propViolations.length).toBe(1);
+    expect(propViolations[0].category).toBe('public-api');
+  });
+
   it('detects new class properties as additions', () => {
     // Lines 214-216: candidate has properties not in baseline
     const baseline = emptySurface({

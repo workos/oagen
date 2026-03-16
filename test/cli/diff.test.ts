@@ -88,6 +88,52 @@ describe('diffCommand', () => {
     expect(diff).toHaveProperty('summary');
   });
 
+  it('exits 2 for breaking changes in report mode', async () => {
+    // Lines 28-29: breaking changes → exit code 2
+    const V2_BREAKING = resolve(FIXTURES, 'v2-breaking.yml');
+    await expect(
+      diffCommand({
+        old: V1,
+        new: V2_BREAKING,
+        report: true,
+      }),
+    ).rejects.toThrow('process.exit called');
+
+    const jsonCall = consoleSpy.mock.calls.find((call) => {
+      try {
+        JSON.parse(call[0] as string);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const diff = JSON.parse(jsonCall![0] as string);
+    expect(diff.summary.breaking).toBeGreaterThan(0);
+  });
+
+  it('exits 0 for no changes in report mode', async () => {
+    // Line 34: no changes → exit code 0
+    await expect(
+      diffCommand({
+        old: V1,
+        new: V1,
+        report: true,
+      }),
+    ).rejects.toThrow('process.exit called');
+  });
+
+  it('prints "No changes detected" when specs are identical', async () => {
+    // Line 85: no changes → "No changes detected"
+    await diffCommand({
+      old: V1,
+      new: V1,
+      lang: 'test-lang',
+      output: tmpDir,
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith('No changes detected');
+  });
+
   it('exits 1 when --lang is missing for incremental gen', async () => {
     await expect(
       diffCommand({
