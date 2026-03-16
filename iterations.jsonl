@@ -1,0 +1,1 @@
+{"iteration":1,"before":80.15,"after":84.02,"action":"Add CLI command unit tests (generate, parse, extract, diff)","result":"kept","note":"21 new tests covering CLI command functions directly — lines 75.25→80.57%, functions 91.3→96.52%"}
