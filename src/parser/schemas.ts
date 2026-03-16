@@ -244,11 +244,17 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
     };
   }
 
-  // Handle freeform object with additionalProperties → Map<string, T>
+  // Handle freeform object with additionalProperties or patternProperties → Map<string, T>
   if (schema.type === 'object' && !schema.properties) {
     let valueType: TypeRef = { kind: 'primitive', type: 'string' };
     if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
       valueType = schemaToTypeRef(schema.additionalProperties, contextName);
+    } else if (schema.patternProperties) {
+      // patternProperties: { "pattern": schema } → use the first pattern's schema as value type
+      const patterns = Object.values(schema.patternProperties);
+      if (patterns.length > 0) {
+        valueType = schemaToTypeRef(patterns[0], contextName);
+      }
     }
     return {
       kind: 'map',
@@ -271,6 +277,23 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
       type: primitiveMap[typeStr],
       ...(schema.format ? { format: schema.format } : {}),
     };
+  }
+
+  // Handle schemas with no type — if it has properties, treat as model
+  if (!schema.type && schema.properties) {
+    return {
+      kind: 'model',
+      name: toPascalCase(contextName ?? 'UnknownModel'),
+    };
+  }
+
+  // Schemas with no type and no meaningful shape → treat as freeform map (Record<string, unknown>)
+  // This is more accurate than string for untyped schemas in OpenAPI 3.x
+  if (!schema.type && !schema.$ref && !schema.oneOf && !schema.anyOf && !schema.allOf && !schema.enum) {
+    if (contextName) {
+      console.warn(`[oagen] Warning: Unknown schema shape treated as map (context: ${contextName})`);
+    }
+    return { kind: 'map', valueType: { kind: 'primitive', type: 'string' } };
   }
 
   // Fallback: treat unknown schemas as string
