@@ -42,7 +42,7 @@ export interface Parameter {
 }
 
 /** Type reference — the core type system of the IR */
-export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType | NullableType;
+export type TypeRef = PrimitiveType | ArrayType | ModelRef | EnumRef | UnionType | NullableType | LiteralType;
 
 export interface PrimitiveType {
   kind: 'primitive';
@@ -63,6 +63,12 @@ export interface ModelRef {
 export interface EnumRef {
   kind: 'enum';
   name: string;
+  values?: string[];
+}
+
+export interface LiteralType {
+  kind: 'literal';
+  value: string;
 }
 
 export interface UnionType {
@@ -100,6 +106,23 @@ export interface EnumValue {
   name: string;
   value: string;
   description?: string;
+}
+
+/**
+ * Exhaustive check helper for TypeRef switches.
+ * If a new kind is added to TypeRef, any switch that doesn't handle it
+ * will fail to compile because `never` won't accept the unhandled variant.
+ *
+ * Usage:
+ *   switch (ref.kind) {
+ *     case 'primitive': ...
+ *     case 'array': ...
+ *     // If you forget 'literal', TypeScript errors here:
+ *     default: assertNever(ref);
+ *   }
+ */
+export function assertNever(x: never): never {
+  throw new Error(`Unexpected TypeRef kind: ${(x as TypeRef).kind}`);
 }
 
 export interface ErrorResponse {

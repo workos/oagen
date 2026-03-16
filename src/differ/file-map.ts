@@ -1,4 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
+import { assertNever } from '../ir/types.js';
 import type { Emitter, EmitterContext } from '../engine/types.js';
 import type { Change } from './types.js';
 
@@ -146,6 +147,13 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
       case 'union':
         typeRef.variants.forEach((v) => trackRef(v, serviceName));
         break;
+      case 'literal':
+        break;
+      case 'primitive':
+        break;
+      default:
+        assertNever(typeRef);
+        break;
     }
   }
 
@@ -178,6 +186,13 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
         break;
       case 'union':
         typeRef.variants.forEach((v) => collectDeps(v, deps));
+        break;
+      case 'literal':
+        break;
+      case 'primitive':
+        break;
+      default:
+        assertNever(typeRef);
         break;
     }
   }

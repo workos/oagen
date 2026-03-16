@@ -1,4 +1,5 @@
 import type { Model, TypeRef } from '../ir/types.js';
+import { assertNever } from '../ir/types.js';
 import type { Change, FieldChange } from './types.js';
 import { classifyFieldChange } from './classify.js';
 
@@ -88,6 +89,8 @@ export function typeRefsEqual(a: TypeRef, b: TypeRef): boolean {
       return b.kind === 'model' && a.name === b.name;
     case 'enum':
       return b.kind === 'enum' && a.name === b.name;
+    case 'literal':
+      return b.kind === 'literal' && a.value === b.value;
     case 'nullable':
       return b.kind === 'nullable' && typeRefsEqual(a.inner, b.inner);
     case 'union': {
@@ -104,4 +107,5 @@ export function typeRefsEqual(a: TypeRef, b: TypeRef): boolean {
       return aKeys.every((k, i) => k === bKeys[i] && a.discriminator!.mapping[k] === b.discriminator!.mapping[k]);
     }
   }
+  return assertNever(a);
 }

@@ -9,6 +9,7 @@ export type {
   ArrayType,
   ModelRef,
   EnumRef,
+  LiteralType,
   UnionType,
   NullableType,
   Model,
@@ -17,6 +18,8 @@ export type {
   EnumValue,
   ErrorResponse,
 } from './ir/types.js';
+
+export { assertNever } from './ir/types.js';
 
 export type { GeneratedFile, EmitterContext, Emitter } from './engine/types.js';
 
@@ -67,8 +70,8 @@ export { diffSpecs } from './differ/diff.js';
 export { mapChangesToFiles } from './differ/file-map.js';
 export { generateIncremental } from './engine/incremental.js';
 export { buildOverlayLookup, patchOverlay } from './compat/overlay.js';
-export { diffSurfaces } from './compat/differ.js';
-export { toSnakeCase, toCamelCase, toPascalCase, toKebabCase, toUpperSnakeCase } from './utils/naming.js';
+export { diffSurfaces, specDerivedNames, filterSurface } from './compat/differ.js';
+export { toSnakeCase, toCamelCase, toPascalCase, toKebabCase, toUpperSnakeCase, stripBackendPrefixes } from './utils/naming.js';
 
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';

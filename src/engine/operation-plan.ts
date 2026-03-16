@@ -1,4 +1,5 @@
 import type { Operation, TypeRef } from '../ir/types.js';
+import { assertNever } from '../ir/types.js';
 
 export interface OperationPlan {
   operation: Operation;
@@ -54,6 +55,9 @@ function extractModelName(ref: TypeRef): string | null {
     }
     case 'enum':
     case 'primitive':
+    case 'literal':
       return null;
+    default:
+      return assertNever(ref);
   }
 }
