@@ -37,8 +37,10 @@ export async function generate(
   ];
 
   const header = emitter.fileHeader();
+  const langPrefix = `${emitter.language}/`;
   const withHeaders = files.map((f) => ({
     ...f,
+    path: `${langPrefix}${f.path}`,
     content: f.path.endsWith('.json') ? f.content : header + '\n\n' + f.content,
     skipIfExists: f.skipIfExists ?? false,
   }));

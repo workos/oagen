@@ -37,14 +37,14 @@ describe('generate', () => {
 
     expect(files).toHaveLength(8);
     const paths = files.map((f) => f.path);
-    expect(paths).toContain('models/user.rb');
-    expect(paths).toContain('models/status.rb');
-    expect(paths).toContain('resources/users.rb');
-    expect(paths).toContain('client.rb');
-    expect(paths).toContain('errors.rb');
-    expect(paths).toContain('config.rb');
-    expect(paths).toContain('sig/user.rbs');
-    expect(paths).toContain('test/test_users.rb');
+    expect(paths).toContain('mock/models/user.rb');
+    expect(paths).toContain('mock/models/status.rb');
+    expect(paths).toContain('mock/resources/users.rb');
+    expect(paths).toContain('mock/client.rb');
+    expect(paths).toContain('mock/errors.rb');
+    expect(paths).toContain('mock/config.rb');
+    expect(paths).toContain('mock/sig/user.rbs');
+    expect(paths).toContain('mock/test/test_users.rb');
   });
 
   it('prepends file header to all non-JSON files', async () => {
