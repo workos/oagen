@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { diffSurfaces } from '../../src/compat/differ.js';
+import { diffSurfaces, specDerivedNames, filterSurface } from '../../src/compat/differ.js';
 import type { ApiSurface } from '../../src/compat/types.js';
+import type { ApiSpec } from '../../src/ir/types.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -320,5 +321,145 @@ describe('diffSurfaces', () => {
     const result = diffSurfaces(baseline, candidate);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({ category: 'signature', symbolPath: 'Status.Active' });
+  });
+});
+
+describe('specDerivedNames', () => {
+  it('includes model names with Response and Serialized variants', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'Organization',
+          fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+        },
+      ],
+    };
+
+    const names = specDerivedNames(spec);
+    expect(names.has('Organization')).toBe(true);
+    expect(names.has('OrganizationResponse')).toBe(true);
+    expect(names.has('SerializedOrganization')).toBe(true);
+  });
+
+  it('includes enum names', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [{ name: 'Status', values: [{ name: 'ACTIVE', value: 'active' }] }],
+      models: [],
+    };
+
+    const names = specDerivedNames(spec);
+    expect(names.has('Status')).toBe(true);
+  });
+
+  it('includes service names', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Organizations',
+          operations: [
+            {
+              name: 'list',
+              httpMethod: 'get',
+              path: '/orgs',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'Org' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+    };
+
+    const names = specDerivedNames(spec);
+    expect(names.has('Organizations')).toBe(true);
+    expect(names.has('Org')).toBe(true);
+    expect(names.has('OrgResponse')).toBe(true);
+    expect(names.has('SerializedOrg')).toBe(true);
+  });
+});
+
+describe('filterSurface', () => {
+  it('drops interfaces not in allowed set', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Organization: { name: 'Organization', fields: {}, extends: [] },
+        HandWrittenHelper: { name: 'HandWrittenHelper', fields: {}, extends: [] },
+      },
+    });
+
+    const allowed = new Set(['Organization']);
+    const filtered = filterSurface(surface, allowed);
+
+    expect(filtered.interfaces['Organization']).toBeDefined();
+    expect(filtered.interfaces['HandWrittenHelper']).toBeUndefined();
+  });
+
+  it('drops classes not in allowed set', () => {
+    const surface = emptySurface({
+      classes: {
+        Users: { name: 'Users', methods: {}, properties: {}, constructorParams: [] },
+        Internal: { name: 'Internal', methods: {}, properties: {}, constructorParams: [] },
+      },
+    });
+
+    const allowed = new Set(['Users']);
+    const filtered = filterSurface(surface, allowed);
+
+    expect(filtered.classes['Users']).toBeDefined();
+    expect(filtered.classes['Internal']).toBeUndefined();
+  });
+
+  it('returns empty exports (line 101)', () => {
+    const surface = emptySurface({
+      exports: { 'src/index.ts': ['Client', 'Options'] },
+      interfaces: {
+        Options: { name: 'Options', fields: {}, extends: [] },
+      },
+    });
+
+    const allowed = new Set(['Options']);
+    const filtered = filterSurface(surface, allowed);
+
+    // filterSurface always returns empty exports for scoped comparison
+    expect(Object.keys(filtered.exports)).toHaveLength(0);
+  });
+
+  it('filters type aliases and enums', () => {
+    const surface = emptySurface({
+      typeAliases: {
+        OrgId: { name: 'OrgId', value: 'string' },
+        InternalId: { name: 'InternalId', value: 'string' },
+      },
+      enums: {
+        Status: { name: 'Status', members: { Active: 'active' } },
+        InternalState: { name: 'InternalState', members: { Open: 'open' } },
+      },
+    });
+
+    const allowed = new Set(['OrgId', 'Status']);
+    const filtered = filterSurface(surface, allowed);
+
+    expect(filtered.typeAliases['OrgId']).toBeDefined();
+    expect(filtered.typeAliases['InternalId']).toBeUndefined();
+    expect(filtered.enums['Status']).toBeDefined();
+    expect(filtered.enums['InternalState']).toBeUndefined();
   });
 });

@@ -341,6 +341,121 @@ describe('buildOverlayLookup', () => {
     expect(lookup.modelNameByIR.get('ControllerOrgResponse')).toBe('Organization');
   });
 
+  it('field matching picks first interface when Jaccard scores tie', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Alpha: {
+          name: 'Alpha',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+            slug: { name: 'slug', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+        Beta: {
+          name: 'Beta',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+            slug: { name: 'slug', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'MyModel',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'slug', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    // First processed interface wins — Alpha comes before Beta
+    expect(lookup.modelNameByIR.get('MyModel')).toBe('Alpha');
+  });
+
+  it('skips IR model with only 1 field', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Tiny: {
+          name: 'Tiny',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'TinyModel',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('TinyModel')).toBeUndefined();
+  });
+
+  it('does not match IR model with 2 fields (needs >= 3 common fields)', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Small: {
+          name: 'Small',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'SmallModel',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('SmallModel')).toBeUndefined();
+  });
+
   it('does not produce duplicate mappings', () => {
     const surface = emptySurface({
       interfaces: {
@@ -489,5 +604,85 @@ describe('patchOverlay', () => {
 
     expect(overlay.interfaceByName.get('Org')).toBe('Org');
     expect(overlay.interfaceByName.get('User')).toBe('User');
+  });
+
+  it('gracefully handles method violation when no manifest (no httpKeyByMethod)', () => {
+    const baseline = emptySurface({
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {
+            listUsers: {
+              name: 'listUsers',
+              params: [],
+              returnType: 'Promise<User[]>',
+              async: true,
+            },
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+
+    const overlay = buildOverlayLookup(emptySurface());
+    // No manifest → httpKeyByMethod is empty
+    expect(overlay.httpKeyByMethod.size).toBe(0);
+
+    const violations: Violation[] = [
+      {
+        category: 'public-api',
+        severity: 'breaking',
+        symbolPath: 'Users.listUsers',
+        baseline: 'listUsers',
+        candidate: '(missing)',
+        message: 'Method "Users.listUsers" missing',
+      },
+    ];
+
+    const patched = patchOverlay(overlay, violations, baseline);
+    // Should not crash, and should not add a method mapping (no HTTP key available)
+    expect(patched.methodByOperation.size).toBe(0);
+  });
+
+  it('returns equivalent overlay when violations array is empty', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Org: { name: 'Org', fields: {}, extends: [] },
+      },
+    });
+    const overlay = buildOverlayLookup(surface);
+    const patched = patchOverlay(overlay, [], emptySurface());
+
+    expect(patched.interfaceByName.get('Org')).toBe('Org');
+    expect(patched.methodByOperation.size).toBe(overlay.methodByOperation.size);
+    expect(patched.requiredExports.size).toBe(overlay.requiredExports.size);
+  });
+
+  it('handles violation referencing symbol not in baseline without crashing', () => {
+    const overlay = buildOverlayLookup(emptySurface());
+    const violations: Violation[] = [
+      {
+        category: 'public-api',
+        severity: 'breaking',
+        symbolPath: 'NonExistentClass.missingMethod',
+        baseline: 'missingMethod',
+        candidate: '(missing)',
+        message: 'Method missing',
+      },
+      {
+        category: 'public-api',
+        severity: 'breaking',
+        symbolPath: 'GhostInterface',
+        baseline: 'GhostInterface',
+        candidate: '(missing)',
+        message: 'Interface missing',
+      },
+    ];
+
+    // Should not throw — baseline has no matching symbols
+    const patched = patchOverlay(overlay, violations, emptySurface());
+    expect(patched.methodByOperation.size).toBe(0);
+    expect(patched.interfaceByName.size).toBe(0);
   });
 });
