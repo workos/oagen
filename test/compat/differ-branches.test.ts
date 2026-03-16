@@ -49,6 +49,99 @@ describe('diffSurfaces — type alias branches', () => {
   });
 });
 
+describe('diffSurfaces — class and interface field branches', () => {
+  it('detects new class properties as additions', () => {
+    // Lines 214-216: candidate has properties not in baseline
+    const baseline = emptySurface({
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {},
+          properties: { baseUrl: { name: 'baseUrl', type: 'string', readonly: true } },
+          constructorParams: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {},
+          properties: {
+            baseUrl: { name: 'baseUrl', type: 'string', readonly: true },
+            newProp: { name: 'newProp', type: 'number', readonly: false },
+          },
+          constructorParams: [],
+        },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.additions).toContainEqual({ symbolPath: 'Users.newProp', symbolType: 'property' });
+  });
+
+  it('detects missing interface fields as violations', () => {
+    // Lines 249-258: baseline interface has field, candidate doesn't
+    const baseline = emptySurface({
+      interfaces: {
+        User: {
+          name: 'User',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            email: { name: 'email', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      interfaces: {
+        User: {
+          name: 'User',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            // email is missing
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    const fieldViolations = result.violations.filter((v) => v.symbolPath === 'User.email');
+    expect(fieldViolations.length).toBe(1);
+    expect(fieldViolations[0].category).toBe('public-api');
+  });
+
+  it('detects new interface fields as additions', () => {
+    // Lines 277-278: candidate interface has fields not in baseline
+    const baseline = emptySurface({
+      interfaces: {
+        User: {
+          name: 'User',
+          fields: { id: { name: 'id', type: 'string', optional: false } },
+          extends: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      interfaces: {
+        User: {
+          name: 'User',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            newField: { name: 'newField', type: 'number', optional: true },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const result = diffSurfaces(baseline, candidate);
+    expect(result.additions).toContainEqual({ symbolPath: 'User.newField', symbolType: 'property' });
+  });
+});
+
 describe('diffSurfaces — enum and export branches', () => {
   it('detects new enums as additions', () => {
     // Lines 362-364: candidate has enum not in baseline

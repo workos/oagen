@@ -272,6 +272,54 @@ describe('verifyCommand', () => {
     }
   });
 
+  it('generates spec-only baseline when no raw results and --spec provided', async () => {
+    // Lines 211-223: runScript for baseline + smoke
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => '');
+
+    const origCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      await verifyCommand({
+        spec: MINIMAL_SPEC,
+        lang: 'test-lang',
+        output: tmpDir,
+      });
+
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Generating spec-only baseline'));
+      expect(consoleSpy).toHaveBeenCalledWith('\nVerify: all checks passed');
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  it('exits 1 when baseline generation fails', async () => {
+    // Lines 217-220: runScript throws → baseline gen failed
+    const { execFileSync } = await import('node:child_process');
+    let callCount = 0;
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) throw new Error('baseline script failed');
+      return '';
+    });
+
+    const origCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      await expect(
+        verifyCommand({
+          spec: MINIMAL_SPEC,
+          lang: 'test-lang',
+          output: tmpDir,
+        }),
+      ).rejects.toThrow('process.exit(1)');
+
+      expect(errorSpy).toHaveBeenCalledWith('Baseline generation failed');
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
   // ── Smoke test success path ───────────────────────────────────────────
 
   it('runs smoke test and reports success', async () => {
