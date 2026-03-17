@@ -278,6 +278,8 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
     fileBySymbol: new Map(overlay.fileBySymbol),
   };
 
+  let warnedManifest = false;
+
   for (const v of violations) {
     if (v.category === 'public-api') {
       // For missing methods: symbolPath is "ClassName.methodName"
@@ -293,6 +295,13 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
           // cannot be patched via overlay — the emitter must implement
           // generateManifest for the self-correcting loop to resolve these.
           const httpKey = overlay.httpKeyByMethod.get(`${className}.${methodName}`);
+          if (!httpKey && overlay.httpKeyByMethod.size === 0 && !warnedManifest) {
+            console.warn(
+              'Warning: No smoke-manifest.json available. Method-level violations cannot be auto-patched. ' +
+                'Implement generateManifest in your emitter for the self-correcting loop to resolve these.',
+            );
+            warnedManifest = true;
+          }
           if (httpKey) {
             const method = baseClass.methods[methodName][0];
             patched.methodByOperation.set(httpKey, {
