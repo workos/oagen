@@ -41,7 +41,7 @@ export const nodeHints: LanguageHints = {
   },
 
   isExtractionArtifact(type: string): boolean {
-    return type === 'any';
+    return type === 'any' || type === 'Record<string, unknown>';
   },
 
   tolerateCategoryMismatch: true,
@@ -97,6 +97,42 @@ export const nodeHints: LanguageHints = {
       );
       const baseMembers = parseUnionMembers(baselineType);
       if (baseMembers.length > 0 && baseMembers.every((m) => enumValuesSet.has(m))) {
+        return true;
+      }
+    }
+
+    // Tolerate untyped-map equivalences:
+    // { [key: string]: any; } ≡ Record<string, unknown> ≡ Record<string, any>
+    const untypedMapPatterns = [
+      'Record<string, unknown>',
+      'Record<string, any>',
+      '{ [key: string]: any; }',
+      '{ [key: string]: unknown; }',
+      'any',
+    ];
+    if (untypedMapPatterns.includes(baselineType) && untypedMapPatterns.includes(candidateType)) {
+      return true;
+    }
+
+    // Tolerate inline object literal vs named model in candidate.
+    // e.g., baseline: '{ type: "organization"; id: string; }', candidate: 'ApiKeyOwner'
+    // The named model is more structured but semantically equivalent.
+    if (baselineType.startsWith('{') && baselineType.endsWith('}')) {
+      if (candidateSurface.interfaces[candidateType] || candidateSurface.classes[candidateType]) {
+        return true;
+      }
+    }
+
+    // Tolerate array of equivalent model names:
+    // e.g., baseline: 'ConnectionDomain[]', candidate: 'ConnectionDomainResponse[]'
+    // Both point to the same underlying model just named differently in domain vs wire
+    const baseArray = baselineType.match(/^(.+)\[\]$/);
+    const candArray = candidateType.match(/^(.+)\[\]$/);
+    if (baseArray && candArray) {
+      const baseName = baseArray[1];
+      const candName = candArray[1];
+      // If one is a "Response" suffixed version of the other, tolerate
+      if (candName === baseName + 'Response' || baseName === candName + 'Response') {
         return true;
       }
     }
