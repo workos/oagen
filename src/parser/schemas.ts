@@ -389,16 +389,20 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
  */
 function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
-  if (baseName.startsWith(parentName)) return baseName;
+  // Strip ListItem/ByExternalId markers from parent name so inline model names
+  // are clean and match the names produced by qualifyNestedName() in responses.ts.
+  // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
+  const cleanParent = stripListItemMarkers(parentName);
+  if (baseName.startsWith(cleanParent)) return baseName;
   // Singularize the trailing PascalCase word of the combined name.
   // Split baseName into leading words + trailing word, singularize trailing.
   const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
   if (trailingMatch) {
     const [, prefix, trailingWord] = trailingMatch;
     const singular = singularize(trailingWord);
-    return `${parentName}${prefix}${singular}`;
+    return `${cleanParent}${prefix}${singular}`;
   }
-  return `${parentName}${baseName}`;
+  return `${cleanParent}${baseName}`;
 }
 
 /**
