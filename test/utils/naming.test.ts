@@ -9,6 +9,7 @@ import {
   stripListItemMarkers,
   singularize,
   cleanSchemaName,
+  ACRONYM_SET,
 } from '../../src/utils/naming.js';
 
 describe('toPascalCase', () => {
@@ -198,5 +199,30 @@ describe('toUpperSnakeCase', () => {
   });
   it('converts PascalCase', () => {
     expect(toUpperSnakeCase('UserProfile')).toBe('USER_PROFILE');
+  });
+});
+
+describe('acronym customization', () => {
+  it('toPascalCase expands user_id with custom ID acronym', () => {
+    expect(toPascalCase('user_id', new Set(['ID']))).toBe('UserID');
+  });
+
+  it('toCamelCase expands user_id with custom ID acronym', () => {
+    expect(toCamelCase('user_id', new Set(['ID']))).toBe('userID');
+  });
+
+  it('toPascalCase expands http_url with multiple custom acronyms', () => {
+    expect(toPascalCase('http_url', new Set(['HTTP', 'URL']))).toBe('HTTPURL');
+  });
+
+  it('toPascalCase default behavior unchanged when no acronyms param', () => {
+    expect(toPascalCase('user_id')).toBe('UserId');
+  });
+
+  it('ACRONYM_SET is exported and contains expected values', () => {
+    expect(ACRONYM_SET).toBeInstanceOf(Set);
+    expect(ACRONYM_SET.has('SSO')).toBe(true);
+    expect(ACRONYM_SET.has('FGA')).toBe(true);
+    expect(ACRONYM_SET.has('SAML')).toBe(true);
   });
 });

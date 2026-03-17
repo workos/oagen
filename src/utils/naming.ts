@@ -18,13 +18,14 @@ export function splitWords(s: string): string[] {
     .filter((w) => w.length > 0);
 }
 
-const ACRONYM_SET = new Set(['SSO', 'FGA', 'SAML', 'SCIM', 'JWT', 'HMAC']);
+export const ACRONYM_SET = new Set(['SSO', 'FGA', 'SAML', 'SCIM', 'JWT', 'HMAC']);
 
-export function toPascalCase(s: string): string {
+export function toPascalCase(s: string, acronyms?: Set<string>): string {
+  const merged = acronyms ? new Set([...ACRONYM_SET, ...acronyms]) : ACRONYM_SET;
   return splitWords(s)
     .map((w) => {
       const upper = w.toUpperCase();
-      if (ACRONYM_SET.has(upper)) return upper;
+      if (merged.has(upper)) return upper;
       // Special case: OAuth should stay as OAuth, not OAUTH
       if (upper === 'OAUTH') return 'OAuth';
       return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
@@ -32,14 +33,15 @@ export function toPascalCase(s: string): string {
     .join('');
 }
 
-export function toCamelCase(s: string): string {
+export function toCamelCase(s: string, acronyms?: Set<string>): string {
+  const merged = acronyms ? new Set([...ACRONYM_SET, ...acronyms]) : ACRONYM_SET;
   const words = splitWords(s);
   if (words.length === 0) return '';
   return words
     .map((w, i) => {
       if (i === 0) return w.toLowerCase();
       const upper = w.toUpperCase();
-      if (ACRONYM_SET.has(upper)) return upper;
+      if (merged.has(upper)) return upper;
       if (upper === 'OAUTH') return 'OAuth';
       return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
     })
