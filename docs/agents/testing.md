@@ -39,6 +39,7 @@ Compat verification catches regressions like renamed methods, changed parameter 
 - Unified verify (includes compat): `oagen verify --api-surface <output>/sdk-{language}-surface.json --lang <language> --output <output>`
 - Run `/verify-compat <language>` for the full guided workflow
 - See `docs/architecture/extractor-contract.md` for building new language extractors
+- The differ and overlay use `LanguageHints` from the extractor to handle language-specific type comparisons (nullability, unions, extraction artifacts, derived model names). See the "Language Hints" section in the extractor contract doc.
 
 ## Smoke Tests
 

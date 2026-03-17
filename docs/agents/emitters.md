@@ -55,6 +55,8 @@ When regenerating an SDK for a language that already has a published SDK, verify
 3. Verify the generated output against the baseline (`oagen verify --api-surface <output>/sdk-{language}-surface.json --lang <language> --output <output>`)
 4. If violations exist, fix the emitter and regenerate — loop mode (`--loop`) automates this cycle
 
+The differ and overlay delegate all language-specific logic to the extractor's `hints: LanguageHints` object. Every extractor must provide hints — use `resolveHints({...})` to override only what differs from Node defaults. See `docs/architecture/extractor-contract.md` for the full hints reference.
+
 The `--api-surface` flag is supported by both `oagen generate` and `oagen diff` (for incremental generation with compat overlay).
 
 Run `/generate-extractor <language>` to scaffold the extractor, then `/verify-compat <language>` for the full guided workflow.

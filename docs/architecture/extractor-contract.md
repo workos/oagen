@@ -10,11 +10,13 @@ Every language extractor must implement the `Extractor` interface:
 interface Extractor {
   language: string;
   extract(sdkPath: string): Promise<ApiSurface>;
+  hints: LanguageHints;
 }
 ```
 
 - `language` — the language identifier (e.g., `"node"`, `"ruby"`, `"python"`). Must match the emitter's `language` field.
 - `extract` — analyzes a live SDK at `sdkPath` and returns its public API surface. Must be deterministic: same input produces the same output.
+- `hints` — a `LanguageHints` object that tells the differ and overlay how to interpret type strings for this language. Required — every extractor must explicitly declare its conventions.
 
 ## ApiSurface
 
@@ -55,6 +57,36 @@ The `exports` field maps file paths to their exported symbol names, capturing th
 3. **Preserve fidelity** — Method signatures should capture parameter names, types, and optionality as they appear in the live SDK, not as the IR would generate them.
 
 4. **Handle missing infrastructure gracefully** — If the language's type system files are missing (e.g., no `tsconfig.json`, no `.pyi` stubs), throw a descriptive error rather than returning an empty surface.
+
+## Language Hints
+
+Every extractor must provide a `hints: LanguageHints` object that tells the differ and overlay how to interpret language-specific type strings. The `LanguageHints` interface includes:
+
+| Method/Property | Purpose | Node example | Go example |
+|---|---|---|---|
+| `stripNullable(type)` | Strip nullable wrapper | `"string \| null"` → `"string"` | `"*Organization"` → `"Organization"` |
+| `isNullableOnlyDifference(a, b)` | True if a and b differ only by nullability | `"string"` vs `"string \| null"` → true | |
+| `isUnionReorder(a, b)` | True if same union members in different order | `"a" \| "b"` vs `"b" \| "a"` → true | Always false (Go has no unions) |
+| `isGenericTypeParam(type)` | True if type is an unresolvable generic param | `"T"`, `"TCustomAttributes"` → true | |
+| `isExtractionArtifact(type)` | True if type is an extraction artifact | `"any"` → true | `"interface{}"` → true |
+| `tolerateCategoryMismatch` | Allow type alias ↔ interface/class mismatch | `true` (TS allows both forms) | `false` |
+| `extractReturnTypeName(returnType)` | Extract innermost type from return type | `"Promise<Organization>"` → `"Organization"` | |
+| `extractParamTypeName(paramType)` | Extract type from param (null for primitives) | `"string"` → null | |
+| `propertyMatchesClass(prop, class)` | True if property maps to class name | camelCase: `"organizations"` → `"Organizations"` | |
+| `derivedModelNames(modelName)` | Additional names a model produces | `["FooResponse", "SerializedFoo"]` | `["FooResponse"]` |
+
+Use `resolveHints({...overrides})` to start from Node defaults and override only the methods that differ for your language:
+
+```typescript
+import { resolveHints } from '@workos/oagen';
+
+const goHints = resolveHints({
+  stripNullable: (type) => type.startsWith('*') ? type.slice(1) : null,
+  isExtractionArtifact: (type) => type === 'interface{}',
+  tolerateCategoryMismatch: false,
+  derivedModelNames: (name) => [`${name}Response`],
+});
+```
 
 ## Registration
 
@@ -118,16 +150,17 @@ getExtractor(language: string): Extractor
 
 1. Create the extractor in your **emitter project** (not oagen core), e.g., `src/compat/extractors/{language}.ts`
 2. Implement the `Extractor` interface — export a named constant (e.g., `export const rubyExtractor: Extractor = { ... }`)
-3. Register in the emitter project's `oagen.config.ts`:
+3. Provide `hints` using `resolveHints({...})` to override only the language-specific behaviors. Every extractor must have hints — the differ and overlay delegate all language-specific logic through them.
+4. Register in the emitter project's `oagen.config.ts`:
    ```typescript
    import { rubyExtractor } from "./src/compat/extractors/ruby.js";
    const config: OagenConfig = {
      extractors: [rubyExtractor],
    };
    ```
-4. Add tests in `test/compat/extractors/{language}.test.ts`
-5. Create a fixture SDK in `test/fixtures/sample-sdk-{language}/` with known classes, methods, and exports
-6. Verify deterministic output: extracting twice produces identical JSON
+5. Add tests in `test/compat/extractors/{language}.test.ts`
+6. Create a fixture SDK in `test/fixtures/sample-sdk-{language}/` with known classes, methods, and exports
+7. Verify deterministic output: extracting twice produces identical JSON
 
 Use `/generate-extractor <language>` for a guided workflow.
 

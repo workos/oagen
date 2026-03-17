@@ -27,10 +27,13 @@ gets written or fixed.
 ### Overlay loop (Scenario A only, inside /verify-compat)
 
 Mechanical, automated. The overlay patches itself to resolve naming mismatches
-between the generated SDK and the live SDK's API surface.
+between the generated SDK and the live SDK's API surface. The extractor's
+`hints: LanguageHints` flows through to both the overlay builder and the differ,
+so all type string interpretation (nullability, unions, extraction artifacts) is
+language-appropriate.
 
-1. Generate SDK with compat overlay applied
-2. Diff generated output against baseline `<output>/sdk-{language}-surface.json`
+1. Generate SDK with compat overlay applied (hints from extractor)
+2. Diff generated output against baseline `<output>/sdk-{language}-surface.json` (hints from extractor)
 3. If violations found, `patchOverlay()` adjusts the overlay
 4. Regenerate with the patched overlay
 5. Repeat
