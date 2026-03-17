@@ -98,11 +98,47 @@ describe('nodeExtractor', () => {
     expect(extended.methods.deleteOrganization).toBeDefined();
   });
 
+  it('sets sourceFile on extracted classes', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    expect(surface.classes.SampleClient.sourceFile).toBe('src/client.ts');
+    expect(surface.classes.ExtendedClient.sourceFile).toBe('src/client.ts');
+  });
+
+  it('sets sourceFile on extracted interfaces', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    expect(surface.interfaces.Organization.sourceFile).toBe('src/models.ts');
+    expect(surface.interfaces.ClientOptions.sourceFile).toBe('src/models.ts');
+    expect(surface.interfaces.ListResponse.sourceFile).toBe('src/models.ts');
+  });
+
+  it('sets sourceFile on extracted enums', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    expect(surface.enums.Status.sourceFile).toBe('src/models.ts');
+  });
+
+  it('sets sourceFile on extracted type aliases', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    expect(surface.typeAliases.StatusType.sourceFile).toBe('src/models.ts');
+  });
+
   it('extracts barrel exports', async () => {
     const surface = await nodeExtractor.extract(fixturePath);
     expect(surface.exports['src/index.ts']).toBeDefined();
     expect(surface.exports['src/index.ts']).toEqual(
       expect.arrayContaining(['SampleClient', 'ClientOptions', 'Organization', 'ListResponse', 'Status']),
+    );
+  });
+
+  it('walks barrel chain to produce exports for all files', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    expect(Object.keys(surface.exports).sort()).toEqual(['src/client.ts', 'src/index.ts', 'src/models.ts']);
+  });
+
+  it('lists correct exports for each file in barrel chain', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    expect(surface.exports['src/client.ts']).toEqual(expect.arrayContaining(['SampleClient', 'ExtendedClient']));
+    expect(surface.exports['src/models.ts']).toEqual(
+      expect.arrayContaining(['ClientOptions', 'ListResponse', 'Organization', 'Status', 'StatusType']),
     );
   });
 

@@ -11,6 +11,7 @@ export interface ApiSurface {
 
 export interface ApiClass {
   name: string;
+  sourceFile?: string;
   methods: Record<string, ApiMethod>;
   properties: Record<string, ApiProperty>;
   constructorParams: ApiParam[];
@@ -37,6 +38,7 @@ export interface ApiProperty {
 
 export interface ApiInterface {
   name: string;
+  sourceFile?: string;
   fields: Record<string, ApiField>;
   extends: string[];
 }
@@ -49,11 +51,13 @@ export interface ApiField {
 
 export interface ApiTypeAlias {
   name: string;
+  sourceFile?: string;
   value: string;
 }
 
 export interface ApiEnum {
   name: string;
+  sourceFile?: string;
   members: Record<string, string | number>;
 }
 

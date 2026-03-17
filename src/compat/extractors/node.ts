@@ -1,6 +1,6 @@
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
-import { resolve, relative } from 'node:path';
+import path, { resolve, relative } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type {
   ApiSurface,
@@ -61,18 +61,20 @@ export const nodeExtractor: Extractor = {
       if (!declarations || declarations.length === 0) continue;
       const decl = declarations[0];
 
+      const sourceFile = relative(sdkPath, decl.getSourceFile().fileName);
+
       if (ts.isClassDeclaration(decl)) {
-        classes[resolved.name] = extractClass(resolved, checker);
+        classes[resolved.name] = { ...extractClass(resolved, checker), sourceFile };
       } else if (ts.isInterfaceDeclaration(decl)) {
-        interfaces[resolved.name] = extractInterface(resolved, checker);
+        interfaces[resolved.name] = { ...extractInterface(resolved, checker), sourceFile };
       } else if (ts.isTypeAliasDeclaration(decl)) {
-        typeAliases[resolved.name] = extractTypeAlias(resolved, checker);
+        typeAliases[resolved.name] = { ...extractTypeAlias(resolved, checker), sourceFile };
       } else if (ts.isEnumDeclaration(decl)) {
-        enums[resolved.name] = extractEnum(resolved, checker);
+        enums[resolved.name] = { ...extractEnum(resolved, checker), sourceFile };
       }
     }
 
-    const exports = buildExportMap(entrySourceFile, checker, sdkPath);
+    const exports = buildExportMap(entrySourceFile, checker, sdkPath, program);
 
     return {
       language: 'node',
@@ -320,18 +322,44 @@ function extractEnum(sym: ts.Symbol, checker: ts.TypeChecker): ApiEnum {
   };
 }
 
-function buildExportMap(sourceFile: ts.SourceFile, checker: ts.TypeChecker, sdkPath: string): Record<string, string[]> {
+function buildExportMap(
+  entryFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  sdkPath: string,
+  program: ts.Program,
+): Record<string, string[]> {
   const exports: Record<string, string[]> = {};
-  const relPath = relative(sdkPath, sourceFile.fileName);
+  const visited = new Set<string>();
 
-  const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
-  if (moduleSymbol) {
-    const exportedNames = checker.getExportsOfModule(moduleSymbol).map((s) => s.name);
-    if (exportedNames.length > 0) {
-      exports[relPath] = exportedNames.sort();
+  function walk(sourceFile: ts.SourceFile): void {
+    const absPath = sourceFile.fileName;
+    if (visited.has(absPath)) return;
+    visited.add(absPath);
+
+    const relPath = relative(sdkPath, absPath);
+    const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
+    if (moduleSymbol) {
+      const names = checker.getExportsOfModule(moduleSymbol).map((s) => s.name);
+      if (names.length > 0) {
+        exports[relPath] = names.sort();
+      }
+    }
+
+    for (const stmt of sourceFile.statements) {
+      if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+        const target = stmt.moduleSpecifier.text;
+        const resolved = resolveSourceFile(path.dirname(absPath), target, program);
+        if (resolved) {
+          const targetFile = program.getSourceFile(resolved);
+          if (targetFile) {
+            walk(targetFile);
+          }
+        }
+      }
     }
   }
 
+  walk(entryFile);
   return exports;
 }
 
