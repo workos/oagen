@@ -1,4 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition, LanguageHints } from './types.js';
 
 /**
@@ -42,32 +43,17 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
 }
 
 function collectTypeRefNames(ref: TypeRef, out: Set<string>, hints: LanguageHints): void {
-  switch (ref.kind) {
-    case 'model':
-      out.add(ref.name);
-      for (const derived of hints.derivedModelNames(ref.name)) {
+  walkTypeRef(ref, {
+    model: (r) => {
+      out.add(r.name);
+      for (const derived of hints.derivedModelNames(r.name)) {
         out.add(derived);
       }
-      break;
-    case 'enum':
-      out.add(ref.name);
-      break;
-    case 'array':
-      collectTypeRefNames(ref.items, out, hints);
-      break;
-    case 'nullable':
-      collectTypeRefNames(ref.inner, out, hints);
-      break;
-    case 'union':
-      ref.variants.forEach((v) => collectTypeRefNames(v, out, hints));
-      break;
-    case 'map':
-      collectTypeRefNames(ref.valueType, out, hints);
-      break;
-    case 'literal':
-    case 'primitive':
-      break;
-  }
+    },
+    enum: (r) => {
+      out.add(r.name);
+    },
+  });
 }
 
 function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Record<string, T> {

@@ -1,4 +1,5 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import { toPascalCase, toUpperSnakeCase, cleanSchemaName, stripListItemMarkers, singularize } from '../utils/naming.js';
 
 interface SchemaObject {
@@ -53,33 +54,23 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
  * This ensures type alias files are generated for inline enums.
  */
 function collectInlineEnums(fields: Field[], enums: Enum[]): void {
-  const existingNames = new Set(enums.map((e) => e.name));
+  const seen = new Set(enums.map((e) => e.name));
   for (const field of fields) {
-    walkTypeRefForEnums(field.type, enums, existingNames);
-  }
-}
-
-function walkTypeRefForEnums(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
-  if (ref.kind === 'enum' && ref.values && !seen.has(ref.name)) {
-    seen.add(ref.name);
-    enums.push({
-      name: ref.name,
-      values: ref.values.map((v) => ({
-        name: toUpperSnakeCase(v),
-        value: v,
-        description: undefined,
-      })),
+    walkTypeRef(field.type, {
+      enum: (ref) => {
+        if (ref.values && !seen.has(ref.name)) {
+          seen.add(ref.name);
+          enums.push({
+            name: ref.name,
+            values: ref.values.map((v) => ({
+              name: toUpperSnakeCase(v),
+              value: v,
+              description: undefined,
+            })),
+          });
+        }
+      },
     });
-  } else if (ref.kind === 'array') {
-    walkTypeRefForEnums(ref.items, enums, seen);
-  } else if (ref.kind === 'nullable') {
-    walkTypeRefForEnums(ref.inner, enums, seen);
-  } else if (ref.kind === 'union') {
-    for (const v of ref.variants) {
-      walkTypeRefForEnums(v, enums, seen);
-    }
-  } else if (ref.kind === 'map') {
-    walkTypeRefForEnums(ref.valueType, enums, seen);
   }
 }
 

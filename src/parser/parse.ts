@@ -1,4 +1,5 @@
-import type { ApiSpec, Enum, TypeRef } from '../ir/types.js';
+import type { ApiSpec, Enum, Model, TypeRef } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import { toUpperSnakeCase } from '../utils/naming.js';
 import { loadAndBundleSpec } from './refs.js';
 import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
@@ -60,14 +61,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
   });
   // Deduplicate inline models against each other — when multiple responses produce
   // models with the same name, keep the one with the most fields (most complete).
-  const inlineByName = new Map<string, (typeof deduplicatedInlineModels)[0]>();
-  for (const m of deduplicatedInlineModels) {
-    const existing = inlineByName.get(m.name);
-    if (!existing || m.fields.length > existing.fields.length) {
-      inlineByName.set(m.name, m);
-    }
-  }
-  const uniqueInlineModels = [...inlineByName.values()];
+  const uniqueInlineModels = keepLargestByName(deduplicatedInlineModels);
 
   const allModels = [...models, ...uniqueInlineModels];
 
@@ -125,14 +119,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     return false;
   });
   // Deduplicate field-extracted models against each other
-  const fieldByName = new Map<string, (typeof deduplicatedFieldModels)[0]>();
-  for (const m of deduplicatedFieldModels) {
-    const existing = fieldByName.get(m.name);
-    if (!existing || m.fields.length > existing.fields.length) {
-      fieldByName.set(m.name, m);
-    }
-  }
-  const uniqueFieldModels = [...fieldByName.values()];
+  const uniqueFieldModels = keepLargestByName(deduplicatedFieldModels);
 
   const finalModels = [...allModels, ...uniqueFieldModels];
 
@@ -161,51 +148,29 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
 
 /** Recursively rewrite model references from oldName to newName in a TypeRef tree. */
 function rewriteModelRefs(ref: TypeRef, oldName: string, newName: string): void {
-  switch (ref.kind) {
-    case 'model':
-      if (ref.name === oldName) (ref as { name: string }).name = newName;
-      break;
-    case 'array':
-      rewriteModelRefs(ref.items, oldName, newName);
-      break;
-    case 'nullable':
-      rewriteModelRefs(ref.inner, oldName, newName);
-      break;
-    case 'union':
-      for (const v of ref.variants) rewriteModelRefs(v, oldName, newName);
-      break;
-    case 'map':
-      rewriteModelRefs(ref.valueType, oldName, newName);
-      break;
-    case 'enum':
-    case 'primitive':
-    case 'literal':
-      break;
-  }
+  walkTypeRef(ref, {
+    model: (r) => {
+      if (r.name === oldName) (r as { name: string }).name = newName;
+    },
+  });
 }
 
 function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
-  if (ref.kind === 'enum' && ref.values && !seen.has(ref.name)) {
-    seen.add(ref.name);
-    enums.push({
-      name: ref.name,
-      values: ref.values.map((v) => ({
-        name: toUpperSnakeCase(v),
-        value: v,
-        description: undefined,
-      })),
-    });
-  } else if (ref.kind === 'array') {
-    collectInlineEnumsFromTypeRef(ref.items, enums, seen);
-  } else if (ref.kind === 'nullable') {
-    collectInlineEnumsFromTypeRef(ref.inner, enums, seen);
-  } else if (ref.kind === 'union') {
-    for (const v of ref.variants) {
-      collectInlineEnumsFromTypeRef(v, enums, seen);
-    }
-  } else if (ref.kind === 'map') {
-    collectInlineEnumsFromTypeRef(ref.valueType, enums, seen);
-  }
+  walkTypeRef(ref, {
+    enum: (r) => {
+      if (r.values && !seen.has(r.name)) {
+        seen.add(r.name);
+        enums.push({
+          name: r.name,
+          values: r.values.map((v) => ({
+            name: toUpperSnakeCase(v),
+            value: v,
+            description: undefined,
+          })),
+        });
+      }
+    },
+  });
 }
 
 /**
@@ -218,29 +183,13 @@ function validateModelRefs(spec: ApiSpec): void {
   for (const e of spec.enums) knownNames.add(e.name);
 
   function walkRef(ref: TypeRef, context: string): void {
-    switch (ref.kind) {
-      case 'model':
-        if (!knownNames.has(ref.name)) {
-          console.warn(`[oagen] Warning: Unresolved model reference "${ref.name}" (context: ${context})`);
+    walkTypeRef(ref, {
+      model: (r) => {
+        if (!knownNames.has(r.name)) {
+          console.warn(`[oagen] Warning: Unresolved model reference "${r.name}" (context: ${context})`);
         }
-        break;
-      case 'array':
-        walkRef(ref.items, context);
-        break;
-      case 'nullable':
-        walkRef(ref.inner, context);
-        break;
-      case 'union':
-        for (const v of ref.variants) walkRef(v, context);
-        break;
-      case 'map':
-        walkRef(ref.valueType, context);
-        break;
-      case 'enum':
-      case 'primitive':
-      case 'literal':
-        break;
-    }
+      },
+    });
   }
 
   for (const model of spec.models) {
@@ -258,4 +207,16 @@ function validateModelRefs(spec: ApiSpec): void {
       walkRef(op.response, `${service.name}.${op.name}.response`);
     }
   }
+}
+
+/** Deduplicate models by name, keeping whichever has the most fields. */
+function keepLargestByName(models: Model[]): Model[] {
+  const byName = new Map<string, Model>();
+  for (const m of models) {
+    const existing = byName.get(m.name);
+    if (!existing || m.fields.length > existing.fields.length) {
+      byName.set(m.name, m);
+    }
+  }
+  return [...byName.values()];
 }

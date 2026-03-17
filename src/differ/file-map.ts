@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { assertNever } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import type { Emitter, EmitterContext } from '../engine/types.js';
 import type { Change } from './types.js';
 
@@ -129,35 +129,14 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
   const refs = new Map<string, Set<string>>();
 
   function trackRef(typeRef: TypeRef, serviceName: string) {
-    switch (typeRef.kind) {
-      case 'model':
-        if (!refs.has(typeRef.name)) refs.set(typeRef.name, new Set());
-        refs.get(typeRef.name)!.add(serviceName);
-        break;
-      case 'enum':
-        if (!refs.has(typeRef.name)) refs.set(typeRef.name, new Set());
-        refs.get(typeRef.name)!.add(serviceName);
-        break;
-      case 'array':
-        trackRef(typeRef.items, serviceName);
-        break;
-      case 'nullable':
-        trackRef(typeRef.inner, serviceName);
-        break;
-      case 'union':
-        typeRef.variants.forEach((v) => trackRef(v, serviceName));
-        break;
-      case 'map':
-        trackRef(typeRef.valueType, serviceName);
-        break;
-      case 'literal':
-        break;
-      case 'primitive':
-        break;
-      default:
-        assertNever(typeRef);
-        break;
-    }
+    const addName = (name: string) => {
+      if (!refs.has(name)) refs.set(name, new Set());
+      refs.get(name)!.add(serviceName);
+    };
+    walkTypeRef(typeRef, {
+      model: (r) => addName(r.name),
+      enum: (r) => addName(r.name),
+    });
   }
 
   for (const service of spec.services) {
@@ -174,33 +153,10 @@ function buildReferenceGraph(spec: ApiSpec): Map<string, string[]> {
   const modelDeps = new Map<string, Set<string>>();
 
   function collectDeps(typeRef: TypeRef, deps: Set<string>) {
-    switch (typeRef.kind) {
-      case 'model':
-        deps.add(typeRef.name);
-        break;
-      case 'enum':
-        deps.add(typeRef.name);
-        break;
-      case 'array':
-        collectDeps(typeRef.items, deps);
-        break;
-      case 'nullable':
-        collectDeps(typeRef.inner, deps);
-        break;
-      case 'union':
-        typeRef.variants.forEach((v) => collectDeps(v, deps));
-        break;
-      case 'map':
-        collectDeps(typeRef.valueType, deps);
-        break;
-      case 'literal':
-        break;
-      case 'primitive':
-        break;
-      default:
-        assertNever(typeRef);
-        break;
-    }
+    walkTypeRef(typeRef, {
+      model: (r) => deps.add(r.name),
+      enum: (r) => deps.add(r.name),
+    });
   }
 
   for (const model of spec.models) {

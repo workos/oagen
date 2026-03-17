@@ -146,6 +146,51 @@ export function assertNever(x: never): never {
   throw new Error(`Unexpected TypeRef kind: ${(x as TypeRef).kind}`);
 }
 
+/**
+ * Generic depth-first walker for TypeRef trees.
+ * Handles recursion into array/nullable/union/map children and provides
+ * an exhaustive `assertNever` check so callers don't need to repeat the
+ * switch boilerplate.  Supply callbacks only for the leaf kinds you care about.
+ */
+export function walkTypeRef(
+  ref: TypeRef,
+  visitor: {
+    model?: (ref: ModelRef) => void;
+    enum?: (ref: EnumRef) => void;
+    primitive?: (ref: PrimitiveType) => void;
+    literal?: (ref: LiteralType) => void;
+  },
+): void {
+  switch (ref.kind) {
+    case 'model':
+      visitor.model?.(ref);
+      break;
+    case 'enum':
+      visitor.enum?.(ref);
+      break;
+    case 'array':
+      walkTypeRef(ref.items, visitor);
+      break;
+    case 'nullable':
+      walkTypeRef(ref.inner, visitor);
+      break;
+    case 'union':
+      for (const v of ref.variants) walkTypeRef(v, visitor);
+      break;
+    case 'map':
+      walkTypeRef(ref.valueType, visitor);
+      break;
+    case 'literal':
+      visitor.literal?.(ref);
+      break;
+    case 'primitive':
+      visitor.primitive?.(ref);
+      break;
+    default:
+      assertNever(ref);
+  }
+}
+
 export interface ErrorResponse {
   statusCode: number;
   type?: TypeRef;
