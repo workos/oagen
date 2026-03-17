@@ -11,6 +11,7 @@ export async function diffCommand(opts: {
   output?: string;
   report?: boolean;
   force?: boolean;
+  target?: string;
   apiSurface?: string;
   manifest?: string;
 }): Promise<void> {
@@ -55,6 +56,7 @@ export async function diffCommand(opts: {
     namespace: newSpec.name,
     outputDir: opts.output,
     force: opts.force,
+    target: opts.target,
     apiSurface,
     overlayLookup,
   });

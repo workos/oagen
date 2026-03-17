@@ -28,6 +28,7 @@ Collect these values. Use arguments if provided, otherwise ask:
 
 Optional (Scenario A only):
 
+- **`sdk_path`** — path to the live SDK for target integration
 - **`api-surface`** — path to `sdk-{language}-surface.json` for compat overlay
 
 Check if a previous findings file exists — this indicates a prior loop iteration:
@@ -46,10 +47,10 @@ If findings exist, read them to understand the starting state before running the
 oagen generate --spec {spec} --lang {language} --output {output} --namespace {namespace}
 ```
 
-If Scenario A (compat overlay), include:
+If Scenario A (compat overlay + live SDK integration), include:
 
 ```bash
-oagen generate --spec {spec} --lang {language} --output {output} --namespace {namespace} --api-surface {api-surface}
+oagen generate --spec {spec} --lang {language} --output {output} --namespace {namespace} --api-surface {api-surface} --target {sdk_path}
 ```
 
 ### Step 2: Verify

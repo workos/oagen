@@ -62,9 +62,9 @@ Store as `spec` and pass it to all sub-skill invocations.
 Step 1: /generate-emitter {language} {project} sdk_path={sdk_path}    — study existing SDK, scaffold emitter
 Step 2: /generate-extractor {language} sdk_path={sdk_path}            — scaffold extractor
 Step 3: /verify-compat {language} sdk_path={sdk_path}                 — extract baseline, verify
-Step 4: /generate-smoke-test {language}                               — wire-level HTTP parity tests
-Step 5: /verify-smoke-test {language}                                 — run smoke tests
-Step 6: /integrate {language} sdk_path={sdk_path}                     — integrate into live SDK
+Step 4: /integrate {language} sdk_path={sdk_path}                     — merge into live SDK
+Step 5: /generate-smoke-test {language}                               — test the integrated live SDK
+Step 6: /verify-smoke-test {language}                                 — iterate until clean
 ```
 
 ### Scenario B — Fresh
@@ -74,6 +74,8 @@ Step 1: /generate-emitter {project} {language}    — scaffold emitter
 Step 2: /generate-smoke-test {language}            — wire-level HTTP parity tests
 Step 3: /verify-smoke-test {language}              — run smoke tests
 ```
+
+> **Lifecycle note:** Scenario B is a one-time bootstrap. Once the generated SDK ships, it becomes the live SDK. All future spec updates follow Scenario A — use `--target` to integrate into the live SDK and `--api-surface` to preserve backwards compatibility.
 
 Confirm with the user, then invoke the first skill.
 
@@ -93,11 +95,11 @@ grep -l "hints" {project}/src/compat/extractors/{language}.ts
 
 # After /verify-compat — handled by the skill itself
 
-# After /generate-smoke-test — script exists
-ls {project}/smoke/sdk-{language}.ts
-
 # After /integrate — changes visible in live SDK
 cd {sdk_path} && git diff --stat
+
+# After /generate-smoke-test — script exists
+ls {project}/smoke/sdk-{language}.ts
 ```
 
 **For Scenario A:** After `/generate-emitter`, also verify the design doc references real SDK patterns:
@@ -128,6 +130,7 @@ Skills completed:
   [x] /generate-emitter {language}
   [x] /generate-extractor {language}     (Scenario A only)
   [x] /verify-compat {language}          (Scenario A only)
+  [x] /integrate {language}              (Scenario A only)
   [x] /generate-smoke-test {language}
 
 Validation:

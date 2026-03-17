@@ -19,6 +19,7 @@ export async function generateIncremental(
     outputDir: string;
     dryRun?: boolean;
     force?: boolean;
+    target?: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
   },
@@ -57,6 +58,30 @@ export async function generateIncremental(
       language: emitter.language,
       header,
     });
+
+    // Target integration pass — strip language prefix and write to live SDK
+    if (options.target) {
+      const langPrefix = `${emitter.language}/`;
+      const targetFiles = generated.map((f) => ({
+        ...f,
+        path: f.path.startsWith(langPrefix) ? f.path.replace(langPrefix, '') : f.path,
+      }));
+
+      const targetResult = await writeFiles(targetFiles, options.target, {
+        language: emitter.language,
+        header,
+      });
+
+      if (targetResult.written.length > 0) {
+        console.log(`Target: created ${targetResult.written.length} new files`);
+      }
+      if (targetResult.merged.length > 0) {
+        console.log(`Target: merged into ${targetResult.merged.length} existing files (additive only)`);
+      }
+      if (targetResult.skipped.length > 0) {
+        console.log(`Target: skipped ${targetResult.skipped.length} files (no grammar or skipIfExists)`);
+      }
+    }
 
     if (options.force) {
       for (const filePath of affected.delete) {

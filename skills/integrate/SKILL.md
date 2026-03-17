@@ -1,11 +1,11 @@
 ---
 name: integrate
-description: Integrate generated SDK code into a live SDK by running `oagen generate --target`. Use when the user wants to merge generated code into an existing SDK, integrate emitter output into a live codebase, or run the final step of Scenario A SDK generation.
+description: Integrate generated SDK code into a live SDK by running `oagen generate --target`. Required for every Scenario A generation cycle — initial setup and ongoing spec updates. Use when the user wants to merge generated code into an existing SDK or integrate emitter output into a live codebase.
 ---
 
 # /integrate
 
-Integrate generated SDK code into a live SDK by running `oagen generate --target`.
+Integrate generated SDK code into a live SDK by running `oagen generate --target`. This runs every time code is generated for a live SDK, not just once — both during initial setup and on every subsequent spec update. The writer's additive merge makes it safe to run on every regeneration.
 
 ## Prerequisites
 

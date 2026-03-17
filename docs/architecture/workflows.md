@@ -17,12 +17,18 @@ gets written or fixed.
 1. `/generate-emitter` — scaffold emitter, design doc, tests
 2. `/generate-extractor` — scaffold extractor for API surface extraction
 3. `/verify-compat` — extract baseline, generate with overlay, verify (includes overlay loop)
-4. `/generate-smoke-test` — wire-level HTTP parity tests
+4. `/integrate` — merge generated code into the live SDK
+5. `/generate-smoke-test` — wire-level HTTP parity tests (run against the integrated live SDK)
 
 **Scenario B** (fresh, no compat constraints):
 
 1. `/generate-emitter` — scaffold emitter, design doc, tests
 2. `/generate-smoke-test` — wire-level HTTP parity tests
+
+> **Lifecycle note:** Scenario B is a one-time bootstrap. Once the generated SDK
+> ships, it becomes the live SDK. All future spec updates follow Scenario A —
+> use `--target` to integrate into the live SDK and `--api-surface` to preserve
+> backwards compatibility. Phase 2 is always Scenario A.
 
 ### Overlay loop (Scenario A only, inside /verify-compat)
 
@@ -77,28 +83,27 @@ npm run lint:structure  # dependency layers, naming, file size
 
 ## Phase 2: Spec updates (ongoing)
 
-The emitter is stable. When a new version of the OpenAPI spec arrives,
-regenerate the SDK and verify it.
+The emitter is stable. Phase 2 is always Scenario A — there is always a live
+SDK to integrate into (either a pre-existing one from Scenario A setup, or the
+output of Scenario B's initial generation).
 
 ### Pipeline
 
+Every spec update uses `--target` to merge into the live SDK and `--api-surface`
+to preserve backwards compatibility:
+
 1. **Review changes:** `oagen diff --old v1.yml --new v2.yml --report`
-2. **Regenerate:** `oagen generate --spec v2.yml --lang {lang} --output ./sdk`
-3. **Verify:** `oagen verify --spec v2.yml --lang {lang} --output ./sdk`
+2. **Regenerate:** `oagen generate --spec v2.yml --lang {lang} --output ./sdk --target {sdk_path} --api-surface sdk-{lang}-surface.json`
+3. **Verify:** `oagen verify --spec v2.yml --lang {lang} --output ./sdk --api-surface sdk-{lang}-surface.json`
 4. **Ship** if verify exits 0
 
 **Alternative: incremental generation.** Instead of full `generate`, use
-`diff` in generation mode to only regenerate affected files:
+`diff` in generation mode to only regenerate affected files. This also supports
+`--target` for live SDK integration:
 
 ```bash
-oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk
-oagen verify --spec v2.yml --lang ruby --output ./sdk
-```
-
-For Scenario A (backwards-compat), pass `--api-surface` to preserve the overlay:
-
-```bash
-oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk --api-surface ./sdk/sdk-{language}-surface.json
+oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk --target {sdk_path} --api-surface sdk-{lang}-surface.json
+oagen verify --spec v2.yml --lang ruby --output ./sdk --api-surface sdk-{lang}-surface.json
 ```
 
 **External consumers** configure emitters and extractors via `oagen.config.ts`
