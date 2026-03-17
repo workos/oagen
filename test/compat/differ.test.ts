@@ -567,7 +567,7 @@ describe('specDerivedNames', () => {
               headerParams: [],
               response: { kind: 'model', name: 'Org' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },

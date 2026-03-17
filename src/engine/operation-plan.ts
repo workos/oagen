@@ -16,7 +16,7 @@ export interface OperationPlan {
 export function planOperation(op: Operation): OperationPlan {
   const isDelete = op.httpMethod === 'delete';
   const hasBody = !!op.requestBody;
-  const isIdempotentPost = op.idempotent && op.httpMethod === 'post';
+  const isIdempotentPost = op.injectIdempotencyKey && op.httpMethod === 'post';
   const hasQueryParams = op.queryParams.length > 0;
   const pathParamsInOptions = op.pathParams.length > 1 || (op.pathParams.length > 0 && (hasBody || hasQueryParams));
   const isPaginated = op.pagination !== undefined;

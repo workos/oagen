@@ -435,14 +435,14 @@ describe('parseSpec – operations', () => {
     expect(error400).toBeDefined();
   });
 
-  it('POST sets idempotent flag', () => {
+  it('POST sets injectIdempotencyKey flag', () => {
     const op = findOperation('Widgets', 'createWidget');
-    expect(op!.idempotent).toBe(true);
+    expect(op!.injectIdempotencyKey).toBe(true);
   });
 
-  it('GET does not set idempotent flag', () => {
+  it('GET does not set injectIdempotencyKey flag', () => {
     const op = findOperation('Widgets', 'listWidgets');
-    expect(op!.idempotent).toBe(false);
+    expect(op!.injectIdempotencyKey).toBe(false);
   });
 
   it('DELETE operation extracted', () => {

@@ -59,7 +59,10 @@ export interface OperationExtractionResult {
   inlineModels: Model[];
 }
 
-export function extractOperations(paths: Record<string, PathItem> | undefined): OperationExtractionResult {
+export function extractOperations(
+  paths: Record<string, PathItem> | undefined,
+  operationIdTransform?: (id: string) => string,
+): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
   const serviceMap = new Map<string, Operation[]>();
@@ -73,7 +76,13 @@ export function extractOperations(paths: Record<string, PathItem> | undefined): 
       const op = pathItem[method];
       if (!op) continue;
 
-      const { operation, inlineModels: opModels } = buildOperation(method, path, op, pathLevelParams);
+      const { operation, inlineModels: opModels } = buildOperation(
+        method,
+        path,
+        op,
+        pathLevelParams,
+        operationIdTransform,
+      );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
@@ -105,10 +114,18 @@ function inferServiceName(path: string): string {
   return toPascalCase(first);
 }
 
-function inferOperationName(method: HttpMethod, path: string, operationId?: string): string {
-  // NestJS operationIds follow the pattern: {Resource}Controller_{action}
-  // Extract the action part (after _) which is the actual method name.
+function inferOperationName(
+  method: HttpMethod,
+  path: string,
+  operationId?: string,
+  operationIdTransform?: (id: string) => string,
+): string {
   if (operationId) {
+    if (operationIdTransform) {
+      return operationIdTransform(operationId);
+    }
+    // Default: NestJS operationIds follow the pattern: {Resource}Controller_{action}
+    // Extract the action part (after _) which is the actual method name.
     const stripped = operationId.replace(/Controller/g, '');
     const underscoreIdx = stripped.indexOf('_');
     if (underscoreIdx !== -1) {
@@ -257,6 +274,7 @@ function buildOperation(
   path: string,
   op: OperationObject,
   pathLevelParams: ParameterObject[],
+  operationIdTransform?: (id: string) => string,
 ): { operation: Operation; inlineModels: Model[] } {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
@@ -292,7 +310,7 @@ function buildOperation(
 
   return {
     operation: {
-      name: inferOperationName(method, path, op.operationId),
+      name: inferOperationName(method, path, op.operationId, operationIdTransform),
       description: op.description ?? op.summary,
       httpMethod: method,
       path,
@@ -304,7 +322,7 @@ function buildOperation(
       response,
       errors,
       pagination,
-      idempotent: method === 'post',
+      injectIdempotencyKey: method === 'post',
     },
     inlineModels,
   };

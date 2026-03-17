@@ -40,7 +40,7 @@ export interface Operation {
   response: TypeRef;
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
-  idempotent: boolean;
+  injectIdempotencyKey: boolean;
 }
 
 /** Structured pagination metadata for auto-paging iterator generation */

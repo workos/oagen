@@ -449,7 +449,7 @@ describe('end-to-end pipeline', () => {
         headerParams: [],
         response: { kind: 'model', name: 'WidgetStats' },
         errors: [],
-        idempotent: false,
+        injectIdempotencyKey: false,
       });
     });
 

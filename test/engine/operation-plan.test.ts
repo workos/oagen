@@ -12,7 +12,7 @@ function makeOp(overrides: Partial<Operation> = {}): Operation {
     headerParams: [],
     response: { kind: 'primitive', type: 'string' },
     errors: [],
-    idempotent: false,
+    injectIdempotencyKey: false,
     ...overrides,
   };
 }
@@ -32,7 +32,7 @@ describe('planOperation', () => {
           "errors": [],
           "headerParams": [],
           "httpMethod": "delete",
-          "idempotent": false,
+          "injectIdempotencyKey": false,
           "name": "test",
           "path": "/test",
           "pathParams": [],
@@ -62,7 +62,7 @@ describe('planOperation', () => {
           "errors": [],
           "headerParams": [],
           "httpMethod": "get",
-          "idempotent": false,
+          "injectIdempotencyKey": false,
           "name": "test",
           "path": "/test",
           "pathParams": [],
@@ -78,11 +78,11 @@ describe('planOperation', () => {
     `);
   });
 
-  it('POST with body and idempotent', () => {
+  it('POST with body and injectIdempotencyKey', () => {
     const plan = planOperation(
       makeOp({
         httpMethod: 'post',
-        idempotent: true,
+        injectIdempotencyKey: true,
         requestBody: { kind: 'model', name: 'CreateOrgPayload' },
         response: { kind: 'model', name: 'Organization' },
       }),
@@ -99,7 +99,7 @@ describe('planOperation', () => {
           "errors": [],
           "headerParams": [],
           "httpMethod": "post",
-          "idempotent": true,
+          "injectIdempotencyKey": true,
           "name": "test",
           "path": "/test",
           "pathParams": [],

@@ -40,7 +40,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
     const paginatedChanged = !!oldOp.pagination !== !!newOp.pagination;
-    const idempotentChanged = oldOp.idempotent !== newOp.idempotent;
+    const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
 
@@ -51,16 +51,16 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       httpMethodChanged ||
       pathChanged ||
       paginatedChanged ||
-      idempotentChanged ||
+      injectIdempotencyKeyChanged ||
       errorsChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
       // paginated: true→false is breaking (SDK loses pagination helper)
       const paginatedBreaking = paginatedChanged && !newOp.pagination;
-      // idempotent: false→true is additive (SDK gains idempotency key)
-      // idempotent: true→false is breaking (SDK loses idempotency key)
-      const idempotentBreaking = idempotentChanged && !newOp.idempotent;
+      // injectIdempotencyKey: false→true is additive (SDK gains idempotency key)
+      // injectIdempotencyKey: true→false is breaking (SDK loses idempotency key)
+      const injectIdempotencyKeyBreaking = injectIdempotencyKeyChanged && !newOp.injectIdempotencyKey;
       const errorsBreaking = errorsDiff === 'breaking';
 
       const hasBreaking =
@@ -69,7 +69,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
-        idempotentBreaking ||
+        injectIdempotencyKeyBreaking ||
         errorsBreaking ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
@@ -82,7 +82,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         httpMethodChanged,
         pathChanged,
         paginatedChanged,
-        idempotentChanged,
+        injectIdempotencyKeyChanged,
         errorsChanged,
         classification: hasBreaking ? 'breaking' : 'additive',
       });

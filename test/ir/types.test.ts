@@ -143,7 +143,7 @@ describe('IR types', () => {
                 dataPath: 'data',
                 itemType: { kind: 'model', name: 'User' },
               } as PaginationMeta,
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },

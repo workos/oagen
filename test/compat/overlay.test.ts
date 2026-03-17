@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { buildOverlayLookup, patchOverlay } from '../../src/compat/overlay.js';
 import type { ManifestEntry } from '../../src/compat/overlay.js';
 import type { ApiSurface, Violation } from '../../src/compat/types.js';
@@ -225,7 +225,7 @@ describe('buildOverlayLookup', () => {
               headerParams: [],
               response: { kind: 'model', name: 'ControllerOrgResponse' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },
@@ -451,7 +451,7 @@ describe('buildOverlayLookup', () => {
               headerParams: [],
               response: { kind: 'model', name: 'ControllerOrgResponse' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },
@@ -757,6 +757,45 @@ describe('patchOverlay', () => {
     expect(overlay.interfaceByName.get('User')).toBe('User');
   });
 
+  it('warns about missing manifest when method-level violations hit empty httpKeyByMethod', () => {
+    const baseline = emptySurface({
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {
+            listUsers: [
+              {
+                name: 'listUsers',
+                params: [],
+                returnType: 'Promise<User[]>',
+                async: true,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+
+    const overlay = buildOverlayLookup(emptySurface());
+    const violations: Violation[] = [
+      {
+        category: 'public-api',
+        severity: 'breaking',
+        symbolPath: 'Users.listUsers',
+        baseline: 'listUsers',
+        candidate: '(missing)',
+        message: 'Method "Users.listUsers" missing',
+      },
+    ];
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    patchOverlay(overlay, violations, baseline);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No smoke-manifest.json available'));
+    warnSpy.mockRestore();
+  });
+
   it('gracefully handles method violation when no manifest (no httpKeyByMethod)', () => {
     const baseline = emptySurface({
       classes: {
@@ -793,7 +832,9 @@ describe('patchOverlay', () => {
       },
     ];
 
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const patched = patchOverlay(overlay, violations, baseline);
+    warnSpy.mockRestore();
     // Should not crash, and should not add a method mapping (no HTTP key available)
     expect(patched.methodByOperation.size).toBe(0);
   });

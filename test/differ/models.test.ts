@@ -109,6 +109,61 @@ describe('diffModels', () => {
       });
     }
   });
+
+  it('detects readOnly undefined→true as breaking', () => {
+    const old: Model = {
+      name: 'User',
+      fields: [{ name: 'email', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    const modified: Model = {
+      name: 'User',
+      fields: [{ name: 'email', type: { kind: 'primitive', type: 'string' }, required: true, readOnly: true }],
+    };
+    const changes = diffModels([old], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'model-modified') {
+      expect(changes[0].fieldChanges).toHaveLength(1);
+      expect(changes[0].fieldChanges[0]).toMatchObject({
+        kind: 'field-access-changed',
+        fieldName: 'email',
+        classification: 'breaking',
+      });
+    }
+  });
+
+  it('detects writeOnly true→undefined as breaking', () => {
+    const old: Model = {
+      name: 'User',
+      fields: [{ name: 'password', type: { kind: 'primitive', type: 'string' }, required: true, writeOnly: true }],
+    };
+    const modified: Model = {
+      name: 'User',
+      fields: [{ name: 'password', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    const changes = diffModels([old], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'model-modified') {
+      expect(changes[0].fieldChanges).toHaveLength(1);
+      expect(changes[0].fieldChanges[0]).toMatchObject({
+        kind: 'field-access-changed',
+        fieldName: 'password',
+        classification: 'breaking',
+      });
+    }
+  });
+
+  it('no access change when readOnly/writeOnly unchanged', () => {
+    const old: Model = {
+      name: 'User',
+      fields: [{ name: 'email', type: { kind: 'primitive', type: 'string' }, required: true, readOnly: true }],
+    };
+    const same: Model = {
+      name: 'User',
+      fields: [{ name: 'email', type: { kind: 'primitive', type: 'string' }, required: true, readOnly: true }],
+    };
+    const changes = diffModels([old], [same]);
+    expect(changes).toHaveLength(0);
+  });
 });
 
 describe('typeRefsEqual', () => {

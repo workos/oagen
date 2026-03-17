@@ -15,7 +15,7 @@ const listUsers: Operation = {
   response: { kind: 'array', items: { kind: 'model', name: 'User' } },
   errors: [],
   pagination: { cursorParam: 'cursor', dataPath: 'data', itemType: { kind: 'model', name: 'User' } },
-  idempotent: false,
+  injectIdempotencyKey: false,
 };
 
 const getUser: Operation = {
@@ -27,7 +27,7 @@ const getUser: Operation = {
   headerParams: [],
   response: { kind: 'model', name: 'User' },
   errors: [],
-  idempotent: false,
+  injectIdempotencyKey: false,
 };
 
 describe('diffOperations', () => {
@@ -237,23 +237,23 @@ describe('diffOperations', () => {
     }
   });
 
-  it('detects idempotent true→false as breaking', () => {
-    const idempotentOp: Operation = { ...getUser, idempotent: true };
-    const modified: Operation = { ...getUser, idempotent: false };
+  it('detects injectIdempotencyKey true→false as breaking', () => {
+    const idempotentOp: Operation = { ...getUser, injectIdempotencyKey: true };
+    const modified: Operation = { ...getUser, injectIdempotencyKey: false };
     const changes = diffOperations('Users', [idempotentOp], [modified]);
     expect(changes).toHaveLength(1);
     if (changes[0].kind === 'operation-modified') {
-      expect(changes[0].idempotentChanged).toBe(true);
+      expect(changes[0].injectIdempotencyKeyChanged).toBe(true);
       expect(changes[0].classification).toBe('breaking');
     }
   });
 
-  it('detects idempotent false→true as additive', () => {
-    const modified: Operation = { ...getUser, idempotent: true };
+  it('detects injectIdempotencyKey false→true as additive', () => {
+    const modified: Operation = { ...getUser, injectIdempotencyKey: true };
     const changes = diffOperations('Users', [getUser], [modified]);
     expect(changes).toHaveLength(1);
     if (changes[0].kind === 'operation-modified') {
-      expect(changes[0].idempotentChanged).toBe(true);
+      expect(changes[0].injectIdempotencyKeyChanged).toBe(true);
       expect(changes[0].classification).toBe('additive');
     }
   });

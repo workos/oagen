@@ -76,7 +76,7 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('createUser');
-    expect(services[0].operations[0].idempotent).toBe(true);
+    expect(services[0].operations[0].injectIdempotencyKey).toBe(true);
     expect(services[0].operations[0].requestBody).toBeDefined();
   });
 
@@ -328,5 +328,47 @@ describe('extractOperations', () => {
     const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.requestBodyEncoding).toBe('binary');
+  });
+
+  it('default behavior strips NestJS Controller prefix and underscore action', () => {
+    const paths = {
+      '/foo': {
+        get: {
+          operationId: 'FooController_bar',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].name).toBe('bar');
+  });
+
+  it('custom operationIdTransform replaces default NestJS logic', () => {
+    const paths = {
+      '/foo': {
+        get: {
+          operationId: 'FooController_bar',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths, (id) => id.toLowerCase());
+    expect(services[0].operations[0].name).toBe('foocontroller_bar');
+  });
+
+  it('identity operationIdTransform passes raw operationId through unchanged', () => {
+    const paths = {
+      '/foo': {
+        get: {
+          operationId: 'FooController_bar',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths, (id) => id);
+    expect(services[0].operations[0].name).toBe('FooController_bar');
   });
 });

@@ -44,7 +44,7 @@ export interface ModelModified {
 }
 
 export interface FieldChange {
-  kind: 'field-added' | 'field-removed' | 'field-type-changed' | 'field-required-changed';
+  kind: 'field-added' | 'field-removed' | 'field-type-changed' | 'field-required-changed' | 'field-access-changed';
   fieldName: string;
   classification: 'additive' | 'breaking';
   details?: string;
@@ -112,7 +112,7 @@ export interface OperationModified {
   httpMethodChanged: boolean;
   pathChanged: boolean;
   paginatedChanged: boolean;
-  idempotentChanged: boolean;
+  injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
   classification: 'additive' | 'breaking';
 }

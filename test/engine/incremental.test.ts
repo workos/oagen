@@ -54,7 +54,7 @@ const v1: ApiSpec = {
           headerParams: [],
           response: { kind: 'model', name: 'User' },
           errors: [],
-          idempotent: false,
+          injectIdempotencyKey: false,
         },
       ],
     },
