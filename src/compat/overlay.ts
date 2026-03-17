@@ -92,17 +92,13 @@ export function buildOverlayLookup(
   }
 
   // Populate fileBySymbol from enriched surface
-  for (const [name, cls] of Object.entries(surface.classes)) {
-    if (cls.sourceFile) lookup.fileBySymbol.set(name, cls.sourceFile);
-  }
-  for (const [name, iface] of Object.entries(surface.interfaces)) {
-    if (iface.sourceFile) lookup.fileBySymbol.set(name, iface.sourceFile);
-  }
-  for (const [name, alias] of Object.entries(surface.typeAliases)) {
-    if (alias.sourceFile) lookup.fileBySymbol.set(name, alias.sourceFile);
-  }
-  for (const [name, en] of Object.entries(surface.enums)) {
-    if (en.sourceFile) lookup.fileBySymbol.set(name, en.sourceFile);
+  for (const record of [surface.classes, surface.interfaces, surface.typeAliases, surface.enums] as Record<
+    string,
+    { sourceFile?: string }
+  >[]) {
+    for (const [name, item] of Object.entries(record)) {
+      if (item.sourceFile) lookup.fileBySymbol.set(name, item.sourceFile);
+    }
   }
 
   // Auto-infer IR model name → SDK interface name mappings
