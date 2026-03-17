@@ -43,6 +43,7 @@ npx tsx src/cli/index.ts generate \
 ```
 
 Present the output to the user. The dry-run shows:
+
 - Files that would be written to the output directory
 - Files that would be written/merged/skipped in the target directory
 

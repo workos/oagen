@@ -52,10 +52,7 @@ describe('writeFiles', () => {
       // Pre-populate with an existing file
       await fs.writeFile(path.join(tmpDir, 'existing.rb'), 'class Existing; end');
 
-      const result = await writeFiles(
-        [{ path: 'new_file.rb', content: 'class NewFile; end' }],
-        tmpDir,
-      );
+      const result = await writeFiles([{ path: 'new_file.rb', content: 'class NewFile; end' }], tmpDir);
 
       expect(result.written).toContain('new_file.rb');
       const content = await fs.readFile(path.join(tmpDir, 'new_file.rb'), 'utf-8');
@@ -73,10 +70,7 @@ describe('writeFiles', () => {
     try {
       await fs.writeFile(path.join(tmpDir, 'keep_me.rb'), 'original content');
 
-      const result = await writeFiles(
-        [{ path: 'keep_me.rb', content: 'new content', skipIfExists: true }],
-        tmpDir,
-      );
+      const result = await writeFiles([{ path: 'keep_me.rb', content: 'new content', skipIfExists: true }], tmpDir);
 
       expect(result.skipped).toContain('keep_me.rb');
       const content = await fs.readFile(path.join(tmpDir, 'keep_me.rb'), 'utf-8');
@@ -91,10 +85,7 @@ describe('writeFiles', () => {
     try {
       await fs.writeFile(path.join(tmpDir, 'same.rb'), 'class Same; end');
 
-      const result = await writeFiles(
-        [{ path: 'same.rb', content: 'class Same; end' }],
-        tmpDir,
-      );
+      const result = await writeFiles([{ path: 'same.rb', content: 'class Same; end' }], tmpDir);
 
       expect(result.identical).toContain('same.rb');
     } finally {

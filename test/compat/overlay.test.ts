@@ -136,7 +136,13 @@ describe('buildOverlayLookup', () => {
   it('populates fileBySymbol from enriched surface', () => {
     const surface = emptySurface({
       classes: {
-        SampleClient: { name: 'SampleClient', sourceFile: 'src/client.ts', methods: {}, properties: {}, constructorParams: [] },
+        SampleClient: {
+          name: 'SampleClient',
+          sourceFile: 'src/client.ts',
+          methods: {},
+          properties: {},
+          constructorParams: [],
+        },
       },
       interfaces: {
         Organization: { name: 'Organization', sourceFile: 'src/models.ts', fields: {}, extends: [] },
