@@ -58,7 +58,18 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     }
     return false;
   });
-  const allModels = [...models, ...deduplicatedInlineModels];
+  // Deduplicate inline models against each other — when multiple responses produce
+  // models with the same name, keep the one with the most fields (most complete).
+  const inlineByName = new Map<string, (typeof deduplicatedInlineModels)[0]>();
+  for (const m of deduplicatedInlineModels) {
+    const existing = inlineByName.get(m.name);
+    if (!existing || m.fields.length > existing.fields.length) {
+      inlineByName.set(m.name, m);
+    }
+  }
+  const uniqueInlineModels = [...inlineByName.values()];
+
+  const allModels = [...models, ...uniqueInlineModels];
 
   // Merge FooJson models into Foo when FooJson is a superset of Foo.
   // Component schemas sometimes split request DTOs (Foo) from response schemas (FooJson).
@@ -113,7 +124,17 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     }
     return false;
   });
-  const finalModels = [...allModels, ...deduplicatedFieldModels];
+  // Deduplicate field-extracted models against each other
+  const fieldByName = new Map<string, (typeof deduplicatedFieldModels)[0]>();
+  for (const m of deduplicatedFieldModels) {
+    const existing = fieldByName.get(m.name);
+    if (!existing || m.fields.length > existing.fields.length) {
+      fieldByName.set(m.name, m);
+    }
+  }
+  const uniqueFieldModels = [...fieldByName.values()];
+
+  const finalModels = [...allModels, ...uniqueFieldModels];
 
   // Collect inline enums from all models (including inline models from responses)
   const enumNames = new Set(enums.map((e) => e.name));
