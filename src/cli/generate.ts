@@ -7,6 +7,7 @@ export async function generateCommand(opts: {
   spec: string;
   lang: string;
   output: string;
+  target?: string;
   namespace?: string;
   dryRun?: boolean;
   apiSurface?: string;
@@ -36,6 +37,7 @@ export async function generateCommand(opts: {
     namespace,
     dryRun: opts.dryRun,
     outputDir: opts.output,
+    target: opts.target,
     apiSurface,
     overlayLookup,
   });
@@ -46,5 +48,8 @@ export async function generateCommand(opts: {
     }
   } else {
     console.log(`Generated ${files.length} files in ${opts.output}`);
+    if (opts.target) {
+      console.log(`Integrated into ${opts.target}`);
+    }
   }
 }

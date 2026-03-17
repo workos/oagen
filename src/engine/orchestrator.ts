@@ -12,6 +12,7 @@ export async function generate(
     namespace: string;
     dryRun?: boolean;
     outputDir: string;
+    target?: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
   },
@@ -48,6 +49,12 @@ export async function generate(
   }));
 
   if (options.dryRun) {
+    if (options.target) {
+      console.log(`\nTarget integration (${options.target}):`);
+      for (const f of withHeaders) {
+        console.log(`  ${f.path.replace(langPrefix, '')}`);
+      }
+    }
     return withHeaders;
   }
 
@@ -58,6 +65,29 @@ export async function generate(
 
   if (writeResult.merged.length > 0) {
     console.log(`Merged into ${writeResult.merged.length} existing files (additive only)`);
+  }
+
+  // Target integration pass
+  if (options.target) {
+    const targetFiles = withHeaders.map((f) => ({
+      ...f,
+      path: f.path.replace(langPrefix, ''),
+    }));
+
+    const targetResult = await writeFiles(targetFiles, options.target, {
+      language: emitter.language,
+      header,
+    });
+
+    if (targetResult.written.length > 0) {
+      console.log(`Target: created ${targetResult.written.length} new files`);
+    }
+    if (targetResult.merged.length > 0) {
+      console.log(`Target: merged into ${targetResult.merged.length} existing files (additive only)`);
+    }
+    if (targetResult.skipped.length > 0) {
+      console.log(`Target: skipped ${targetResult.skipped.length} files (no grammar or skipIfExists)`);
+    }
   }
 
   return withHeaders;

@@ -64,6 +64,7 @@ Step 2: /generate-extractor {language} sdk_path={sdk_path}            — scaffo
 Step 3: /verify-compat {language} sdk_path={sdk_path}                 — extract baseline, verify
 Step 4: /generate-smoke-test {language}                               — wire-level HTTP parity tests
 Step 5: /verify-smoke-test {language}                                 — run smoke tests
+Step 6: /integrate {language} sdk_path={sdk_path}                     — integrate into live SDK
 ```
 
 ### Scenario B — Fresh
@@ -94,6 +95,9 @@ grep -l "hints" {project}/src/compat/extractors/{language}.ts
 
 # After /generate-smoke-test — script exists
 ls {project}/smoke/sdk-{language}.ts
+
+# After /integrate — changes visible in live SDK
+cd {sdk_path} && git diff --stat
 ```
 
 **For Scenario A:** After `/generate-emitter`, also verify the design doc references real SDK patterns:

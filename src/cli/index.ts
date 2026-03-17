@@ -48,6 +48,7 @@ program
   .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
   .requiredOption('--lang <language>', 'Target language')
   .requiredOption('--output <dir>', 'Output directory')
+  .option('--target <dir>', 'Target directory for live SDK integration (merged output)')
   .option('--namespace <name>', 'SDK namespace/package name')
   .option('--dry-run', 'Preview files without writing')
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')

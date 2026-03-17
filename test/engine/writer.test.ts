@@ -45,4 +45,79 @@ describe('writeFiles', () => {
       await fs.rm(tmpDir, { recursive: true });
     }
   });
+
+  it('creates new files in a pre-populated directory', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      // Pre-populate with an existing file
+      await fs.writeFile(path.join(tmpDir, 'existing.rb'), 'class Existing; end');
+
+      const result = await writeFiles(
+        [{ path: 'new_file.rb', content: 'class NewFile; end' }],
+        tmpDir,
+      );
+
+      expect(result.written).toContain('new_file.rb');
+      const content = await fs.readFile(path.join(tmpDir, 'new_file.rb'), 'utf-8');
+      expect(content).toBe('class NewFile; end');
+      // Existing file should be untouched
+      const existing = await fs.readFile(path.join(tmpDir, 'existing.rb'), 'utf-8');
+      expect(existing).toBe('class Existing; end');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('skips files with skipIfExists when file already exists', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      await fs.writeFile(path.join(tmpDir, 'keep_me.rb'), 'original content');
+
+      const result = await writeFiles(
+        [{ path: 'keep_me.rb', content: 'new content', skipIfExists: true }],
+        tmpDir,
+      );
+
+      expect(result.skipped).toContain('keep_me.rb');
+      const content = await fs.readFile(path.join(tmpDir, 'keep_me.rb'), 'utf-8');
+      expect(content).toBe('original content');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('reports identical files when content matches', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      await fs.writeFile(path.join(tmpDir, 'same.rb'), 'class Same; end');
+
+      const result = await writeFiles(
+        [{ path: 'same.rb', content: 'class Same; end' }],
+        tmpDir,
+      );
+
+      expect(result.identical).toContain('same.rb');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('running write twice produces identical results (idempotent)', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const files = [
+        { path: 'lib/models/user.rb', content: 'class User; end' },
+        { path: 'lib/client.rb', content: 'class Client; end' },
+      ];
+
+      const result1 = await writeFiles(files, tmpDir);
+      expect(result1.written).toHaveLength(2);
+
+      const result2 = await writeFiles(files, tmpDir);
+      expect(result2.written).toHaveLength(0);
+      expect(result2.identical).toHaveLength(2);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
 });

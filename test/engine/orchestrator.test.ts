@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { generate } from '../../src/engine/orchestrator.js';
 import type { Emitter, EmitterContext } from '../../src/engine/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
@@ -108,5 +111,80 @@ describe('generate', () => {
     });
 
     expect(files.length).toBeGreaterThan(0);
+  });
+
+  it('writes to both outputDir and target when target is set', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-out-'));
+    const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-target-'));
+    try {
+      await generate(minimalSpec, mockEmitter(), {
+        namespace: 'test',
+        outputDir,
+        target: targetDir,
+      });
+
+      // Output dir should have language-prefixed files
+      const outputFile = await fs.readFile(path.join(outputDir, 'mock/client.rb'), 'utf-8');
+      expect(outputFile).toMatch(/^# Auto-generated/);
+
+      // Target dir should have files without language prefix
+      const targetFile = await fs.readFile(path.join(targetDir, 'client.rb'), 'utf-8');
+      expect(targetFile).toMatch(/^# Auto-generated/);
+    } finally {
+      await fs.rm(outputDir, { recursive: true });
+      await fs.rm(targetDir, { recursive: true });
+    }
+  });
+
+  it('strips language prefix from target file paths', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-out-'));
+    const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-target-'));
+    try {
+      await generate(minimalSpec, mockEmitter(), {
+        namespace: 'test',
+        outputDir,
+        target: targetDir,
+      });
+
+      // Target should NOT have mock/ prefix
+      const entries = await fs.readdir(targetDir, { recursive: true });
+      const paths = entries.map(String);
+      expect(paths).not.toContain('mock');
+      expect(paths).toContain('client.rb');
+    } finally {
+      await fs.rm(outputDir, { recursive: true });
+      await fs.rm(targetDir, { recursive: true });
+    }
+  });
+
+  it('dry run with target does not write to target', async () => {
+    const targetDir = path.join(os.tmpdir(), 'oagen-target-dryrun-should-not-exist');
+    const files = await generate(minimalSpec, mockEmitter(), {
+      namespace: 'test',
+      dryRun: true,
+      outputDir: '/tmp/nonexistent',
+      target: targetDir,
+    });
+
+    expect(files.length).toBeGreaterThan(0);
+    // Target directory should not exist
+    await expect(fs.access(targetDir)).rejects.toThrow();
+  });
+
+  it('without target behaves exactly as before', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-out-'));
+    try {
+      const files = await generate(minimalSpec, mockEmitter(), {
+        namespace: 'test',
+        outputDir,
+      });
+
+      expect(files).toHaveLength(8);
+      // Only output dir should have files
+      const outputFile = await fs.readFile(path.join(outputDir, 'mock/client.rb'), 'utf-8');
+      expect(outputFile).toMatch(/^# Auto-generated/);
+    } finally {
+      await fs.rm(outputDir, { recursive: true });
+    }
   });
 });
