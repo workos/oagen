@@ -1,40 +1,34 @@
 import type { LanguageHints } from './types.js';
 
+/** Split a pipe-delimited union string into trimmed, non-empty members. */
+function parseUnionMembers(s: string): string[] {
+  return s
+    .split('|')
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
 /**
  * Node/TypeScript language hints — reference implementation.
  * Extracted from the hardcoded logic previously in differ.ts and overlay.ts.
  */
 export const nodeHints: LanguageHints = {
   stripNullable(type: string): string | null {
-    const stripped = type
-      .split('|')
-      .map((p) => p.trim())
-      .filter((p) => p !== 'null');
-    if (stripped.length === type.split('|').map((p) => p.trim()).filter(Boolean).length) {
+    const members = parseUnionMembers(type);
+    const stripped = members.filter((p) => p !== 'null');
+    if (stripped.length === members.length) {
       return null; // no null member found
     }
     return stripped.join(' | ');
   },
 
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const stripNull = (s: string) =>
-      s
-        .split('|')
-        .map((p) => p.trim())
-        .filter((p) => p !== 'null')
-        .join(' | ');
-    return stripNull(a) === stripNull(b);
+    return (nodeHints.stripNullable(a) ?? a) === (nodeHints.stripNullable(b) ?? b);
   },
 
   isUnionReorder(a: string, b: string): boolean {
-    const parseMembers = (s: string) =>
-      s
-        .split('|')
-        .map((p) => p.trim())
-        .filter(Boolean)
-        .sort();
-    const membersA = parseMembers(a);
-    const membersB = parseMembers(b);
+    const membersA = parseUnionMembers(a).sort();
+    const membersB = parseUnionMembers(b).sort();
     if (membersA.length !== membersB.length || membersA.length < 2) return false;
     return membersA.every((m, i) => m === membersB[i]);
   },
