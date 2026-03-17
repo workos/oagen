@@ -1,8 +1,7 @@
-import type { ApiSpec, Enum, Model, TypeRef } from '../ir/types.js';
+import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
-import { toUpperSnakeCase } from '../utils/naming.js';
 import { loadAndBundleSpec } from './refs.js';
-import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
+import { extractSchemas, extractInlineModelsFromSchemas, collectInlineEnumFromRef } from './schemas.js';
 import { extractOperations } from './operations.js';
 
 export async function parseSpec(specPath: string): Promise<ApiSpec> {
@@ -127,7 +126,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
   const enumNames = new Set(enums.map((e) => e.name));
   for (const model of finalModels) {
     for (const field of model.fields) {
-      collectInlineEnumsFromTypeRef(field.type, enums, enumNames);
+      collectInlineEnumFromRef(field.type, enums, enumNames);
     }
   }
 
@@ -151,24 +150,6 @@ function rewriteModelRefs(ref: TypeRef, oldName: string, newName: string): void 
   walkTypeRef(ref, {
     model: (r) => {
       if (r.name === oldName) (r as { name: string }).name = newName;
-    },
-  });
-}
-
-function collectInlineEnumsFromTypeRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
-  walkTypeRef(ref, {
-    enum: (r) => {
-      if (r.values && !seen.has(r.name)) {
-        seen.add(r.name);
-        enums.push({
-          name: r.name,
-          values: r.values.map((v) => ({
-            name: toUpperSnakeCase(v),
-            value: v,
-            description: undefined,
-          })),
-        });
-      }
     },
   });
 }

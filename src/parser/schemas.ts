@@ -50,27 +50,35 @@ export function extractSchemas(schemas: Record<string, any> | undefined): Extrac
 }
 
 /**
+ * Walk a single TypeRef and extract inline enum refs as top-level enum definitions.
+ * Shared by both schemas.ts (field-level) and parse.ts (model-level) collection passes.
+ */
+export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
+  walkTypeRef(ref, {
+    enum: (r) => {
+      if (r.values && !seen.has(r.name)) {
+        seen.add(r.name);
+        enums.push({
+          name: r.name,
+          values: r.values.map((v) => ({
+            name: toUpperSnakeCase(v),
+            value: v,
+            description: undefined,
+          })),
+        });
+      }
+    },
+  });
+}
+
+/**
  * Walk model fields and extract inline enum refs as top-level enum definitions.
  * This ensures type alias files are generated for inline enums.
  */
 function collectInlineEnums(fields: Field[], enums: Enum[]): void {
   const seen = new Set(enums.map((e) => e.name));
   for (const field of fields) {
-    walkTypeRef(field.type, {
-      enum: (ref) => {
-        if (ref.values && !seen.has(ref.name)) {
-          seen.add(ref.name);
-          enums.push({
-            name: ref.name,
-            values: ref.values.map((v) => ({
-              name: toUpperSnakeCase(v),
-              value: v,
-              description: undefined,
-            })),
-          });
-        }
-      },
-    });
+    collectInlineEnumFromRef(field.type, enums, seen);
   }
 }
 
