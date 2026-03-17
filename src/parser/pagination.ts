@@ -1,24 +1,28 @@
-import type { TypeRef, Parameter } from '../ir/types.js';
+import type { TypeRef, Parameter, PaginationMeta } from '../ir/types.js';
+
+const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before'];
 
 /**
- * Detect if an operation uses cursor-based pagination.
+ * Detect if an operation uses cursor-based pagination and return
+ * structured metadata for auto-paging iterator generation.
  *
  * Heuristics:
- * 1. Response contains a `data` array field
- * 2. Query params include a cursor-like parameter (cursor, after, before, starting_after)
+ * 1. Query params include a cursor-like parameter (cursor, after, before, starting_after, ending_before)
+ * 2. Response TypeRef is walked to infer the item type
  *
- * OR:
- * 1. Response has a wrapper object with list_metadata / next_cursor field
+ * Returns null if no cursor param is found.
  */
-export function detectPagination(response: TypeRef, queryParams: Parameter[]): boolean {
-  const hasCursorParam = queryParams.some((p) =>
-    ['cursor', 'after', 'before', 'starting_after', 'ending_before'].includes(p.name),
-  );
+export function detectPagination(response: TypeRef, queryParams: Parameter[]): PaginationMeta | null {
+  const cursorParam = queryParams.find((p) => CURSOR_PARAMS.includes(p.name));
 
-  if (!hasCursorParam) return false;
+  if (!cursorParam) return null;
 
-  // Response is a model/object that likely wraps a list
-  // In a dereferenced spec, the response will be inlined — check if it looks like a list wrapper
-  // For now, having a cursor param is a strong enough signal
-  return true;
+  // Infer item type from the response TypeRef
+  const itemType: TypeRef = response.kind === 'array' ? response.items : response;
+
+  return {
+    cursorParam: cursorParam.name,
+    dataPath: 'data',
+    itemType,
+  };
 }

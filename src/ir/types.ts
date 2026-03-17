@@ -1,5 +1,11 @@
 /** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
-export const IR_VERSION = 4;
+export const IR_VERSION = 5;
+
+/** Authentication scheme extracted from OpenAPI securitySchemes */
+export type AuthScheme =
+  | { kind: 'bearer' }
+  | { kind: 'apiKey'; in: 'header' | 'query'; name: string }
+  | { kind: 'oauth2'; flows: Record<string, unknown> };
 
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
@@ -10,6 +16,7 @@ export interface ApiSpec {
   services: Service[];
   models: Model[];
   enums: Enum[];
+  auth?: AuthScheme[];
 }
 
 /** A service groups related operations (maps to an SDK resource class) */
@@ -29,10 +36,18 @@ export interface Operation {
   queryParams: Parameter[];
   headerParams: Parameter[];
   requestBody?: TypeRef;
+  requestBodyEncoding?: 'json' | 'form-data' | 'binary' | 'text';
   response: TypeRef;
   errors: ErrorResponse[];
-  paginated: boolean;
+  pagination?: PaginationMeta;
   idempotent: boolean;
+}
+
+/** Structured pagination metadata for auto-paging iterator generation */
+export interface PaginationMeta {
+  cursorParam: string;
+  dataPath: string;
+  itemType: TypeRef;
 }
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
@@ -115,6 +130,8 @@ export interface Field {
   type: TypeRef;
   required: boolean;
   description?: string;
+  readOnly?: boolean;
+  writeOnly?: boolean;
 }
 
 /** Enum definition */
@@ -194,6 +211,50 @@ export function walkTypeRef(
       break;
     default:
       assertNever(ref);
+  }
+}
+
+/**
+ * Generic depth-first mapper for TypeRef trees.
+ * Like walkTypeRef but returns a transformed value instead of void.
+ * Handles recursion into array/nullable/union/map children, passing
+ * already-mapped child values to the parent callback.
+ */
+export function mapTypeRef<T>(
+  ref: TypeRef,
+  mapper: {
+    primitive: (ref: PrimitiveType) => T;
+    array: (ref: ArrayType, mappedItems: T) => T;
+    model: (ref: ModelRef) => T;
+    enum: (ref: EnumRef) => T;
+    union: (ref: UnionType, mappedVariants: T[]) => T;
+    nullable: (ref: NullableType, mappedInner: T) => T;
+    literal: (ref: LiteralType) => T;
+    map: (ref: MapType, mappedValue: T) => T;
+  },
+): T {
+  switch (ref.kind) {
+    case 'primitive':
+      return mapper.primitive(ref);
+    case 'array':
+      return mapper.array(ref, mapTypeRef(ref.items, mapper));
+    case 'model':
+      return mapper.model(ref);
+    case 'enum':
+      return mapper.enum(ref);
+    case 'union':
+      return mapper.union(
+        ref,
+        ref.variants.map((v) => mapTypeRef(v, mapper)),
+      );
+    case 'nullable':
+      return mapper.nullable(ref, mapTypeRef(ref.inner, mapper));
+    case 'literal':
+      return mapper.literal(ref);
+    case 'map':
+      return mapper.map(ref, mapTypeRef(ref.valueType, mapper));
+    default:
+      return assertNever(ref);
   }
 }
 

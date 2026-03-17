@@ -119,6 +119,37 @@ describe('extractSchemas', () => {
     expect(models).toHaveLength(0);
     expect(enums).toHaveLength(0);
   });
+
+  it('extracts readOnly and writeOnly field annotations', () => {
+    const result = extractSchemas({
+      MyModel: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', readOnly: true },
+          password: { type: 'string', writeOnly: true },
+          name: { type: 'string' },
+        },
+      },
+    });
+
+    expect(result.models).toHaveLength(1);
+    const fields = result.models[0].fields;
+
+    const idField = fields.find((f) => f.name === 'id');
+    expect(idField).toBeDefined();
+    expect(idField!.readOnly).toBe(true);
+    expect(idField!.writeOnly).toBeUndefined();
+
+    const passwordField = fields.find((f) => f.name === 'password');
+    expect(passwordField).toBeDefined();
+    expect(passwordField!.readOnly).toBeUndefined();
+    expect(passwordField!.writeOnly).toBe(true);
+
+    const nameField = fields.find((f) => f.name === 'name');
+    expect(nameField).toBeDefined();
+    expect(nameField!.readOnly).toBeUndefined();
+    expect(nameField!.writeOnly).toBeUndefined();
+  });
 });
 
 describe('schemaToTypeRef', () => {

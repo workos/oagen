@@ -16,7 +16,7 @@ describe('nodeExtractor', () => {
 
   it('extracts method params and return types', async () => {
     const surface = await nodeExtractor.extract(fixturePath);
-    const getOrg = surface.classes.SampleClient.methods.getOrganization;
+    const getOrg = surface.classes.SampleClient.methods.getOrganization[0];
     expect(getOrg.params).toHaveLength(1);
     expect(getOrg.params[0]).toMatchObject({ name: 'id', type: 'string', optional: false });
     expect(getOrg.returnType).toBe('Promise<Organization>');
@@ -25,7 +25,7 @@ describe('nodeExtractor', () => {
 
   it('extracts optional params', async () => {
     const surface = await nodeExtractor.extract(fixturePath);
-    const listOrgs = surface.classes.SampleClient.methods.listOrganizations;
+    const listOrgs = surface.classes.SampleClient.methods.listOrganizations[0];
     expect(listOrgs.params).toHaveLength(1);
     expect(listOrgs.params[0]).toMatchObject({ name: 'limit', optional: true });
   });
@@ -82,7 +82,7 @@ describe('nodeExtractor', () => {
 
   it('stringifies generic types correctly', async () => {
     const surface = await nodeExtractor.extract(fixturePath);
-    const listOrgs = surface.classes.SampleClient.methods.listOrganizations;
+    const listOrgs = surface.classes.SampleClient.methods.listOrganizations[0];
     expect(listOrgs.returnType).toBe('Promise<ListResponse<Organization>>');
   });
 

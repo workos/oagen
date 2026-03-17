@@ -25,12 +25,14 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            get: {
-              name: 'get',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'Promise<Organization>',
-              async: true,
-            },
+            get: [
+              {
+                name: 'get',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -71,7 +73,7 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            list: { name: 'list', params: [], returnType: 'Promise<void>', async: true },
+            list: [{ name: 'list', params: [], returnType: 'Promise<void>', async: true }],
           },
           properties: {},
           constructorParams: [],
@@ -98,7 +100,7 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            get: { name: 'get', params: [], returnType: 'Promise<Organization>', async: true },
+            get: [{ name: 'get', params: [], returnType: 'Promise<Organization>', async: true }],
           },
           properties: {},
           constructorParams: [],
@@ -110,7 +112,7 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            get: { name: 'get', params: [], returnType: 'Promise<Org>', async: true },
+            get: [{ name: 'get', params: [], returnType: 'Promise<Org>', async: true }],
           },
           properties: {},
           constructorParams: [],
@@ -132,12 +134,14 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            list: {
-              name: 'list',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'void',
-              async: false,
-            },
+            list: [
+              {
+                name: 'list',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'void',
+                async: false,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -149,15 +153,17 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            list: {
-              name: 'list',
-              params: [
-                { name: 'id', type: 'string', optional: false },
-                { name: 'limit', type: 'number', optional: true },
-              ],
-              returnType: 'void',
-              async: false,
-            },
+            list: [
+              {
+                name: 'list',
+                params: [
+                  { name: 'id', type: 'string', optional: false },
+                  { name: 'limit', type: 'number', optional: true },
+                ],
+                returnType: 'void',
+                async: false,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -175,15 +181,17 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            get: {
-              name: 'get',
-              params: [
-                { name: 'id', type: 'string', optional: false },
-                { name: 'name', type: 'string', optional: false },
-              ],
-              returnType: 'void',
-              async: false,
-            },
+            get: [
+              {
+                name: 'get',
+                params: [
+                  { name: 'id', type: 'string', optional: false },
+                  { name: 'name', type: 'string', optional: false },
+                ],
+                returnType: 'void',
+                async: false,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -195,12 +203,14 @@ describe('diffSurfaces', () => {
         Client: {
           name: 'Client',
           methods: {
-            get: {
-              name: 'get',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'void',
-              async: false,
-            },
+            get: [
+              {
+                name: 'get',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'void',
+                async: false,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -413,6 +423,94 @@ describe('diffSurfaces', () => {
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({ category: 'signature', symbolPath: 'Status.Active' });
   });
+
+  it('reports no violations when candidate has matching method overloads', () => {
+    const surface = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {
+            create: [
+              {
+                name: 'create',
+                params: [{ name: 'params', type: 'CreateOptions', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+              {
+                name: 'create',
+                params: [
+                  { name: 'params', type: 'CreateOptions', optional: false },
+                  { name: 'options', type: 'RequestOptions', optional: true },
+                ],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+    const result = diffSurfaces(surface, surface, nodeHints);
+    expect(result.violations).toHaveLength(0);
+    expect(result.preservationScore).toBe(100);
+  });
+
+  it('detects violation when candidate is missing one overload from baseline', () => {
+    const baseline = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {
+            create: [
+              {
+                name: 'create',
+                params: [{ name: 'params', type: 'CreateOptions', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+              {
+                name: 'create',
+                params: [
+                  { name: 'params', type: 'CreateOptions', optional: false },
+                  { name: 'options', type: 'RequestOptions', optional: true },
+                ],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+    const candidate = emptySurface({
+      classes: {
+        Client: {
+          name: 'Client',
+          methods: {
+            create: [
+              {
+                name: 'create',
+                params: [{ name: 'params', type: 'CreateOptions', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+    const result = diffSurfaces(baseline, candidate, nodeHints);
+    expect(result.violations.length).toBeGreaterThan(0);
+    const overloadViolation = result.violations.find((v) => v.symbolPath === 'Client.create');
+    expect(overloadViolation).toBeDefined();
+  });
 });
 
 describe('specDerivedNames', () => {
@@ -469,7 +567,6 @@ describe('specDerivedNames', () => {
               headerParams: [],
               response: { kind: 'model', name: 'Org' },
               errors: [],
-              paginated: false,
               idempotent: false,
             },
           ],

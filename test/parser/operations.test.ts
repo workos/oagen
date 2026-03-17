@@ -147,7 +147,7 @@ describe('extractOperations', () => {
     };
 
     const { services } = extractOperations(paths);
-    expect(services[0].operations[0].paginated).toBe(true);
+    expect(services[0].operations[0].pagination).toBeDefined();
   });
 
   it('returns empty for undefined paths', () => {
@@ -278,5 +278,55 @@ describe('extractOperations', () => {
     const { services } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUser' });
+  });
+
+  it('sets requestBodyEncoding to form-data for multipart/form-data content type', () => {
+    const paths = {
+      '/uploads': {
+        post: {
+          operationId: 'uploadFile',
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: { type: 'string', format: 'binary' },
+                    name: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.requestBodyEncoding).toBe('form-data');
+  });
+
+  it('sets requestBodyEncoding to binary for application/octet-stream content type', () => {
+    const paths = {
+      '/files': {
+        post: {
+          operationId: 'uploadBinary',
+          requestBody: {
+            required: true,
+            content: {
+              'application/octet-stream': {},
+            },
+          },
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.requestBodyEncoding).toBe('binary');
   });
 });

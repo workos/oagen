@@ -1,4 +1,14 @@
-import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse, Model, Field } from '../ir/types.js';
+import type {
+  Service,
+  Operation,
+  HttpMethod,
+  Parameter,
+  TypeRef,
+  ErrorResponse,
+  Model,
+  Field,
+  PaginationMeta,
+} from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef } from './schemas.js';
@@ -255,11 +265,30 @@ function buildOperation(
   const headerParams = extractParams(allParams, 'header');
 
   const reqBodyModels: Model[] = [];
-  const requestBody = extractRequestBody(op.requestBody, op, reqBodyModels);
-  const { response, errors, inlineModels, isPaginated } = extractResponses(op.responses, op, path, method);
+  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
+  const {
+    response,
+    errors,
+    inlineModels,
+    isPaginated,
+    dataPath: responseDataPath,
+    itemType: responseItemType,
+  } = extractResponses(op.responses, op, path, method);
   inlineModels.push(...reqBodyModels);
 
-  const paginated = isPaginated || detectPagination(response, queryParams);
+  // Build structured pagination metadata from response classification and query param detection
+  const paginationFromParams = detectPagination(response, queryParams);
+  let pagination: PaginationMeta | undefined;
+  if (isPaginated) {
+    const itemType = responseItemType ?? (response.kind === 'array' ? response.items : response);
+    pagination = {
+      cursorParam: paginationFromParams?.cursorParam ?? 'after',
+      dataPath: responseDataPath ?? 'data',
+      itemType,
+    };
+  } else if (paginationFromParams) {
+    pagination = paginationFromParams;
+  }
 
   return {
     operation: {
@@ -271,9 +300,10 @@ function buildOperation(
       queryParams,
       headerParams,
       requestBody,
+      requestBodyEncoding,
       response,
       errors,
-      paginated,
+      pagination,
       idempotent: method === 'post',
     },
     inlineModels,
@@ -295,13 +325,38 @@ function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
   inlineModels: Model[],
-): TypeRef | undefined {
-  if (!body?.content) return undefined;
+): { body?: TypeRef; encoding?: 'json' | 'form-data' | 'binary' | 'text' } {
+  if (!body?.content) return {};
 
-  const jsonContent = body.content['application/json'];
-  if (!jsonContent?.schema) return undefined;
+  // Detect encoding and find schema from content type in priority order
+  let encoding: 'json' | 'form-data' | 'binary' | 'text' = 'json';
+  let schema: SchemaObject | undefined;
 
-  const schema = jsonContent.schema;
+  if (body.content['application/json']?.schema) {
+    encoding = 'json';
+    schema = body.content['application/json']!.schema;
+  } else if (body.content['multipart/form-data']?.schema) {
+    encoding = 'form-data';
+    schema = body.content['multipart/form-data']!.schema;
+  } else if (body.content['application/octet-stream']) {
+    encoding = 'binary';
+    schema = body.content['application/octet-stream']!.schema;
+  } else if (body.content['text/plain']) {
+    encoding = 'text';
+    schema = body.content['text/plain']!.schema;
+  }
+
+  if (!schema) {
+    // For binary/text, a schema is optional — produce a primitive TypeRef
+    if (encoding === 'binary') {
+      return { body: { kind: 'primitive', type: 'string', format: 'binary' }, encoding };
+    }
+    if (encoding === 'text') {
+      return { body: { kind: 'primitive', type: 'string' }, encoding };
+    }
+    return {};
+  }
+
   const rawName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
   const contextName = cleanSchemaName(rawName);
 
@@ -319,10 +374,10 @@ function extractRequestBody(
       });
     }
     inlineModels.push({ name: contextName, description: undefined, fields });
-    return { kind: 'model', name: contextName };
+    return { body: { kind: 'model', name: contextName }, encoding };
   }
 
-  return schemaToTypeRef(schema, contextName);
+  return { body: schemaToTypeRef(schema, contextName), encoding };
 }
 
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
@@ -339,11 +394,20 @@ function extractResponses(
   op?: OperationObject,
   path?: string,
   method?: HttpMethod,
-): { response: TypeRef; errors: ErrorResponse[]; inlineModels: Model[]; isPaginated: boolean } {
+): {
+  response: TypeRef;
+  errors: ErrorResponse[];
+  inlineModels: Model[];
+  isPaginated: boolean;
+  dataPath?: string;
+  itemType?: TypeRef;
+} {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
   let inlineModels: Model[] = [];
   let isPaginated = false;
+  let dataPath: string | undefined;
+  let itemType: TypeRef | undefined;
 
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
@@ -358,6 +422,8 @@ function extractResponses(
         response = result.response;
         inlineModels = result.inlineModels;
         isPaginated = result.isPaginated;
+        dataPath = result.dataPath;
+        itemType = result.itemType;
       }
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
@@ -366,5 +432,5 @@ function extractResponses(
     }
   }
 
-  return { response, errors, inlineModels, isPaginated };
+  return { response, errors, inlineModels, isPaginated, dataPath, itemType };
 }

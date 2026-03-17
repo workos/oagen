@@ -64,7 +64,8 @@ export function buildOverlayLookup(
       const key = `${entry.httpMethod.toUpperCase()} ${entry.path}`;
       const className = findClassForProperty(surface, entry.sdkResourceProperty, resolvedHints);
       if (className) {
-        const method = surface.classes[className]?.methods[entry.sdkMethodName];
+        const methods = surface.classes[className]?.methods[entry.sdkMethodName];
+        const method = methods?.[0];
         if (method) {
           lookup.methodByOperation.set(key, {
             className,
@@ -285,7 +286,7 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
         const [className, methodName] = parts;
         // Check if this is a method on a class in the baseline
         const baseClass = baseline.classes[className];
-        if (baseClass && baseClass.methods[methodName]) {
+        if (baseClass && baseClass.methods[methodName]?.length > 0) {
           // Use reverse map to resolve the HTTP key for this method.
           // NOTE: httpKeyByMethod is only populated when a manifest was provided
           // to buildOverlayLookup. Without a manifest, method-level violations
@@ -293,7 +294,7 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
           // generateManifest for the self-correcting loop to resolve these.
           const httpKey = overlay.httpKeyByMethod.get(`${className}.${methodName}`);
           if (httpKey) {
-            const method = baseClass.methods[methodName];
+            const method = baseClass.methods[methodName][0];
             patched.methodByOperation.set(httpKey, {
               className,
               methodName,

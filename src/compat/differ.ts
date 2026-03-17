@@ -141,39 +141,42 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         candidate: '(missing)',
         message: `Class "${name}" exists in baseline but not in generated output`,
       });
-      totalBaseline += Object.keys(baseClass.methods).length;
+      totalBaseline += Object.values(baseClass.methods).reduce((sum, overloads) => sum + overloads.length, 0);
       totalBaseline += Object.keys(baseClass.properties).length;
       continue;
     }
     preserved++;
 
-    // Diff methods
-    for (const [methodName, baseMethod] of Object.entries(baseClass.methods)) {
-      totalBaseline++;
-      const candMethod = candClass.methods[methodName];
-      if (!candMethod) {
-        violations.push({
-          category: 'public-api',
-          severity: 'breaking',
-          symbolPath: `${name}.${methodName}`,
-          baseline: methodName,
-          candidate: '(missing)',
-          message: `Method "${name}.${methodName}" exists in baseline but not in generated output`,
-        });
-        continue;
+    // Diff methods (each method name maps to an array of overloads)
+    for (const [methodName, baseOverloads] of Object.entries(baseClass.methods)) {
+      const candOverloads = candClass.methods[methodName];
+      for (const baseMethod of baseOverloads) {
+        totalBaseline++;
+        if (!candOverloads || candOverloads.length === 0) {
+          violations.push({
+            category: 'public-api',
+            severity: 'breaking',
+            symbolPath: `${name}.${methodName}`,
+            baseline: methodName,
+            candidate: '(missing)',
+            message: `Method "${name}.${methodName}" exists in baseline but not in generated output`,
+          });
+          continue;
+        }
+        const candMethod = candOverloads.find((c) => signaturesMatch(baseMethod, c));
+        if (!candMethod) {
+          violations.push({
+            category: 'signature',
+            severity: 'breaking',
+            symbolPath: `${name}.${methodName}`,
+            baseline: formatSignature(baseMethod),
+            candidate: formatSignature(candOverloads[0]),
+            message: `Signature mismatch for "${name}.${methodName}"`,
+          });
+          continue;
+        }
+        preserved++;
       }
-      if (!signaturesMatch(baseMethod, candMethod)) {
-        violations.push({
-          category: 'signature',
-          severity: 'breaking',
-          symbolPath: `${name}.${methodName}`,
-          baseline: formatSignature(baseMethod),
-          candidate: formatSignature(candMethod),
-          message: `Signature mismatch for "${name}.${methodName}"`,
-        });
-        continue;
-      }
-      preserved++;
     }
 
     // Check for new methods (additions)

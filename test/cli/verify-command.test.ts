@@ -40,7 +40,7 @@ function makeSurface(overrides?: Partial<Record<string, unknown>>) {
       Users: {
         name: 'Users',
         methods: {
-          list: { name: 'list', params: [], returnType: 'User[]', async: true },
+          list: [{ name: 'list', params: [], returnType: 'User[]', async: true }],
         },
         properties: {},
         constructorParams: [],

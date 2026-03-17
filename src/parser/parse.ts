@@ -1,4 +1,4 @@
-import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
+import type { ApiSpec, AuthScheme, Model, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -13,7 +13,10 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     info?: { title?: string; version?: string; description?: string };
     servers?: Array<{ url?: string }>;
     paths?: Record<string, unknown>;
-    components?: { schemas?: Record<string, unknown> };
+    components?: {
+      schemas?: Record<string, unknown>;
+      securitySchemes?: Record<string, { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }>;
+    };
   };
 
   // Validate OpenAPI version
@@ -134,6 +137,8 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     }
   }
 
+  const auth = extractAuthSchemes(spec.components?.securitySchemes);
+
   const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',
     version: spec.info?.version ?? '0.0.0',
@@ -142,6 +147,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     services,
     models: finalModels,
     enums,
+    auth,
   };
 
   validateModelRefs(result);
@@ -192,6 +198,24 @@ function validateModelRefs(spec: ApiSpec): void {
       walkRef(op.response, `${service.name}.${op.name}.response`);
     }
   }
+}
+
+/** Extract authentication schemes from OpenAPI securitySchemes. */
+function extractAuthSchemes(
+  securitySchemes?: Record<string, { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }>,
+): AuthScheme[] | undefined {
+  if (!securitySchemes) return undefined;
+  const schemes: AuthScheme[] = [];
+  for (const [, scheme] of Object.entries(securitySchemes)) {
+    if (scheme.type === 'http' && scheme.scheme === 'bearer') {
+      schemes.push({ kind: 'bearer' });
+    } else if (scheme.type === 'apiKey' && scheme.in && scheme.name) {
+      schemes.push({ kind: 'apiKey', in: scheme.in as 'header' | 'query', name: scheme.name });
+    } else if (scheme.type === 'oauth2' && scheme.flows) {
+      schemes.push({ kind: 'oauth2', flows: scheme.flows });
+    }
+  }
+  return schemes.length > 0 ? schemes : undefined;
 }
 
 /** Deduplicate models by name, keeping whichever has the most fields. */

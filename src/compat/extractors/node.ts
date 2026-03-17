@@ -144,7 +144,7 @@ function resolveAlias(sym: ts.Symbol, checker: ts.TypeChecker): ts.Symbol {
 
 function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
   const type = checker.getDeclaredTypeOfSymbol(sym);
-  const methods: Record<string, ApiMethod> = {};
+  const methods: Record<string, ApiMethod[]> = {};
   const properties: Record<string, ApiProperty> = {};
   const constructorParams: ApiParam[] = [];
 
@@ -189,12 +189,13 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
 
     if (callSignatures.length > 0) {
       const sig = callSignatures[0];
-      methods[prop.name] = {
+      if (!methods[prop.name]) methods[prop.name] = [];
+      methods[prop.name].push({
         name: prop.name,
         params: sig.getParameters().map((p) => extractParam(p, checker)),
         returnType: checker.typeToString(sig.getReturnType()),
         async: checker.typeToString(sig.getReturnType()).startsWith('Promise<'),
-      };
+      });
     } else {
       const typeStr = checker.typeToString(propType);
       const isReadonly = propDeclarations?.some((d) => {

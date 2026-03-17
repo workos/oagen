@@ -1,7 +1,9 @@
 export type {
   ApiSpec,
+  AuthScheme,
   Service,
   Operation,
+  PaginationMeta,
   HttpMethod,
   Parameter,
   TypeRef,
@@ -21,7 +23,7 @@ export type {
   ErrorResponse,
 } from './ir/types.js';
 
-export { assertNever, walkTypeRef, IR_VERSION } from './ir/types.js';
+export { assertNever, walkTypeRef, mapTypeRef, IR_VERSION } from './ir/types.js';
 
 export { OagenError, SpecParseError, ConfigError, ExtractorError, RegistryError, InternalError } from './errors.js';
 
@@ -84,6 +86,7 @@ export {
   toUpperSnakeCase,
   stripBackendPrefixes,
   cleanSchemaName,
+  ACRONYM_SET,
 } from './utils/naming.js';
 
 export { nodeExtractor } from './compat/extractors/node.js';

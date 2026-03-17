@@ -14,7 +14,7 @@ const listUsers: Operation = {
   headerParams: [],
   response: { kind: 'array', items: { kind: 'model', name: 'User' } },
   errors: [],
-  paginated: true,
+  pagination: { cursorParam: 'cursor', dataPath: 'data', itemType: { kind: 'model', name: 'User' } },
   idempotent: false,
 };
 
@@ -27,7 +27,6 @@ const getUser: Operation = {
   headerParams: [],
   response: { kind: 'model', name: 'User' },
   errors: [],
-  paginated: false,
   idempotent: false,
 };
 
@@ -216,7 +215,7 @@ describe('diffOperations', () => {
   });
 
   it('detects paginated true→false as breaking', () => {
-    const modified: Operation = { ...listUsers, paginated: false };
+    const modified: Operation = { ...listUsers, pagination: undefined };
     const changes = diffOperations('Users', [listUsers], [modified]);
     expect(changes).toHaveLength(1);
     if (changes[0].kind === 'operation-modified') {
@@ -226,7 +225,7 @@ describe('diffOperations', () => {
   });
 
   it('detects paginated false→true as additive', () => {
-    const modified: Operation = { ...getUser, paginated: true };
+    const modified: Operation = { ...getUser, pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'primitive', type: 'string' } } };
     const changes = diffOperations('Users', [getUser], [modified]);
     expect(changes).toHaveLength(1);
     if (changes[0].kind === 'operation-modified') {

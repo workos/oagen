@@ -9,7 +9,9 @@ import type {
   UnionType,
   Model,
   Enum,
+  PaginationMeta,
 } from '../../src/ir/types.js';
+import { mapTypeRef } from '../../src/ir/types.js';
 
 describe('IR types', () => {
   it('constructs a valid PrimitiveType', () => {
@@ -136,7 +138,7 @@ describe('IR types', () => {
                 items: { kind: 'model', name: 'User' },
               },
               errors: [{ statusCode: 401 }],
-              paginated: true,
+              pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'User' } } as PaginationMeta,
               idempotent: false,
             },
           ],
@@ -157,7 +159,73 @@ describe('IR types', () => {
       enums: [],
     };
     expect(spec.services).toHaveLength(1);
-    expect(spec.services[0].operations[0].paginated).toBe(true);
+    expect(spec.services[0].operations[0].pagination).toBeDefined();
     expect(spec.models).toHaveLength(1);
+  });
+});
+
+describe('mapTypeRef', () => {
+  const stringMapper = {
+    primitive: (r: PrimitiveType) => r.type,
+    array: (_r: ArrayType, items: string) => `Array<${items}>`,
+    model: (r: ModelRef) => r.name,
+    enum: (r: { kind: 'enum'; name: string }) => r.name,
+    union: (_r: UnionType, variants: string[]) => variants.join(' | '),
+    nullable: (_r: NullableType, inner: string) => `${inner} | null`,
+    literal: (r: { kind: 'literal'; value: string }) => `"${r.value}"`,
+    map: (_r: { kind: 'map'; valueType: TypeRef }, value: string) => `Map<string, ${value}>`,
+  };
+
+  it('maps a primitive to its type name string', () => {
+    const result = mapTypeRef({ kind: 'primitive', type: 'string' }, stringMapper);
+    expect(result).toBe('string');
+  });
+
+  it('maps an array type', () => {
+    const result = mapTypeRef(
+      { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+      stringMapper,
+    );
+    expect(result).toBe('Array<string>');
+  });
+
+  it('maps a nullable model ref', () => {
+    const result = mapTypeRef(
+      { kind: 'nullable', inner: { kind: 'model', name: 'User' } },
+      stringMapper,
+    );
+    expect(result).toBe('User | null');
+  });
+
+  it('maps a union type', () => {
+    const result = mapTypeRef(
+      {
+        kind: 'union',
+        variants: [
+          { kind: 'primitive', type: 'string' },
+          { kind: 'model', name: 'Foo' },
+        ],
+      },
+      stringMapper,
+    );
+    expect(result).toBe('string | Foo');
+  });
+
+  it('maps a map type', () => {
+    const result = mapTypeRef(
+      { kind: 'map', valueType: { kind: 'primitive', type: 'integer' } },
+      stringMapper,
+    );
+    expect(result).toBe('Map<string, integer>');
+  });
+
+  it('maps an enum ref', () => {
+    const result = mapTypeRef({ kind: 'enum', name: 'Status' }, stringMapper);
+    expect(result).toBe('Status');
+  });
+
+  it('maps a literal type', () => {
+    const result = mapTypeRef({ kind: 'literal', value: 'active' }, stringMapper);
+    expect(result).toBe('"active"');
   });
 });

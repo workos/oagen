@@ -494,13 +494,13 @@ describe('parseSpec – response patterns', () => {
 
   it('allOf list envelope → paginated: true', () => {
     const op = findOperation('Widgets', 'listWidgets');
-    expect(op!.paginated).toBe(true);
+    expect(op!.pagination).toBeDefined();
   });
 
   it('flat list envelope → ArrayType + paginated', () => {
     const op = findOperation('Gadgets', 'listGadgets');
     expect(op!.response.kind).toBe('array');
-    expect(op!.paginated).toBe(true);
+    expect(op!.pagination).toBeDefined();
   });
 
   it('single-resource wrapper (object const) → ModelRef', () => {
@@ -532,24 +532,24 @@ describe('parseSpec – response patterns', () => {
     if (op!.response.kind === 'array') {
       expect(op!.response.items).toEqual({ kind: 'primitive', type: 'string' });
     }
-    expect(op!.paginated).toBe(false);
+    expect(op!.pagination).toBeUndefined();
   });
 });
 
 describe('parseSpec – pagination', () => {
   it('cursor param + list envelope → paginated: true', () => {
     const op = findOperation('Widgets', 'listWidgets');
-    expect(op!.paginated).toBe(true);
+    expect(op!.pagination).toBeDefined();
   });
 
   it('after param + flat list envelope → paginated: true', () => {
     const op = findOperation('Gadgets', 'listGadgets');
-    expect(op!.paginated).toBe(true);
+    expect(op!.pagination).toBeDefined();
   });
 
   it('no cursor params → paginated: false', () => {
     const op = findOperation('Configs', 'listConfigs');
-    expect(op!.paginated).toBe(false);
+    expect(op!.pagination).toBeUndefined();
   });
 });
 

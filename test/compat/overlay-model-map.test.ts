@@ -26,12 +26,14 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
         Organizations: {
           name: 'Organizations',
           methods: {
-            create: {
-              name: 'create',
-              params: [{ name: 'options', type: 'CreateOrganizationOptions', optional: false }],
-              returnType: 'Organization',
-              async: true,
-            },
+            create: [
+              {
+                name: 'create',
+                params: [{ name: 'options', type: 'CreateOrganizationOptions', optional: false }],
+                returnType: 'Organization',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -82,7 +84,6 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
               requestBody: { kind: 'model', name: 'CreateOrganization' },
               response: { kind: 'model', name: 'Organization' },
               errors: [],
-              paginated: false,
               idempotent: false,
             },
           ],
@@ -113,12 +114,14 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
         Users: {
           name: 'Users',
           methods: {
-            get: {
-              name: 'get',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'User',
-              async: true,
-            },
+            get: [
+              {
+                name: 'get',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'User',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -164,7 +167,6 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
               requestBody: { kind: 'model', name: 'GetUserRequest' },
               response: { kind: 'model', name: 'User' },
               errors: [],
-              paginated: false,
               idempotent: false,
             },
           ],

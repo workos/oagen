@@ -25,18 +25,22 @@ describe('buildOverlayLookup', () => {
         Organizations: {
           name: 'Organizations',
           methods: {
-            listOrgs: {
-              name: 'listOrgs',
-              params: [{ name: 'options', type: 'ListOrgsOptions', optional: true }],
-              returnType: 'Promise<Organization[]>',
-              async: true,
-            },
-            getOrg: {
-              name: 'getOrg',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'Promise<Organization>',
-              async: true,
-            },
+            listOrgs: [
+              {
+                name: 'listOrgs',
+                params: [{ name: 'options', type: 'ListOrgsOptions', optional: true }],
+                returnType: 'Promise<Organization[]>',
+                async: true,
+              },
+            ],
+            getOrg: [
+              {
+                name: 'getOrg',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -168,12 +172,14 @@ describe('buildOverlayLookup', () => {
         Organizations: {
           name: 'Organizations',
           methods: {
-            getOrganization: {
-              name: 'getOrganization',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'Promise<Organization>',
-              async: true,
-            },
+            getOrganization: [
+              {
+                name: 'getOrganization',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -219,7 +225,6 @@ describe('buildOverlayLookup', () => {
               headerParams: [],
               response: { kind: 'model', name: 'ControllerOrgResponse' },
               errors: [],
-              paginated: false,
               idempotent: false,
             },
           ],
@@ -258,12 +263,14 @@ describe('buildOverlayLookup', () => {
         Users: {
           name: 'Users',
           methods: {
-            createUser: {
-              name: 'createUser',
-              params: [],
-              returnType: 'Promise<User>',
-              async: true,
-            },
+            createUser: [
+              {
+                name: 'createUser',
+                params: [],
+                returnType: 'Promise<User>',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -392,12 +399,14 @@ describe('buildOverlayLookup', () => {
         Organizations: {
           name: 'Organizations',
           methods: {
-            getOrganization: {
-              name: 'getOrganization',
-              params: [{ name: 'id', type: 'string', optional: false }],
-              returnType: 'Promise<Organization>',
-              async: true,
-            },
+            getOrganization: [
+              {
+                name: 'getOrganization',
+                params: [{ name: 'id', type: 'string', optional: false }],
+                returnType: 'Promise<Organization>',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],
@@ -442,7 +451,6 @@ describe('buildOverlayLookup', () => {
               headerParams: [],
               response: { kind: 'model', name: 'ControllerOrgResponse' },
               errors: [],
-              paginated: false,
               idempotent: false,
             },
           ],
@@ -755,12 +763,14 @@ describe('patchOverlay', () => {
         Users: {
           name: 'Users',
           methods: {
-            listUsers: {
-              name: 'listUsers',
-              params: [],
-              returnType: 'Promise<User[]>',
-              async: true,
-            },
+            listUsers: [
+              {
+                name: 'listUsers',
+                params: [],
+                returnType: 'Promise<User[]>',
+                async: true,
+              },
+            ],
           },
           properties: {},
           constructorParams: [],

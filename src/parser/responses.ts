@@ -10,6 +10,10 @@ export interface ResponseExtractionResult {
   inlineModels: Model[];
   /** Whether this response indicates a paginated list */
   isPaginated: boolean;
+  /** Path to the data array within the response envelope (e.g., 'data') */
+  dataPath?: string;
+  /** TypeRef of individual items in a paginated list */
+  itemType?: TypeRef;
 }
 
 export function classifyAndExtractResponse(schema: SchemaObject, contextName: string): ResponseExtractionResult {
@@ -96,6 +100,8 @@ function extractListResponse(schema: SchemaObject, contextName: string): Respons
     response: { kind: 'array', items: itemTypeRef },
     inlineModels,
     isPaginated: true,
+    dataPath: 'data',
+    itemType: itemTypeRef,
   };
 }
 
@@ -280,6 +286,8 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
       type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
       description: fieldSchema.description,
+      readOnly: fieldSchema.readOnly || undefined,
+      writeOnly: fieldSchema.writeOnly || undefined,
     });
 
     // Recursively extract nested inline objects — qualify with parent name

@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { parseSpec } from '../../src/parser/parse.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(__dirname, '../fixtures');
@@ -37,7 +40,7 @@ describe('parseSpec', () => {
 
     // Check pagination
     const listOp = userService!.operations.find((o) => o.name === 'listUsers');
-    expect(listOp!.paginated).toBe(true);
+    expect(listOp!.pagination).toBeDefined();
   });
 
   it('parses comprehensive.yml into valid IR', async () => {
@@ -93,6 +96,44 @@ describe('parseSpec', () => {
 
   it('throws on non-existent file', async () => {
     await expect(parseSpec('nonexistent.yml')).rejects.toThrow();
+  });
+
+  it('parses securitySchemes into auth array with bearer and apiKey schemes', async () => {
+    const specContent = `
+openapi: '3.1.0'
+info:
+  title: Auth Test API
+  version: '1.0.0'
+servers:
+  - url: https://api.example.com
+paths: {}
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+`;
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-parse-test-'));
+    const specFile = path.join(tmpDir, 'auth-test.yml');
+    try {
+      await fs.writeFile(specFile, specContent, 'utf-8');
+      const result = await parseSpec(specFile);
+
+      expect(result.auth).toBeDefined();
+      expect(result.auth).toEqual(
+        expect.arrayContaining([
+          { kind: 'bearer' },
+          { kind: 'apiKey', in: 'header', name: 'X-API-Key' },
+        ]),
+      );
+      expect(result.auth).toHaveLength(2);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
   });
 
   it('qualifies inline model name to avoid collision with component schema', async () => {

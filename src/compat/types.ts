@@ -12,7 +12,7 @@ export interface ApiSurface {
 export interface ApiClass {
   name: string;
   sourceFile?: string;
-  methods: Record<string, ApiMethod>;
+  methods: Record<string, ApiMethod[]>;
   properties: Record<string, ApiProperty>;
   constructorParams: ApiParam[];
 }

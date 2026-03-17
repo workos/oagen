@@ -12,7 +12,6 @@ function makeOp(overrides: Partial<Operation> = {}): Operation {
     headerParams: [],
     response: { kind: 'primitive', type: 'string' },
     errors: [],
-    paginated: false,
     idempotent: false,
     ...overrides,
   };
@@ -35,7 +34,6 @@ describe('planOperation', () => {
           "httpMethod": "delete",
           "idempotent": false,
           "name": "test",
-          "paginated": false,
           "path": "/test",
           "pathParams": [],
           "queryParams": [],
@@ -66,7 +64,6 @@ describe('planOperation', () => {
           "httpMethod": "get",
           "idempotent": false,
           "name": "test",
-          "paginated": false,
           "path": "/test",
           "pathParams": [],
           "queryParams": [],
@@ -104,7 +101,6 @@ describe('planOperation', () => {
           "httpMethod": "post",
           "idempotent": true,
           "name": "test",
-          "paginated": false,
           "path": "/test",
           "pathParams": [],
           "queryParams": [],
@@ -167,7 +163,7 @@ describe('planOperation', () => {
   it('paginated operation', () => {
     const plan = planOperation(
       makeOp({
-        paginated: true,
+        pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'Organization' } },
         response: { kind: 'model', name: 'Organization' },
       }),
     );

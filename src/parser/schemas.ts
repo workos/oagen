@@ -14,6 +14,8 @@ export interface SchemaObject {
   oneOf?: SchemaObject[];
   anyOf?: SchemaObject[];
   discriminator?: { propertyName: string; mapping?: Record<string, string> };
+  readOnly?: boolean;
+  writeOnly?: boolean;
   nullable?: boolean;
   $ref?: string;
   additionalProperties?: boolean | SchemaObject;
@@ -108,6 +110,8 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
       type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
       description: fieldSchema.description,
+      readOnly: fieldSchema.readOnly || undefined,
+      writeOnly: fieldSchema.writeOnly || undefined,
     });
   }
 
@@ -148,6 +152,8 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
             type: schemaToTypeRef(fieldSchema, fieldName, name),
             required: false, // will be set below
             description: fieldSchema.description,
+            readOnly: fieldSchema.readOnly || undefined,
+            writeOnly: fieldSchema.writeOnly || undefined,
           });
         }
       }
@@ -490,6 +496,8 @@ function buildInlineModel(name: string, schema: SchemaObject): Model {
       type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
       description: fieldSchema.description,
+      readOnly: fieldSchema.readOnly || undefined,
+      writeOnly: fieldSchema.writeOnly || undefined,
     });
   }
 

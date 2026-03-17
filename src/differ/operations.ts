@@ -39,7 +39,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
-    const paginatedChanged = oldOp.paginated !== newOp.paginated;
+    const paginatedChanged = !!oldOp.pagination !== !!newOp.pagination;
     const idempotentChanged = oldOp.idempotent !== newOp.idempotent;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
@@ -57,7 +57,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
       // paginated: true→false is breaking (SDK loses pagination helper)
-      const paginatedBreaking = paginatedChanged && !newOp.paginated;
+      const paginatedBreaking = paginatedChanged && !newOp.pagination;
       // idempotent: false→true is additive (SDK gains idempotency key)
       // idempotent: true→false is breaking (SDK loses idempotency key)
       const idempotentBreaking = idempotentChanged && !newOp.idempotent;

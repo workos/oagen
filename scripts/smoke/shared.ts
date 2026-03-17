@@ -142,10 +142,10 @@ function operationSortKey(op: Operation): number {
   const method = op.httpMethod;
 
   if (method === 'post' && !hasParams) return 0; // top-level create
-  if (method === 'get' && !hasParams && op.paginated) return 1; // top-level list
+  if (method === 'get' && !hasParams && op.pagination) return 1; // top-level list
   if (method === 'get' && !hasParams) return 2; // top-level singular GET
   if (method === 'post' && hasParams) return 3; // sub-entity create
-  if (method === 'get' && hasParams && op.paginated) return 4; // sub-entity list
+  if (method === 'get' && hasParams && op.pagination) return 4; // sub-entity list
   if (method === 'get' && hasParams) return 5; // singular GET by ID
   if (method === 'put' || method === 'patch') return 6; // update
   if (method === 'delete') return 7; // delete
@@ -312,7 +312,7 @@ export function generateCamelPayload(op: Operation, spec: ApiSpec): Record<strin
 export function generateQueryParams(op: Operation, spec: ApiSpec): Record<string, string> {
   const params: Record<string, string> = {};
 
-  if (op.paginated) {
+  if (op.pagination) {
     params['limit'] = '1';
   }
 
@@ -334,7 +334,7 @@ export function generateQueryParams(op: Operation, spec: ApiSpec): Record<string
 export function generateCamelQueryParams(op: Operation, spec: ApiSpec): Record<string, unknown> {
   const params: Record<string, unknown> = {};
 
-  if (op.paginated) {
+  if (op.pagination) {
     params['limit'] = 1;
   }
 

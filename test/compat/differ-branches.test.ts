@@ -58,7 +58,7 @@ describe('diffSurfaces — class and interface field branches', () => {
         Users: {
           name: 'Users',
           methods: {
-            list: { name: 'list', params: [], returnType: 'User[]', async: true },
+            list: [{ name: 'list', params: [], returnType: 'User[]', async: true }],
           },
           properties: {},
           constructorParams: [],
@@ -70,8 +70,8 @@ describe('diffSurfaces — class and interface field branches', () => {
         Users: {
           name: 'Users',
           methods: {
-            list: { name: 'list', params: [], returnType: 'User[]', async: true },
-            create: { name: 'create', params: [], returnType: 'User', async: true },
+            list: [{ name: 'list', params: [], returnType: 'User[]', async: true }],
+            create: [{ name: 'create', params: [], returnType: 'User', async: true }],
           },
           properties: {},
           constructorParams: [],

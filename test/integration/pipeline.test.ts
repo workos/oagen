@@ -97,17 +97,19 @@ function irToSurface(spec: ApiSpec): ApiSurface {
   const typeAliases: Record<string, ApiTypeAlias> = {};
 
   for (const service of spec.services) {
-    const methods: Record<string, ApiMethod> = {};
+    const methods: Record<string, ApiMethod[]> = {};
     for (const op of service.operations) {
-      methods[op.name] = {
-        name: op.name,
-        params: [
-          ...op.pathParams.map((p) => ({ name: p.name, type: typeRefToString(p.type), optional: !p.required })),
-          ...op.queryParams.map((p) => ({ name: p.name, type: typeRefToString(p.type), optional: !p.required })),
-        ],
-        returnType: typeRefToString(op.response),
-        async: true,
-      };
+      methods[op.name] = [
+        {
+          name: op.name,
+          params: [
+            ...op.pathParams.map((p) => ({ name: p.name, type: typeRefToString(p.type), optional: !p.required })),
+            ...op.queryParams.map((p) => ({ name: p.name, type: typeRefToString(p.type), optional: !p.required })),
+          ],
+          returnType: typeRefToString(op.response),
+          async: true,
+        },
+      ];
     }
     classes[service.name] = {
       name: service.name,
@@ -325,7 +327,7 @@ describe('end-to-end pipeline', () => {
     it('detects paginated list endpoints', () => {
       const listOp = conformance.services.flatMap((s) => s.operations).find((o) => o.name === 'listWidgets');
       expect(listOp).toBeDefined();
-      expect(listOp!.paginated).toBe(true);
+      expect(listOp!.pagination).toBeDefined();
     });
 
     it('extracts full CRUD operation set', () => {
@@ -447,7 +449,6 @@ describe('end-to-end pipeline', () => {
         headerParams: [],
         response: { kind: 'model', name: 'WidgetStats' },
         errors: [],
-        paginated: false,
         idempotent: false,
       });
     });
