@@ -100,6 +100,8 @@ This makes the following skills available:
 | `/oagen:generate-extractor <lang>`  | Scaffold an API surface extractor for compat verification                    |
 | `/oagen:generate-smoke-test <lang>` | Create smoke tests for a generated SDK                                       |
 | `/oagen:verify-compat <lang>`       | Verify emitter output preserves backwards compatibility                      |
+| `/oagen:integrate <lang>`           | Merge generated code into a live SDK via `--target`                          |
+| `/oagen:verify-smoke-test <lang>`   | Run generate-verify loop to iteratively fix an emitter until smoke tests pass |
 
 ### Local development
 
