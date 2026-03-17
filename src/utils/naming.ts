@@ -139,6 +139,11 @@ export function singularize(word: string): string {
  *
  * Must be idempotent: `cleanSchemaName(cleanSchemaName(x)) === cleanSchemaName(x)`
  */
+/** Strip `.js` extensions from import/export specifiers for dedup comparison. */
+export function normalizeJsExtension(text: string): string {
+  return text.replace(/\.js(['"])/g, '$1');
+}
+
 export function cleanSchemaName(name: string): string {
   let result = stripBackendPrefixes(stripBackendSuffixes(name));
   result = stripListItemMarkers(result);

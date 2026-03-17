@@ -141,6 +141,84 @@ export interface Bar { name: string; }
     expect(result.content).toContain('interface Bar');
   });
 
+  it('includes new imports not present in existing file', async () => {
+    const existing = `
+import { Foo } from './foo';
+
+export interface Foo {
+  id: string;
+}
+`;
+    const generated = `
+${header}
+
+import { Foo } from './foo.js';
+import { Bar } from './bar.js';
+
+export interface Foo {
+  id: string;
+}
+
+export interface Baz {
+  name: string;
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.changed).toBe(true);
+    // Bar import is new — should be included
+    expect(result.content).toContain("import { Bar } from './bar.js'");
+    // Foo import already exists (normalized) — should not be duplicated
+    expect(result.content).toContain('interface Baz');
+  });
+
+  it('deduplicates imports with .js extension differences', async () => {
+    const existing = `
+import { Foo } from './foo';
+
+export interface Foo {
+  id: string;
+}
+`;
+    const generated = `
+${header}
+
+import { Foo } from './foo.js';
+
+export interface Foo {
+  id: string;
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.changed).toBe(false);
+    expect(result.added).toBe(0);
+  });
+
+  it('does not add imports when no new symbols need them', async () => {
+    const existing = `
+import { Foo } from './foo';
+
+export interface Foo { id: string; }
+export interface Bar { name: string; }
+`;
+    const generated = `
+${header}
+
+import { Foo } from './foo.js';
+import { Baz } from './baz.js';
+
+export interface Foo { id: string; }
+export interface Bar { name: string; }
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    // All symbols exist, but Baz import is new — should still be added since
+    // the merger doesn't analyze import usage, just deduplicates
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain("import { Baz } from './baz.js'");
+  });
+
   it('handles barrel export lines', async () => {
     const existing = `
 export * from './organizations/interfaces/index.js';

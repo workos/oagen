@@ -10,6 +10,7 @@
  */
 
 import Parser from 'tree-sitter';
+import { normalizeJsExtension } from '../utils/naming.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
@@ -183,11 +184,34 @@ export async function mergeIntoExisting(
   language: string,
   header: string,
 ): Promise<MergeResult> {
-  const existing = await extractTopLevelSymbols(existingContent, language);
+  // Parse existing file once — extract both symbols and statements from the same AST pass
+  const existingStatements = await extractStatements(existingContent, language);
   const generatedStatements = await extractStatements(generatedContent, language);
+
+  // Build symbol/text sets from existing statements (avoids a second tree-sitter parse)
+  const existingNames = new Set<string>();
+  const existingUnnamedTexts = new Set<string>();
+  const existingImports = new Set<string>();
+  let lastImportEndIndex = -1;
+
+  for (const stmt of existingStatements) {
+    if (stmt.nodeType === 'import_statement') {
+      existingImports.add(normalizeJsExtension(stmt.text.trim()));
+      // Track end position of last import for insertion point
+      const linesBefore = existingContent.slice(0, existingContent.indexOf(stmt.text)).split('\n').length - 1;
+      const stmtLines = stmt.text.split('\n').length;
+      lastImportEndIndex = linesBefore + stmtLines - 1;
+    }
+    if (stmt.name) {
+      existingNames.add(stmt.name);
+    } else {
+      existingUnnamedTexts.add(stmt.text.trim());
+    }
+  }
 
   const headerLine = header.trim();
 
+  const newImports: string[] = [];
   const toAppend: string[] = [];
   let preserved = 0;
 
@@ -195,9 +219,15 @@ export async function mergeIntoExisting(
     // Skip the header comment
     if (stmt.text.trim() === headerLine) continue;
 
-    // Skip import statements — the existing file's imports are authoritative
+    // For import statements, only skip if an equivalent exists in the existing file.
+    // This allows new imports (required by appended code) to be included.
     if (stmt.nodeType === 'import_statement') {
-      preserved++;
+      const normalizedText = normalizeJsExtension(stmt.text.trim());
+      if (existingImports.has(normalizedText)) {
+        preserved++;
+        continue;
+      }
+      newImports.push(stmt.text);
       continue;
     }
 
@@ -205,9 +235,9 @@ export async function mergeIntoExisting(
     // (e.g., generated uses .js extension but existing doesn't).
     // Allow genuinely new re-exports through.
     if (stmt.nodeType === 'export_statement' && stmt.text.includes(' from ')) {
-      const normalizedText = stmt.text.trim().replace(/\.js(['"])/g, '$1');
-      const existsNormalized = [...existing.unnamedTexts].some(
-        (t) => t.replace(/\.js(['"])/g, '$1') === normalizedText,
+      const normalizedText = normalizeJsExtension(stmt.text.trim());
+      const existsNormalized = [...existingUnnamedTexts].some(
+        (t) => normalizeJsExtension(t) === normalizedText,
       );
       if (existsNormalized) {
         preserved++;
@@ -218,22 +248,22 @@ export async function mergeIntoExisting(
       // since the existing file may use extensionless imports.
       // Name format: __export:'./path/to/module.js' → __export:'./path/to/module'
       if (stmt.name?.startsWith(REEXPORT_PREFIX)) {
-        const normalizedName = stmt.name.replace(/\.js(['"])/g, '$1');
-        if (existing.names.has(normalizedName) || existing.names.has(stmt.name)) {
+        const normalizedName = normalizeJsExtension(stmt.name);
+        if (existingNames.has(normalizedName) || existingNames.has(stmt.name)) {
           preserved++;
           continue;
         }
       }
     }
 
-    if (stmt.name && existing.names.has(stmt.name)) {
+    if (stmt.name && existingNames.has(stmt.name)) {
       preserved++;
       continue;
     }
 
     // For unnamed statements, check text dedup via pre-built Set (O(1))
     if (!stmt.name) {
-      if (existing.unnamedTexts.has(stmt.text.trim())) {
+      if (existingUnnamedTexts.has(stmt.text.trim())) {
         preserved++;
         continue;
       }
@@ -242,7 +272,7 @@ export async function mergeIntoExisting(
     toAppend.push(stmt.text);
   }
 
-  if (toAppend.length === 0) {
+  if (newImports.length === 0 && toAppend.length === 0) {
     return { content: existingContent, added: 0, preserved, changed: false };
   }
 
@@ -250,7 +280,17 @@ export async function mergeIntoExisting(
 
   // Don't prepend auto-generated header to hand-written files
 
-  result = result.trimEnd() + '\n\n' + toAppend.join('\n\n') + '\n';
+  // Insert new imports after the last existing import (using AST-derived position)
+  if (newImports.length > 0) {
+    const lines = result.split('\n');
+    const insertIdx = lastImportEndIndex + 1;
+    lines.splice(insertIdx, 0, ...newImports);
+    result = lines.join('\n');
+  }
 
-  return { content: result, added: toAppend.length, preserved, changed: true };
+  if (toAppend.length > 0) {
+    result = result.trimEnd() + '\n\n' + toAppend.join('\n\n') + '\n';
+  }
+
+  return { content: result, added: newImports.length + toAppend.length, preserved, changed: true };
 }
