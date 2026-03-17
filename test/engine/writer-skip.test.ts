@@ -57,7 +57,12 @@ describe('writeFiles skipIfExists', () => {
       await fs.writeFile(filePath, 'export interface Foo { id: string; }\n', 'utf-8');
 
       const result = await writeFiles(
-        [{ path: 'models.ts', content: '// header\n\nexport interface Foo { id: string; }\n\nexport interface Bar { name: string; }\n' }],
+        [
+          {
+            path: 'models.ts',
+            content: '// header\n\nexport interface Foo { id: string; }\n\nexport interface Bar { name: string; }\n',
+          },
+        ],
         tmpDir,
         { language: 'node', header: '// header' },
       );

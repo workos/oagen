@@ -78,12 +78,7 @@ export async function writeFiles(
 
     // Source files with grammar → AST-level merge
     if (language && hasGrammar(language)) {
-      const mergeResult = await mergeIntoExisting(
-        existingContent,
-        file.content,
-        language,
-        header,
-      );
+      const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header);
 
       if (!mergeResult.changed) {
         result.identical.push(file.path);

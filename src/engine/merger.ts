@@ -14,12 +14,14 @@ import Parser from 'tree-sitter';
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
 
+/** Synthetic name prefix for `export * from '...'` re-export dedup */
+const REEXPORT_PREFIX = '__export:';
+
 /**
  * Map emitter language names to tree-sitter grammar module names.
  */
 const GRAMMAR_MODULES: Record<string, string> = {
   node: 'tree-sitter-typescript/typescript',
-  typescript: 'tree-sitter-typescript/typescript',
 };
 
 /**
@@ -37,7 +39,7 @@ async function getParser(language: string): Promise<Parser> {
   if (!grammarModule) {
     throw new Error(
       `No tree-sitter grammar configured for language "${language}". ` +
-      `Add it to GRAMMAR_MODULES in merger.ts and install the corresponding npm package.`,
+        `Add it to GRAMMAR_MODULES in merger.ts and install the corresponding npm package.`,
     );
   }
 
@@ -61,7 +63,7 @@ function extractNodeName(node: Parser.SyntaxNode): string | null {
     // export * from '...' — use the source string as identifier
     const source = node.childForFieldName('source');
     if (source) {
-      return `__export:${source.text}`;
+      return `${REEXPORT_PREFIX}${source.text}`;
     }
     return null;
   }
@@ -85,23 +87,36 @@ function extractDeclName(node: Parser.SyntaxNode): string | null {
   return null;
 }
 
+interface ParsedSymbols {
+  names: Set<string>;
+  /** Trimmed text of unnamed top-level statements (for text-based dedup) */
+  unnamedTexts: Set<string>;
+}
+
 /**
- * Extract all top-level symbol names from source code.
+ * Extract all top-level symbol names (and unnamed statement texts) from source code.
  */
-export async function extractTopLevelNames(
-  source: string,
-  language: string,
-): Promise<Set<string>> {
+export async function extractTopLevelSymbols(source: string, language: string): Promise<ParsedSymbols> {
   const parser = await getParser(language);
   const tree = parser.parse(source);
   const names = new Set<string>();
+  const unnamedTexts = new Set<string>();
 
   for (const child of tree.rootNode.children) {
     const name = extractNodeName(child);
-    if (name) names.add(name);
+    if (name) {
+      names.add(name);
+    } else if (child.type !== 'comment') {
+      unnamedTexts.add(source.slice(child.startIndex, child.endIndex).trim());
+    }
   }
 
-  return names;
+  return { names, unnamedTexts };
+}
+
+/** Convenience wrapper that returns only the name set. */
+export async function extractTopLevelNames(source: string, language: string): Promise<Set<string>> {
+  return (await extractTopLevelSymbols(source, language)).names;
 }
 
 /**
@@ -148,7 +163,7 @@ export async function mergeIntoExisting(
   language: string,
   header: string,
 ): Promise<MergeResult> {
-  const existingNames = await extractTopLevelNames(existingContent, language);
+  const existing = await extractTopLevelSymbols(existingContent, language);
   const generatedStatements = await extractStatements(generatedContent, language);
 
   const headerLine = header.trim();
@@ -160,14 +175,14 @@ export async function mergeIntoExisting(
     // Skip the header comment
     if (stmt.text.trim() === headerLine) continue;
 
-    if (stmt.name && existingNames.has(stmt.name)) {
+    if (stmt.name && existing.names.has(stmt.name)) {
       preserved++;
       continue;
     }
 
-    // For unnamed statements, check text dedup
+    // For unnamed statements, check text dedup via pre-built Set (O(1))
     if (!stmt.name) {
-      if (existingContent.includes(stmt.text.trim())) {
+      if (existing.unnamedTexts.has(stmt.text.trim())) {
         preserved++;
         continue;
       }
