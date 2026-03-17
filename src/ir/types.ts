@@ -1,5 +1,5 @@
 /** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
-export const IR_VERSION = 3;
+export const IR_VERSION = 4;
 
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
@@ -90,11 +90,24 @@ export interface MapType {
   valueType: TypeRef;
 }
 
+/**
+ * A generic type parameter on a model.
+ * Example: `DirectoryUser<TCustomAttributes = Record<string, unknown>>`
+ * → `{ name: 'TCustomAttributes', default: { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } } }`
+ */
+export interface TypeParam {
+  name: string;
+  /** Default type when the param is not specified. */
+  default?: TypeRef;
+}
+
 /** Model definition (maps to an SDK model/data class) */
 export interface Model {
   name: string;
   description?: string;
   fields: Field[];
+  /** Generic type parameters. Empty/undefined for non-generic models. */
+  typeParams?: TypeParam[];
 }
 
 export interface Field {

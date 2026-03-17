@@ -14,6 +14,7 @@ export type {
   NullableType,
   MapType,
   Model,
+  TypeParam,
   Field,
   Enum,
   EnumValue,
