@@ -253,7 +253,7 @@ function extractTypeAlias(sym: ts.Symbol, checker: ts.TypeChecker): ApiTypeAlias
   const type = checker.getDeclaredTypeOfSymbol(sym);
   return {
     name: sym.name,
-    value: checker.typeToString(type, undefined, ts.TypeFormatFlags.InTypeAlias),
+    value: checker.typeToString(type, undefined, ts.TypeFormatFlags.InTypeAlias | ts.TypeFormatFlags.NoTruncation),
   };
 }
 

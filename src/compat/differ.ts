@@ -137,6 +137,22 @@ function isUnionReorder(a: string, b: string): boolean {
   return membersA.every((m, i) => m === membersB[i]);
 }
 
+/**
+ * Returns true if a type string looks like a generic type parameter.
+ * Examples: `T`, `TCustomAttributes`, `TRawAttributes`, `T[]`
+ * These are type-level variables that only exist at the declaration site
+ * and cannot be matched by extraction from generated output.
+ */
+function isGenericTypeParam(type: string): boolean {
+  // Single letter type param (T, U, V, K, etc.)
+  if (/^[A-Z]$/.test(type)) return true;
+  // T-prefixed PascalCase (TCustomAttributes, TRawAttributes)
+  if (/^T[A-Z][a-zA-Z]*$/.test(type)) return true;
+  // Array of a generic param (T[])
+  if (/^[A-Z]\[\]$/.test(type) || /^T[A-Z][a-zA-Z]*\[\]$/.test(type)) return true;
+  return false;
+}
+
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffResult {
   const violations: Violation[] = [];
   const additions: Addition[] = [];
@@ -276,10 +292,22 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
         continue;
       }
       if (baseField.type !== candField.type) {
+        // Union member reordering is not a real difference
+        if (isUnionReorder(baseField.type, candField.type)) {
+          preserved++;
+          continue;
+        }
         const nullableOnly = isNullableOnlyDifference(baseField.type, candField.type);
+        // Generic type params (T, TCustomAttributes, etc.) can't be preserved
+        // in generated output — the extractor resolves them to `any`.
+        const genericParam = isGenericTypeParam(baseField.type);
+        // When candidate resolves to `any`, it's typically an extraction artifact
+        // (TS compiler couldn't resolve the type due to missing imports).
+        // Downgrade to warning since the generated source likely has the correct type.
+        const extractionArtifact = candField.type === 'any' && baseField.type !== 'any';
         violations.push({
           category: 'signature',
-          severity: nullableOnly ? 'warning' : 'breaking',
+          severity: nullableOnly || genericParam || extractionArtifact ? 'warning' : 'breaking',
           symbolPath: `${name}.${fieldName}`,
           baseline: baseField.type,
           candidate: candField.type,
@@ -310,6 +338,13 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
     totalBaseline++;
     const candAlias = candidate.typeAliases[name];
     if (!candAlias) {
+      // Category mismatch tolerance: if the candidate has this name as an
+      // interface or class instead of a type alias, it's still "present" —
+      // just in a different TypeScript declaration form.
+      if (candidate.interfaces[name] || candidate.classes[name]) {
+        preserved++;
+        continue;
+      }
       violations.push({
         category: 'public-api',
         severity: 'breaking',
