@@ -295,8 +295,14 @@ The manifest maps every `HTTP_METHOD /path` to `{ sdkMethod, service }`:
 
 ```json
 {
-  "POST /organizations": { "sdkMethod": "createOrganizations", "service": "organizations" },
-  "GET /organizations/{id}": { "sdkMethod": "getOrganizations", "service": "organizations" }
+  "POST /organizations": {
+    "sdkMethod": "createOrganizations",
+    "service": "organizations"
+  },
+  "GET /organizations/{id}": {
+    "sdkMethod": "getOrganizations",
+    "service": "organizations"
+  }
 }
 ```
 
