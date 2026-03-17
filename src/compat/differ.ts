@@ -166,6 +166,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
           candidate: candProp.type,
           message: `Property type mismatch for "${name}.${propName}"`,
         });
+        if (nullableOnly) preserved++;
         continue;
       }
       preserved++;
@@ -237,14 +238,17 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         // the extractor couldn't resolve the type due to missing imports.
         // Downgrade to warning since the generated source likely has the correct type.
         const extractionArtifact = hints.isExtractionArtifact(candField.type);
+        const isWarning = nullableOnly || genericParam || extractionArtifact;
         violations.push({
           category: 'signature',
-          severity: nullableOnly || genericParam || extractionArtifact ? 'warning' : 'breaking',
+          severity: isWarning ? 'warning' : 'breaking',
           symbolPath: `${name}.${fieldName}`,
           baseline: baseField.type,
           candidate: candField.type,
           message: `Field type mismatch for "${name}.${fieldName}"`,
         });
+        // Warning-level mismatches are backwards-compatible — count as preserved
+        if (isWarning) preserved++;
         continue;
       }
       preserved++;
@@ -304,6 +308,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         candidate: candAlias.value,
         message: `Type alias value mismatch for "${name}"`,
       });
+      if (nullableOnly) preserved++;
       continue;
     }
     preserved++;
