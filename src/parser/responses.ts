@@ -1,7 +1,7 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
 import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef } from './schemas.js';
+import { schemaToTypeRef, buildFieldFromSchema } from './schemas.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -281,14 +281,7 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    fields.push({
-      name: fieldName,
-      type: schemaToTypeRef(fieldSchema, fieldName, name),
-      required: requiredSet.has(fieldName),
-      description: fieldSchema.description,
-      readOnly: fieldSchema.readOnly || undefined,
-      writeOnly: fieldSchema.writeOnly || undefined,
-    });
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
 
     // Recursively extract nested inline objects — qualify with parent name
     // to avoid generic names like "Domains" when multiple parents have a "domains" field

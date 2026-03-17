@@ -5,6 +5,31 @@ import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { toSnakeCase } from '../utils/naming.js';
 import { writeFiles } from './writer.js';
 
+/** Collect all generated files from an emitter (no headers, no path prefixes). */
+export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterContext): GeneratedFile[] {
+  return [
+    ...emitter.generateModels(spec.models, ctx),
+    ...emitter.generateEnums(spec.enums, ctx),
+    ...emitter.generateResources(spec.services, ctx),
+    ...emitter.generateClient(spec, ctx),
+    ...emitter.generateErrors(ctx),
+    ...emitter.generateConfig(ctx),
+    ...(emitter.generateTypeSignatures?.(spec, ctx) ?? []),
+    ...emitter.generateTests(spec, ctx),
+    ...(emitter.generateManifest?.(spec, ctx) ?? []),
+  ];
+}
+
+/** Apply file header to generated files, respecting headerPlacement and JSON files. */
+export function applyFileHeaders(files: GeneratedFile[], header: string): GeneratedFile[] {
+  return files.map((f) => ({
+    ...f,
+    content:
+      f.path.endsWith('.json') || f.headerPlacement === 'skip' ? f.content : header + '\n\n' + f.content,
+    skipIfExists: f.skipIfExists ?? false,
+  }));
+}
+
 export async function generate(
   spec: ApiSpec,
   emitter: Emitter,
@@ -27,26 +52,13 @@ export async function generate(
     irVersion: IR_VERSION,
   };
 
-  const files: GeneratedFile[] = [
-    ...emitter.generateModels(spec.models, ctx),
-    ...emitter.generateEnums(spec.enums, ctx),
-    ...emitter.generateResources(spec.services, ctx),
-    ...emitter.generateClient(spec, ctx),
-    ...emitter.generateErrors(ctx),
-    ...emitter.generateConfig(ctx),
-    ...(emitter.generateTypeSignatures?.(spec, ctx) ?? []),
-    ...emitter.generateTests(spec, ctx),
-    ...(emitter.generateManifest?.(spec, ctx) ?? []),
-  ];
+  const files = generateAllFiles(spec, emitter, ctx);
 
   const header = emitter.fileHeader();
   const langPrefix = `${emitter.language}/`;
-  const withHeaders = files.map((f) => ({
+  const withHeaders = applyFileHeaders(files, header).map((f) => ({
     ...f,
     path: `${langPrefix}${f.path}`,
-    content:
-      f.path.endsWith('.json') || f.headerPlacement === 'skip' ? f.content : header + '\n\n' + f.content,
-    skipIfExists: f.skipIfExists ?? false,
   }));
 
   if (options.dryRun) {

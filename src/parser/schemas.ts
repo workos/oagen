@@ -86,6 +86,23 @@ function collectInlineEnums(fields: Field[], enums: Enum[]): void {
   }
 }
 
+/** Build a single Field from a schema property entry. Shared across all extraction sites. */
+export function buildFieldFromSchema(
+  fieldName: string,
+  fieldSchema: SchemaObject,
+  contextName: string,
+  requiredSet: Set<string>,
+): Field {
+  return {
+    name: fieldName,
+    type: schemaToTypeRef(fieldSchema, fieldName, contextName),
+    required: requiredSet.has(fieldName),
+    description: fieldSchema.description,
+    readOnly: fieldSchema.readOnly || undefined,
+    writeOnly: fieldSchema.writeOnly || undefined,
+  };
+}
+
 function extractEnum(name: string, schema: SchemaObject): Enum {
   const values: EnumValue[] = (schema.enum ?? []).map((v) => ({
     name: toUpperSnakeCase(v),
@@ -105,14 +122,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push({
-      name: fieldName,
-      type: schemaToTypeRef(fieldSchema, fieldName, name),
-      required: requiredSet.has(fieldName),
-      description: fieldSchema.description,
-      readOnly: fieldSchema.readOnly || undefined,
-      writeOnly: fieldSchema.writeOnly || undefined,
-    });
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
   }
 
   return { name, description: schema.description, fields };
@@ -145,16 +155,11 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
         for (const r of resolved.required) requiredSet.add(r);
       }
       if (resolved.properties) {
+        // Use an empty requiredSet — required flags are set in the final pass below
+        const emptyRequired = new Set<string>();
         for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
           if (!fieldSchema) continue;
-          fields.push({
-            name: fieldName,
-            type: schemaToTypeRef(fieldSchema, fieldName, name),
-            required: false, // will be set below
-            description: fieldSchema.description,
-            readOnly: fieldSchema.readOnly || undefined,
-            writeOnly: fieldSchema.writeOnly || undefined,
-          });
+          fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired));
         }
       }
     }
@@ -491,14 +496,7 @@ function buildInlineModel(name: string, schema: SchemaObject): Model {
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push({
-      name: fieldName,
-      type: schemaToTypeRef(fieldSchema, fieldName, name),
-      required: requiredSet.has(fieldName),
-      description: fieldSchema.description,
-      readOnly: fieldSchema.readOnly || undefined,
-      writeOnly: fieldSchema.writeOnly || undefined,
-    });
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
   }
 
   return { name, description: schema.description, fields };

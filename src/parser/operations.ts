@@ -11,7 +11,7 @@ import type {
 } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef } from './schemas.js';
+import { schemaToTypeRef, buildFieldFromSchema } from './schemas.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 
@@ -366,12 +366,7 @@ function extractRequestBody(
     const fields: Field[] = [];
     for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
       if (!fieldSchema) continue;
-      fields.push({
-        name: fieldName,
-        type: schemaToTypeRef(fieldSchema, fieldName, contextName),
-        required: requiredSet.has(fieldName),
-        description: fieldSchema.description,
-      });
+      fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet));
     }
     inlineModels.push({ name: contextName, description: undefined, fields });
     return { body: { kind: 'model', name: contextName }, encoding };

@@ -4,7 +4,6 @@ import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 export interface GeneratedFile {
   path: string;
   content: string;
-  header?: string;
   skipIfExists?: boolean;
   headerPlacement?: 'prepend' | 'skip';
 }

@@ -4,6 +4,7 @@ import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { diffSpecs } from '../differ/diff.js';
 import { mapChangesToFiles } from '../differ/file-map.js';
+import { generateAllFiles, applyFileHeaders } from './orchestrator.js';
 import { toSnakeCase } from '../utils/naming.js';
 import { writeFiles } from './writer.js';
 import * as fs from 'node:fs/promises';
@@ -42,27 +43,14 @@ export async function generateIncremental(
 
   // Regenerate affected files from the new spec using full generation,
   // then filter to only the affected paths
-  const allFiles = [
-    ...emitter.generateModels(newSpec.models, ctx),
-    ...emitter.generateEnums(newSpec.enums, ctx),
-    ...emitter.generateResources(newSpec.services, ctx),
-    ...emitter.generateClient(newSpec, ctx),
-    ...emitter.generateErrors(ctx),
-    ...emitter.generateConfig(ctx),
-    ...(emitter.generateTypeSignatures?.(newSpec, ctx) ?? []),
-    ...emitter.generateTests(newSpec, ctx),
-    ...(emitter.generateManifest?.(newSpec, ctx) ?? []),
-  ];
+  const allFiles = generateAllFiles(newSpec, emitter, ctx);
 
   const header = emitter.fileHeader();
   const affectedSet = new Set(affected.regenerate);
-  const generated = allFiles
-    .filter((f) => affectedSet.has(f.path))
-    .map((f) => ({
-      ...f,
-      content: f.path.endsWith('.json') ? f.content : header + '\n\n' + f.content,
-      skipIfExists: f.skipIfExists ?? false,
-    }));
+  const generated = applyFileHeaders(
+    allFiles.filter((f) => affectedSet.has(f.path)),
+    header,
+  );
 
   if (!options.dryRun) {
     await writeFiles(generated, options.outputDir, {
