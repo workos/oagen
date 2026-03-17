@@ -84,8 +84,9 @@ ls {project}/docs/sdk-architecture/{language}.md
 ls {project}/src/{language}/index.ts
 cd {project} && npx vitest run test/{language}/ 2>&1 | tail -5
 
-# After /generate-extractor — extractor registered
+# After /generate-extractor — extractor registered with hints
 grep -l "{language}Extractor\|{language}_extractor" {project}/oagen.config.ts
+grep -l "hints" {project}/src/compat/extractors/{language}.ts
 
 # After /verify-compat — handled by the skill itself
 

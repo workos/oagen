@@ -67,9 +67,18 @@ Create `src/compat/extractors/{language}.ts` **in the emitter project**.
 
 ```typescript
 import type { ApiSurface, Extractor } from '@workos/oagen';
+import { resolveHints } from '@workos/oagen';
 
 export const {language}Extractor: Extractor = {
   language: '{language}',
+  hints: resolveHints({
+    // Override only the hints that differ from Node/TypeScript defaults.
+    // See docs/architecture/extractor-contract.md for the full reference.
+    // stripNullable: (type) => ...,
+    // isExtractionArtifact: (type) => ...,
+    // tolerateCategoryMismatch: false,
+    // derivedModelNames: (name) => [...],
+  }),
   async extract(sdkPath: string): Promise<ApiSurface> {
     // 1. Discover entry point
     // 2. Load and analyze public surface
@@ -97,6 +106,7 @@ export const {language}Extractor: Extractor = {
 3. **Preserve fidelity** — Capture method signatures as they appear in the live SDK, not as the IR would generate them.
 4. **Handle missing infrastructure gracefully** — Throw a descriptive error if required files are missing.
 5. **Populate all ApiSurface fields** — `classes`, `interfaces`, `typeAliases`, `enums`, `exports`. Map as closely as possible even if the language doesn't have a direct equivalent for every category.
+6. **Provide `hints`** — Every extractor must include a `hints: LanguageHints` field. Use `resolveHints({...})` to start from Node defaults and override only the language-specific methods. Test that your hints produce correct results for the target language's type strings.
 
 ## Step 2: Register the Extractor
 

@@ -25,7 +25,7 @@ Check for `node_modules/@workos/oagen/`, or `src/engine/types.ts` in the current
 
 - An emitter exists for `<language>` (run `/generate-emitter` first)
 - The live SDK is accessible at `--sdk-path` — must be the real, published SDK
-- An extractor exists for `<language>` (run `/generate-extractor` first)
+- An extractor exists for `<language>` (run `/generate-extractor` first), with `hints: LanguageHints` properly configured for the target language
 - The emitter has been run at least once to produce generated output
 - The emitter's design doc (`docs/sdk-architecture/{language}.md`) exists and documents the real SDK's patterns
 
@@ -139,8 +139,9 @@ oagen generate --spec <spec> --lang <language> --output <path> --no-compat-check
 
 ## Reference
 
-- Extractor contract: `{oagen}/docs/architecture/extractor-contract.md`
-- Compat types: `{oagen}/src/compat/types.ts`
+- Extractor contract: `{oagen}/docs/architecture/extractor-contract.md` (includes Language Hints reference)
+- Language hints: `{oagen}/src/compat/language-hints.ts` (`nodeHints`, `resolveHints`)
+- Compat types: `{oagen}/src/compat/types.ts` (`LanguageHints`, `Extractor`)
 - Node extractor (reference): `{oagen}/src/compat/extractors/node.ts`
 - Overlay logic: `{oagen}/src/compat/overlay.ts`
 - Differ: `{oagen}/src/compat/differ.ts`
