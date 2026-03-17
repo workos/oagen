@@ -1,5 +1,6 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
 import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming.js';
+import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef } from './schemas.js';
 
 export interface ResponseExtractionResult {
@@ -11,10 +12,7 @@ export interface ResponseExtractionResult {
   isPaginated: boolean;
 }
 
-export function classifyAndExtractResponse(
-  schema: Record<string, unknown>,
-  contextName: string,
-): ResponseExtractionResult {
+export function classifyAndExtractResponse(schema: SchemaObject, contextName: string): ResponseExtractionResult {
   // 1. If schema is a $ref, resolve to model name (Phase 1)
   if (schema.$ref) {
     return { response: schemaToTypeRef(schema, contextName), inlineModels: [], isPaginated: false };
@@ -34,20 +32,18 @@ export function classifyAndExtractResponse(
   return extractDirectResource(schema, contextName);
 }
 
-function isListEnvelope(schema: Record<string, unknown>): boolean {
+function isListEnvelope(schema: SchemaObject): boolean {
   // Check allOf-style list envelope
-  const allOf = schema.allOf as Record<string, unknown>[] | undefined;
-  if (allOf) {
+  if (schema.allOf) {
     let hasListMetadata = false;
     let hasDataArray = false;
 
-    for (const sub of allOf) {
-      const props = sub.properties as Record<string, unknown> | undefined;
-      if (!props) continue;
+    for (const sub of schema.allOf) {
+      if (!sub.properties) continue;
 
-      if (props.list_metadata) hasListMetadata = true;
+      if (sub.properties.list_metadata) hasListMetadata = true;
 
-      const dataSchema = props.data as Record<string, unknown> | undefined;
+      const dataSchema = sub.properties.data;
       if (dataSchema?.type === 'array') hasDataArray = true;
     }
 
@@ -55,39 +51,37 @@ function isListEnvelope(schema: Record<string, unknown>): boolean {
   }
 
   // Check flat list envelope (object with data array + list_metadata)
-  const props = schema.properties as Record<string, unknown> | undefined;
-  if (props) {
-    const dataSchema = props.data as Record<string, unknown> | undefined;
+  if (schema.properties) {
+    const dataSchema = schema.properties.data;
     const hasDataArray = dataSchema?.type === 'array';
-    const hasListMetadata = !!props.list_metadata;
+    const hasListMetadata = !!schema.properties.list_metadata;
     if (hasDataArray && hasListMetadata) return true;
   }
 
   return false;
 }
 
-function extractListResponse(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
+function extractListResponse(schema: SchemaObject, contextName: string): ResponseExtractionResult {
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
   // Collect all property sources (allOf sub-schemas or flat schema)
-  const propSources: Record<string, unknown>[] = [];
-  const allOf = schema.allOf as Record<string, unknown>[] | undefined;
-  if (allOf) {
-    for (const sub of allOf) {
-      if (sub.properties) propSources.push(sub.properties as Record<string, unknown>);
+  const propSources: Record<string, SchemaObject | undefined>[] = [];
+  if (schema.allOf) {
+    for (const sub of schema.allOf) {
+      if (sub.properties) propSources.push(sub.properties);
     }
   }
   if (schema.properties) {
-    propSources.push(schema.properties as Record<string, unknown>);
+    propSources.push(schema.properties);
   }
 
   for (const props of propSources) {
-    if (!props.data) continue;
+    const dataProp = props.data;
+    if (!dataProp) continue;
 
-    const dataSchema = props.data as Record<string, unknown>;
-    if (dataSchema.type === 'array' && dataSchema.items) {
-      const items = dataSchema.items as Record<string, unknown>;
+    if (dataProp.type === 'array' && dataProp.items) {
+      const items = dataProp.items;
       if (items.$ref) {
         itemTypeRef = schemaToTypeRef(items, contextName);
       } else if (items.type === 'object' && items.properties) {
@@ -105,32 +99,29 @@ function extractListResponse(schema: Record<string, unknown>, contextName: strin
   };
 }
 
-function hasObjectConstField(schema: Record<string, unknown>): boolean {
-  const props = schema.properties as Record<string, unknown> | undefined;
-  if (!props?.object) return false;
-  const objectField = props.object as Record<string, unknown>;
-  return objectField.const !== undefined || objectField.enum !== undefined;
+function hasObjectConstField(schema: SchemaObject): boolean {
+  if (!schema.properties?.object) return false;
+  const objectField = schema.properties.object;
+  return objectField !== undefined && (objectField.const !== undefined || objectField.enum !== undefined);
 }
 
-function isSingleResourceWrapper(schema: Record<string, unknown>): boolean {
+function isSingleResourceWrapper(schema: SchemaObject): boolean {
   if (schema.type !== 'object') return false;
-  const props = schema.properties as Record<string, unknown> | undefined;
-  if (!props) return false;
+  if (!schema.properties) return false;
 
   // Find the wrapper property: use required[0] if available, or the single property key
-  const required = schema.required as string[] | undefined;
   let wrapperKey: string | undefined;
-  if (required && required.length === 1) {
-    wrapperKey = required[0];
+  if (schema.required && schema.required.length === 1) {
+    wrapperKey = schema.required[0];
   } else {
-    const propKeys = Object.keys(props);
+    const propKeys = Object.keys(schema.properties);
     if (propKeys.length === 1) {
       wrapperKey = propKeys[0];
     }
   }
   if (!wrapperKey) return false;
 
-  const propSchema = props[wrapperKey] as Record<string, unknown> | undefined;
+  const propSchema = schema.properties[wrapperKey];
   if (!propSchema) return false;
 
   // Direct object with `object` const field
@@ -138,33 +129,30 @@ function isSingleResourceWrapper(schema: Record<string, unknown>): boolean {
 
   // oneOf with object + null (nullable resource)
   if (propSchema.oneOf) {
-    const variants = propSchema.oneOf as Record<string, unknown>[];
-    return variants.some((v) => v.type === 'object' && hasObjectConstField(v));
+    return propSchema.oneOf.some((v) => v.type === 'object' && hasObjectConstField(v));
   }
 
   return false;
 }
 
-function extractWrappedResource(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
-  const props = schema.properties as Record<string, unknown>;
-  const required = schema.required as string[] | undefined;
-  const wrapperKey = required && required.length === 1 ? required[0] : Object.keys(props)[0];
-  const propSchema = props[wrapperKey] as Record<string, unknown>;
+function extractWrappedResource(schema: SchemaObject, contextName: string): ResponseExtractionResult {
+  const props = schema.properties!;
+  const wrapperKey = schema.required && schema.required.length === 1 ? schema.required[0] : Object.keys(props)[0];
+  const propSchema = props[wrapperKey]!;
   const inlineModels: Model[] = [];
 
   // Derive model name from the object const value or wrapper property name
   const resourceName = contextName.replace(/Response$/, '');
 
   if (propSchema.oneOf) {
-    const variants = propSchema.oneOf as Record<string, unknown>[];
-    const objectVariant = variants.find((v) => v.type === 'object' && hasObjectConstField(v));
+    const objectVariant = propSchema.oneOf.find((v) => v.type === 'object' && hasObjectConstField(v));
 
     if (objectVariant) {
       const modelName = deriveModelName(objectVariant, resourceName);
       inlineModels.push(...extractInlineModel(modelName, objectVariant));
 
-      const hasNullVariant = variants.some(
-        (v) => v.type === 'null' || (Array.isArray(v.type) && (v.type as string[]).includes('null')),
+      const hasNullVariant = propSchema.oneOf.some(
+        (v) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
       );
 
       const modelRef: TypeRef = { kind: 'model', name: modelName };
@@ -187,7 +175,7 @@ function extractWrappedResource(schema: Record<string, unknown>, contextName: st
   };
 }
 
-function extractDirectResource(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
+function extractDirectResource(schema: SchemaObject, contextName: string): ResponseExtractionResult {
   const inlineModels: Model[] = [];
 
   // Direct object with properties (with or without explicit type: 'object')
@@ -203,19 +191,18 @@ function extractDirectResource(schema: Record<string, unknown>, contextName: str
 
   // allOf with properties — merge into a single model
   if (schema.allOf) {
-    const allOf = schema.allOf as Record<string, unknown>[];
-    const mergedProperties: Record<string, unknown> = {};
+    const mergedProperties: Record<string, SchemaObject | undefined> = {};
     const mergedRequired: string[] = [];
-    for (const sub of allOf) {
+    for (const sub of schema.allOf) {
       if (sub.properties) {
         Object.assign(mergedProperties, sub.properties);
       }
       if (sub.required) {
-        mergedRequired.push(...(sub.required as string[]));
+        mergedRequired.push(...sub.required);
       }
     }
     if (Object.keys(mergedProperties).length > 0) {
-      const merged = { type: 'object', properties: mergedProperties, required: mergedRequired };
+      const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
       const modelName = deriveModelName(merged, contextName);
       inlineModels.push(...extractInlineModel(modelName, merged));
       return {
@@ -229,8 +216,7 @@ function extractDirectResource(schema: Record<string, unknown>, contextName: str
   // oneOf — delegate to schemaToTypeRef (returns union) but also extract inline models
   // from object variants so the model refs resolve
   if (schema.oneOf) {
-    const variants = schema.oneOf as Record<string, unknown>[];
-    for (const variant of variants) {
+    for (const variant of schema.oneOf) {
       if (variant.properties && (variant.type === 'object' || !variant.type)) {
         const modelName = deriveModelName(variant, contextName);
         const existingNames = new Set(inlineModels.map((m) => m.name));
@@ -249,11 +235,10 @@ function extractDirectResource(schema: Record<string, unknown>, contextName: str
   };
 }
 
-function deriveModelName(schema: Record<string, unknown>, fallback: string): string {
-  const props = schema.properties as Record<string, unknown> | undefined;
-  if (props?.object) {
-    const objectField = props.object as Record<string, unknown>;
-    if (objectField.const && typeof objectField.const === 'string') {
+function deriveModelName(schema: SchemaObject, fallback: string): string {
+  if (schema.properties?.object) {
+    const objectField = schema.properties.object;
+    if (objectField && objectField.const && typeof objectField.const === 'string') {
       return toPascalCase(objectField.const);
     }
   }
@@ -282,18 +267,19 @@ function qualifyNestedName(parentName: string, fieldName: string): string {
   return qualified;
 }
 
-function extractInlineModel(name: string, schema: Record<string, unknown>): Model[] {
-  const requiredSet = new Set((schema.required as string[] | undefined) ?? []);
+function extractInlineModel(name: string, schema: SchemaObject): Model[] {
+  const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
-  const properties = (schema.properties as Record<string, Record<string, unknown>> | undefined) ?? {};
+  const properties = schema.properties ?? {};
   const nestedModels: Model[] = [];
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+    if (!fieldSchema) continue;
     fields.push({
       name: fieldName,
       type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
-      description: (fieldSchema.description as string) ?? undefined,
+      description: fieldSchema.description,
     });
 
     // Recursively extract nested inline objects — qualify with parent name
@@ -303,7 +289,7 @@ function extractInlineModel(name: string, schema: Record<string, unknown>): Mode
       nestedModels.push(...extractInlineModel(nestedName, fieldSchema));
     }
     if (fieldSchema.type === 'array' && fieldSchema.items) {
-      const items = fieldSchema.items as Record<string, unknown>;
+      const items = fieldSchema.items;
       if (items.type === 'object' && items.properties) {
         const nestedName = qualifyNestedName(name, fieldName);
         nestedModels.push(...extractInlineModel(nestedName, items));
@@ -311,5 +297,5 @@ function extractInlineModel(name: string, schema: Record<string, unknown>): Mode
     }
   }
 
-  return [{ name, description: (schema.description as string) ?? undefined, fields }, ...nestedModels];
+  return [{ name, description: schema.description, fields }, ...nestedModels];
 }

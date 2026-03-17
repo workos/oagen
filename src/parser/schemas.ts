@@ -2,11 +2,11 @@ import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import { toPascalCase, toUpperSnakeCase, cleanSchemaName, stripListItemMarkers, singularize } from '../utils/naming.js';
 
-interface SchemaObject {
+export interface SchemaObject {
   type?: string | string[];
   format?: string;
   description?: string;
-  properties?: Record<string, SchemaObject>;
+  properties?: Record<string, SchemaObject | undefined>;
   required?: string[];
   items?: SchemaObject;
   enum?: string[];
@@ -17,6 +17,9 @@ interface SchemaObject {
   nullable?: boolean;
   $ref?: string;
   additionalProperties?: boolean | SchemaObject;
+  const?: unknown;
+  patternProperties?: Record<string, SchemaObject>;
+  [key: string]: unknown;
 }
 
 export interface ExtractedSchemas {
@@ -24,8 +27,7 @@ export interface ExtractedSchemas {
   enums: Enum[];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function extractSchemas(schemas: Record<string, any> | undefined): ExtractedSchemas {
+export function extractSchemas(schemas: Record<string, SchemaObject> | undefined): ExtractedSchemas {
   const models: Model[] = [];
   const enums: Enum[] = [];
 
@@ -91,9 +93,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
 
   return { name, values };
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, any>): Model {
+function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   if (schema.allOf) {
     return extractAllOfModel(name, schema, schemas);
   }
@@ -102,6 +102,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   const fields: Field[] = [];
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
+    if (!fieldSchema) continue;
     fields.push({
       name: fieldName,
       type: schemaToTypeRef(fieldSchema, fieldName, name),
@@ -113,8 +114,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   return { name, description: schema.description, fields };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, any>): Model {
+function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   const fields: Field[] = [];
   const requiredSet = new Set<string>();
 
@@ -122,10 +122,10 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     // Resolve $ref sub-schemas by looking up the referenced component schema
     let resolved = subSchema;
     if (subSchema.$ref && schemas) {
-      const segments = (subSchema.$ref as string).split('/');
+      const segments = subSchema.$ref.split('/');
       const refName = segments[segments.length - 1];
       if (refName && schemas[refName]) {
-        resolved = schemas[refName] as SchemaObject;
+        resolved = schemas[refName];
       }
     }
 
@@ -142,6 +142,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
       }
       if (resolved.properties) {
         for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
+          if (!fieldSchema) continue;
           fields.push({
             name: fieldName,
             type: schemaToTypeRef(fieldSchema, fieldName, name),
@@ -166,8 +167,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
   return { name, description: schema.description, fields };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function schemaToTypeRef(schema: any, contextName?: string, parentModelName?: string): TypeRef {
+export function schemaToTypeRef(schema: SchemaObject, contextName?: string, parentModelName?: string): TypeRef {
   // Handle $ref → ModelRef
   if (schema.$ref) {
     const segments = schema.$ref.split('/');
@@ -327,7 +327,7 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
       // Empty additionalProperties ({}) means "any value" — keep as unknown
       const apKeys = Object.keys(schema.additionalProperties);
       if (apKeys.length > 0) {
-        valueType = schemaToTypeRef(schema.additionalProperties, contextName);
+        valueType = schemaToTypeRef(schema.additionalProperties as SchemaObject, contextName);
       }
     } else if (schema.patternProperties) {
       // patternProperties: { "pattern": schema } → use the first pattern's schema as value type
@@ -418,8 +418,7 @@ function qualifyInlineModelName(baseName: string, parentName?: string): string {
  * that are objects with properties (or arrays of such objects).
  * These correspond to the ModelRef entries created by schemaToTypeRef.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function extractInlineModelsFromSchemas(schemas: Record<string, any> | undefined): Model[] {
+export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObject> | undefined): Model[] {
   if (!schemas) return [];
 
   const inlineModels: Model[] = [];
@@ -443,6 +442,7 @@ function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[
   }
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+    if (!fieldSchema) continue;
     // Direct inline object with properties (with or without explicit type: 'object')
     if (fieldSchema.properties && (fieldSchema.type === 'object' || !fieldSchema.type)) {
       const baseName = toPascalCase(fieldName);
@@ -453,7 +453,7 @@ function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[
 
     // Array of inline objects
     if (fieldSchema.type === 'array' && fieldSchema.items) {
-      const items = fieldSchema.items as SchemaObject;
+      const items = fieldSchema.items;
       if (items.properties && (items.type === 'object' || !items.type)) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
@@ -465,9 +465,7 @@ function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[
     // oneOf containing objects — extract the first non-null variant as a model
     // This handles: totp: { oneOf: [{ type: object, properties: {...} }, { type: 'null' }] }
     if (fieldSchema.oneOf) {
-      const objectVariant = (fieldSchema.oneOf as SchemaObject[]).find(
-        (v) => v.properties && (v.type === 'object' || !v.type),
-      );
+      const objectVariant = fieldSchema.oneOf.find((v) => v.properties && (v.type === 'object' || !v.type));
       if (objectVariant) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
@@ -486,6 +484,7 @@ function buildInlineModel(name: string, schema: SchemaObject): Model {
   const fields: Field[] = [];
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
+    if (!fieldSchema) continue;
     fields.push({
       name: fieldName,
       type: schemaToTypeRef(fieldSchema, fieldName, name),

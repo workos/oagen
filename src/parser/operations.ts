@@ -1,5 +1,6 @@
 import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse, Model, Field } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
+import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef } from './schemas.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -28,17 +29,17 @@ interface ParameterObject {
   in: 'path' | 'query' | 'header' | 'cookie';
   required?: boolean;
   description?: string;
-  schema?: Record<string, unknown>;
+  schema?: SchemaObject;
 }
 
 interface RequestBodyObject {
   required?: boolean;
-  content?: Record<string, { schema?: Record<string, unknown> }>;
+  content?: Record<string, { schema?: SchemaObject }>;
 }
 
 interface ResponseObject {
   description?: string;
-  content?: Record<string, { schema?: Record<string, unknown> }>;
+  content?: Record<string, { schema?: SchemaObject }>;
 }
 
 const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
@@ -284,9 +285,7 @@ function extractParams(params: ParameterObject[], location: 'path' | 'query' | '
     .filter((p) => p.in === location)
     .map((p) => ({
       name: p.name,
-      type: p.schema
-        ? schemaToTypeRef(p.schema as Record<string, unknown>, p.name)
-        : ({ kind: 'primitive', type: 'string' } as TypeRef),
+      type: p.schema ? schemaToTypeRef(p.schema, p.name) : ({ kind: 'primitive', type: 'string' } as TypeRef),
       required: p.required ?? false,
       description: p.description,
     }));
@@ -302,22 +301,21 @@ function extractRequestBody(
   const jsonContent = body.content['application/json'];
   if (!jsonContent?.schema) return undefined;
 
-  const schema = jsonContent.schema as Record<string, unknown>;
+  const schema = jsonContent.schema;
   const rawName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
   const contextName = cleanSchemaName(rawName);
 
   // If the request body is an inline object with properties, extract it as a model
   if (schema.properties && (schema.type === 'object' || !schema.type)) {
-    const requiredSet = new Set((schema.required as string[] | undefined) ?? []);
+    const requiredSet = new Set(schema.required ?? []);
     const fields: Field[] = [];
-    for (const [fieldName, fieldSchema] of Object.entries(
-      schema.properties as Record<string, Record<string, unknown>>,
-    )) {
+    for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
+      if (!fieldSchema) continue;
       fields.push({
         name: fieldName,
         type: schemaToTypeRef(fieldSchema, fieldName, contextName),
         required: requiredSet.has(fieldName),
-        description: (fieldSchema.description as string) ?? undefined,
+        description: fieldSchema.description,
       });
     }
     inlineModels.push({ name: contextName, description: undefined, fields });
@@ -356,16 +354,14 @@ function extractResponses(
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
         const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
-        const result = classifyAndExtractResponse(jsonContent.schema as Record<string, unknown>, contextName);
+        const result = classifyAndExtractResponse(jsonContent.schema, contextName);
         response = result.response;
         inlineModels = result.inlineModels;
         isPaginated = result.isPaginated;
       }
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
-      const type = jsonContent?.schema
-        ? schemaToTypeRef(jsonContent.schema as Record<string, unknown>, `Error${code}`)
-        : undefined;
+      const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
       errors.push({ statusCode: code, type });
     }
   }

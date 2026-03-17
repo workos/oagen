@@ -272,8 +272,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         // because the type couldn't be resolved from the spec (parser limitation), not
         // because the emitter chose to omit it.
         const baseTypeClean = baseField.type.replace(/\[\]$/, '').replace(/ \| null$/, '');
-        const typeIsUnresolvable =
-          NAMED_TYPE_RE.test(baseTypeClean) && !typeExistsInSurface(baseTypeClean, candidate);
+        const typeIsUnresolvable = NAMED_TYPE_RE.test(baseTypeClean) && !typeExistsInSurface(baseTypeClean, candidate);
         violations.push({
           category: 'public-api',
           severity: typeIsUnresolvable ? 'warning' : 'breaking',
