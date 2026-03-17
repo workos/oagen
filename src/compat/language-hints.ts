@@ -1,5 +1,26 @@
 import type { ApiSurface, LanguageHints } from './types.js';
 
+/** Untyped map patterns — hoisted to avoid allocation on every isTypeEquivalent call. */
+const UNTYPED_MAP_PATTERNS = new Set([
+  'Record<string, unknown>',
+  'Record<string, any>',
+  '{ [key: string]: any; }',
+  '{ [key: string]: unknown; }',
+  'any',
+]);
+
+const NAMED_TYPE_RE = /^[A-Z][a-zA-Z0-9]*$/;
+
+/** Check whether a type name exists as an interface, class, or enum in a surface. */
+function typeExistsInSurface(name: string, surface: ApiSurface): boolean {
+  return !!(surface.interfaces[name] || surface.classes[name] || surface.enums[name]);
+}
+
+/** Split a PascalCase string into words, keeping only words > 2 chars. */
+function splitPascalWords(s: string): string[] {
+  return s.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ').filter(w => w.length > 2);
+}
+
 /** Split a pipe-delimited union string into trimmed, non-empty members. */
 function parseUnionMembers(s: string): string[] {
   return s
@@ -103,14 +124,7 @@ export const nodeHints: LanguageHints = {
 
     // Tolerate untyped-map equivalences:
     // { [key: string]: any; } ≡ Record<string, unknown> ≡ Record<string, any>
-    const untypedMapPatterns = [
-      'Record<string, unknown>',
-      'Record<string, any>',
-      '{ [key: string]: any; }',
-      '{ [key: string]: unknown; }',
-      'any',
-    ];
-    if (untypedMapPatterns.includes(baselineType) && untypedMapPatterns.includes(candidateType)) {
+    if (UNTYPED_MAP_PATTERNS.has(baselineType) && UNTYPED_MAP_PATTERNS.has(candidateType)) {
       return true;
     }
 
@@ -118,7 +132,7 @@ export const nodeHints: LanguageHints = {
     // e.g., baseline: '{ type: "organization"; id: string; }', candidate: 'ApiKeyOwner'
     // The named model is more structured but semantically equivalent.
     if (baselineType.startsWith('{') && baselineType.endsWith('}')) {
-      if (candidateSurface.interfaces[candidateType] || candidateSurface.classes[candidateType]) {
+      if (typeExistsInSurface(candidateType, candidateSurface)) {
         return true;
       }
     }
@@ -144,14 +158,8 @@ export const nodeHints: LanguageHints = {
     // Both are named types (PascalCase, no operators) — check if candidate
     // is a known model/interface/enum, and baseline looks like a named type too.
     // This tolerates the parser's qualified naming vs the live SDK's shared naming.
-    const isNamedType = (t: string) => /^[A-Z][a-zA-Z0-9]*$/.test(t);
-    if (sameArrayness && isNamedType(baseClean) && isNamedType(candClean)) {
-      const candExists = !!(
-        candidateSurface.interfaces[candClean] ||
-        candidateSurface.classes[candClean] ||
-        candidateSurface.enums[candClean]
-      );
-      if (candExists) {
+    if (sameArrayness && NAMED_TYPE_RE.test(baseClean) && NAMED_TYPE_RE.test(candClean)) {
+      if (typeExistsInSurface(candClean, candidateSurface)) {
         // One name contains the other (e.g., ProfileConnectionType contains ConnectionType)
         if (candClean.includes(baseClean) || baseClean.includes(candClean)) {
           return true;
@@ -165,9 +173,8 @@ export const nodeHints: LanguageHints = {
         // Word-component overlap: split PascalCase into words and check
         // if they share enough meaningful words (handles name reordering
         // from Json merges: AuditLogTargetSchema vs AuditLogSchemaJsonTarget)
-        const splitWords = (s: string) => s.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ').filter(w => w.length > 2);
-        const baseWords = new Set(splitWords(baseNoResp));
-        const candWords = new Set(splitWords(candNoResp));
+        const baseWords = new Set(splitPascalWords(baseNoResp));
+        const candWords = new Set(splitPascalWords(candNoResp));
         const overlap = [...baseWords].filter(w => candWords.has(w));
         if (overlap.length >= 2 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) {
           return true;

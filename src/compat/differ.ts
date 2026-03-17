@@ -121,48 +121,6 @@ export function filterSurface(surface: ApiSurface, allowedNames: Set<string>, fi
   };
 }
 
-/**
- * Extract the core named type from a type string, or null for primitives.
- * Examples:
- *   "string" → null
- *   "Organization" → "Organization"
- *   "RoleResponse[]" → "RoleResponse"
- *   "ApiKey | null" → "ApiKey"
- *   "{ type: string }" → null (inline object)
- *   '"active" | "inactive"' → null (string literal union)
- */
-function extractCoreTypeName(typeStr: string): string | null {
-  // Strip array suffix
-  let cleaned = typeStr.replace(/\[\]$/, '');
-  // Strip nullable
-  cleaned = cleaned.replace(/\s*\|\s*null$/, '').replace(/^\s*null\s*\|\s*/, '');
-  cleaned = cleaned.trim();
-  // Primitives and literals
-  if (['string', 'number', 'boolean', 'any', 'unknown', 'void', 'never', 'undefined'].includes(cleaned)) {
-    return null;
-  }
-  // Inline objects or string literal unions
-  if (cleaned.startsWith('{') || cleaned.startsWith('"') || cleaned.startsWith("'")) {
-    return null;
-  }
-  // Generic types: extract the outer type
-  const genericMatch = cleaned.match(/^([A-Z][a-zA-Z0-9]*)</);
-  if (genericMatch) {
-    return genericMatch[1];
-  }
-  // Simple named type
-  if (/^[A-Z][a-zA-Z0-9]*$/.test(cleaned)) {
-    return cleaned;
-  }
-  // Union of named types — check first member
-  const unionMembers = cleaned.split('|').map(m => m.trim());
-  if (unionMembers.length > 1) {
-    const firstNamed = unionMembers.find(m => /^[A-Z][a-zA-Z0-9]*$/.test(m));
-    return firstNamed ?? null;
-  }
-  return null;
-}
-
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints: LanguageHints): DiffResult {
   const violations: Violation[] = [];
   const additions: Addition[] = [];
@@ -276,17 +234,13 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
     const candIface = candidate.interfaces[name];
     if (!candIface) {
       // When tolerateCategoryMismatch is on, also check if this interface is
-      // a derived type (Serialized*, *Response) whose base model exists.
+      // a derived type (Serialized*) whose base model exists.
       // These are emitter implementation details, not public API contract violations.
       let tolerated = false;
-      if (hints.tolerateCategoryMismatch) {
-        for (const prefix of ['Serialized']) {
-          if (name.startsWith(prefix)) {
-            const baseName = name.slice(prefix.length);
-            if (candidate.interfaces[baseName] || candidate.classes[baseName]) {
-              tolerated = true;
-            }
-          }
+      if (hints.tolerateCategoryMismatch && name.startsWith('Serialized')) {
+        const baseName = name.slice('Serialized'.length);
+        if (candidate.interfaces[baseName] || candidate.classes[baseName]) {
+          tolerated = true;
         }
       }
       if (tolerated) {
