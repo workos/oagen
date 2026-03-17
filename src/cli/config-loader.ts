@@ -13,6 +13,13 @@ export interface OagenConfig {
   /** Map from language key to custom smoke runner script path. */
   smokeRunners?: Record<string, string>;
   irVersion?: number;
+  /**
+   * Custom transform for operation IDs. When provided, replaces the default
+   * NestJS-specific stripping logic (e.g. `FooController_bar` → `bar`).
+   * Receives the raw operationId string; return the desired operation name.
+   * The result is used as-is (no additional camelCase conversion is applied).
+   */
+  operationIdTransform?: (id: string) => string;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];

@@ -5,7 +5,11 @@ import { loadAndBundleSpec } from './refs.js';
 import { extractSchemas, extractInlineModelsFromSchemas, collectInlineEnumFromRef } from './schemas.js';
 import { extractOperations } from './operations.js';
 
-export async function parseSpec(specPath: string): Promise<ApiSpec> {
+export interface ParseOptions {
+  operationIdTransform?: (id: string) => string;
+}
+
+export async function parseSpec(specPath: string, options?: ParseOptions): Promise<ApiSpec> {
   const { parsed } = await loadAndBundleSpec(specPath);
 
   const spec = parsed as {
@@ -37,6 +41,7 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
 
   const { services, inlineModels } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
+    options?.operationIdTransform,
   );
 
   // Merge inline response models with component schema models.

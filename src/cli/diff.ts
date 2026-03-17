@@ -14,9 +14,11 @@ export async function diffCommand(opts: {
   target?: string;
   apiSurface?: string;
   manifest?: string;
+  operationIdTransform?: (id: string) => string;
 }): Promise<void> {
-  const oldSpec = await parseSpec(opts.old);
-  const newSpec = await parseSpec(opts.new);
+  const parseOptions = { operationIdTransform: opts.operationIdTransform };
+  const oldSpec = await parseSpec(opts.old, parseOptions);
+  const newSpec = await parseSpec(opts.new, parseOptions);
 
   if (opts.report) {
     const diff = diffSpecs(oldSpec, newSpec);

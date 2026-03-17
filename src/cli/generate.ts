@@ -13,8 +13,9 @@ export async function generateCommand(opts: {
   apiSurface?: string;
   manifest?: string;
   compatCheck?: boolean;
+  operationIdTransform?: (id: string) => string;
 }): Promise<void> {
-  const ir = await parseSpec(opts.spec);
+  const ir = await parseSpec(opts.spec, { operationIdTransform: opts.operationIdTransform });
   const emitter = getEmitter(opts.lang);
   const namespace = opts.namespace ?? ir.name;
 
