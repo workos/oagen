@@ -160,8 +160,8 @@ In both Scenario A and Scenario B, include this section on running smoke tests:
   # Use oagen skills directly from the emitter project:
   claude --plugin-dir node_modules/@workos/oagen
   # (or: claude --plugin-dir ../oagen)
-  # Then run the emitter-smoke-test loop:
-  /oagen:generate-smoke-test {language}
-  # This iterates: generate → run smoke tests → fix emitter → repeat
+  # Then run the generate-verify loop:
+  /oagen:verify-smoke-test {language}
+  # This iterates: generate → verify → fix emitter → repeat
   # until the smoke tests pass without emitter changes.
 ```

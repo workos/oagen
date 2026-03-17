@@ -45,3 +45,4 @@ oagen ships as a Claude Code plugin. Skills are in `skills/` at the repo root. U
 - `/oagen:generate-extractor <language>` — scaffold an API surface extractor for compat verification
 - `/oagen:generate-smoke-test <language>` — create smoke tests for a generated SDK
 - `/oagen:verify-compat <language>` — verify emitter output preserves BC with a live SDK
+- `/oagen:verify-smoke-test <language>` — run generate-verify loop to iteratively fix an emitter until smoke tests pass

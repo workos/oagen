@@ -62,27 +62,27 @@ The `exports` field maps file paths to their exported symbol names, capturing th
 
 Every extractor must provide a `hints: LanguageHints` object that tells the differ and overlay how to interpret language-specific type strings. The `LanguageHints` interface includes:
 
-| Method/Property | Purpose | Node example | Go example |
-|---|---|---|---|
-| `stripNullable(type)` | Strip nullable wrapper | `"string \| null"` → `"string"` | `"*Organization"` → `"Organization"` |
-| `isNullableOnlyDifference(a, b)` | True if a and b differ only by nullability | `"string"` vs `"string \| null"` → true | |
-| `isUnionReorder(a, b)` | True if same union members in different order | `"a" \| "b"` vs `"b" \| "a"` → true | Always false (Go has no unions) |
-| `isGenericTypeParam(type)` | True if type is an unresolvable generic param | `"T"`, `"TCustomAttributes"` → true | |
-| `isExtractionArtifact(type)` | True if type is an extraction artifact | `"any"` → true | `"interface{}"` → true |
-| `tolerateCategoryMismatch` | Allow type alias ↔ interface/class mismatch | `true` (TS allows both forms) | `false` |
-| `extractReturnTypeName(returnType)` | Extract innermost type from return type | `"Promise<Organization>"` → `"Organization"` | |
-| `extractParamTypeName(paramType)` | Extract type from param (null for primitives) | `"string"` → null | |
-| `propertyMatchesClass(prop, class)` | True if property maps to class name | camelCase: `"organizations"` → `"Organizations"` | |
-| `derivedModelNames(modelName)` | Additional names a model produces | `["FooResponse", "SerializedFoo"]` | `["FooResponse"]` |
+| Method/Property                     | Purpose                                       | Node example                                     | Go example                           |
+| ----------------------------------- | --------------------------------------------- | ------------------------------------------------ | ------------------------------------ |
+| `stripNullable(type)`               | Strip nullable wrapper                        | `"string \| null"` → `"string"`                  | `"*Organization"` → `"Organization"` |
+| `isNullableOnlyDifference(a, b)`    | True if a and b differ only by nullability    | `"string"` vs `"string \| null"` → true          |                                      |
+| `isUnionReorder(a, b)`              | True if same union members in different order | `"a" \| "b"` vs `"b" \| "a"` → true              | Always false (Go has no unions)      |
+| `isGenericTypeParam(type)`          | True if type is an unresolvable generic param | `"T"`, `"TCustomAttributes"` → true              |                                      |
+| `isExtractionArtifact(type)`        | True if type is an extraction artifact        | `"any"` → true                                   | `"interface{}"` → true               |
+| `tolerateCategoryMismatch`          | Allow type alias ↔ interface/class mismatch   | `true` (TS allows both forms)                    | `false`                              |
+| `extractReturnTypeName(returnType)` | Extract innermost type from return type       | `"Promise<Organization>"` → `"Organization"`     |                                      |
+| `extractParamTypeName(paramType)`   | Extract type from param (null for primitives) | `"string"` → null                                |                                      |
+| `propertyMatchesClass(prop, class)` | True if property maps to class name           | camelCase: `"organizations"` → `"Organizations"` |                                      |
+| `derivedModelNames(modelName)`      | Additional names a model produces             | `["FooResponse", "SerializedFoo"]`               | `["FooResponse"]`                    |
 
 Use `resolveHints({...overrides})` to start from Node defaults and override only the methods that differ for your language:
 
 ```typescript
-import { resolveHints } from '@workos/oagen';
+import { resolveHints } from "@workos/oagen";
 
 const goHints = resolveHints({
-  stripNullable: (type) => type.startsWith('*') ? type.slice(1) : null,
-  isExtractionArtifact: (type) => type === 'interface{}',
+  stripNullable: (type) => (type.startsWith("*") ? type.slice(1) : null),
+  isExtractionArtifact: (type) => type === "interface{}",
   tolerateCategoryMismatch: false,
   derivedModelNames: (name) => [`${name}Response`],
 });
