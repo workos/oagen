@@ -204,9 +204,55 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
     };
   }
 
-  // Handle oneOf / anyOf → Union
+  // Handle allOf — merge properties from all sub-schemas.
+  // This handles patterns like: allOf: [{ type: object, properties: {...} }, { oneOf: [...] }]
+  // which are valid OAS 3.1 but weren't handled for field-level schemas.
+  if (schema.allOf) {
+    // If allOf contains a $ref, prefer the ref (it's a named type)
+    const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
+    if (refItem) {
+      return schemaToTypeRef(refItem, contextName, parentModelName);
+    }
+    // If allOf has a single item, unwrap it
+    if (schema.allOf.length === 1) {
+      return schemaToTypeRef(schema.allOf[0], contextName, parentModelName);
+    }
+    // If allOf items all have properties, treat as a merged model
+    const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
+    if (hasProperties) {
+      return {
+        kind: 'model',
+        name: toPascalCase(contextName ?? 'UnknownModel'),
+      };
+    }
+    // Fall through to other checks
+  }
+
+  // Handle oneOf / anyOf → Union or Nullable
+  // Valid OAS 3.1: properties can have { oneOf: [{ type: object }, { type: 'null' }] }
+  // without a wrapping `type` field.
   if (schema.oneOf || schema.anyOf) {
-    const variants = (schema.oneOf ?? schema.anyOf ?? []).map((v: SchemaObject) => schemaToTypeRef(v, contextName));
+    const rawVariants: SchemaObject[] = schema.oneOf ?? schema.anyOf ?? [];
+
+    // Check for nullable pattern: oneOf: [realType, { type: 'null' }]
+    const nullVariant = rawVariants.find(
+      (v: SchemaObject) => v.type === 'null' || (Array.isArray(v.type) && v.type.length === 1 && v.type[0] === 'null'),
+    );
+    const nonNullVariants = rawVariants.filter((v) => v !== nullVariant);
+
+    if (nullVariant && nonNullVariants.length === 1) {
+      // Nullable single type — unwrap as nullable
+      return {
+        kind: 'nullable',
+        inner: schemaToTypeRef(nonNullVariants[0], contextName, parentModelName),
+      };
+    }
+
+    // General union
+    const variants = rawVariants
+      .filter((v: SchemaObject) => v.type !== 'null')
+      .map((v: SchemaObject) => schemaToTypeRef(v, contextName));
+    const hasNull = !!nullVariant;
     const union: TypeRef = {
       kind: 'union',
       variants,
@@ -219,7 +265,7 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
           }
         : {}),
     };
-    return union;
+    return hasNull ? { kind: 'nullable', inner: union } : union;
   }
 
   // Handle const or single-value enum → LiteralType
@@ -245,6 +291,13 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
 
   // Handle array
   if (schema.type === 'array' && schema.items) {
+    return {
+      kind: 'array',
+      items: schemaToTypeRef(schema.items, contextName),
+    };
+  }
+  // Handle array without explicit type but with items (valid OAS 3.1)
+  if (!schema.type && schema.items) {
     return {
       kind: 'array',
       items: schemaToTypeRef(schema.items, contextName),
@@ -312,13 +365,18 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
     };
   }
 
-  // Schemas with no type and no meaningful shape → treat as freeform map (Record<string, unknown>)
-  // This is more accurate than string for untyped schemas in OpenAPI 3.x
-  if (!schema.type && !schema.$ref && !schema.oneOf && !schema.anyOf && !schema.allOf && !schema.enum) {
-    if (contextName) {
-      console.warn(`[oagen] Warning: Unknown schema shape treated as map (context: ${contextName})`);
-    }
-    return { kind: 'map', valueType: { kind: 'primitive', type: 'string' } };
+  // Empty schema {} → unknown
+  if (
+    !schema.type &&
+    !schema.$ref &&
+    !schema.oneOf &&
+    !schema.anyOf &&
+    !schema.allOf &&
+    !schema.enum &&
+    !schema.properties &&
+    !schema.items
+  ) {
+    return { kind: 'primitive', type: 'unknown' };
   }
 
   // Fallback: treat unknown schemas as string
@@ -357,8 +415,8 @@ function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[
   }
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
-    // Direct inline object with properties
-    if (fieldSchema.type === 'object' && fieldSchema.properties) {
+    // Direct inline object with properties (with or without explicit type: 'object')
+    if (fieldSchema.properties && (fieldSchema.type === 'object' || !fieldSchema.type)) {
       const modelName = toPascalCase(fieldName);
       results.push(buildInlineModel(modelName, fieldSchema));
       extractInlineModelsFromProperties(fieldSchema, results);
@@ -367,10 +425,26 @@ function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[
     // Array of inline objects
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items as SchemaObject;
-      if (items.type === 'object' && items.properties) {
+      if (items.properties && (items.type === 'object' || !items.type)) {
         const modelName = toPascalCase(fieldName);
         results.push(buildInlineModel(modelName, items));
         extractInlineModelsFromProperties(items, results);
+      }
+    }
+
+    // oneOf containing objects — extract the first non-null variant as a model
+    // This handles: totp: { oneOf: [{ type: object, properties: {...} }, { type: 'null' }] }
+    if (fieldSchema.oneOf) {
+      const objectVariant = (fieldSchema.oneOf as SchemaObject[]).find(
+        (v) => v.properties && (v.type === 'object' || !v.type),
+      );
+      if (objectVariant) {
+        const modelName = toPascalCase(fieldName);
+        const existingNames = new Set(results.map((r) => r.name));
+        if (!existingNames.has(modelName)) {
+          results.push(buildInlineModel(modelName, objectVariant));
+          extractInlineModelsFromProperties(objectVariant, results);
+        }
       }
     }
   }

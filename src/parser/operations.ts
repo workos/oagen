@@ -1,4 +1,4 @@
-import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse, Model } from '../ir/types.js';
+import type { Service, Operation, HttpMethod, Parameter, TypeRef, ErrorResponse, Model, Field } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import { schemaToTypeRef } from './schemas.js';
 import { detectPagination } from './pagination.js';
@@ -133,8 +133,10 @@ function buildOperation(
   const queryParams = extractParams(allParams, 'query');
   const headerParams = extractParams(allParams, 'header');
 
-  const requestBody = extractRequestBody(op.requestBody, op);
+  const reqBodyModels: Model[] = [];
+  const requestBody = extractRequestBody(op.requestBody, op, reqBodyModels);
   const { response, errors, inlineModels, isPaginated } = extractResponses(op.responses, op, path, method);
+  inlineModels.push(...reqBodyModels);
 
   const paginated = isPaginated || detectPagination(response, queryParams);
 
@@ -170,15 +172,39 @@ function extractParams(params: ParameterObject[], location: 'path' | 'query' | '
     }));
 }
 
-function extractRequestBody(body?: RequestBodyObject, op?: OperationObject): TypeRef | undefined {
+function extractRequestBody(
+  body: RequestBodyObject | undefined,
+  op: OperationObject | undefined,
+  inlineModels: Model[],
+): TypeRef | undefined {
   if (!body?.content) return undefined;
 
   const jsonContent = body.content['application/json'];
   if (!jsonContent?.schema) return undefined;
 
+  const schema = jsonContent.schema as Record<string, unknown>;
   const rawName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
   const contextName = cleanSchemaName(rawName);
-  return schemaToTypeRef(jsonContent.schema as Record<string, unknown>, contextName);
+
+  // If the request body is an inline object with properties, extract it as a model
+  if (schema.properties && (schema.type === 'object' || !schema.type)) {
+    const requiredSet = new Set((schema.required as string[] | undefined) ?? []);
+    const fields: Field[] = [];
+    for (const [fieldName, fieldSchema] of Object.entries(
+      schema.properties as Record<string, Record<string, unknown>>,
+    )) {
+      fields.push({
+        name: fieldName,
+        type: schemaToTypeRef(fieldSchema, fieldName, contextName),
+        required: requiredSet.has(fieldName),
+        description: (fieldSchema.description as string) ?? undefined,
+      });
+    }
+    inlineModels.push({ name: contextName, description: undefined, fields });
+    return { kind: 'model', name: contextName };
+  }
+
+  return schemaToTypeRef(schema, contextName);
 }
 
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {

@@ -247,17 +247,9 @@ describe('schemaToTypeRef', () => {
     expect(ref).toEqual({ kind: 'primitive', type: 'string' });
   });
 
-  it('treats empty schema as map and warns', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      const ref = schemaToTypeRef({}, 'unknownField');
-      expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'string' } });
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Unknown schema shape treated as map (context: unknownField)'),
-      );
-    } finally {
-      warnSpy.mockRestore();
-    }
+  it('treats empty schema as unknown primitive', () => {
+    const ref = schemaToTypeRef({}, 'unknownField');
+    expect(ref).toEqual({ kind: 'primitive', type: 'unknown' });
   });
 
   it('warns on ignored additionalProperties with object schema that also has properties', () => {

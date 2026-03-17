@@ -190,7 +190,8 @@ function extractWrappedResource(schema: Record<string, unknown>, contextName: st
 function extractDirectResource(schema: Record<string, unknown>, contextName: string): ResponseExtractionResult {
   const inlineModels: Model[] = [];
 
-  if (schema.type === 'object' && schema.properties) {
+  // Direct object with properties (with or without explicit type: 'object')
+  if (schema.properties && (schema.type === 'object' || !schema.type)) {
     const modelName = deriveModelName(schema, contextName);
     inlineModels.push(...extractInlineModel(modelName, schema));
     return {
@@ -200,10 +201,50 @@ function extractDirectResource(schema: Record<string, unknown>, contextName: str
     };
   }
 
-  // Non-object schema (primitive, array, etc.) — delegate to schemaToTypeRef
+  // allOf with properties — merge into a single model
+  if (schema.allOf) {
+    const allOf = schema.allOf as Record<string, unknown>[];
+    const mergedProperties: Record<string, unknown> = {};
+    const mergedRequired: string[] = [];
+    for (const sub of allOf) {
+      if (sub.properties) {
+        Object.assign(mergedProperties, sub.properties);
+      }
+      if (sub.required) {
+        mergedRequired.push(...(sub.required as string[]));
+      }
+    }
+    if (Object.keys(mergedProperties).length > 0) {
+      const merged = { type: 'object', properties: mergedProperties, required: mergedRequired };
+      const modelName = deriveModelName(merged, contextName);
+      inlineModels.push(...extractInlineModel(modelName, merged));
+      return {
+        response: { kind: 'model', name: modelName },
+        inlineModels,
+        isPaginated: false,
+      };
+    }
+  }
+
+  // oneOf — delegate to schemaToTypeRef (returns union) but also extract inline models
+  // from object variants so the model refs resolve
+  if (schema.oneOf) {
+    const variants = schema.oneOf as Record<string, unknown>[];
+    for (const variant of variants) {
+      if (variant.properties && (variant.type === 'object' || !variant.type)) {
+        const modelName = deriveModelName(variant, contextName);
+        const existingNames = new Set(inlineModels.map((m) => m.name));
+        if (!existingNames.has(modelName)) {
+          inlineModels.push(...extractInlineModel(modelName, variant));
+        }
+      }
+    }
+  }
+
+  // Non-object schema (primitive, array, union, etc.) — delegate to schemaToTypeRef
   return {
     response: schemaToTypeRef(schema, contextName),
-    inlineModels: [],
+    inlineModels,
     isPaginated: false,
   };
 }
