@@ -1,4 +1,5 @@
 import type { ApiSurface, LanguageHints } from './types.js';
+import { splitWords } from '../utils/naming.js';
 
 /** Untyped map patterns — hoisted to avoid allocation on every isTypeEquivalent call. */
 const UNTYPED_MAP_PATTERNS = new Set([
@@ -9,19 +10,16 @@ const UNTYPED_MAP_PATTERNS = new Set([
   'any',
 ]);
 
-const NAMED_TYPE_RE = /^[A-Z][a-zA-Z0-9]*$/;
+export const NAMED_TYPE_RE = /^[A-Z][a-zA-Z0-9]*$/;
 
 /** Check whether a type name exists as an interface, class, or enum in a surface. */
-function typeExistsInSurface(name: string, surface: ApiSurface): boolean {
+export function typeExistsInSurface(name: string, surface: ApiSurface): boolean {
   return !!(surface.interfaces[name] || surface.classes[name] || surface.enums[name]);
 }
 
 /** Split a PascalCase string into words, keeping only words > 2 chars. */
 function splitPascalWords(s: string): string[] {
-  return s
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .split(' ')
-    .filter((w) => w.length > 2);
+  return splitWords(s).filter((w) => w.length > 2);
 }
 
 /** Split a pipe-delimited union string into trimmed, non-empty members. */

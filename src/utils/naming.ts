@@ -5,7 +5,7 @@
  * - Consecutive capitals (e.g., "HTTPClient" → ["HTTP", "Client"])
  * - Numbers as word boundaries (e.g., "OAuth2Token" → ["OAuth", "2", "Token"])
  */
-function splitWords(s: string): string[] {
+export function splitWords(s: string): string[] {
   if (!s) return [];
 
   return s
