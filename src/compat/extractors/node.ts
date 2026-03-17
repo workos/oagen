@@ -244,6 +244,32 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
     };
   }
 
+  // Fallback: walk AST declaration members for fields that type.getProperties() missed.
+  // This handles generic interfaces (e.g., List<T>) where the checker may not resolve
+  // all properties when the type parameter is unbound.
+  if (declarations) {
+    for (const decl of declarations) {
+      if (ts.isInterfaceDeclaration(decl)) {
+        for (const member of decl.members) {
+          if (ts.isPropertySignature(member) && member.name) {
+            const memberName = member.name.getText();
+            if (!fields[memberName]) {
+              const memberType = member.type
+                ? checker.typeToString(checker.getTypeFromTypeNode(member.type))
+                : 'any';
+              const isOpt = !!member.questionToken;
+              fields[memberName] = {
+                name: memberName,
+                type: isOpt ? stripUndefined(memberType) : memberType,
+                optional: isOpt,
+              };
+            }
+          }
+        }
+      }
+    }
+  }
+
   return {
     name: sym.name,
     fields: sortRecord(fields),
