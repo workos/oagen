@@ -54,17 +54,13 @@ export async function generate(
   const files = generateAllFiles(spec, emitter, ctx);
 
   const header = emitter.fileHeader();
-  const langPrefix = `${emitter.language}/`;
-  const withHeaders = applyFileHeaders(files, header).map((f) => ({
-    ...f,
-    path: `${langPrefix}${f.path}`,
-  }));
+  const withHeaders = applyFileHeaders(files, header);
 
   if (options.dryRun) {
     if (options.target) {
       console.log(`\nTarget integration (${options.target}):`);
       for (const f of withHeaders) {
-        console.log(`  ${f.path.replace(langPrefix, '')}`);
+        console.log(`  ${f.path}`);
       }
     }
     return withHeaders;
@@ -81,12 +77,7 @@ export async function generate(
 
   // Target integration pass
   if (options.target) {
-    const targetFiles = withHeaders.map((f) => ({
-      ...f,
-      path: f.path.replace(langPrefix, ''),
-    }));
-
-    const targetResult = await writeFiles(targetFiles, options.target, {
+    const targetResult = await writeFiles(withHeaders, options.target, {
       language: emitter.language,
       header,
     });

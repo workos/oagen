@@ -41,14 +41,14 @@ describe('generate', () => {
 
     expect(files).toHaveLength(8);
     const paths = files.map((f) => f.path);
-    expect(paths).toContain('mock/models/user.rb');
-    expect(paths).toContain('mock/models/status.rb');
-    expect(paths).toContain('mock/resources/users.rb');
-    expect(paths).toContain('mock/client.rb');
-    expect(paths).toContain('mock/errors.rb');
-    expect(paths).toContain('mock/config.rb');
-    expect(paths).toContain('mock/sig/user.rbs');
-    expect(paths).toContain('mock/test/test_users.rb');
+    expect(paths).toContain('models/user.rb');
+    expect(paths).toContain('models/status.rb');
+    expect(paths).toContain('resources/users.rb');
+    expect(paths).toContain('client.rb');
+    expect(paths).toContain('errors.rb');
+    expect(paths).toContain('config.rb');
+    expect(paths).toContain('sig/user.rbs');
+    expect(paths).toContain('test/test_users.rb');
   });
 
   it('prepends file header to all non-JSON files', async () => {
@@ -124,7 +124,7 @@ describe('generate', () => {
       });
 
       // Output dir should have language-prefixed files
-      const outputFile = await fs.readFile(path.join(outputDir, 'mock/client.rb'), 'utf-8');
+      const outputFile = await fs.readFile(path.join(outputDir, 'client.rb'), 'utf-8');
       expect(outputFile).toMatch(/^# Auto-generated/);
 
       // Target dir should have files without language prefix
@@ -146,10 +146,9 @@ describe('generate', () => {
         target: targetDir,
       });
 
-      // Target should NOT have mock/ prefix
+      // Target gets the same paths as output (no language prefix)
       const entries = await fs.readdir(targetDir, { recursive: true });
       const paths = entries.map(String);
-      expect(paths).not.toContain('mock');
       expect(paths).toContain('client.rb');
     } finally {
       await fs.rm(outputDir, { recursive: true });
@@ -181,7 +180,7 @@ describe('generate', () => {
 
       expect(files).toHaveLength(8);
       // Only output dir should have files
-      const outputFile = await fs.readFile(path.join(outputDir, 'mock/client.rb'), 'utf-8');
+      const outputFile = await fs.readFile(path.join(outputDir, 'client.rb'), 'utf-8');
       expect(outputFile).toMatch(/^# Auto-generated/);
     } finally {
       await fs.rm(outputDir, { recursive: true });
@@ -198,7 +197,7 @@ describe('generate', () => {
       outputDir: '/tmp/test',
     });
 
-    const modelFile = files.find((f) => f.path === 'mock/models/user.rb');
+    const modelFile = files.find((f) => f.path === 'models/user.rb');
     expect(modelFile).toBeDefined();
     expect(modelFile!.content).toBe('class User; end');
     expect(modelFile!.content).not.toMatch(/^# Auto-generated/);
@@ -217,9 +216,9 @@ describe('generate', () => {
     // Should still return files from all other methods
     expect(files.length).toBeGreaterThan(0);
     const paths = files.map((f) => f.path);
-    expect(paths).toContain('mock/models/user.rb');
-    expect(paths).toContain('mock/client.rb');
+    expect(paths).toContain('models/user.rb');
+    expect(paths).toContain('client.rb');
     // No type signature files since the method was omitted
-    expect(paths).not.toContain('mock/sig/user.rbs');
+    expect(paths).not.toContain('sig/user.rbs');
   });
 });

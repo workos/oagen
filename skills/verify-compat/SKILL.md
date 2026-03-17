@@ -29,34 +29,32 @@ Check for `node_modules/@workos/oagen/`, or `src/engine/types.ts` in the current
 - The emitter has been run at least once to produce generated output
 - The emitter's design doc (`docs/sdk-architecture/{language}.md`) exists and documents the real SDK's patterns
 
-## Resolve Emitter Project
+## Resolve Paths
 
-Determine the location of the OpenAPI spec and live SDK before doing anything:
+All artifacts (surface files, generated output) live **inside the emitter project** — never in `/tmp` or other throwaway locations. This ensures they persist across sessions and are available to convenience scripts.
 
-1. If the `spec` argument was provided, use that.
-2. Otherwise, use `AskUserQuestion`: "Where is your OpenAPI spec located? (absolute or relative path, e.g. `../openapi.yaml`)"
+Determine required paths:
 
-Store it as `spec`.
+1. **Emitter project** (`project`): from argument, or detect from CWD (look for `oagen.config.ts`), or use `AskUserQuestion`
+2. **Spec** (`spec`): from argument, or use `AskUserQuestion`
+3. **Live SDK** (`sdk_path`): from argument, or use `AskUserQuestion`
+4. **API surface file**: `{project}/sdk-{language}-surface.json` — always in the emitter project root
+5. **Generated output**: `{project}/sdk/` — a subdirectory of the emitter project
 
-3. If the `sdk-path` argument was provided, use that.
-4. Otherwise, use `AskUserQuestion`: "Where is the live, published SDK? This must be the real SDK repository, not a generated output directory. (absolute path, e.g. `../backend/workos-node`)"
-
-Store it as `sdk-path`.
-
-**Validation**: The `sdk-path` MUST NOT be the same as or inside the `--output` directory. If it is, reject it and ask again — extracting from the generation target produces a meaningless self-comparison. The purpose of compat verification is to compare generated output against an independently maintained SDK.
+**Validation**: The `sdk_path` MUST NOT be the same as or inside the output directory. If it is, reject it and ask again.
 
 ## Step 1: Extract Baseline
 
 ```bash
-oagen extract --sdk-path <path> --lang <language> --output <output-path>/sdk-{language}-surface.json
+oagen extract --sdk-path {sdk_path} --lang <language> --output {project}/sdk-{language}-surface.json
 ```
 
-This produces `sdk-{language}-surface.json` inside the output directory — the baseline snapshot of the live SDK's public API (classes, methods, interfaces, type aliases, enums, exports).
+This produces `sdk-{language}-surface.json` in the **emitter project root** — the baseline snapshot of the live SDK's public API.
 
-**Gitignore it** — it's a derived artifact. Ensure `sdk-*-surface.json` is in the output project's `.gitignore`:
+**Gitignore it** — it's a derived artifact:
 
 ```bash
-grep -q 'sdk-\*-surface.json' <output-path>/.gitignore 2>/dev/null || echo 'sdk-*-surface.json' >> <output-path>/.gitignore
+grep -q 'sdk-\*-surface.json' {project}/.gitignore 2>/dev/null || echo 'sdk-*-surface.json' >> {project}/.gitignore
 ```
 
 **Verify the output via subagent:** Use the `Agent` tool with `subagent_type: Explore` to spot-check the extraction. This keeps the SDK's source out of the main context:
@@ -79,17 +77,17 @@ This prevents the compat score from being diluted by symbols the emitter can't p
 ## Step 2: Generate with Overlay
 
 ```bash
-oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
+oagen generate --spec {spec} --lang <language> --output {project}/sdk --api-surface {project}/sdk-{language}-surface.json
 ```
 
-The emitter receives the overlay via `EmitterContext` and uses it to preserve existing method names, class names, and type names where possible.
+The emitter receives the overlay via `EmitterContext` and uses it to preserve existing method names, class names, and type names where possible. The generated output goes to `{project}/sdk/`, not a temp directory.
 
 ## Step 3: Verify
 
 **IMPORTANT:** Always include `--spec` so the comparison is scoped to spec-derivable symbols only. Without it, the score includes hand-written SDK features (webhooks, PKCE, etc.) that the emitter can't generate, producing a misleadingly low compat score.
 
 ```bash
-oagen verify --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
+oagen verify --spec {spec} --lang <language> --output {project}/sdk --api-surface {project}/sdk-{language}-surface.json
 ```
 
 - **Exit 0** + preservation score = all clear
@@ -123,8 +121,8 @@ oagen verify --spec <spec> --lang <language> --output <output-path> --api-surfac
 Repeat Steps 2 and 3 until violations are resolved:
 
 ```bash
-oagen generate --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
-oagen verify --spec <spec> --lang <language> --output <output-path> --api-surface <output-path>/sdk-{language}-surface.json
+oagen generate --spec {spec} --lang <language> --output {project}/sdk --api-surface {project}/sdk-{language}-surface.json
+oagen verify --spec {spec} --lang <language> --output {project}/sdk --api-surface {project}/sdk-{language}-surface.json
 ```
 
 Continue until either all violations are resolved (exit 0) or no further improvement is possible (fix the emitter manually).

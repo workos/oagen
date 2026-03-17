@@ -43,11 +43,11 @@ describe('generate — non-dry-run', () => {
       expect(files.length).toBeGreaterThan(0);
 
       // Files should actually exist on disk
-      const userFile = await fs.readFile(path.join(tmpDir, 'mock/models/user.rb'), 'utf-8');
+      const userFile = await fs.readFile(path.join(tmpDir, 'models/user.rb'), 'utf-8');
       expect(userFile).toContain('Auto-generated');
       expect(userFile).toContain('class User; end');
 
-      const clientFile = await fs.readFile(path.join(tmpDir, 'mock/client.rb'), 'utf-8');
+      const clientFile = await fs.readFile(path.join(tmpDir, 'client.rb'), 'utf-8');
       expect(clientFile).toContain('class Client; end');
     } finally {
       await fs.rm(tmpDir, { recursive: true });
