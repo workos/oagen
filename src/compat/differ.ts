@@ -70,38 +70,26 @@ function collectTypeRefNames(ref: TypeRef, out: Set<string>, hints: LanguageHint
   }
 }
 
+function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Record<string, T> {
+  const result: Record<string, T> = {};
+  for (const [name, value] of Object.entries(record)) {
+    if (allowed.has(name)) result[name] = value;
+  }
+  return result;
+}
+
 /**
  * Filter an ApiSurface to only include symbols whose names appear in the
  * allowed set. Symbols not in the set are dropped entirely — they won't
  * count toward the total or produce violations.
  */
 export function filterSurface(surface: ApiSurface, allowedNames: Set<string>): ApiSurface {
-  const classes: typeof surface.classes = {};
-  for (const [name, cls] of Object.entries(surface.classes)) {
-    if (allowedNames.has(name)) classes[name] = cls;
-  }
-
-  const interfaces: typeof surface.interfaces = {};
-  for (const [name, iface] of Object.entries(surface.interfaces)) {
-    if (allowedNames.has(name)) interfaces[name] = iface;
-  }
-
-  const typeAliases: typeof surface.typeAliases = {};
-  for (const [name, alias] of Object.entries(surface.typeAliases)) {
-    if (allowedNames.has(name)) typeAliases[name] = alias;
-  }
-
-  const enums: typeof surface.enums = {};
-  for (const [name, e] of Object.entries(surface.enums)) {
-    if (allowedNames.has(name)) enums[name] = e;
-  }
-
   return {
     ...surface,
-    classes,
-    interfaces,
-    typeAliases,
-    enums,
+    classes: filterRecord(surface.classes, allowedNames),
+    interfaces: filterRecord(surface.interfaces, allowedNames),
+    typeAliases: filterRecord(surface.typeAliases, allowedNames),
+    enums: filterRecord(surface.enums, allowedNames),
     exports: {}, // exports are structural, not symbol-level — skip for scoped comparison
   };
 }
@@ -257,7 +245,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         // When candidate resolves to an extraction artifact, it's typically because
         // the extractor couldn't resolve the type due to missing imports.
         // Downgrade to warning since the generated source likely has the correct type.
-        const extractionArtifact = hints.isExtractionArtifact(candField.type) && baseField.type !== candField.type;
+        const extractionArtifact = hints.isExtractionArtifact(candField.type);
         violations.push({
           category: 'signature',
           severity: nullableOnly || genericParam || extractionArtifact ? 'warning' : 'breaking',
