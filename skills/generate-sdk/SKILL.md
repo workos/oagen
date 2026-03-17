@@ -63,6 +63,7 @@ Step 1: /generate-emitter {language} {project} sdk_path={sdk_path}    — study 
 Step 2: /generate-extractor {language} sdk_path={sdk_path}            — scaffold extractor
 Step 3: /verify-compat {language} sdk_path={sdk_path}                 — extract baseline, verify
 Step 4: /generate-smoke-test {language}                               — wire-level HTTP parity tests
+Step 5: /verify-smoke-test {language}                                 — run smoke tests
 ```
 
 ### Scenario B — Fresh
@@ -70,6 +71,7 @@ Step 4: /generate-smoke-test {language}                               — wire-l
 ```
 Step 1: /generate-emitter {project} {language}    — scaffold emitter
 Step 2: /generate-smoke-test {language}            — wire-level HTTP parity tests
+Step 3: /verify-smoke-test {language}              — run smoke tests
 ```
 
 Confirm with the user, then invoke the first skill.
