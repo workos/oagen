@@ -103,11 +103,7 @@ export interface LanguageHints {
    *  of its string literal values. The candidate surface is provided
    *  so the hint can look up enum definitions.
    *  Returns true to suppress the mismatch, false to report it. */
-  isTypeEquivalent?(
-    baselineType: string,
-    candidateType: string,
-    candidateSurface: ApiSurface,
-  ): boolean;
+  isTypeEquivalent?(baselineType: string, candidateType: string, candidateSurface: ApiSurface): boolean;
 }
 
 export interface Extractor {

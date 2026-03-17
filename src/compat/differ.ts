@@ -100,7 +100,7 @@ export function filterSurface(surface: ApiSurface, allowedNames: Set<string>, fi
   // Filter interface fields by spec-derived field paths if provided
   if (fieldPaths) {
     for (const [name, iface] of Object.entries(filteredInterfaces)) {
-      const filteredFields: Record<string, typeof iface.fields[string]> = {};
+      const filteredFields: Record<string, (typeof iface.fields)[string]> = {};
       for (const [fieldName, field] of Object.entries(iface.fields)) {
         // Keep the field if its path is spec-derived
         if (fieldPaths.has(`${name}.${fieldName}`)) {
@@ -271,7 +271,8 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         // because the type couldn't be resolved from the spec (parser limitation), not
         // because the emitter chose to omit it.
         const baseTypeClean = baseField.type.replace(/\[\]$/, '').replace(/ \| null$/, '');
-        const typeIsUnresolvable = /^[A-Z][a-zA-Z0-9]*$/.test(baseTypeClean) &&
+        const typeIsUnresolvable =
+          /^[A-Z][a-zA-Z0-9]*$/.test(baseTypeClean) &&
           !candidate.interfaces[baseTypeClean] &&
           !candidate.classes[baseTypeClean] &&
           !candidate.enums[baseTypeClean];
@@ -344,7 +345,10 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
       // Category mismatch tolerance: if the candidate has this name as an
       // interface, class, or enum instead of a type alias, it's still "present" —
       // just in a different declaration form (e.g., TypeScript type alias vs interface vs enum).
-      if (hints.tolerateCategoryMismatch && (candidate.interfaces[name] || candidate.classes[name] || candidate.enums[name])) {
+      if (
+        hints.tolerateCategoryMismatch &&
+        (candidate.interfaces[name] || candidate.classes[name] || candidate.enums[name])
+      ) {
         preserved++;
         continue;
       }

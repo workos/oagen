@@ -254,9 +254,7 @@ function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface
           if (ts.isPropertySignature(member) && member.name) {
             const memberName = member.name.getText();
             if (!fields[memberName]) {
-              const memberType = member.type
-                ? checker.typeToString(checker.getTypeFromTypeNode(member.type))
-                : 'any';
+              const memberType = member.type ? checker.typeToString(checker.getTypeFromTypeNode(member.type)) : 'any';
               const isOpt = !!member.questionToken;
               fields[memberName] = {
                 name: memberName,

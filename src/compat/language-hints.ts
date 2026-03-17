@@ -18,7 +18,10 @@ function typeExistsInSurface(name: string, surface: ApiSurface): boolean {
 
 /** Split a PascalCase string into words, keeping only words > 2 chars. */
 function splitPascalWords(s: string): string[] {
-  return s.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ').filter(w => w.length > 2);
+  return s
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(' ')
+    .filter((w) => w.length > 2);
 }
 
 /** Split a pipe-delimited union string into trimmed, non-empty members. */
@@ -98,11 +101,7 @@ export const nodeHints: LanguageHints = {
     return [`${modelName}Response`, `Serialized${modelName}`];
   },
 
-  isTypeEquivalent(
-    baselineType: string,
-    candidateType: string,
-    candidateSurface: ApiSurface,
-  ): boolean {
+  isTypeEquivalent(baselineType: string, candidateType: string, candidateSurface: ApiSurface): boolean {
     // Check if one side is a named enum and the other is an inline union
     // of that enum's string literal values.
     // e.g., baseline: '"active" | "inactive"', candidate: 'ConnectionState'
@@ -113,9 +112,7 @@ export const nodeHints: LanguageHints = {
     // so check that all baseline members exist in the enum (subset match).
     const candEnum = candidateSurface.enums[candidateType];
     if (candEnum) {
-      const enumValuesSet = new Set(
-        Object.values(candEnum.members).flatMap((v) => [`"${v}"`, `'${v}'`]),
-      );
+      const enumValuesSet = new Set(Object.values(candEnum.members).flatMap((v) => [`"${v}"`, `'${v}'`]));
       const baseMembers = parseUnionMembers(baselineType);
       if (baseMembers.length > 0 && baseMembers.every((m) => enumValuesSet.has(m))) {
         return true;
@@ -175,7 +172,7 @@ export const nodeHints: LanguageHints = {
         // from Json merges: AuditLogTargetSchema vs AuditLogSchemaJsonTarget)
         const baseWords = new Set(splitPascalWords(baseNoResp));
         const candWords = new Set(splitPascalWords(candNoResp));
-        const overlap = [...baseWords].filter(w => candWords.has(w));
+        const overlap = [...baseWords].filter((w) => candWords.has(w));
         if (overlap.length >= 2 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) {
           return true;
         }
