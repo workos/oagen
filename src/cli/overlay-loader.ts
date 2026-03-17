@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from 'node:fs';
 import * as path from 'node:path';
+import { ConfigError } from '../errors.js';
 import { buildOverlayLookup } from '../compat/overlay.js';
 import type { ManifestEntry } from '../compat/overlay.js';
 import type { ApiSurface, LanguageHints, OverlayLookup } from '../compat/types.js';
@@ -27,13 +28,19 @@ export function loadOverlayContext(opts: {
   try {
     raw = readFileSync(opts.apiSurfacePath, 'utf-8');
   } catch {
-    throw new Error(`API surface file not found: ${opts.apiSurfacePath}. Run \`oagen extract\` first.`);
+    throw new ConfigError(
+      `API surface file not found: ${opts.apiSurfacePath}. Run \`oagen extract\` first.`,
+      `Generate the API surface file by running \`oagen extract --lang ${opts.lang} --sdk-path <path-to-sdk>\` before running this command.`,
+    );
   }
   let apiSurface: ApiSurface;
   try {
     apiSurface = JSON.parse(raw) as ApiSurface;
   } catch (err) {
-    throw new Error(`Failed to parse API surface JSON: ${err instanceof Error ? err.message : String(err)}`);
+    throw new ConfigError(
+      `Failed to parse API surface JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `Ensure "${opts.apiSurfacePath}" contains valid JSON. Re-run \`oagen extract\` to regenerate it.`,
+    );
   }
 
   // Load manifest: explicit flag, or auto-discover in output directory
@@ -66,7 +73,10 @@ export function loadOverlayContext(opts: {
       }
     } catch {
       if (opts.manifestPath) {
-        throw new Error(`Failed to read manifest: ${resolvedManifestPath}`);
+        throw new ConfigError(
+          `Failed to read manifest: ${resolvedManifestPath}`,
+          `Verify the manifest file exists and contains valid JSON. If using --manifest, check the path is correct.`,
+        );
       }
     }
   }

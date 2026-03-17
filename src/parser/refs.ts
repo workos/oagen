@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { makeDocumentFromString, bundleDocument, createConfig, BaseResolver } from '@redocly/openapi-core';
+import { SpecParseError } from '../errors.js';
 
 export interface BundledSpec {
   parsed: Record<string, unknown>;
@@ -28,7 +29,10 @@ export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> 
       .filter((p) => p.severity === 'error')
       .map((p) => p.message)
       .join('\n');
-    throw new Error(`Failed to parse spec: ${errors}`);
+    throw new SpecParseError(
+      `Failed to parse spec: ${errors}`,
+      `Check the OpenAPI spec at "${absolutePath}" for syntax errors. Run a linter such as \`npx @redocly/cli lint ${specPath}\` to identify issues.`,
+    );
   }
 
   return {

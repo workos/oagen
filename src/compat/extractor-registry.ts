@@ -1,3 +1,4 @@
+import { RegistryError } from '../errors.js';
 import type { Extractor } from './types.js';
 
 const extractors = new Map<string, Extractor>();
@@ -10,7 +11,10 @@ export function getExtractor(language: string): Extractor {
   const extractor = extractors.get(language);
   if (!extractor) {
     const available = [...extractors.keys()].join(', ') || '(none)';
-    throw new Error(`No extractor registered for language: ${language}. Available: ${available}`);
+    throw new RegistryError(
+      `No extractor registered for language: ${language}. Available: ${available}`,
+      `Register an extractor for "${language}" via registerExtractor() or add one in your oagen.config.ts plugin.`,
+    );
   }
   return extractor;
 }

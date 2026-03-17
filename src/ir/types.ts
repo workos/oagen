@@ -143,7 +143,13 @@ export interface EnumValue {
  *   }
  */
 export function assertNever(x: never): never {
-  throw new Error(`Unexpected TypeRef kind: ${(x as TypeRef).kind}`);
+  // Inline to avoid importing from ../errors.js (ir/ is layer 0, must not import upward)
+  const kind = (x as TypeRef).kind;
+  const err = new Error(
+    `Unexpected TypeRef kind: ${kind}\nHint: If you added a new TypeRef variant, handle it in every switch/case that calls assertNever.`,
+  );
+  err.name = 'InternalError';
+  throw err;
 }
 
 /**

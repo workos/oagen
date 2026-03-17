@@ -1,6 +1,7 @@
 import ts from 'typescript';
 import { readFileSync } from 'node:fs';
 import { resolve, relative } from 'node:path';
+import { ExtractorError } from '../../errors.js';
 import type {
   ApiSurface,
   Extractor,
@@ -21,7 +22,11 @@ export const nodeExtractor: Extractor = {
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     const configPath = ts.findConfigFile(sdkPath, ts.sys.fileExists, 'tsconfig.json');
-    if (!configPath) throw new Error(`No tsconfig.json found in ${sdkPath}`);
+    if (!configPath)
+      throw new ExtractorError(
+        `No tsconfig.json found in ${sdkPath}`,
+        `Create a tsconfig.json in "${sdkPath}" or verify the --sdk-path argument points to a TypeScript project root.`,
+      );
 
     const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
     const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, sdkPath);
@@ -30,10 +35,18 @@ export const nodeExtractor: Extractor = {
 
     const entryPoint = resolveEntryPoint(sdkPath, program);
     const entrySourceFile = program.getSourceFile(entryPoint);
-    if (!entrySourceFile) throw new Error(`Entry point not found: ${entryPoint}`);
+    if (!entrySourceFile)
+      throw new ExtractorError(
+        `Entry point not found: ${entryPoint}`,
+        `Ensure the file "${entryPoint}" exists and is included in the tsconfig.json "include" or "files" array.`,
+      );
 
     const moduleSymbol = checker.getSymbolAtLocation(entrySourceFile);
-    if (!moduleSymbol) throw new Error('No exports found at entry point');
+    if (!moduleSymbol)
+      throw new ExtractorError(
+        'No exports found at entry point',
+        `Verify that "${entryPoint}" has at least one \`export\` statement. The extractor needs public exports to build an API surface.`,
+      );
 
     const exportedSymbols = checker.getExportsOfModule(moduleSymbol);
 
@@ -101,7 +114,10 @@ function resolveEntryPoint(sdkPath: string, program: ts.Program): string {
   // Default fallback
   const fallback = resolve(sdkPath, 'src/index.ts');
   if (program.getSourceFile(fallback)) return fallback;
-  throw new Error(`No entry point found. Tried: package.json exports/main, src/index.ts`);
+  throw new ExtractorError(
+    `No entry point found. Tried: package.json exports/main, src/index.ts`,
+    `Add an "exports" or "main" field to package.json in "${sdkPath}", or create a src/index.ts file that re-exports the public API.`,
+  );
 }
 
 function resolveSourceFile(sdkPath: string, entryPath: string, program: ts.Program): string | undefined {

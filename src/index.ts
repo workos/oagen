@@ -23,6 +23,8 @@ export type {
 
 export { assertNever, walkTypeRef, IR_VERSION } from './ir/types.js';
 
+export { OagenError, SpecParseError, ConfigError, ExtractorError, RegistryError, InternalError } from './errors.js';
+
 export type { GeneratedFile, EmitterContext, Emitter } from './engine/types.js';
 
 export type {

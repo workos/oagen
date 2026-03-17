@@ -1,5 +1,6 @@
 import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
+import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
 import { extractSchemas, extractInlineModelsFromSchemas, collectInlineEnumFromRef } from './schemas.js';
 import { extractOperations } from './operations.js';
@@ -18,7 +19,10 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
   // Validate OpenAPI version
   const version = spec.openapi ?? '';
   if (!version.startsWith('3.')) {
-    throw new Error(`Unsupported OpenAPI version: ${version}. oagen requires OpenAPI 3.x`);
+    throw new SpecParseError(
+      `Unsupported OpenAPI version: ${version}. oagen requires OpenAPI 3.x`,
+      `Update the spec to OpenAPI 3.0 or 3.1. If you are using Swagger 2.x, convert it first with \`npx swagger2openapi ${specPath}\`.`,
+    );
   }
 
   const { models, enums } = extractSchemas(
