@@ -1,6 +1,7 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition, LanguageHints } from './types.js';
+import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
 
 /**
  * Compute the set of symbol names that are derivable from the OpenAPI spec.
@@ -272,10 +273,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         // because the emitter chose to omit it.
         const baseTypeClean = baseField.type.replace(/\[\]$/, '').replace(/ \| null$/, '');
         const typeIsUnresolvable =
-          /^[A-Z][a-zA-Z0-9]*$/.test(baseTypeClean) &&
-          !candidate.interfaces[baseTypeClean] &&
-          !candidate.classes[baseTypeClean] &&
-          !candidate.enums[baseTypeClean];
+          NAMED_TYPE_RE.test(baseTypeClean) && !typeExistsInSurface(baseTypeClean, candidate);
         violations.push({
           category: 'public-api',
           severity: typeIsUnresolvable ? 'warning' : 'breaking',
@@ -345,10 +343,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
       // Category mismatch tolerance: if the candidate has this name as an
       // interface, class, or enum instead of a type alias, it's still "present" —
       // just in a different declaration form (e.g., TypeScript type alias vs interface vs enum).
-      if (
-        hints.tolerateCategoryMismatch &&
-        (candidate.interfaces[name] || candidate.classes[name] || candidate.enums[name])
-      ) {
+      if (hints.tolerateCategoryMismatch && typeExistsInSurface(name, candidate)) {
         preserved++;
         continue;
       }
@@ -498,7 +493,6 @@ function signaturesMatch(baseline: ApiMethod, candidate: ApiMethod): boolean {
 
   return true;
 }
-
 function formatSignature(method: ApiMethod): string {
   const params = method.params.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`).join(', ');
   return `(${params}) => ${method.returnType}`;
