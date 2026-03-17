@@ -224,6 +224,11 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
           preserved++;
           continue;
         }
+        // Named type vs inline union equivalence (e.g., ConnectionState ≡ "active" | "inactive")
+        if (hints.isTypeEquivalent?.(baseField.type, candField.type, candidate)) {
+          preserved++;
+          continue;
+        }
         const nullableOnly = hints.isNullableOnlyDifference(baseField.type, candField.type);
         // Generic type params (T, TCustomAttributes, etc.) can't be preserved
         // in generated output — the extractor resolves them to `any`.
@@ -266,9 +271,9 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
     const candAlias = candidate.typeAliases[name];
     if (!candAlias) {
       // Category mismatch tolerance: if the candidate has this name as an
-      // interface or class instead of a type alias, it's still "present" —
-      // just in a different declaration form (e.g., TypeScript type alias vs interface).
-      if (hints.tolerateCategoryMismatch && (candidate.interfaces[name] || candidate.classes[name])) {
+      // interface, class, or enum instead of a type alias, it's still "present" —
+      // just in a different declaration form (e.g., TypeScript type alias vs interface vs enum).
+      if (hints.tolerateCategoryMismatch && (candidate.interfaces[name] || candidate.classes[name] || candidate.enums[name])) {
         preserved++;
         continue;
       }

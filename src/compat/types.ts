@@ -97,6 +97,17 @@ export interface LanguageHints {
    *  Node: ["FooResponse", "SerializedFoo"]
    *  Go: ["FooResponse"] */
   derivedModelNames(modelName: string): string[];
+
+  /** True if two type strings are semantically equivalent even when
+   *  structurally different — e.g., a named enum vs an inline union
+   *  of its string literal values. The candidate surface is provided
+   *  so the hint can look up enum definitions.
+   *  Returns true to suppress the mismatch, false to report it. */
+  isTypeEquivalent?(
+    baselineType: string,
+    candidateType: string,
+    candidateSurface: ApiSurface,
+  ): boolean;
 }
 
 export interface Extractor {

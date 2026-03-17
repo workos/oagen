@@ -1,4 +1,4 @@
-import type { LanguageHints } from './types.js';
+import type { ApiSurface, LanguageHints } from './types.js';
 
 /** Split a pipe-delimited union string into trimmed, non-empty members. */
 function parseUnionMembers(s: string): string[] {
@@ -75,6 +75,33 @@ export const nodeHints: LanguageHints = {
 
   derivedModelNames(modelName: string): string[] {
     return [`${modelName}Response`, `Serialized${modelName}`];
+  },
+
+  isTypeEquivalent(
+    baselineType: string,
+    candidateType: string,
+    candidateSurface: ApiSurface,
+  ): boolean {
+    // Check if one side is a named enum and the other is an inline union
+    // of that enum's string literal values.
+    // e.g., baseline: '"active" | "inactive"', candidate: 'ConnectionState'
+    //    or baseline: 'ConnectionState', candidate: '"active" | "inactive"'
+
+    // Try: candidate is enum name, baseline is inline union of string literals.
+    // The generated enum may have MORE members than the baseline (new spec values),
+    // so check that all baseline members exist in the enum (subset match).
+    const candEnum = candidateSurface.enums[candidateType];
+    if (candEnum) {
+      const enumValuesSet = new Set(
+        Object.values(candEnum.members).flatMap((v) => [`"${v}"`, `'${v}'`]),
+      );
+      const baseMembers = parseUnionMembers(baselineType);
+      if (baseMembers.length > 0 && baseMembers.every((m) => enumValuesSet.has(m))) {
+        return true;
+      }
+    }
+
+    return false;
   },
 };
 
