@@ -16,19 +16,16 @@ npm run typecheck --silent 2>/dev/null || gate_fail "typecheck"
 # 2. Structural lint
 npm run lint:structure --silent 2>/dev/null || gate_fail "lint:structure"
 
-# 3. Tests — capture pass/fail counts
-TEST_OUTPUT=$(npx vitest run 2>&1) || true
-TESTS_PASSED=$(echo "$TEST_OUTPUT" | grep -oE 'Tests  [0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
-TESTS_FAILED=$(echo "$TEST_OUTPUT" | grep -oE '[0-9]+ failed' | head -1 | grep -oE '[0-9]+' || echo 0)
+# 3. Tests + Coverage in a single run
+# Run coverage on src/ only — excludes scripts/ and smoke tools
+COV_OUTPUT=$(npx vitest run --coverage --coverage.include='src/**' --coverage.reporter=json-summary 2>&1) || true
+TESTS_PASSED=$(echo "$COV_OUTPUT" | grep -oE 'Tests  [0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
+TESTS_FAILED=$(echo "$COV_OUTPUT" | grep -oE '[0-9]+ failed' | head -1 | grep -oE '[0-9]+' || echo 0)
 TOTAL_TESTS=$((TESTS_PASSED + TESTS_FAILED))
 
 if [ "$TESTS_FAILED" -gt 0 ]; then
   gate_fail "tests: $TESTS_FAILED of $TOTAL_TESTS failed"
 fi
-
-# ── Coverage (the actual score) ──────────────────────────────────────────────
-# Run coverage on src/ only — excludes scripts/ and smoke tools
-COV_OUTPUT=$(npx vitest run --coverage --coverage.include='src/**' --coverage.reporter=json-summary 2>&1) || true
 
 # Parse coverage-summary.json
 if [ ! -f coverage/coverage-summary.json ]; then
@@ -37,10 +34,7 @@ if [ ! -f coverage/coverage-summary.json ]; then
   exit 0
 fi
 
-COV_JSON=$(cat coverage/coverage-summary.json)
-LINE_COV=$(echo "$COV_JSON" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).total.lines.pct))")
-BRANCH_COV=$(echo "$COV_JSON" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).total.branches.pct))")
-FUNC_COV=$(echo "$COV_JSON" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).total.functions.pct))")
+read -r LINE_COV BRANCH_COV FUNC_COV <<< "$(node -e "const t=JSON.parse(require('fs').readFileSync('coverage/coverage-summary.json','utf8')).total; console.log(t.lines.pct, t.branches.pct, t.functions.pct)")"
 
 # Composite: 50% lines + 30% branches + 20% functions
 SCORE=$(node -e "
