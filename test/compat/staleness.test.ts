@@ -20,8 +20,8 @@ function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
 
 function emptySpec(overrides?: Partial<ApiSpec>): ApiSpec {
   return {
+    name: 'Test API',
     version: '1.0.0',
-    title: 'Test API',
     baseUrl: 'https://api.test.com',
     models: [],
     enums: [],
@@ -92,25 +92,25 @@ describe('detectStaleSymbols', () => {
           operations: [
             {
               name: 'getUser',
-              httpMethod: 'GET',
+              httpMethod: 'get',
               path: '/users/{id}',
-              pathParams: [{ name: 'id', type: { kind: 'primitive', name: 'string' }, required: true }],
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
               queryParams: [],
               headerParams: [],
-              response: { kind: 'primitive', name: 'void' },
+              response: { kind: 'primitive', type: 'string' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
             {
               name: 'deleteUser',
-              httpMethod: 'DELETE',
+              httpMethod: 'delete',
               path: '/users/{id}',
-              pathParams: [{ name: 'id', type: { kind: 'primitive', name: 'string' }, required: true }],
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
               queryParams: [],
               headerParams: [],
-              response: { kind: 'primitive', name: 'void' },
+              response: { kind: 'primitive', type: 'string' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },
@@ -123,14 +123,14 @@ describe('detectStaleSymbols', () => {
           operations: [
             {
               name: 'getUser',
-              httpMethod: 'GET',
+              httpMethod: 'get',
               path: '/users/{id}',
-              pathParams: [{ name: 'id', type: { kind: 'primitive', name: 'string' }, required: true }],
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
               queryParams: [],
               headerParams: [],
-              response: { kind: 'primitive', name: 'void' },
+              response: { kind: 'primitive', type: 'string' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },
@@ -166,8 +166,8 @@ describe('detectStaleSymbols', () => {
         {
           name: 'Organization',
           fields: [
-            { name: 'id', type: { kind: 'primitive', name: 'string' }, required: true },
-            { name: 'legacyCode', type: { kind: 'primitive', name: 'string' }, required: false },
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'legacyCode', type: { kind: 'primitive', type: 'string' }, required: false },
           ],
         },
       ],
@@ -176,7 +176,7 @@ describe('detectStaleSymbols', () => {
       models: [
         {
           name: 'Organization',
-          fields: [{ name: 'id', type: { kind: 'primitive', name: 'string' }, required: true }],
+          fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
     });
@@ -211,14 +211,14 @@ describe('detectStaleSymbols', () => {
           operations: [
             {
               name: 'doThing',
-              httpMethod: 'GET',
+              httpMethod: 'get',
               path: '/legacy/thing',
               pathParams: [],
               queryParams: [],
               headerParams: [],
-              response: { kind: 'primitive', name: 'void' },
+              response: { kind: 'primitive', type: 'string' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },
@@ -278,7 +278,9 @@ describe('detectStaleSymbols', () => {
 
   it('produces no staleness findings when specs are identical', () => {
     const spec = emptySpec({
-      models: [{ name: 'Organization', fields: [{ name: 'id', type: { kind: 'primitive', name: 'string' }, required: true }] }],
+      models: [
+        { name: 'Organization', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      ],
       enums: [{ name: 'Status', values: [{ name: 'Active', value: 'active' }] }],
       services: [
         {
@@ -286,14 +288,14 @@ describe('detectStaleSymbols', () => {
           operations: [
             {
               name: 'getOrg',
-              httpMethod: 'GET',
+              httpMethod: 'get',
               path: '/orgs/{id}',
-              pathParams: [{ name: 'id', type: { kind: 'primitive', name: 'string' }, required: true }],
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
               queryParams: [],
               headerParams: [],
               response: { kind: 'model', name: 'Organization' },
               errors: [],
-              idempotent: false,
+              injectIdempotencyKey: false,
             },
           ],
         },
