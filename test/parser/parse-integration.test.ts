@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { parseSpec } from '../../src/parser/parse.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
