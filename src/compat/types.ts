@@ -140,7 +140,7 @@ export interface OverlayLookup {
   fileBySymbol: Map<string, string>;
 }
 
-export type ViolationCategory = 'public-api' | 'signature' | 'export-structure' | 'behavioral';
+export type ViolationCategory = 'public-api' | 'signature' | 'export-structure' | 'behavioral' | 'staleness';
 export type ViolationSeverity = 'breaking' | 'warning';
 
 export interface Violation {
