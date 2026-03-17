@@ -138,7 +138,11 @@ describe('IR types', () => {
                 items: { kind: 'model', name: 'User' },
               },
               errors: [{ statusCode: 401 }],
-              pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'User' } } as PaginationMeta,
+              pagination: {
+                cursorParam: 'after',
+                dataPath: 'data',
+                itemType: { kind: 'model', name: 'User' },
+              } as PaginationMeta,
               idempotent: false,
             },
           ],
@@ -182,18 +186,12 @@ describe('mapTypeRef', () => {
   });
 
   it('maps an array type', () => {
-    const result = mapTypeRef(
-      { kind: 'array', items: { kind: 'primitive', type: 'string' } },
-      stringMapper,
-    );
+    const result = mapTypeRef({ kind: 'array', items: { kind: 'primitive', type: 'string' } }, stringMapper);
     expect(result).toBe('Array<string>');
   });
 
   it('maps a nullable model ref', () => {
-    const result = mapTypeRef(
-      { kind: 'nullable', inner: { kind: 'model', name: 'User' } },
-      stringMapper,
-    );
+    const result = mapTypeRef({ kind: 'nullable', inner: { kind: 'model', name: 'User' } }, stringMapper);
     expect(result).toBe('User | null');
   });
 
@@ -212,10 +210,7 @@ describe('mapTypeRef', () => {
   });
 
   it('maps a map type', () => {
-    const result = mapTypeRef(
-      { kind: 'map', valueType: { kind: 'primitive', type: 'integer' } },
-      stringMapper,
-    );
+    const result = mapTypeRef({ kind: 'map', valueType: { kind: 'primitive', type: 'integer' } }, stringMapper);
     expect(result).toBe('Map<string, integer>');
   });
 

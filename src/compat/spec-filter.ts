@@ -1,7 +1,6 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import type { ApiSurface, LanguageHints } from './types.js';
-import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
 
 /**
  * Compute the set of symbol names that are derivable from the OpenAPI spec.

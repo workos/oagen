@@ -190,9 +190,7 @@ describe('generate', () => {
 
   it('does not prepend header when headerPlacement is skip', async () => {
     const emitter = mockEmitter();
-    emitter.generateModels = () => [
-      { path: 'models/user.rb', content: 'class User; end', headerPlacement: 'skip' },
-    ];
+    emitter.generateModels = () => [{ path: 'models/user.rb', content: 'class User; end', headerPlacement: 'skip' }];
 
     const files = await generate(minimalSpec, emitter, {
       namespace: 'test',

@@ -39,7 +39,8 @@ export function mapChangesToFiles(changes: Change[], emitter: Emitter, ctx: Emit
       ...emitter.generateResources([service], ctx),
       ...emitter.generateTests({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx),
     ];
-    const sigs = emitter.generateTypeSignatures?.({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx) ?? [];
+    const sigs =
+      emitter.generateTypeSignatures?.({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx) ?? [];
     serviceFiles.set(
       service.name,
       [...files, ...sigs].map((f) => f.path),

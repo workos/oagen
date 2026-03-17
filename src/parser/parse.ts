@@ -15,7 +15,10 @@ export async function parseSpec(specPath: string): Promise<ApiSpec> {
     paths?: Record<string, unknown>;
     components?: {
       schemas?: Record<string, unknown>;
-      securitySchemes?: Record<string, { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }>;
+      securitySchemes?: Record<
+        string,
+        { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
+      >;
     };
   };
 
@@ -202,7 +205,10 @@ function validateModelRefs(spec: ApiSpec): void {
 
 /** Extract authentication schemes from OpenAPI securitySchemes. */
 function extractAuthSchemes(
-  securitySchemes?: Record<string, { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }>,
+  securitySchemes?: Record<
+    string,
+    { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
+  >,
 ): AuthScheme[] | undefined {
   if (!securitySchemes) return undefined;
   const schemes: AuthScheme[] = [];

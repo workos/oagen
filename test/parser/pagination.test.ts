@@ -40,10 +40,9 @@ describe('detectPagination', () => {
   });
 
   it('returns structured PaginationMeta with cursorParam, dataPath, and itemType', () => {
-    const result = detectPagination(
-      { kind: 'array', items: { kind: 'model', name: 'User' } },
-      [{ name: 'after', type: { kind: 'primitive', type: 'string' }, required: false }],
-    );
+    const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'User' } }, [
+      { name: 'after', type: { kind: 'primitive', type: 'string' }, required: false },
+    ]);
     expect(result).toEqual({
       cursorParam: 'after',
       dataPath: 'data',
