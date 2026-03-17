@@ -62,7 +62,17 @@ The interception code is typically ~20-30 lines. It must capture the request as-
 
 ## Step 2: Build the SERVICE_MAP
 
-Map IR service names to SDK resource accessors. If `sdk_path` is provided, **delegate the exploration to a subagent** to keep file-reading noise out of the main context:
+Map IR service names to SDK resource accessors. There are two sources of truth depending on the SDK:
+
+### Generated SDK (preferred)
+
+For emitter-generated SDKs, the `smoke-manifest.json` (produced by the emitter's `generateManifest` hook) contains the authoritative `service` field for every operation. The smoke test should load this manifest and use its service mappings. The `SERVICE_MAP` only needs fallback entries for services not covered by the manifest.
+
+If no manifest exists, warn the user: the emitter should implement `generateManifest`. Without it, most operations will be skipped because heuristic method resolution fails on disambiguated names.
+
+### Live/hand-written SDK
+
+If `sdk_path` points to a hand-written SDK (not emitter-generated), **delegate the exploration to a subagent** to discover accessor names:
 
 Use the `Agent` tool with `subagent_type: Explore` and a prompt like:
 
@@ -83,7 +93,7 @@ Each language's SDK will have different accessor names — discover them by read
 
 Adapt the 4-tier resolution to the target language's naming conventions:
 
-0. **Manifest match** — If `smoke-manifest.json` exists, use it for deterministic resolution (preferred)
+0. **Manifest match** — Load `smoke-manifest.json` from the SDK output directory (emitter-generated, not hand-maintained). This is the **primary** resolution path for generated SDKs. The manifest maps every `HTTP_METHOD /path` to `{ sdkMethod, service }` and is produced by the emitter's `generateManifest` hook. If the manifest is missing, warn and fall through to heuristic tiers.
 1. **Exact match** — IR operation name converted to target convention
 2. **CRUD prefix match** — standard verbs (create, list, retrieve/get, update, delete) with service name tiebreaker
 3. **Keyword fuzzy match** — stem words and score overlap
@@ -113,6 +123,7 @@ Create the script **in the emitter project**:
 3. `main()` function:
    - Parse CLI args, validate API key
    - Parse spec via `parseSpec()`
+   - Load manifest from `{sdk-path}/smoke-manifest.json` (emitter-generated). If missing, log a warning — method resolution will rely on heuristic tiers and most operations will likely be skipped.
    - Load and configure the SDK
    - Iterate `planOperations()` groups
    - For each operation: resolve SDK method, resolve path params, build args, call SDK, capture exchange
@@ -148,12 +159,15 @@ oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.j
 
 ## Emitter-Fixing Loop
 
-During initial setup, run `oagen generate` then `oagen verify` until verify exits 0:
+During initial setup, run `oagen generate` then the smoke test until skips are minimized:
 
 ```bash
 oagen generate --lang {lang} --output {sdk-path} --spec {spec} --namespace {ns}
+# The emitter produces smoke-manifest.json alongside the SDK — the smoke test loads it automatically.
 oagen verify --lang {lang} --output {sdk-path} --spec {spec}
 ```
+
+If many operations are skipped with "No matching SDK method", check that the emitter's `generateManifest` is implemented and that the manifest file is being written to the SDK output directory. The manifest is the primary mechanism the smoke test uses to find SDK methods.
 
 | Exit | Meaning       | Output                      | Action                                  |
 | ---- | ------------- | --------------------------- | --------------------------------------- |

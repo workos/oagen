@@ -103,7 +103,8 @@ Create the following files under `src/{language}/` **in the emitter project**:
 ├── config.ts         # Configuration module/class
 ├── types-*.ts        # Type annotation files (language-specific, may be 0-2 files)
 ├── tests.ts          # Test file generation
-└── fixtures.ts       # Test fixture generation
+├── fixtures.ts       # Test fixture generation
+└── manifest.ts       # Smoke test manifest (operation → SDK method mapping)
 ```
 
 Not every language needs every file, and some languages may need **additional** files beyond this scaffold. **For Scenario A**, the design doc from Step 0c may identify additional generators needed (e.g., `serializers.ts`, `common.ts`, `factory.ts`, `request-types.ts`). The file list in the design doc is authoritative, not this generic scaffold.
@@ -188,6 +189,7 @@ export const {language}Emitter: Emitter = {
   generateConfig(ctx) { return generateConfig(ctx); },
   generateTypeSignatures(spec, ctx) { return generateTypeSignatures(spec, ctx); },
   generateTests(spec, ctx) { return generateTests(spec, ctx); },
+  generateManifest(spec, ctx) { return generateManifest(spec, ctx); },
   fileHeader() { return "{language-appropriate auto-generated file header}"; },
 };
 ```
@@ -284,6 +286,43 @@ Validation:
 Patterns replicated: (Scenario A only)
   Model / Enum / Resource / Client / Error / Serialization / Pagination / Testing / Barrel exports
 ```
+
+## Smoke Manifest Generation (required)
+
+Every emitter **must** implement `generateManifest`. The smoke test runner uses the manifest to resolve SDK methods from HTTP operations — without it, the smoke test cannot find methods and most operations will be skipped.
+
+The manifest maps every `HTTP_METHOD /path` to `{ sdkMethod, service }`:
+
+```json
+{
+  "POST /organizations": { "sdkMethod": "createOrganizations", "service": "organizations" },
+  "GET /organizations/{id}": { "sdkMethod": "getOrganizations", "service": "organizations" }
+}
+```
+
+The emitter already knows every operation→method mapping (from `resolveMethodName` or the equivalent). `generateManifest` simply serializes that mapping to `smoke-manifest.json` as a `GeneratedFile`. The orchestrator calls `emitter.generateManifest?.(spec, ctx)` and writes the result alongside the SDK output.
+
+**Implementation pattern** (`manifest.ts`):
+
+```typescript
+export function generateManifest(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
+  const manifest: Record<string, { sdkMethod: string; service: string }> = {};
+  for (const service of spec.services) {
+    const propName = /* service property name on the client */;
+    for (const op of service.operations) {
+      const httpKey = `${op.httpMethod.toUpperCase()} ${op.path}`;
+      const methodName = /* resolved method name for this operation */;
+      manifest[httpKey] = { sdkMethod: methodName, service: propName };
+    }
+  }
+  return [{
+    path: "smoke-manifest.json",
+    content: JSON.stringify(manifest, null, 2),
+  }];
+}
+```
+
+If the emitter disambiguates operation names (e.g., multiple `list` operations in one service), the manifest must use the **disambiguated** names. Run disambiguation before building the manifest, or reuse the same resolved names that `generateResources` uses.
 
 ## Overlay Integration
 
