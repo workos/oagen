@@ -221,6 +221,7 @@ describe('generateIncremental', () => {
       typeAliasByName: new Map(),
       requiredExports: new Map(),
       modelNameByIR: new Map(),
+      fileBySymbol: new Map(),
     };
 
     const ctxCapture: { ctx?: EmitterContext } = {};

@@ -130,6 +130,120 @@ describe('buildOverlayLookup', () => {
     expect(lookup.typeAliasByName.size).toBe(0);
     expect(lookup.requiredExports.size).toBe(0);
     expect(lookup.modelNameByIR.size).toBe(0);
+    expect(lookup.fileBySymbol.size).toBe(0);
+  });
+
+  it('populates fileBySymbol from enriched surface', () => {
+    const surface = emptySurface({
+      classes: {
+        SampleClient: { name: 'SampleClient', sourceFile: 'src/client.ts', methods: {}, properties: {}, constructorParams: [] },
+      },
+      interfaces: {
+        Organization: { name: 'Organization', sourceFile: 'src/models.ts', fields: {}, extends: [] },
+      },
+      typeAliases: {
+        StatusType: { name: 'StatusType', sourceFile: 'src/models.ts', value: '"active" | "inactive"' },
+      },
+      enums: {
+        Status: { name: 'Status', sourceFile: 'src/models.ts', members: { Active: 'active' } },
+      },
+    });
+
+    const lookup = buildOverlayLookup(surface);
+    expect(lookup.fileBySymbol.get('SampleClient')).toBe('src/client.ts');
+    expect(lookup.fileBySymbol.get('Organization')).toBe('src/models.ts');
+    expect(lookup.fileBySymbol.get('StatusType')).toBe('src/models.ts');
+    expect(lookup.fileBySymbol.get('Status')).toBe('src/models.ts');
+  });
+
+  it('remaps fileBySymbol with IR names after modelNameByIR', () => {
+    const surface = emptySurface({
+      classes: {
+        Organizations: {
+          name: 'Organizations',
+          methods: {
+            getOrganization: {
+              name: 'getOrganization',
+              params: [{ name: 'id', type: 'string', optional: false }],
+              returnType: 'Promise<Organization>',
+              async: true,
+            },
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+      interfaces: {
+        Organization: {
+          name: 'Organization',
+          sourceFile: 'src/models.ts',
+          fields: { id: { name: 'id', type: 'string', optional: false } },
+          extends: [],
+        },
+      },
+    });
+
+    const manifest: ManifestEntry[] = [
+      {
+        operationId: 'Organizations.GetOrganization',
+        sdkResourceProperty: 'organizations',
+        sdkMethodName: 'getOrganization',
+        httpMethod: 'GET',
+        path: '/organizations/{id}',
+        pathParams: ['id'],
+        bodyFields: [],
+        queryFields: [],
+      },
+    ];
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Organizations',
+          operations: [
+            {
+              name: 'GetOrganization',
+              httpMethod: 'get',
+              path: '/organizations/{id}',
+              pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'model', name: 'ControllerOrgResponse' },
+              errors: [],
+              paginated: false,
+              idempotent: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [
+        {
+          name: 'ControllerOrgResponse',
+          fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, manifest, spec);
+    // SDK name maps to file
+    expect(lookup.fileBySymbol.get('Organization')).toBe('src/models.ts');
+    // IR name also maps to same file via modelNameByIR remapping
+    expect(lookup.fileBySymbol.get('ControllerOrgResponse')).toBe('src/models.ts');
+  });
+
+  it('produces empty fileBySymbol from surface without sourceFile fields', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Organization: { name: 'Organization', fields: {}, extends: [] },
+      },
+    });
+
+    const lookup = buildOverlayLookup(surface);
+    expect(lookup.fileBySymbol.size).toBe(0);
   });
 
   it('normalizes httpMethod to uppercase for key lookup', () => {
@@ -558,6 +672,31 @@ describe('patchOverlay', () => {
 
     patchOverlay(overlay, violations, emptySurface());
     expect(overlay.requiredExports.size).toBe(0);
+  });
+
+  it('preserves fileBySymbol entries from the original overlay', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Organization: { name: 'Organization', sourceFile: 'src/models.ts', fields: {}, extends: [] },
+      },
+    });
+
+    const overlay = buildOverlayLookup(surface);
+    const patched = patchOverlay(overlay, [], emptySurface());
+    expect(patched.fileBySymbol.get('Organization')).toBe('src/models.ts');
+  });
+
+  it('does not mutate the original overlay fileBySymbol', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Organization: { name: 'Organization', sourceFile: 'src/models.ts', fields: {}, extends: [] },
+      },
+    });
+
+    const overlay = buildOverlayLookup(surface);
+    const patched = patchOverlay(overlay, [], emptySurface());
+    patched.fileBySymbol.set('NewSymbol', 'src/new.ts');
+    expect(overlay.fileBySymbol.has('NewSymbol')).toBe(false);
   });
 
   it('accumulates constraints across multiple patches', () => {

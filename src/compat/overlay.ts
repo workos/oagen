@@ -55,6 +55,7 @@ export function buildOverlayLookup(
     typeAliasByName: new Map(),
     requiredExports: new Map(),
     modelNameByIR: new Map(),
+    fileBySymbol: new Map(),
   };
 
   // If manifest available, map operationId → HTTP method + path → existing method
@@ -90,9 +91,31 @@ export function buildOverlayLookup(
     lookup.requiredExports.set(path, new Set(symbols));
   }
 
+  // Populate fileBySymbol from enriched surface
+  for (const [name, cls] of Object.entries(surface.classes)) {
+    if (cls.sourceFile) lookup.fileBySymbol.set(name, cls.sourceFile);
+  }
+  for (const [name, iface] of Object.entries(surface.interfaces)) {
+    if (iface.sourceFile) lookup.fileBySymbol.set(name, iface.sourceFile);
+  }
+  for (const [name, alias] of Object.entries(surface.typeAliases)) {
+    if (alias.sourceFile) lookup.fileBySymbol.set(name, alias.sourceFile);
+  }
+  for (const [name, en] of Object.entries(surface.enums)) {
+    if (en.sourceFile) lookup.fileBySymbol.set(name, en.sourceFile);
+  }
+
   // Auto-infer IR model name → SDK interface name mappings
   if (spec) {
     buildModelNameMap(surface, spec, lookup, resolvedHints);
+
+    // Remap fileBySymbol so IR model names point to the SDK symbol's file
+    for (const [irName, sdkName] of lookup.modelNameByIR) {
+      const filePath = lookup.fileBySymbol.get(sdkName);
+      if (filePath) {
+        lookup.fileBySymbol.set(irName, filePath);
+      }
+    }
   }
 
   return lookup;
@@ -255,6 +278,7 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
     typeAliasByName: new Map(overlay.typeAliasByName),
     requiredExports: new Map(Array.from(overlay.requiredExports.entries()).map(([k, v]) => [k, new Set(v)])),
     modelNameByIR: new Map(overlay.modelNameByIR),
+    fileBySymbol: new Map(overlay.fileBySymbol),
   };
 
   for (const v of violations) {

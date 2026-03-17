@@ -63,6 +63,31 @@ The subagent reads 10+ files and returns only the structured findings — interm
 
 **Do NOT skip this step.** The entire emitter is derived from these findings.
 
+#### File Path Hints (C1)
+
+When generating for a live SDK, the overlay provides `fileBySymbol` — a map from
+IR symbol names to the relative file paths where those symbols live in the live SDK.
+Emitters can use this to produce `GeneratedFile` entries with paths that match the
+live SDK's layout, enabling the merger to find and merge into the correct files.
+
+**Usage in emitter code:**
+
+```typescript
+generateModels(models: Model[], ctx: EmitterContext): GeneratedFile[] {
+  return models.map((model) => {
+    // Check overlay for live SDK path hint
+    const hintPath = ctx.overlayLookup?.fileBySymbol?.get(model.name);
+    const filePath = hintPath ?? `models/${toKebabCase(model.name)}.ts`;
+
+    return { path: filePath, content: renderModel(model) };
+  });
+}
+```
+
+This is opt-in. Emitters that don't check `fileBySymbol` generate into their
+default layout. The hint is most valuable during `/integrate` (Phase 3), when
+generated files need to merge into the live SDK at the correct locations.
+
 #### 0b. Present Findings
 
 After receiving the subagent's structured summary, present it to the user. For each pattern, include the pattern name, a 1–2 sentence description, a real code snippet from the SDK, and the source file path.

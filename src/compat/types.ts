@@ -136,6 +136,8 @@ export interface OverlayLookup {
   requiredExports: Map<string, Set<string>>;
   /** IR model name → SDK interface name (auto-inferred from field structure) */
   modelNameByIR: Map<string, string>;
+  /** IR symbol name → relative file path in the live SDK */
+  fileBySymbol: Map<string, string>;
 }
 
 export type ViolationCategory = 'public-api' | 'signature' | 'export-structure' | 'behavioral';
