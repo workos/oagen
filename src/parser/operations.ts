@@ -70,6 +70,13 @@ export function extractOperations(paths: Record<string, PathItem> | undefined): 
     }
   }
 
+  // Disambiguate operation names within each service.
+  // Multiple operations can get the same name (e.g., several "list" endpoints
+  // in UserManagement for users, invitations, auth factors, etc.).
+  for (const [, operations] of serviceMap) {
+    disambiguateOperationNames(operations);
+  }
+
   const services = Array.from(serviceMap.entries()).map(([name, operations]) => ({
     name,
     operations,
@@ -101,14 +108,23 @@ function inferOperationName(method: HttpMethod, path: string, operationId?: stri
     return toCamelCase(stripped);
   }
 
-  // Fallback when no operationId is available
+  // Fallback when no operationId is available — use method + path to build
+  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor"
+  const verb = inferVerb(method, path);
+  const resource = inferResourceFromPath(path);
+  return resource ? toCamelCase(`${verb}_${resource}`) : verb;
+}
+
+/**
+ * Infer the CRUD verb from HTTP method and path shape.
+ */
+function inferVerb(method: HttpMethod, path: string): string {
   const segments = path.split('/').filter(Boolean);
   const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith('{');
-  const isCollectionPath = !hasTrailingParam;
 
   switch (method) {
     case 'get':
-      return isCollectionPath ? 'list' : 'retrieve';
+      return hasTrailingParam ? 'get' : 'list';
     case 'post':
       return 'create';
     case 'put':
@@ -119,6 +135,110 @@ function inferOperationName(method: HttpMethod, path: string, operationId?: stri
     default:
       return method;
   }
+}
+
+/**
+ * Extract a resource noun from the path for operation naming.
+ * Uses the last non-param segment (the resource being operated on).
+ *
+ * Examples:
+ *   /user_management/users → "Users"
+ *   /user_management/users/{id} → "User" (singular for item operations)
+ *   /user_management/users/{id}/auth_factors → "AuthFactors"
+ *   /organizations/{id}/api_keys → "ApiKeys"
+ *   /sso/authorize → "Authorize" (action endpoint)
+ */
+function inferResourceFromPath(path: string): string | null {
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length <= 1) return null;
+
+  // Find the last meaningful (non-param) segment
+  let resourceSegment: string | null = null;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (!segments[i].startsWith('{')) {
+      resourceSegment = segments[i];
+      break;
+    }
+  }
+
+  if (!resourceSegment) return null;
+  // Skip the service name (first segment) — it would be redundant
+  if (resourceSegment === segments[0]) return null;
+
+  return toPascalCase(resourceSegment);
+}
+
+/**
+ * Detect and resolve name collisions within a service's operations.
+ *
+ * When multiple operations share the same name (e.g., several "list" from
+ * different sub-resources), disambiguate by appending the resource noun
+ * from the path. Only renames operations on DIFFERENT paths — same-name
+ * operations on the same path (e.g., PUT + PATCH both "update") are left as-is
+ * since they represent the same logical resource.
+ */
+function disambiguateOperationNames(operations: Operation[]): void {
+  // Group by name
+  const byName = new Map<string, Operation[]>();
+  for (const op of operations) {
+    const group = byName.get(op.name) ?? [];
+    group.push(op);
+    byName.set(op.name, group);
+  }
+
+  for (const [name, group] of byName) {
+    if (group.length <= 1) continue;
+
+    // Check if these are genuinely different resources (different paths)
+    // vs the same resource with different methods (PUT + PATCH)
+    const uniquePaths = new Set(group.map((op) => op.path));
+    if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
+
+    for (const op of group) {
+      const resource = inferResourceFromPath(op.path);
+      if (resource) {
+        const newName = toCamelCase(`${name}_${resource}`);
+        (op as { name: string }).name = newName;
+      }
+    }
+
+    // If disambiguation still left collisions (same sub-resource),
+    // use the full distinguishing path segment chain
+    const renamed = new Map<string, Operation[]>();
+    for (const op of group) {
+      const rGroup = renamed.get(op.name) ?? [];
+      rGroup.push(op);
+      renamed.set(op.name, rGroup);
+    }
+    for (const [, rGroup] of renamed) {
+      if (rGroup.length <= 1) continue;
+      // Still colliding — different paths map to same resource name.
+      // Use deeper path context to disambiguate.
+      for (const op of rGroup) {
+        const deeper = inferDeeperContext(op.path);
+        if (deeper) {
+          (op as { name: string }).name = toCamelCase(`${op.name}_${deeper}`);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Extract a deeper disambiguation context from the path when the last
+ * segment isn't unique enough. Uses the second-to-last non-param segment.
+ *
+ * /users/{id}/auth_factors → already captured as "AuthFactors"
+ * /users/external_id/{external_id} → "ExternalId" (special path, not a sub-resource)
+ */
+function inferDeeperContext(path: string): string | null {
+  const segments = path.split('/').filter(Boolean);
+  const nonParams = segments.filter((s) => !s.startsWith('{'));
+  // Skip first (service) and last (already used) — use the middle ones
+  if (nonParams.length >= 3) {
+    return toPascalCase(nonParams.slice(1, -1).join('_'));
+  }
+  return null;
 }
 
 function buildOperation(
