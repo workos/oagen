@@ -43,11 +43,11 @@ Register custom emitters, extractors, and smoke runners via `oagen.config.ts` in
 ```ts
 // oagen.config.ts
 import { myGoEmitter } from "./emitters/go/index.js";
-import { myGoExtractor } from "./extractors/go/index.js";
+import { myGoExtractor } from "./extractors/go/index.js"; // must include hints: LanguageHints
 
 export default {
   emitters: [myGoEmitter],
-  extractors: [myGoExtractor],
+  extractors: [myGoExtractor], // extractor.hints drives language-specific compat logic
   smokeRunners: { go: "./smoke/go-runner.ts" },
   emitterProject: "./path/to/emitter-project",
   irVersion: 1, // pin to the IR version your emitters were built against
