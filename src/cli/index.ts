@@ -19,15 +19,14 @@ function handleError(err: unknown): never {
 // we use top-level await.
 const config = await loadConfig();
 let configSmokeRunners: Record<string, string> | undefined;
+let configOperationIdTransform: ((id: string) => string) | undefined;
 if (config) {
   applyConfig(config);
   configSmokeRunners = config.smokeRunners;
+  configOperationIdTransform = config.operationIdTransform;
 }
 
-const program = new Command()
-  .name('oagen')
-  .description('Generate SDKs from OpenAPI 3.1 specifications')
-  .version('0.0.1');
+const program = new Command().name('oagen').description('Framework for building OpenAPI SDK emitters').version('0.0.1');
 
 program
   .command('parse')
@@ -44,7 +43,7 @@ program
 
 program
   .command('generate')
-  .description('Generate SDK code from an OpenAPI spec')
+  .description('Run a registered emitter against an OpenAPI spec')
   .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
   .requiredOption('--lang <language>', 'Target language')
   .requiredOption('--output <dir>', 'Output directory')
@@ -60,7 +59,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    generateCommand(opts).catch(handleError);
+    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform }).catch(handleError);
   });
 
 program
@@ -76,7 +75,7 @@ program
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
   .option('--manifest <path>', 'Path to smoke-manifest.json for method overlay')
   .action((opts) => {
-    diffCommand(opts).catch(handleError);
+    diffCommand({ ...opts, operationIdTransform: configOperationIdTransform }).catch(handleError);
   });
 
 program
@@ -106,13 +105,14 @@ program
   )
   .option('--old-spec <path>', 'Previous OpenAPI spec — enables staleness detection for removed/renamed symbols')
   .option('--diagnostics', 'Output verify-diagnostics.json with structured violation breakdown')
+  .option('--max-retries <n>', 'Max retry iterations for self-correcting overlay loop (default: 3)', '3')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     // --spec is only required when we need to generate a baseline (no --raw-results
     // and no existing smoke-results-raw.json). Defer the check to verifyCommand.
     // CLI --smoke-runner takes precedence, then per-language smokeRunners map from config
     opts.smokeRunner ??= configSmokeRunners?.[opts.lang];
-    verifyCommand(opts).catch(handleError);
+    verifyCommand({ ...opts, maxRetries: parseInt(opts.maxRetries, 10) }).catch(handleError);
   });
 
 program.parse();

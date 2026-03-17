@@ -72,4 +72,57 @@ describe('VerifyDiagnostics', () => {
     expect(diag.smokeCheck!.compileErrors).toBe(true);
     expect(diag.smokeCheck!.findingsCount).toBeUndefined();
   });
+
+  it('has the expected shape for retryLoop diagnostics when converged', () => {
+    const diag: VerifyDiagnostics = {
+      compatCheck: {
+        totalBaselineSymbols: 10,
+        preservedSymbols: 10,
+        preservationScore: 100,
+        violationsByCategory: {},
+        violationsBySeverity: {},
+        additions: 0,
+        scopedToSpec: true,
+      },
+      retryLoop: {
+        attempts: 2,
+        converged: true,
+        finalScore: 100,
+        patchedPerIteration: [3, 1],
+      },
+    };
+
+    expect(diag.retryLoop!.converged).toBe(true);
+    expect(diag.retryLoop!.attempts).toBe(2);
+    expect(diag.retryLoop!.finalScore).toBe(100);
+    expect(diag.retryLoop!.patchedPerIteration).toEqual([3, 1]);
+  });
+
+  it('has the expected shape for retryLoop diagnostics when not converged', () => {
+    const diag: VerifyDiagnostics = {
+      retryLoop: {
+        attempts: 3,
+        converged: false,
+        finalScore: 60,
+        patchedPerIteration: [5, 4, 3],
+      },
+    };
+
+    expect(diag.retryLoop!.converged).toBe(false);
+    expect(diag.retryLoop!.attempts).toBe(3);
+    expect(diag.retryLoop!.patchedPerIteration).toHaveLength(3);
+
+    // Verify JSON round-trip
+    const json = JSON.stringify(diag, null, 2);
+    const parsed = JSON.parse(json) as VerifyDiagnostics;
+    expect(parsed.retryLoop!.patchedPerIteration).toEqual([5, 4, 3]);
+  });
+
+  it('retryLoop is optional and undefined by default', () => {
+    const diag: VerifyDiagnostics = {
+      smokeCheck: { passed: true },
+    };
+
+    expect(diag.retryLoop).toBeUndefined();
+  });
 });

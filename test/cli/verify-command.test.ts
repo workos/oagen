@@ -26,6 +26,26 @@ vi.mock('../../src/compat/extractor-registry.js', async () => {
   };
 });
 
+// Mock overlay module for retry loop tests
+const mockBuildOverlayLookup = vi.fn();
+const mockPatchOverlay = vi.fn();
+vi.mock('../../src/compat/overlay.js', () => ({
+  buildOverlayLookup: (...args: unknown[]) => mockBuildOverlayLookup(...args),
+  patchOverlay: (...args: unknown[]) => mockPatchOverlay(...args),
+}));
+
+// Mock orchestrator for retry loop tests
+const mockGenerate = vi.fn();
+vi.mock('../../src/engine/orchestrator.js', () => ({
+  generate: (...args: unknown[]) => mockGenerate(...args),
+}));
+
+// Mock emitter registry for retry loop tests
+const mockGetEmitter = vi.fn();
+vi.mock('../../src/engine/registry.js', () => ({
+  getEmitter: (lang: string) => mockGetEmitter(lang),
+}));
+
 import { verifyCommand } from '../../src/cli/verify.js';
 
 /**
@@ -76,6 +96,21 @@ describe('verifyCommand', () => {
 
     // Default: extractor returns same surface as baseline (100% preserved)
     mockExtract.mockResolvedValue(makeSurface());
+
+    // Default overlay mock: return a dummy overlay object
+    const dummyOverlay = {
+      methodByOperation: new Map(),
+      httpKeyByMethod: new Map(),
+      interfaceByName: new Map(),
+      typeAliasByName: new Map(),
+      requiredExports: new Map(),
+      modelNameByIR: new Map(),
+      fileBySymbol: new Map(),
+    };
+    mockBuildOverlayLookup.mockReturnValue(dummyOverlay);
+    mockPatchOverlay.mockReturnValue(dummyOverlay);
+    mockGenerate.mockResolvedValue([]);
+    mockGetEmitter.mockReturnValue({ language: 'test-lang' });
   });
 
   afterEach(() => {
@@ -493,5 +528,251 @@ describe('verifyCommand', () => {
     } finally {
       process.chdir(origCwd);
     }
+  });
+
+  // ── Retry loop (--max-retries) ────────────────────────────────────────
+
+  it('skips retry when --max-retries 0 and exits 1 on violations', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+
+    // Candidate is missing the User interface → breaking violation
+    mockExtract.mockResolvedValue({ ...makeSurface(), interfaces: {} });
+
+    await expect(
+      verifyCommand({
+        spec: MINIMAL_SPEC,
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface: surfacePath,
+        rawResults: resolve(tmpDir, 'raw.json'),
+        maxRetries: 0,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    // generate should NOT be called when maxRetries is 0
+    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Compat violations found'));
+  });
+
+  it('retries and converges when emitter is fixed on second attempt', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+    const rawPath = resolve(tmpDir, 'raw.json');
+    writeFileSync(rawPath, '[]');
+
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => '');
+
+    // First extraction: missing interface (violation). After retry: correct surface.
+    mockExtract
+      .mockResolvedValueOnce({ ...makeSurface(), interfaces: {} }) // attempt 0: violation
+      .mockResolvedValue(makeSurface()); // attempt 1: converged
+
+    await verifyCommand({
+      spec: MINIMAL_SPEC,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface: surfacePath,
+      rawResults: rawPath,
+      maxRetries: 3,
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Retry 1/3'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('converged after 1 retry'));
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it('exits 1 after exhausting max retries without convergence', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+
+    // Return a slightly different (but still failing) surface each call so score varies.
+    // attempt 0: missing interface (score low), attempt 1: still missing (same score → stall)
+    // To avoid stall, make the second extraction improve slightly but not converge,
+    // then the third extraction stays the same (exhausting maxRetries=1 check).
+    // For a clean exhaustion test: use maxRetries=1, return violations each time.
+    // attempt 0 → score X, attempt 1 → score slightly higher (> X) so no stall,
+    //   but attempt === maxRetries(1) → exit 1.
+    let callCount = 0;
+    mockExtract.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // attempt 0: missing interface and class (score 0)
+        return { ...makeSurface(), interfaces: {}, classes: {} };
+      }
+      // attempt 1: only missing interface (higher score — no stall)
+      return { ...makeSurface(), interfaces: {} };
+    });
+
+    await expect(
+      verifyCommand({
+        spec: MINIMAL_SPEC,
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface: surfacePath,
+        rawResults: resolve(tmpDir, 'raw.json'),
+        maxRetries: 1,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    // One retry was attempted (generate called once), then max reached
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Compat violations found'));
+  });
+
+  it('exits 1 immediately when violations are not patchable', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+
+    // Return surface with only a signature violation (not patchable by overlay)
+    mockExtract.mockResolvedValue({
+      ...makeSurface(),
+      classes: {
+        Users: {
+          name: 'Users',
+          methods: {
+            // list exists but with a changed return type → signature violation
+            list: [{ name: 'list', params: [], returnType: 'string', async: true }],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+
+    await expect(
+      verifyCommand({
+        spec: MINIMAL_SPEC,
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface: surfacePath,
+        rawResults: resolve(tmpDir, 'raw.json'),
+        maxRetries: 3,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('No patchable violations'));
+  });
+
+  it('detects stall when preservation score does not improve', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+
+    // Always return the same violations (same score) — stall detected on attempt 1
+    mockExtract.mockResolvedValue({ ...makeSurface(), interfaces: {} });
+
+    // Stall is detected on the second loop iteration (attempt 1) because
+    // the preservation score is the same as prevScore set on attempt 0.
+    // generate will be called once (for the retry after attempt 0).
+    await expect(
+      verifyCommand({
+        spec: MINIMAL_SPEC,
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface: surfacePath,
+        rawResults: resolve(tmpDir, 'raw.json'),
+        maxRetries: 3,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Stalled at'));
+    // generate is called once (the retry after attempt 0 succeeds in patching,
+    // but the stall is detected when attempt 1 checks the result)
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it('populates retryLoop diagnostics when converged', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+    const rawPath = resolve(tmpDir, 'raw.json');
+    writeFileSync(rawPath, '[]');
+
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => '');
+
+    mockExtract
+      .mockResolvedValueOnce({ ...makeSurface(), interfaces: {} }) // attempt 0: violation
+      .mockResolvedValue(makeSurface()); // attempt 1: converged
+
+    const origCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      await verifyCommand({
+        spec: MINIMAL_SPEC,
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface: surfacePath,
+        rawResults: rawPath,
+        maxRetries: 3,
+        diagnostics: true,
+      });
+
+      expect(existsSync(resolve(tmpDir, 'verify-diagnostics.json'))).toBe(true);
+      const diag = JSON.parse(
+        (await import('node:fs')).readFileSync(resolve(tmpDir, 'verify-diagnostics.json'), 'utf-8'),
+      );
+      expect(diag.retryLoop).toBeDefined();
+      expect(diag.retryLoop.converged).toBe(true);
+      expect(diag.retryLoop.attempts).toBe(1);
+      expect(diag.retryLoop.patchedPerIteration).toHaveLength(1);
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  it('populates retryLoop diagnostics when not converged', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+
+    // Always violating
+    mockExtract.mockResolvedValue({ ...makeSurface(), interfaces: {} });
+
+    const origCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      await expect(
+        verifyCommand({
+          spec: MINIMAL_SPEC,
+          lang: 'test-lang',
+          output: tmpDir,
+          apiSurface: surfacePath,
+          rawResults: resolve(tmpDir, 'raw.json'),
+          maxRetries: 1,
+          diagnostics: true,
+        }),
+      ).rejects.toThrow('process.exit(1)');
+
+      expect(existsSync(resolve(tmpDir, 'verify-diagnostics.json'))).toBe(true);
+      const diag = JSON.parse(
+        (await import('node:fs')).readFileSync(resolve(tmpDir, 'verify-diagnostics.json'), 'utf-8'),
+      );
+      expect(diag.retryLoop).toBeDefined();
+      expect(diag.retryLoop.converged).toBe(false);
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+
+  it('does not retry when no --spec is provided (no parsedSpec)', async () => {
+    const surfacePath = resolve(tmpDir, 'surface.json');
+    writeFileSync(surfacePath, JSON.stringify(makeSurface()));
+
+    // Missing interface → violation
+    mockExtract.mockResolvedValue({ ...makeSurface(), interfaces: {} });
+
+    await expect(
+      verifyCommand({
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface: surfacePath,
+        rawResults: resolve(tmpDir, 'raw.json'),
+        maxRetries: 3, // even with retries configured, no spec means no retry
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    // generate should NOT be called — no spec means shouldRetry is false
+    expect(mockGenerate).not.toHaveBeenCalled();
   });
 });

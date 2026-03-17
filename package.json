@@ -1,7 +1,7 @@
 {
   "name": "@workos/oagen",
   "version": "0.0.1",
-  "description": "Generate SDKs from OpenAPI 3.1 specifications",
+  "description": "Framework for building OpenAPI SDK emitters",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

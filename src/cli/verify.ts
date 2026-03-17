@@ -23,8 +23,11 @@ import { getExtractor } from '../compat/extractor-registry.js';
 import { diffSurfaces, specDerivedNames, specDerivedFieldPaths, filterSurface } from '../compat/differ.js';
 import { parseSpec } from '../parser/parse.js';
 import type { ApiSpec } from '../ir/types.js';
-import type { ApiSurface, DiffResult, Violation } from '../compat/types.js';
+import type { ApiSurface, DiffResult, OverlayLookup, Violation, ViolationCategory } from '../compat/types.js';
 import { detectStaleSymbols } from '../compat/staleness.js';
+import { buildOverlayLookup, patchOverlay } from '../compat/overlay.js';
+import { generate } from '../engine/orchestrator.js';
+import { getEmitter } from '../engine/registry.js';
 
 export interface VerifyDiagnostics {
   compatCheck?: {
@@ -45,6 +48,12 @@ export interface VerifyDiagnostics {
     passed: boolean;
     findingsCount?: number;
     compileErrors?: boolean;
+  };
+  retryLoop?: {
+    attempts: number;
+    converged: boolean;
+    finalScore: number;
+    patchedPerIteration: number[];
   };
 }
 
@@ -139,6 +148,8 @@ async function runCompatCheckInner(
   return { passed: true, diff, scopedToSpec, scopedSymbolCount };
 }
 
+const PATCHABLE_CATEGORIES: Set<ViolationCategory> = new Set(['public-api', 'export-structure']);
+
 export async function verifyCommand(opts: {
   spec?: string;
   oldSpec?: string;
@@ -150,14 +161,21 @@ export async function verifyCommand(opts: {
   smokeRunner?: string;
   scope?: 'full' | 'spec-only';
   diagnostics?: boolean;
+  maxRetries?: number;
 }): Promise<void> {
   const { spec, oldSpec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics } = opts;
+  const maxRetries = opts.maxRetries ?? 3;
   const diagData: VerifyDiagnostics = {};
 
   let stepNum = 1;
 
+  // Read baseline surface once — shared by compat check and staleness detection
+  const baseline: ApiSurface | undefined = apiSurface
+    ? (JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface)
+    : undefined;
+
   // ── Compat verification (only when --api-surface is provided) ──────────
-  if (apiSurface) {
+  if (apiSurface && baseline) {
     console.log(`\n${separator}`);
     console.log(`Step ${stepNum}: Compat verification`);
     console.log(separator);
@@ -172,41 +190,106 @@ export async function verifyCommand(opts: {
       process.exit(1);
     }
 
-    const compatResult = await runCompatCheckInner(
-      JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface,
-      output,
-      lang,
-      parsedSpec,
-    );
+    // Only retry when we have spec (for regeneration) and maxRetries > 0
+    const shouldRetry = !!parsedSpec && maxRetries > 0;
+    let overlay: OverlayLookup | undefined;
+    let prevScore = -1;
+    const patchedPerIteration: number[] = [];
 
-    if (diagnostics) {
-      const violationsByCategory: Record<string, number> = {};
-      const violationsBySeverity: Record<string, number> = {};
-      for (const v of compatResult.diff.violations) {
-        violationsByCategory[v.category] = (violationsByCategory[v.category] ?? 0) + 1;
-        violationsBySeverity[v.severity] = (violationsBySeverity[v.severity] ?? 0) + 1;
-      }
-      diagData.compatCheck = {
-        totalBaselineSymbols: compatResult.diff.totalBaselineSymbols,
-        preservedSymbols: compatResult.diff.preservedSymbols,
-        preservationScore: compatResult.diff.preservationScore,
-        violationsByCategory,
-        violationsBySeverity,
-        additions: compatResult.diff.additions.length,
-        scopedToSpec: compatResult.scopedToSpec,
-        ...(compatResult.scopedSymbolCount !== undefined ? { scopedSymbolCount: compatResult.scopedSymbolCount } : {}),
-      };
-    }
+    for (let attempt = 0; attempt <= (shouldRetry ? maxRetries : 0); attempt++) {
+      const compatResult = await runCompatCheckInner(baseline, output, lang, parsedSpec);
 
-    if (compatResult.passed) {
-      console.log('Compat: passed');
-    } else {
       if (diagnostics) {
-        writeDiagnostics(diagData);
+        const violationsByCategory: Record<string, number> = {};
+        const violationsBySeverity: Record<string, number> = {};
+        for (const v of compatResult.diff.violations) {
+          violationsByCategory[v.category] = (violationsByCategory[v.category] ?? 0) + 1;
+          violationsBySeverity[v.severity] = (violationsBySeverity[v.severity] ?? 0) + 1;
+        }
+        diagData.compatCheck = {
+          totalBaselineSymbols: compatResult.diff.totalBaselineSymbols,
+          preservedSymbols: compatResult.diff.preservedSymbols,
+          preservationScore: compatResult.diff.preservationScore,
+          violationsByCategory,
+          violationsBySeverity,
+          additions: compatResult.diff.additions.length,
+          scopedToSpec: compatResult.scopedToSpec,
+          ...(compatResult.scopedSymbolCount !== undefined
+            ? { scopedSymbolCount: compatResult.scopedSymbolCount }
+            : {}),
+        };
       }
-      console.error('\nCompat violations found — fix the emitter and re-run `oagen verify`.');
-      process.exit(1);
+
+      if (compatResult.passed) {
+        if (attempt > 0) {
+          console.log(`Compat: converged after ${attempt} retry iteration(s)`);
+          if (diagnostics) {
+            setRetryDiag(diagData, attempt, true, compatResult.diff.preservationScore, patchedPerIteration);
+          }
+        } else {
+          console.log('Compat: passed');
+        }
+        break; // converged
+      }
+
+      // Check if we should retry
+      if (!shouldRetry || attempt === maxRetries) {
+        // No more retries
+        if (diagnostics) {
+          if (attempt > 0) {
+            setRetryDiag(diagData, attempt, false, compatResult.diff.preservationScore, patchedPerIteration);
+          }
+          writeDiagnostics(diagData);
+        }
+        console.error('\nCompat violations found — fix the emitter and re-run `oagen verify`.');
+        process.exit(1);
+      }
+
+      // Filter to patchable violations only
+      const patchable = compatResult.diff.violations.filter((v) => PATCHABLE_CATEGORIES.has(v.category));
+      if (patchable.length === 0) {
+        console.log(
+          'No patchable violations — cannot self-correct. Remaining violations require emitter code changes.',
+        );
+        if (diagnostics) {
+          setRetryDiag(diagData, attempt, false, compatResult.diff.preservationScore, patchedPerIteration);
+          writeDiagnostics(diagData);
+        }
+        process.exit(1);
+      }
+
+      // Stall detection
+      const currentScore = compatResult.diff.preservationScore;
+      if (attempt > 0 && currentScore <= prevScore) {
+        console.log(`Stalled at ${currentScore}% — overlay patching is not making progress.`);
+        if (diagnostics) {
+          setRetryDiag(diagData, attempt, false, currentScore, patchedPerIteration);
+          writeDiagnostics(diagData);
+        }
+        process.exit(1);
+      }
+      prevScore = currentScore;
+
+      // Patch overlay and regenerate
+      console.log(`\nRetry ${attempt + 1}/${maxRetries}: patching ${patchable.length} violation(s)...`);
+      patchedPerIteration.push(patchable.length);
+
+      // Build overlay on first iteration, patch on subsequent
+      if (!overlay) {
+        overlay = buildOverlayLookup(baseline, undefined, parsedSpec);
+      }
+      overlay = patchOverlay(overlay, patchable, baseline);
+
+      // Regenerate with patched overlay
+      const emitter = getEmitter(lang);
+      await generate(parsedSpec!, emitter, {
+        namespace: parsedSpec!.name,
+        outputDir: output,
+        overlayLookup: overlay,
+        apiSurface: baseline,
+      });
     }
+
     stepNum++;
   }
 
@@ -219,9 +302,8 @@ export async function verifyCommand(opts: {
     const extractor = getExtractor(lang);
     const oldParsedSpec = await parseSpec(oldSpec);
     const newParsedSpec = await parseSpec(spec);
-    const liveSurface = JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface;
 
-    const staleViolations: Violation[] = detectStaleSymbols(liveSurface, oldParsedSpec, newParsedSpec, extractor.hints);
+    const staleViolations: Violation[] = detectStaleSymbols(baseline!, oldParsedSpec, newParsedSpec, extractor.hints);
 
     if (staleViolations.length > 0) {
       console.log(`Found ${staleViolations.length} stale symbol(s):`);
@@ -320,6 +402,16 @@ Remediation guide (by finding type):
   }
 
   console.log('\nVerify: all checks passed');
+}
+
+function setRetryDiag(
+  diagData: VerifyDiagnostics,
+  attempt: number,
+  converged: boolean,
+  finalScore: number,
+  patchedPerIteration: number[],
+): void {
+  diagData.retryLoop = { attempts: attempt, converged, finalScore, patchedPerIteration };
 }
 
 function writeDiagnostics(data: VerifyDiagnostics): void {
