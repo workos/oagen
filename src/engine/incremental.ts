@@ -65,7 +65,10 @@ export async function generateIncremental(
     }));
 
   if (!options.dryRun) {
-    await writeFiles(generated, options.outputDir);
+    await writeFiles(generated, options.outputDir, {
+      language: emitter.language,
+      header,
+    });
 
     if (options.force) {
       for (const filePath of affected.delete) {

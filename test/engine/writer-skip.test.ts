@@ -33,16 +33,39 @@ describe('writeFiles skipIfExists', () => {
     }
   });
 
-  it('overwrites existing file when skipIfExists is not set', async () => {
+  it('skips existing file when no grammar is available (no clobber)', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-skip-'));
     try {
       const filePath = path.join(tmpDir, 'overwrite.rb');
       await fs.writeFile(filePath, 'old', 'utf-8');
 
-      await writeFiles([{ path: 'overwrite.rb', content: 'new' }], tmpDir);
+      const result = await writeFiles([{ path: 'overwrite.rb', content: 'new' }], tmpDir);
 
-      const result = await fs.readFile(filePath, 'utf-8');
-      expect(result).toBe('new');
+      // Without a grammar, existing files are skipped to avoid clobbering
+      expect(result.skipped).toContain('overwrite.rb');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toBe('old');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('merges new symbols into existing TypeScript file', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-merge-'));
+    try {
+      const filePath = path.join(tmpDir, 'models.ts');
+      await fs.writeFile(filePath, 'export interface Foo { id: string; }\n', 'utf-8');
+
+      const result = await writeFiles(
+        [{ path: 'models.ts', content: '// header\n\nexport interface Foo { id: string; }\n\nexport interface Bar { name: string; }\n' }],
+        tmpDir,
+        { language: 'node', header: '// header' },
+      );
+
+      expect(result.merged).toContain('models.ts');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toContain('interface Foo');
+      expect(content).toContain('interface Bar');
     } finally {
       await fs.rm(tmpDir, { recursive: true });
     }

@@ -51,6 +51,14 @@ export async function generate(
     return withHeaders;
   }
 
-  await writeFiles(withHeaders, options.outputDir);
+  const writeResult = await writeFiles(withHeaders, options.outputDir, {
+    language: emitter.language,
+    header,
+  });
+
+  if (writeResult.merged.length > 0) {
+    console.log(`Merged into ${writeResult.merged.length} existing files (additive only)`);
+  }
+
   return withHeaders;
 }
