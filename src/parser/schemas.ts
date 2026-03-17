@@ -283,8 +283,7 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
     // e.g., DirectoryListItem + State → Directory + State = DirectoryState
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
-    const qualifiedName =
-      cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
+    const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
     return {
       kind: 'enum',
       name: qualifiedName,

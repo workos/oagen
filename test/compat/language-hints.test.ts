@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { nodeHints, resolveHints } from '../../src/compat/language-hints.js';
 import { diffSurfaces, specDerivedNames } from '../../src/compat/differ.js';
-import type { LanguageHints } from '../../src/compat/types.js';
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 
@@ -129,10 +128,7 @@ describe('nodeHints', () => {
 
   describe('derivedModelNames', () => {
     it('produces Response and Serialized variants', () => {
-      expect(nodeHints.derivedModelNames('Organization')).toEqual([
-        'OrganizationResponse',
-        'SerializedOrganization',
-      ]);
+      expect(nodeHints.derivedModelNames('Organization')).toEqual(['OrganizationResponse', 'SerializedOrganization']);
     });
   });
 
