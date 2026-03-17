@@ -18,10 +18,26 @@ const parserCache = new Map<string, Parser>();
 const REEXPORT_PREFIX = '__export:';
 
 /**
+ * tree-sitter 0.21.x has a native binding bug: its internal UTF-16 buffer is
+ * 32 768 uint16 units (32 768 characters for BMP text). When the JS input
+ * callback returns a string >= 32 768 chars, `napi_get_value_string_utf16`
+ * overflows and the C layer throws "Invalid argument". Work around this by
+ * supplying a chunked callback for large sources instead of a raw string.
+ */
+const TS_SAFE_CHUNK = 32_767;
+
+function safeParse(parser: Parser, source: string): Parser.Tree {
+  if (source.length < TS_SAFE_CHUNK) {
+    return parser.parse(source);
+  }
+  return parser.parse((offset: number) => source.slice(offset, offset + TS_SAFE_CHUNK));
+}
+
+/**
  * Map emitter language names to tree-sitter grammar module names.
  */
 const GRAMMAR_MODULES: Record<string, string> = {
-  node: 'tree-sitter-typescript/typescript',
+  node: 'tree-sitter-typescript/bindings/node/typescript.js',
 };
 
 /**
@@ -43,7 +59,8 @@ async function getParser(language: string): Promise<Parser> {
     );
   }
 
-  const grammar = (await import(grammarModule)).default;
+  const mod = await import(grammarModule);
+  const grammar = mod.default ?? mod;
   const parser = new Parser();
   parser.setLanguage(grammar);
   parserCache.set(language, parser);
@@ -98,7 +115,10 @@ interface ParsedSymbols {
  */
 export async function extractTopLevelSymbols(source: string, language: string): Promise<ParsedSymbols> {
   const parser = await getParser(language);
-  const tree = parser.parse(source);
+  if (typeof source !== 'string') {
+    throw new Error(`extractTopLevelSymbols: expected string source, got ${typeof source}`);
+  }
+  const tree = safeParse(parser, source);
   const names = new Set<string>();
   const unnamedTexts = new Set<string>();
 
@@ -126,16 +146,16 @@ export async function extractTopLevelNames(source: string, language: string): Pr
 async function extractStatements(
   source: string,
   language: string,
-): Promise<Array<{ name: string | null; text: string }>> {
+): Promise<Array<{ name: string | null; text: string; nodeType: string }>> {
   const parser = await getParser(language);
-  const tree = parser.parse(source);
-  const statements: Array<{ name: string | null; text: string }> = [];
+  const tree = safeParse(parser, source);
+  const statements: Array<{ name: string | null; text: string; nodeType: string }> = [];
 
   for (const child of tree.rootNode.children) {
     if (child.type === 'comment') continue;
 
     const name = extractNodeName(child);
-    statements.push({ name, text: source.slice(child.startIndex, child.endIndex) });
+    statements.push({ name, text: source.slice(child.startIndex, child.endIndex), nodeType: child.type });
   }
 
   return statements;
@@ -175,6 +195,37 @@ export async function mergeIntoExisting(
     // Skip the header comment
     if (stmt.text.trim() === headerLine) continue;
 
+    // Skip import statements — the existing file's imports are authoritative
+    if (stmt.nodeType === 'import_statement') {
+      preserved++;
+      continue;
+    }
+
+    // Skip re-export statements that duplicate existing re-exports
+    // (e.g., generated uses .js extension but existing doesn't).
+    // Allow genuinely new re-exports through.
+    if (stmt.nodeType === 'export_statement' && stmt.text.includes(' from ')) {
+      const normalizedText = stmt.text.trim().replace(/\.js(['"])/g, '$1');
+      const existsNormalized = [...existing.unnamedTexts].some(
+        (t) => t.replace(/\.js(['"])/g, '$1') === normalizedText,
+      );
+      if (existsNormalized) {
+        preserved++;
+        continue;
+      }
+      // Also check named re-exports against existing names.
+      // Strip .js extension from the module specifier before comparing,
+      // since the existing file may use extensionless imports.
+      // Name format: __export:'./path/to/module.js' → __export:'./path/to/module'
+      if (stmt.name?.startsWith(REEXPORT_PREFIX)) {
+        const normalizedName = stmt.name.replace(/\.js(['"])/g, '$1');
+        if (existing.names.has(normalizedName) || existing.names.has(stmt.name)) {
+          preserved++;
+          continue;
+        }
+      }
+    }
+
     if (stmt.name && existing.names.has(stmt.name)) {
       preserved++;
       continue;
@@ -197,9 +248,7 @@ export async function mergeIntoExisting(
 
   let result = existingContent;
 
-  if (!result.includes(headerLine)) {
-    result = header + '\n\n' + result;
-  }
+  // Don't prepend auto-generated header to hand-written files
 
   result = result.trimEnd() + '\n\n' + toAppend.join('\n\n') + '\n';
 

@@ -128,7 +128,7 @@ export interface Bar { name: string; }
     expect(result.preserved).toBe(2);
   });
 
-  it('adds header if not present in existing file', async () => {
+  it('does not prepend header to existing hand-written files', async () => {
     const existing = `export interface Foo { id: string; }`;
     const generated = `
 ${header}
@@ -137,7 +137,7 @@ export interface Bar { name: string; }
 `;
 
     const result = await mergeIntoExisting(existing, generated, 'node', header);
-    expect(result.content).toContain(header);
+    expect(result.content).not.toMatch(/^\/\/ This file is auto-generated/);
     expect(result.content).toContain('interface Bar');
   });
 
