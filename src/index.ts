@@ -83,6 +83,7 @@ export {
   cleanSchemaName,
 } from './utils/naming.js';
 
+export { nodeExtractor } from './compat/extractors/node.js';
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';
 export type { OagenConfig } from './cli/config-loader.js';

@@ -230,6 +230,21 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
     if (mapped.has(model.name)) continue;
     if (model.fields.length < 2) continue;
 
+    // Strategy 2a: Prefer exact name match — if the IR model name matches an SDK
+    // interface name exactly, use it without Jaccard scoring. This prevents
+    // false positives when a superset interface (e.g., DirectoryUserWithGroups)
+    // scores higher than the exact match (DirectoryUser).
+    const exactMatch = sdkSignatures.find(
+      (sdk) => sdk.name === model.name && !usedSdkNames.has(sdk.name),
+    );
+    if (exactMatch) {
+      lookup.modelNameByIR.set(model.name, exactMatch.name);
+      mapped.add(model.name);
+      usedSdkNames.add(exactMatch.name);
+      continue;
+    }
+
+    // Strategy 2b: Fall back to Jaccard field-similarity matching
     const irFields = irModelFieldSignature(model);
     let bestMatch: string | null = null;
     let bestScore = 0;
