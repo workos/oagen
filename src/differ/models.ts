@@ -72,6 +72,10 @@ function diffFields(oldModel: Model, newModel: Model): FieldChange[] {
     if (oldField.required !== newField.required) {
       changes.push(classifyFieldChange('field-required-changed', name, newField.required));
     }
+
+    if (!!oldField.readOnly !== !!newField.readOnly || !!oldField.writeOnly !== !!newField.writeOnly) {
+      changes.push(classifyFieldChange('field-access-changed', name));
+    }
   }
 
   return changes;

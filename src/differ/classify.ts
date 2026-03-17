@@ -19,6 +19,8 @@ export function classifyFieldChange(kind: FieldChange['kind'], fieldName: string
         classification: isRequired ? 'breaking' : 'additive',
         details: isRequired ? 'optional → required' : 'required → optional',
       };
+    case 'field-access-changed':
+      return { kind, fieldName, classification: 'breaking' };
   }
 }
 
