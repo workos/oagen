@@ -155,10 +155,10 @@ Next steps:
   # This iterates: generate → verify → fix emitter → repeat
   # until the preservation score stops improving.
 
-  # Or run manually:
-  oagen extract --sdk-path {sdk_path} --lang {language} --output sdk-{language}-surface.json
-  oagen generate --spec {spec} --lang {language} --output ./sdk --namespace <ns> --api-surface sdk-{language}-surface.json
-  oagen verify --lang {language} --output ./sdk --api-surface sdk-{language}-surface.json
+  # Or run manually via the scaffolded npm scripts:
+  npm run sdk:extract -- --sdk-path {sdk_path}
+  npm run sdk:generate -- --spec {spec} --namespace <ns> --api-surface ./sdk-{language}-surface.json
+  npm run sdk:verify -- --spec {spec} --api-surface ./sdk-{language}-surface.json
 ```
 
 In both Scenario A and Scenario B, include this section on running smoke tests:

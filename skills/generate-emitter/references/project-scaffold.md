@@ -18,7 +18,10 @@ When `{project}/package.json` does **NOT** exist, create the following boilerpla
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "sdk:generate": "oagen generate --lang {language} --output ./sdk",
+    "sdk:verify": "oagen verify --lang {language} --output ./sdk",
+    "sdk:extract": "oagen extract --lang {language} --output ./sdk-{language}-surface.json"
   },
   "dependencies": {
     "@workos/oagen": "^0.0.1"
@@ -107,3 +110,29 @@ dist/
 ```
 
 After creating these files, run `npm install` in the emitter project directory.
+
+## SDK generation scripts
+
+The `sdk:*` scripts bake in `--lang` and `--output` so you only need to pass the remaining flags via `--`:
+
+```bash
+# Fresh generation
+npm run sdk:generate -- --spec ../openapi.yaml --namespace workos
+
+# Verify generated output
+npm run sdk:verify -- --spec ../openapi.yaml
+
+# Extract API surface from an existing SDK (Scenario A)
+npm run sdk:extract -- --sdk-path ../path-to-live-sdk
+
+# Generate with compat overlay (Scenario A)
+npm run sdk:generate -- --spec ../openapi.yaml --namespace workos --api-surface ./sdk-{language}-surface.json
+
+# Verify with compat check (Scenario A)
+npm run sdk:verify -- --spec ../openapi.yaml --api-surface ./sdk-{language}-surface.json
+
+# Integrate into live SDK (Scenario A)
+npm run sdk:generate -- --spec ../openapi.yaml --namespace workos --api-surface ./sdk-{language}-surface.json --target ../path-to-live-sdk
+```
+
+The `--spec` flag can be replaced by setting `OPENAPI_SPEC_PATH` in the environment.
