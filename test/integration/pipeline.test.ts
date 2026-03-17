@@ -5,6 +5,7 @@ import { diffSpecs } from '../../src/differ/diff.js';
 import { generate } from '../../src/engine/orchestrator.js';
 import { generateIncremental } from '../../src/engine/incremental.js';
 import { diffSurfaces, specDerivedNames, filterSurface } from '../../src/compat/differ.js';
+import { nodeHints } from '../../src/compat/language-hints.js';
 import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
 import type { Emitter } from '../../src/engine/types.js';
 import type { ApiSurface, ApiClass, ApiInterface, ApiField, ApiMethod, ApiTypeAlias } from '../../src/compat/types.js';
@@ -588,7 +589,7 @@ describe('end-to-end pipeline', () => {
     it('compat verification catches breaking changes', () => {
       const baseline = irToSurface(v1);
       const candidate = irToSurface(v2);
-      const result = diffSurfaces(baseline, candidate);
+      const result = diffSurfaces(baseline, candidate, nodeHints);
 
       expect(result.violations.length).toBeGreaterThan(0);
 
@@ -609,7 +610,7 @@ describe('end-to-end pipeline', () => {
     it('compat verification reports additive changes as additions', () => {
       const baseline = irToSurface(v1);
       const candidate = irToSurface(v2);
-      const result = diffSurfaces(baseline, candidate);
+      const result = diffSurfaces(baseline, candidate, nodeHints);
 
       // New WidgetStats interface → addition
       const statsAddition = result.additions.find((a) => a.symbolPath === 'WidgetStats');
@@ -640,7 +641,7 @@ describe('end-to-end pipeline', () => {
 
       const baseline = irToSurface(v1);
       const candidate = irToSurface(v2Additive);
-      const result = diffSurfaces(baseline, candidate);
+      const result = diffSurfaces(baseline, candidate, nodeHints);
 
       const breakingViolations = result.violations.filter((v) => v.severity === 'breaking');
       expect(breakingViolations).toHaveLength(0);
@@ -649,7 +650,7 @@ describe('end-to-end pipeline', () => {
     });
 
     it('specDerivedNames includes all spec-generated symbols', () => {
-      const names = specDerivedNames(v1);
+      const names = specDerivedNames(v1, nodeHints);
 
       // Models + Response/Serialized variants
       expect(names.has('Widget')).toBe(true);
@@ -675,7 +676,7 @@ describe('end-to-end pipeline', () => {
         constructorParams: [],
       };
 
-      const names = specDerivedNames(v1);
+      const names = specDerivedNames(v1, nodeHints);
       const filtered = filterSurface(surface, names);
 
       expect(filtered.classes['CustomHelper']).toBeUndefined();
@@ -710,7 +711,7 @@ describe('end-to-end pipeline', () => {
       // Verify
       const baseline = irToSurface(v1);
       const candidate = irToSurface(v2);
-      const compat = diffSurfaces(baseline, candidate);
+      const compat = diffSurfaces(baseline, candidate, nodeHints);
 
       // User.name changed from string to integer → breaking
       const nameViolation = compat.violations.find((v) => v.symbolPath === 'User.name');
@@ -736,7 +737,7 @@ describe('end-to-end pipeline', () => {
       expect(result.deleted).toHaveLength(0);
 
       const surface = irToSurface(v1);
-      const compat = diffSurfaces(surface, surface);
+      const compat = diffSurfaces(surface, surface, nodeHints);
       expect(compat.preservationScore).toBe(100);
       expect(compat.violations).toHaveLength(0);
     });

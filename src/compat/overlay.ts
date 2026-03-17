@@ -1,6 +1,7 @@
-import type { ApiSurface, ApiInterface, Violation, OverlayLookup } from './types.js';
+import type { ApiSurface, ApiInterface, Violation, OverlayLookup, LanguageHints } from './types.js';
 import type { ApiSpec, Model } from '../ir/types.js';
 import { toSnakeCase } from '../utils/naming.js';
+import { nodeHints as defaultNodeHints } from './language-hints.js';
 
 export type { MethodOverlay, OverlayLookup } from './types.js';
 
@@ -20,10 +21,14 @@ export interface ManifestEntry {
  * E.g. if the surface has a class "Organizations" with property "organizations",
  * and sdkResourceProperty is "organizations", return "Organizations".
  */
-function findClassForProperty(surface: ApiSurface, sdkResourceProperty: string): string | undefined {
+function findClassForProperty(
+  surface: ApiSurface,
+  sdkResourceProperty: string,
+  hints: LanguageHints,
+): string | undefined {
   for (const [className, cls] of Object.entries(surface.classes)) {
-    // Check if the class itself maps to this property (camelCase match)
-    if (sdkResourceProperty === className.charAt(0).toLowerCase() + className.slice(1)) {
+    // Check if the class itself maps to this property (language-specific match)
+    if (hints.propertyMatchesClass(sdkResourceProperty, className)) {
       return className;
     }
     // Check constructor params or properties for a match
@@ -36,7 +41,13 @@ function findClassForProperty(surface: ApiSurface, sdkResourceProperty: string):
   return undefined;
 }
 
-export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry[], spec?: ApiSpec): OverlayLookup {
+export function buildOverlayLookup(
+  surface: ApiSurface,
+  manifest?: ManifestEntry[],
+  spec?: ApiSpec,
+  hints?: LanguageHints,
+): OverlayLookup {
+  const resolvedHints = hints ?? defaultNodeHints;
   const lookup: OverlayLookup = {
     methodByOperation: new Map(),
     httpKeyByMethod: new Map(),
@@ -50,7 +61,7 @@ export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry
   if (manifest) {
     for (const entry of manifest) {
       const key = `${entry.httpMethod.toUpperCase()} ${entry.path}`;
-      const className = findClassForProperty(surface, entry.sdkResourceProperty);
+      const className = findClassForProperty(surface, entry.sdkResourceProperty, resolvedHints);
       if (className) {
         const method = surface.classes[className]?.methods[entry.sdkMethodName];
         if (method) {
@@ -81,7 +92,7 @@ export function buildOverlayLookup(surface: ApiSurface, manifest?: ManifestEntry
 
   // Auto-infer IR model name → SDK interface name mappings
   if (spec) {
-    buildModelNameMap(surface, spec, lookup);
+    buildModelNameMap(surface, spec, lookup, resolvedHints);
   }
 
   return lookup;
@@ -128,43 +139,6 @@ function sdkInterfaceFieldSignature(iface: ApiInterface): Set<string> {
 }
 
 /**
- * Extract the innermost type name from a return type string.
- * "Promise<AutoPaginatable<Organization>>" → "Organization"
- * "Promise<Organization>" → "Organization"
- * "Promise<void>" → null
- */
-function extractReturnTypeName(returnType: string): string | null {
-  // Strip Promise< >
-  let inner = returnType;
-  while (inner.startsWith('Promise<') && inner.endsWith('>')) {
-    inner = inner.slice(8, -1);
-  }
-  // Strip generic wrappers like AutoPaginatable<T>, ListResponse<T>
-  const genericMatch = inner.match(/^[A-Za-z]+<(.+)>$/);
-  if (genericMatch) {
-    inner = genericMatch[1];
-  }
-  // Strip array suffix
-  inner = inner.replace(/\[\]$/, '');
-  // Ignore primitives and void
-  if (['void', 'string', 'number', 'boolean', 'any', 'unknown', 'null', 'undefined'].includes(inner)) {
-    return null;
-  }
-  return inner;
-}
-
-/**
- * Extract the innermost type name from a param type string.
- * "CreateOrganizationOptions" → "CreateOrganizationOptions"
- */
-function extractParamTypeName(paramType: string): string | null {
-  if (['string', 'number', 'boolean', 'any', 'unknown'].includes(paramType)) {
-    return null;
-  }
-  return paramType;
-}
-
-/**
  * Populate the modelNameByIR map using two strategies:
  *
  * 1. Operation-based matching (high confidence):
@@ -177,7 +151,7 @@ function extractParamTypeName(paramType: string): string | null {
  *    against all SDK interfaces using Jaccard similarity. A match requires
  *    ≥60% field overlap with ≥3 fields in common.
  */
-function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLookup): void {
+function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLookup, hints: LanguageHints): void {
   const mapped = new Set<string>(); // IR model names already mapped
   const usedSdkNames = new Set<string>(); // SDK names already claimed
 
@@ -191,7 +165,7 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
 
         // Match response model → SDK return type
         if (op.response.kind === 'model' && !mapped.has(op.response.name)) {
-          const sdkTypeName = extractReturnTypeName(methodOverlay.returnType);
+          const sdkTypeName = hints.extractReturnTypeName(methodOverlay.returnType);
           if (sdkTypeName && surface.interfaces[sdkTypeName]) {
             lookup.modelNameByIR.set(op.response.name, sdkTypeName);
             mapped.add(op.response.name);
@@ -202,7 +176,7 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
         // Match request body model → SDK param type
         if (op.requestBody?.kind === 'model' && !mapped.has(op.requestBody.name)) {
           for (const param of methodOverlay.params) {
-            const sdkTypeName = extractParamTypeName(param.type);
+            const sdkTypeName = hints.extractParamTypeName(param.type);
             if (sdkTypeName && surface.interfaces[sdkTypeName]) {
               lookup.modelNameByIR.set(op.requestBody.name, sdkTypeName);
               mapped.add(op.requestBody.name);

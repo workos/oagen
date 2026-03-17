@@ -15,12 +15,16 @@ vi.mock('node:child_process', () => ({
 
 // Mock the extractor registry
 const mockExtract = vi.fn();
-vi.mock('../../src/compat/extractor-registry.js', () => ({
-  getExtractor: () => ({
-    language: 'test-lang',
-    extract: mockExtract,
-  }),
-}));
+vi.mock('../../src/compat/extractor-registry.js', async () => {
+  const { nodeHints } = await import('../../src/compat/language-hints.js');
+  return {
+    getExtractor: () => ({
+      language: 'test-lang',
+      hints: nodeHints,
+      extract: mockExtract,
+    }),
+  };
+});
 
 import { verifyCommand } from '../../src/cli/verify.js';
 

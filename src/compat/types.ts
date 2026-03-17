@@ -57,9 +57,52 @@ export interface ApiEnum {
   members: Record<string, string | number>;
 }
 
+export interface LanguageHints {
+  /** Strip nullable wrapper, return inner type. null if not nullable.
+   *  Node: "string | null" → "string"
+   *  Go: "*Organization" → "Organization"
+   *  Python: "Optional[str]" → "str" */
+  stripNullable(type: string): string | null;
+
+  /** True if a and b differ only by nullability. */
+  isNullableOnlyDifference(a: string, b: string): boolean;
+
+  /** True if a and b are union types with same members in different order. */
+  isUnionReorder(a: string, b: string): boolean;
+
+  /** True if type is a generic type parameter the extractor can't resolve. */
+  isGenericTypeParam(type: string): boolean;
+
+  /** True if type is an extraction artifact (extractor couldn't resolve).
+   *  Node: "any"; Python: "Any"; Go: "interface{}" */
+  isExtractionArtifact(type: string): boolean;
+
+  /** Whether a missing type alias should be tolerated when the candidate
+   *  has the same name as an interface or class (TS allows this). */
+  tolerateCategoryMismatch: boolean;
+
+  /** Extract innermost meaningful type name from a return type string.
+   *  Node: "Promise<AutoPaginatable<Organization>>" → "Organization" */
+  extractReturnTypeName(returnType: string): string | null;
+
+  /** Extract meaningful type name from a param type string. null for primitives. */
+  extractParamTypeName(paramType: string): string | null;
+
+  /** True if sdkResourceProperty maps to className.
+   *  Node: camelCase ("organizations" → "Organizations")
+   *  Ruby: snake_case ("organizations" → "Organizations") */
+  propertyMatchesClass(propertyName: string, className: string): boolean;
+
+  /** Additional names derived from a model name by this language's emitter.
+   *  Node: ["FooResponse", "SerializedFoo"]
+   *  Go: ["FooResponse"] */
+  derivedModelNames(modelName: string): string[];
+}
+
 export interface Extractor {
   language: string;
   extract(sdkPath: string): Promise<ApiSurface>;
+  hints: LanguageHints;
 }
 
 export interface MethodOverlay {

@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { registerExtractor } from '../../src/compat/extractor-registry.js';
 import type { Extractor } from '../../src/compat/types.js';
 import { extractCommand } from '../../src/cli/extract.js';
+import { nodeHints } from '../../src/compat/language-hints.js';
 
 describe('extractCommand', () => {
   let tmpDir: string;
@@ -12,6 +13,7 @@ describe('extractCommand', () => {
 
   const mockExtractor: Extractor = {
     language: 'test-extract-lang',
+    hints: nodeHints,
     extract: vi.fn().mockResolvedValue({
       classes: { MyClass: { methods: {}, properties: {} } },
       interfaces: { MyInterface: { properties: {} } },

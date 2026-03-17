@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { diffSurfaces } from '../../src/compat/differ.js';
 import type { ApiSurface } from '../../src/compat/types.js';
+import { nodeHints } from '../../src/compat/language-hints.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -30,7 +31,7 @@ describe('diffSurfaces — type alias branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.preservedSymbols).toBe(1);
     expect(result.violations.length).toBe(0);
   });
@@ -44,7 +45,7 @@ describe('diffSurfaces — type alias branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.additions).toContainEqual({ symbolPath: 'NewAlias', symbolType: 'type-alias' });
   });
 });
@@ -78,7 +79,7 @@ describe('diffSurfaces — class and interface field branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.additions).toContainEqual({ symbolPath: 'Users.create', symbolType: 'method' });
   });
 
@@ -111,7 +112,7 @@ describe('diffSurfaces — class and interface field branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     const propViolations = result.violations.filter((v) => v.symbolPath === 'Client.apiKey');
     expect(propViolations.length).toBe(1);
     expect(propViolations[0].category).toBe('public-api');
@@ -143,7 +144,7 @@ describe('diffSurfaces — class and interface field branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.additions).toContainEqual({ symbolPath: 'Users.newProp', symbolType: 'property' });
   });
 
@@ -174,7 +175,7 @@ describe('diffSurfaces — class and interface field branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     const fieldViolations = result.violations.filter((v) => v.symbolPath === 'User.email');
     expect(fieldViolations.length).toBe(1);
     expect(fieldViolations[0].category).toBe('public-api');
@@ -204,7 +205,7 @@ describe('diffSurfaces — class and interface field branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.additions).toContainEqual({ symbolPath: 'User.newField', symbolType: 'property' });
   });
 });
@@ -219,7 +220,7 @@ describe('diffSurfaces — enum and export branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.additions).toContainEqual({ symbolPath: 'Status', symbolType: 'enum' });
   });
 
@@ -234,7 +235,7 @@ describe('diffSurfaces — enum and export branches', () => {
       exports: {},
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     const exportViolations = result.violations.filter((v) => v.category === 'export-structure');
     expect(exportViolations.length).toBe(2);
     expect(exportViolations[0].symbolPath).toContain('./models');
@@ -254,7 +255,7 @@ describe('diffSurfaces — enum and export branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     const exportViolations = result.violations.filter((v) => v.category === 'export-structure');
     expect(exportViolations.length).toBe(2); // Organization and Team missing
     expect(exportViolations.map((v) => v.symbolPath)).toContainEqual(expect.stringContaining('Organization'));
@@ -273,7 +274,7 @@ describe('diffSurfaces — enum and export branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.preservedSymbols).toBe(1);
     expect(result.violations.length).toBe(0);
   });
@@ -291,7 +292,7 @@ describe('diffSurfaces — enum and export branches', () => {
       },
     });
 
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     const enumViolations = result.violations.filter((v) => v.symbolPath.includes('Status'));
     expect(enumViolations.length).toBeGreaterThan(0);
     expect(enumViolations[0].category).toBe('signature');

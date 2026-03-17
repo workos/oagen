@@ -13,9 +13,11 @@ import type {
   ApiTypeAlias,
   ApiEnum,
 } from '../types.js';
+import { nodeHints } from '../language-hints.js';
 
 export const nodeExtractor: Extractor = {
   language: 'node',
+  hints: nodeHints,
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     const configPath = ts.findConfigFile(sdkPath, ts.sys.fileExists, 'tsconfig.json');

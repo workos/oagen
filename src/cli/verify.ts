@@ -94,7 +94,7 @@ async function runCompatCheckInner(
   let scopedToSpec = false;
   let scopedSymbolCount: number | undefined;
   if (spec) {
-    const allowed = specDerivedNames(spec);
+    const allowed = specDerivedNames(spec, extractor.hints);
     scopedBaseline = filterSurface(baseline, allowed);
     scopedToSpec = true;
     const totalBefore =
@@ -110,7 +110,7 @@ async function runCompatCheckInner(
     console.log(`(scoped to spec: ${scopedSymbolCount}/${totalBefore} baseline symbols in scope)`);
   }
 
-  const diff = diffSurfaces(scopedBaseline, candidate);
+  const diff = diffSurfaces(scopedBaseline, candidate, extractor.hints);
 
   const pct = diff.preservationScore;
   const total = diff.totalBaselineSymbols;

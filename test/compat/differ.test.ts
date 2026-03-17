@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { diffSurfaces, specDerivedNames, filterSurface } from '../../src/compat/differ.js';
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { nodeHints } from '../../src/compat/language-hints.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -36,14 +37,14 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(surface, surface);
+    const result = diffSurfaces(surface, surface, nodeHints);
     expect(result.preservationScore).toBe(100);
     expect(result.violations).toHaveLength(0);
     expect(result.additions).toHaveLength(0);
   });
 
   it('returns 100% for two empty surfaces', () => {
-    const result = diffSurfaces(emptySurface(), emptySurface());
+    const result = diffSurfaces(emptySurface(), emptySurface(), nodeHints);
     expect(result.preservationScore).toBe(100);
     expect(result.totalBaselineSymbols).toBe(0);
   });
@@ -54,7 +55,7 @@ describe('diffSurfaces', () => {
         Client: { name: 'Client', methods: {}, properties: {}, constructorParams: [] },
       },
     });
-    const result = diffSurfaces(baseline, emptySurface());
+    const result = diffSurfaces(baseline, emptySurface(), nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({
       category: 'public-api',
@@ -82,7 +83,7 @@ describe('diffSurfaces', () => {
         Client: { name: 'Client', methods: {}, properties: {}, constructorParams: [] },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({
       category: 'public-api',
@@ -116,7 +117,7 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({
       category: 'signature',
@@ -163,7 +164,7 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(0);
     expect(result.preservationScore).toBe(100);
   });
@@ -206,7 +207,7 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].category).toBe('signature');
   });
@@ -217,7 +218,7 @@ describe('diffSurfaces', () => {
         Options: { name: 'Options', fields: { key: { name: 'key', type: 'string', optional: false } }, extends: [] },
       },
     });
-    const result = diffSurfaces(baseline, emptySurface());
+    const result = diffSurfaces(baseline, emptySurface(), nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({
       category: 'public-api',
@@ -232,7 +233,7 @@ describe('diffSurfaces', () => {
     const candidate = emptySurface({
       exports: { 'src/index.ts': ['Client'] },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({
       category: 'export-structure',
@@ -256,7 +257,7 @@ describe('diffSurfaces', () => {
         NewInterface: { name: 'NewInterface', fields: {}, extends: [] },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(0);
     expect(result.additions).toEqual(
       expect.arrayContaining([
@@ -277,7 +278,7 @@ describe('diffSurfaces', () => {
         Org: { name: 'Org', fields: { id: { name: 'id', type: 'number', optional: false } }, extends: [] },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({
       category: 'signature',
@@ -291,7 +292,7 @@ describe('diffSurfaces', () => {
         StatusType: { name: 'StatusType', value: '"active" | "inactive"' },
       },
     });
-    const result = diffSurfaces(baseline, emptySurface());
+    const result = diffSurfaces(baseline, emptySurface(), nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({ category: 'public-api', symbolPath: 'StatusType' });
   });
@@ -302,7 +303,7 @@ describe('diffSurfaces', () => {
         Status: { name: 'Status', members: { Active: 'active', Inactive: 'inactive' } },
       },
     });
-    const result = diffSurfaces(baseline, emptySurface());
+    const result = diffSurfaces(baseline, emptySurface(), nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({ category: 'public-api', symbolPath: 'Status' });
   });
@@ -326,7 +327,7 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].severity).toBe('warning');
   });
@@ -352,7 +353,7 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].severity).toBe('warning');
   });
@@ -368,7 +369,7 @@ describe('diffSurfaces', () => {
         MyType: { name: 'MyType', value: 'string | null' },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].severity).toBe('warning');
   });
@@ -392,7 +393,7 @@ describe('diffSurfaces', () => {
         },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].severity).toBe('breaking');
   });
@@ -408,7 +409,7 @@ describe('diffSurfaces', () => {
         Status: { name: 'Status', members: { Active: 'enabled' } },
       },
     });
-    const result = diffSurfaces(baseline, candidate);
+    const result = diffSurfaces(baseline, candidate, nodeHints);
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0]).toMatchObject({ category: 'signature', symbolPath: 'Status.Active' });
   });
@@ -430,7 +431,7 @@ describe('specDerivedNames', () => {
       ],
     };
 
-    const names = specDerivedNames(spec);
+    const names = specDerivedNames(spec, nodeHints);
     expect(names.has('Organization')).toBe(true);
     expect(names.has('OrganizationResponse')).toBe(true);
     expect(names.has('SerializedOrganization')).toBe(true);
@@ -446,7 +447,7 @@ describe('specDerivedNames', () => {
       models: [],
     };
 
-    const names = specDerivedNames(spec);
+    const names = specDerivedNames(spec, nodeHints);
     expect(names.has('Status')).toBe(true);
   });
 
@@ -478,7 +479,7 @@ describe('specDerivedNames', () => {
       models: [],
     };
 
-    const names = specDerivedNames(spec);
+    const names = specDerivedNames(spec, nodeHints);
     expect(names.has('Organizations')).toBe(true);
     expect(names.has('Org')).toBe(true);
     expect(names.has('OrgResponse')).toBe(true);

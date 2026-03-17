@@ -55,6 +55,7 @@ export type {
   ApiTypeAlias,
   ApiEnum,
   Extractor,
+  LanguageHints,
   MethodOverlay,
   OverlayLookup,
   ViolationCategory,
@@ -84,6 +85,7 @@ export {
 } from './utils/naming.js';
 
 export { nodeExtractor } from './compat/extractors/node.js';
+export { nodeHints, resolveHints } from './compat/language-hints.js';
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';
 export type { OagenConfig } from './cli/config-loader.js';

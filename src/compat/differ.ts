@@ -1,12 +1,12 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition } from './types.js';
+import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition, LanguageHints } from './types.js';
 
 /**
  * Compute the set of symbol names that are derivable from the OpenAPI spec.
  * Only these names should be compared during compat verification — everything
  * else in the baseline is hand-written and out of scope for generation.
  */
-export function specDerivedNames(spec: ApiSpec): Set<string> {
+export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<string> {
   const names = new Set<string>();
 
   // Service classes
@@ -14,21 +14,22 @@ export function specDerivedNames(spec: ApiSpec): Set<string> {
     names.add(service.name);
     for (const op of service.operations) {
       // Operation methods are matched by the class diff, not by name here
-      collectTypeRefNames(op.response, names);
-      if (op.requestBody) collectTypeRefNames(op.requestBody, names);
+      collectTypeRefNames(op.response, names, hints);
+      if (op.requestBody) collectTypeRefNames(op.requestBody, names, hints);
       for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams]) {
-        collectTypeRefNames(p.type, names);
+        collectTypeRefNames(p.type, names, hints);
       }
     }
   }
 
-  // Models → domain interface + Response interface + Serialized variant
+  // Models → domain interface + language-specific derived names
   for (const model of spec.models) {
     names.add(model.name);
-    names.add(`${model.name}Response`);
-    names.add(`Serialized${model.name}`);
+    for (const derived of hints.derivedModelNames(model.name)) {
+      names.add(derived);
+    }
     for (const field of model.fields) {
-      collectTypeRefNames(field.type, names);
+      collectTypeRefNames(field.type, names, hints);
     }
   }
 
@@ -40,27 +41,28 @@ export function specDerivedNames(spec: ApiSpec): Set<string> {
   return names;
 }
 
-function collectTypeRefNames(ref: TypeRef, out: Set<string>): void {
+function collectTypeRefNames(ref: TypeRef, out: Set<string>, hints: LanguageHints): void {
   switch (ref.kind) {
     case 'model':
       out.add(ref.name);
-      out.add(`${ref.name}Response`);
-      out.add(`Serialized${ref.name}`);
+      for (const derived of hints.derivedModelNames(ref.name)) {
+        out.add(derived);
+      }
       break;
     case 'enum':
       out.add(ref.name);
       break;
     case 'array':
-      collectTypeRefNames(ref.items, out);
+      collectTypeRefNames(ref.items, out, hints);
       break;
     case 'nullable':
-      collectTypeRefNames(ref.inner, out);
+      collectTypeRefNames(ref.inner, out, hints);
       break;
     case 'union':
-      ref.variants.forEach((v) => collectTypeRefNames(v, out));
+      ref.variants.forEach((v) => collectTypeRefNames(v, out, hints));
       break;
     case 'map':
-      collectTypeRefNames(ref.valueType, out);
+      collectTypeRefNames(ref.valueType, out, hints);
       break;
     case 'literal':
     case 'primitive':
@@ -104,56 +106,7 @@ export function filterSurface(surface: ApiSurface, allowedNames: Set<string>): A
   };
 }
 
-/**
- * Returns true if the only difference between two type strings is the presence
- * of `| null`. E.g. `string` vs `string | null` or `Foo | null` vs `Foo`.
- */
-function isNullableOnlyDifference(a: string, b: string): boolean {
-  const stripNull = (s: string) =>
-    s
-      .split('|')
-      .map((p) => p.trim())
-      .filter((p) => p !== 'null')
-      .join(' | ');
-  return stripNull(a) === stripNull(b);
-}
-
-/**
- * Returns true if two type alias values are union types with identical members
- * but in different order. TypeScript's typeToString() doesn't guarantee a
- * stable ordering for union members, so `"a" | "b"` and `"b" | "a"` should
- * be considered equivalent.
- */
-function isUnionReorder(a: string, b: string): boolean {
-  const parseMembers = (s: string) =>
-    s
-      .split('|')
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .sort();
-  const membersA = parseMembers(a);
-  const membersB = parseMembers(b);
-  if (membersA.length !== membersB.length || membersA.length < 2) return false;
-  return membersA.every((m, i) => m === membersB[i]);
-}
-
-/**
- * Returns true if a type string looks like a generic type parameter.
- * Examples: `T`, `TCustomAttributes`, `TRawAttributes`, `T[]`
- * These are type-level variables that only exist at the declaration site
- * and cannot be matched by extraction from generated output.
- */
-function isGenericTypeParam(type: string): boolean {
-  // Single letter type param (T, U, V, K, etc.)
-  if (/^[A-Z]$/.test(type)) return true;
-  // T-prefixed PascalCase (TCustomAttributes, TRawAttributes)
-  if (/^T[A-Z][a-zA-Z]*$/.test(type)) return true;
-  // Array of a generic param (T[])
-  if (/^[A-Z]\[\]$/.test(type) || /^T[A-Z][a-zA-Z]*\[\]$/.test(type)) return true;
-  return false;
-}
-
-export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffResult {
+export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints: LanguageHints): DiffResult {
   const violations: Violation[] = [];
   const additions: Addition[] = [];
   let totalBaseline = 0;
@@ -230,7 +183,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
         continue;
       }
       if (baseProp.type !== candProp.type) {
-        const nullableOnly = isNullableOnlyDifference(baseProp.type, candProp.type);
+        const nullableOnly = hints.isNullableOnlyDifference(baseProp.type, candProp.type);
         violations.push({
           category: 'signature',
           severity: nullableOnly ? 'warning' : 'breaking',
@@ -293,18 +246,18 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
       }
       if (baseField.type !== candField.type) {
         // Union member reordering is not a real difference
-        if (isUnionReorder(baseField.type, candField.type)) {
+        if (hints.isUnionReorder(baseField.type, candField.type)) {
           preserved++;
           continue;
         }
-        const nullableOnly = isNullableOnlyDifference(baseField.type, candField.type);
+        const nullableOnly = hints.isNullableOnlyDifference(baseField.type, candField.type);
         // Generic type params (T, TCustomAttributes, etc.) can't be preserved
         // in generated output — the extractor resolves them to `any`.
-        const genericParam = isGenericTypeParam(baseField.type);
-        // When candidate resolves to `any`, it's typically an extraction artifact
-        // (TS compiler couldn't resolve the type due to missing imports).
+        const genericParam = hints.isGenericTypeParam(baseField.type);
+        // When candidate resolves to an extraction artifact, it's typically because
+        // the extractor couldn't resolve the type due to missing imports.
         // Downgrade to warning since the generated source likely has the correct type.
-        const extractionArtifact = candField.type === 'any' && baseField.type !== 'any';
+        const extractionArtifact = hints.isExtractionArtifact(candField.type) && baseField.type !== candField.type;
         violations.push({
           category: 'signature',
           severity: nullableOnly || genericParam || extractionArtifact ? 'warning' : 'breaking',
@@ -340,8 +293,8 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
     if (!candAlias) {
       // Category mismatch tolerance: if the candidate has this name as an
       // interface or class instead of a type alias, it's still "present" —
-      // just in a different TypeScript declaration form.
-      if (candidate.interfaces[name] || candidate.classes[name]) {
+      // just in a different declaration form (e.g., TypeScript type alias vs interface).
+      if (hints.tolerateCategoryMismatch && (candidate.interfaces[name] || candidate.classes[name])) {
         preserved++;
         continue;
       }
@@ -356,14 +309,14 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface): DiffR
       continue;
     }
     if (baseAlias.value !== candAlias.value) {
-      // TypeScript's typeToString() doesn't guarantee union member ordering,
-      // so two identical string unions can produce different strings.
+      // Type serialization may not guarantee union member ordering,
+      // so two identical unions can produce different strings.
       // Check for order-independent equality before flagging.
-      if (isUnionReorder(baseAlias.value, candAlias.value)) {
+      if (hints.isUnionReorder(baseAlias.value, candAlias.value)) {
         preserved++;
         continue;
       }
-      const nullableOnly = isNullableOnlyDifference(baseAlias.value, candAlias.value);
+      const nullableOnly = hints.isNullableOnlyDifference(baseAlias.value, candAlias.value);
       violations.push({
         category: 'signature',
         severity: nullableOnly ? 'warning' : 'breaking',

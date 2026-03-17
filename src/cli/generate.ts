@@ -5,7 +5,9 @@ import { generate } from '../engine/orchestrator.js';
 import { getEmitter } from '../engine/registry.js';
 import { buildOverlayLookup } from '../compat/overlay.js';
 import type { ManifestEntry } from '../compat/overlay.js';
-import type { ApiSurface } from '../compat/types.js';
+import type { ApiSurface, LanguageHints } from '../compat/types.js';
+import { nodeHints } from '../compat/language-hints.js';
+import { getExtractor } from '../compat/extractor-registry.js';
 
 export async function generateCommand(opts: {
   spec: string;
@@ -51,7 +53,13 @@ export async function generateCommand(opts: {
       }
     }
 
-    overlayLookup = buildOverlayLookup(apiSurface, manifest, ir);
+    let hints: LanguageHints = nodeHints;
+    try {
+      hints = getExtractor(opts.lang).hints;
+    } catch {
+      // no extractor registered — use nodeHints fallback
+    }
+    overlayLookup = buildOverlayLookup(apiSurface, manifest, ir, hints);
   }
 
   const files = await generate(ir, emitter, {

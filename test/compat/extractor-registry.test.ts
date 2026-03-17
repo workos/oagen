@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { registerExtractor, getExtractor } from '../../src/compat/extractor-registry.js';
 import type { Extractor } from '../../src/compat/types.js';
+import { nodeHints } from '../../src/compat/language-hints.js';
 
 describe('extractor registry', () => {
   it('throws with available languages when requesting unknown language', () => {
     const mock: Extractor = {
       language: 'extractor-test-lang',
+      hints: nodeHints,
       extract: async () => ({
         language: 'extractor-test-lang',
         extractedFrom: '/test',
@@ -26,6 +28,7 @@ describe('extractor registry', () => {
   it('returns registered extractor by language', () => {
     const mock: Extractor = {
       language: 'extractor-roundtrip',
+      hints: nodeHints,
       extract: async () => ({
         language: 'extractor-roundtrip',
         extractedFrom: '/test',
