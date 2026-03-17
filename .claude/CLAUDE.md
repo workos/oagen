@@ -15,7 +15,7 @@ Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if
 - **Never remove or edit existing tests.** Test coverage can be improved, but not weakend.
 - **Tests:** prefer `toMatchInlineSnapshot()` for complex output; most tests use standard assertions. `test/` mirrors `src/` structure.
 - **Naming:** IR uses PascalCase. Each emitter converts to target conventions via its `naming.ts`.
-- **Git:** commit after each complete feature.
+- **Git:** commit after each complete feature. Use Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 
 ## Task Guides
 
