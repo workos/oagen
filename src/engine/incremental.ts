@@ -49,7 +49,7 @@ export async function generateIncremental(
     ...emitter.generateClient(newSpec, ctx),
     ...emitter.generateErrors(ctx),
     ...emitter.generateConfig(ctx),
-    ...emitter.generateTypeSignatures(newSpec, ctx),
+    ...(emitter.generateTypeSignatures?.(newSpec, ctx) ?? []),
     ...emitter.generateTests(newSpec, ctx),
     ...(emitter.generateManifest?.(newSpec, ctx) ?? []),
   ];

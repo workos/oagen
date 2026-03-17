@@ -19,7 +19,7 @@ export function mapChangesToFiles(changes: Change[], emitter: Emitter, ctx: Emit
   // Build file maps from emitter output
   for (const model of ctx.spec.models) {
     const files = emitter.generateModels([model], ctx);
-    const sigs = emitter.generateTypeSignatures({ ...ctx.spec, models: [model], enums: [], services: [] }, ctx);
+    const sigs = emitter.generateTypeSignatures?.({ ...ctx.spec, models: [model], enums: [], services: [] }, ctx) ?? [];
     modelFiles.set(
       model.name,
       [...files, ...sigs].map((f) => f.path),
@@ -39,7 +39,7 @@ export function mapChangesToFiles(changes: Change[], emitter: Emitter, ctx: Emit
       ...emitter.generateResources([service], ctx),
       ...emitter.generateTests({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx),
     ];
-    const sigs = emitter.generateTypeSignatures({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx);
+    const sigs = emitter.generateTypeSignatures?.({ ...ctx.spec, services: [service], models: [], enums: [] }, ctx) ?? [];
     serviceFiles.set(
       service.name,
       [...files, ...sigs].map((f) => f.path),

@@ -187,4 +187,41 @@ describe('generate', () => {
       await fs.rm(outputDir, { recursive: true });
     }
   });
+
+  it('does not prepend header when headerPlacement is skip', async () => {
+    const emitter = mockEmitter();
+    emitter.generateModels = () => [
+      { path: 'models/user.rb', content: 'class User; end', headerPlacement: 'skip' },
+    ];
+
+    const files = await generate(minimalSpec, emitter, {
+      namespace: 'test',
+      dryRun: true,
+      outputDir: '/tmp/test',
+    });
+
+    const modelFile = files.find((f) => f.path === 'mock/models/user.rb');
+    expect(modelFile).toBeDefined();
+    expect(modelFile!.content).toBe('class User; end');
+    expect(modelFile!.content).not.toMatch(/^# Auto-generated/);
+  });
+
+  it('still works when generateTypeSignatures is omitted from emitter', async () => {
+    const emitter = mockEmitter();
+    delete (emitter as Partial<Emitter>).generateTypeSignatures;
+
+    const files = await generate(minimalSpec, emitter, {
+      namespace: 'test',
+      dryRun: true,
+      outputDir: '/tmp/test',
+    });
+
+    // Should still return files from all other methods
+    expect(files.length).toBeGreaterThan(0);
+    const paths = files.map((f) => f.path);
+    expect(paths).toContain('mock/models/user.rb');
+    expect(paths).toContain('mock/client.rb');
+    // No type signature files since the method was omitted
+    expect(paths).not.toContain('mock/sig/user.rbs');
+  });
 });

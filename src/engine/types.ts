@@ -6,6 +6,7 @@ export interface GeneratedFile {
   content: string;
   header?: string;
   skipIfExists?: boolean;
+  headerPlacement?: 'prepend' | 'skip';
 }
 
 export interface EmitterContext {
@@ -34,7 +35,7 @@ export interface Emitter {
 
   generateConfig(ctx: EmitterContext): GeneratedFile[];
 
-  generateTypeSignatures(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
+  generateTypeSignatures?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
 
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
 

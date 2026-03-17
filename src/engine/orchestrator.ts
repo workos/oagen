@@ -34,7 +34,7 @@ export async function generate(
     ...emitter.generateClient(spec, ctx),
     ...emitter.generateErrors(ctx),
     ...emitter.generateConfig(ctx),
-    ...emitter.generateTypeSignatures(spec, ctx),
+    ...(emitter.generateTypeSignatures?.(spec, ctx) ?? []),
     ...emitter.generateTests(spec, ctx),
     ...(emitter.generateManifest?.(spec, ctx) ?? []),
   ];
@@ -44,7 +44,8 @@ export async function generate(
   const withHeaders = files.map((f) => ({
     ...f,
     path: `${langPrefix}${f.path}`,
-    content: f.path.endsWith('.json') ? f.content : header + '\n\n' + f.content,
+    content:
+      f.path.endsWith('.json') || f.headerPlacement === 'skip' ? f.content : header + '\n\n' + f.content,
     skipIfExists: f.skipIfExists ?? false,
   }));
 
