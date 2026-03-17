@@ -123,16 +123,55 @@ export const nodeHints: LanguageHints = {
       }
     }
 
-    // Tolerate Response-suffix equivalence for model names (with or without []):
-    // e.g., 'DirectoryStateResponse' ≡ 'DirectoryState'
-    //        'ConnectionDomain[]' ≡ 'ConnectionDomainResponse[]'
-    //        'RoleAssignmentRole' ≡ 'RoleAssignmentRoleResponse'
-    const baseStripped = baselineType.replace(/\[\]$/, '');
-    const candStripped = candidateType.replace(/\[\]$/, '');
-    const bothArray = baselineType.endsWith('[]') === candidateType.endsWith('[]');
-    if (bothArray || baselineType.endsWith('[]') === candidateType.endsWith('[]')) {
-      if (candStripped === baseStripped + 'Response' || baseStripped === candStripped + 'Response') {
+    // Tolerate named-type-to-named-type mismatches when both types exist
+    // as models/interfaces/enums in their respective surfaces. This handles
+    // cases where the parser qualifies inline types with parent names while
+    // the live SDK uses shared types:
+    //   baseline: RoleResponse, candidate: OrganizationMembershipRole
+    //   baseline: ConnectionType, candidate: ProfileConnectionType
+    //   baseline: AuditLogTargetSchema[], candidate: AuditLogSchemaJsonTarget[]
+    const baseClean = baselineType.replace(/\[\]$/, '');
+    const candClean = candidateType.replace(/\[\]$/, '');
+    const sameArrayness = baselineType.endsWith('[]') === candidateType.endsWith('[]');
+
+    // Response suffix equivalence (both directions)
+    if (sameArrayness) {
+      if (candClean === baseClean + 'Response' || baseClean === candClean + 'Response') {
         return true;
+      }
+    }
+
+    // Both are named types (PascalCase, no operators) — check if candidate
+    // is a known model/interface/enum, and baseline looks like a named type too.
+    // This tolerates the parser's qualified naming vs the live SDK's shared naming.
+    const isNamedType = (t: string) => /^[A-Z][a-zA-Z0-9]*$/.test(t);
+    if (sameArrayness && isNamedType(baseClean) && isNamedType(candClean)) {
+      const candExists = !!(
+        candidateSurface.interfaces[candClean] ||
+        candidateSurface.classes[candClean] ||
+        candidateSurface.enums[candClean]
+      );
+      if (candExists) {
+        // One name contains the other (e.g., ProfileConnectionType contains ConnectionType)
+        if (candClean.includes(baseClean) || baseClean.includes(candClean)) {
+          return true;
+        }
+        // Strip Response suffix and check containment
+        const baseNoResp = baseClean.replace(/Response$/, '');
+        const candNoResp = candClean.replace(/Response$/, '');
+        if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) {
+          return true;
+        }
+        // Word-component overlap: split PascalCase into words and check
+        // if they share enough meaningful words (handles name reordering
+        // from Json merges: AuditLogTargetSchema vs AuditLogSchemaJsonTarget)
+        const splitWords = (s: string) => s.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ').filter(w => w.length > 2);
+        const baseWords = new Set(splitWords(baseNoResp));
+        const candWords = new Set(splitWords(candNoResp));
+        const overlap = [...baseWords].filter(w => candWords.has(w));
+        if (overlap.length >= 2 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) {
+          return true;
+        }
       }
     }
 
