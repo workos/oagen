@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
 import { getExtractor } from '../compat/extractor-registry.js';
-import { diffSurfaces, specDerivedNames, filterSurface } from '../compat/differ.js';
+import { diffSurfaces, specDerivedNames, specDerivedFieldPaths, filterSurface } from '../compat/differ.js';
 import { parseSpec } from '../parser/parse.js';
 import type { ApiSpec } from '../ir/types.js';
 import type { ApiSurface, DiffResult } from '../compat/types.js';
@@ -95,7 +95,8 @@ async function runCompatCheckInner(
   let scopedSymbolCount: number | undefined;
   if (spec) {
     const allowed = specDerivedNames(spec, extractor.hints);
-    scopedBaseline = filterSurface(baseline, allowed);
+    const fieldPaths = specDerivedFieldPaths(spec, extractor.hints);
+    scopedBaseline = filterSurface(baseline, allowed, fieldPaths);
     scopedToSpec = true;
     const totalBefore =
       Object.keys(baseline.interfaces).length +

@@ -42,6 +42,27 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
   return names;
 }
 
+/**
+ * Compute the set of field paths (e.g., "Organization.name") that are defined
+ * in the OpenAPI spec's model schemas. Used by filterSurface to exclude
+ * hand-added SDK fields that reference spec-derived types.
+ */
+export function specDerivedFieldPaths(spec: ApiSpec, hints: LanguageHints): Set<string> {
+  const paths = new Set<string>();
+  for (const model of spec.models) {
+    for (const field of model.fields) {
+      paths.add(`${model.name}.${field.name}`);
+    }
+    // Also add field paths for derived model names (e.g., OrganizationResponse.name)
+    for (const derived of hints.derivedModelNames(model.name)) {
+      for (const field of model.fields) {
+        paths.add(`${derived}.${field.name}`);
+      }
+    }
+  }
+  return paths;
+}
+
 function collectTypeRefNames(ref: TypeRef, out: Set<string>, hints: LanguageHints): void {
   walkTypeRef(ref, {
     model: (r) => {
@@ -68,16 +89,78 @@ function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Recor
  * Filter an ApiSurface to only include symbols whose names appear in the
  * allowed set. Symbols not in the set are dropped entirely — they won't
  * count toward the total or produce violations.
+ *
+ * For interfaces: when fieldPaths is provided, only keeps fields that appear
+ * in the spec-derived field paths. This prevents false positives from hand-added
+ * SDK fields that reference spec-derived types but aren't defined in the spec.
  */
-export function filterSurface(surface: ApiSurface, allowedNames: Set<string>): ApiSurface {
+export function filterSurface(surface: ApiSurface, allowedNames: Set<string>, fieldPaths?: Set<string>): ApiSurface {
+  const filteredInterfaces = filterRecord(surface.interfaces, allowedNames);
+
+  // Filter interface fields by spec-derived field paths if provided
+  if (fieldPaths) {
+    for (const [name, iface] of Object.entries(filteredInterfaces)) {
+      const filteredFields: Record<string, typeof iface.fields[string]> = {};
+      for (const [fieldName, field] of Object.entries(iface.fields)) {
+        // Keep the field if its path is spec-derived
+        if (fieldPaths.has(`${name}.${fieldName}`)) {
+          filteredFields[fieldName] = field;
+        }
+      }
+      filteredInterfaces[name] = { ...iface, fields: filteredFields };
+    }
+  }
+
   return {
     ...surface,
     classes: filterRecord(surface.classes, allowedNames),
-    interfaces: filterRecord(surface.interfaces, allowedNames),
+    interfaces: filteredInterfaces,
     typeAliases: filterRecord(surface.typeAliases, allowedNames),
     enums: filterRecord(surface.enums, allowedNames),
     exports: {}, // exports are structural, not symbol-level — skip for scoped comparison
   };
+}
+
+/**
+ * Extract the core named type from a type string, or null for primitives.
+ * Examples:
+ *   "string" → null
+ *   "Organization" → "Organization"
+ *   "RoleResponse[]" → "RoleResponse"
+ *   "ApiKey | null" → "ApiKey"
+ *   "{ type: string }" → null (inline object)
+ *   '"active" | "inactive"' → null (string literal union)
+ */
+function extractCoreTypeName(typeStr: string): string | null {
+  // Strip array suffix
+  let cleaned = typeStr.replace(/\[\]$/, '');
+  // Strip nullable
+  cleaned = cleaned.replace(/\s*\|\s*null$/, '').replace(/^\s*null\s*\|\s*/, '');
+  cleaned = cleaned.trim();
+  // Primitives and literals
+  if (['string', 'number', 'boolean', 'any', 'unknown', 'void', 'never', 'undefined'].includes(cleaned)) {
+    return null;
+  }
+  // Inline objects or string literal unions
+  if (cleaned.startsWith('{') || cleaned.startsWith('"') || cleaned.startsWith("'")) {
+    return null;
+  }
+  // Generic types: extract the outer type
+  const genericMatch = cleaned.match(/^([A-Z][a-zA-Z0-9]*)</);
+  if (genericMatch) {
+    return genericMatch[1];
+  }
+  // Simple named type
+  if (/^[A-Z][a-zA-Z0-9]*$/.test(cleaned)) {
+    return cleaned;
+  }
+  // Union of named types — check first member
+  const unionMembers = cleaned.split('|').map(m => m.trim());
+  if (unionMembers.length > 1) {
+    const firstNamed = unionMembers.find(m => /^[A-Z][a-zA-Z0-9]*$/.test(m));
+    return firstNamed ?? null;
+  }
+  return null;
 }
 
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints: LanguageHints): DiffResult {

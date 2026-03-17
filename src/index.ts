@@ -73,7 +73,7 @@ export { diffSpecs } from './differ/diff.js';
 export { mapChangesToFiles } from './differ/file-map.js';
 export { generateIncremental } from './engine/incremental.js';
 export { buildOverlayLookup, patchOverlay } from './compat/overlay.js';
-export { diffSurfaces, specDerivedNames, filterSurface } from './compat/differ.js';
+export { diffSurfaces, specDerivedNames, specDerivedFieldPaths, filterSurface } from './compat/differ.js';
 export {
   toSnakeCase,
   toCamelCase,
