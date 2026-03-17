@@ -23,7 +23,8 @@ import { getExtractor } from '../compat/extractor-registry.js';
 import { diffSurfaces, specDerivedNames, specDerivedFieldPaths, filterSurface } from '../compat/differ.js';
 import { parseSpec } from '../parser/parse.js';
 import type { ApiSpec } from '../ir/types.js';
-import type { ApiSurface, DiffResult } from '../compat/types.js';
+import type { ApiSurface, DiffResult, Violation } from '../compat/types.js';
+import { detectStaleSymbols } from '../compat/staleness.js';
 
 export interface VerifyDiagnostics {
   compatCheck?: {
@@ -35,6 +36,10 @@ export interface VerifyDiagnostics {
     additions: number;
     scopedToSpec: boolean;
     scopedSymbolCount?: number;
+  };
+  stalenessCheck?: {
+    staleSymbolCount: number;
+    staleSymbols: string[];
   };
   smokeCheck?: {
     passed: boolean;
@@ -136,6 +141,7 @@ async function runCompatCheckInner(
 
 export async function verifyCommand(opts: {
   spec?: string;
+  oldSpec?: string;
   lang: string;
   output: string;
   apiSurface?: string;
@@ -145,7 +151,7 @@ export async function verifyCommand(opts: {
   scope?: 'full' | 'spec-only';
   diagnostics?: boolean;
 }): Promise<void> {
-  const { spec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics } = opts;
+  const { spec, oldSpec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics } = opts;
   const diagData: VerifyDiagnostics = {};
 
   let stepNum = 1;
@@ -201,6 +207,38 @@ export async function verifyCommand(opts: {
       console.error('\nCompat violations found — fix the emitter and re-run `oagen verify`.');
       process.exit(1);
     }
+    stepNum++;
+  }
+
+  // ── Staleness detection (when --old-spec, --spec, and --api-surface are all provided) ──
+  if (oldSpec && spec && apiSurface) {
+    console.log(`\n${separator}`);
+    console.log(`Step ${stepNum}: Staleness detection`);
+    console.log(separator);
+
+    const extractor = getExtractor(lang);
+    const oldParsedSpec = await parseSpec(oldSpec);
+    const newParsedSpec = await parseSpec(spec);
+    const liveSurface = JSON.parse(readFileSync(apiSurface, 'utf-8')) as ApiSurface;
+
+    const staleViolations: Violation[] = detectStaleSymbols(liveSurface, oldParsedSpec, newParsedSpec, extractor.hints);
+
+    if (staleViolations.length > 0) {
+      console.log(`Found ${staleViolations.length} stale symbol(s):`);
+      for (const v of staleViolations) {
+        console.log(`  [${v.category}] ${v.severity}: ${v.symbolPath} — ${v.message}`);
+      }
+    } else {
+      console.log('No stale symbols detected.');
+    }
+
+    if (diagnostics) {
+      diagData.stalenessCheck = {
+        staleSymbolCount: staleViolations.length,
+        staleSymbols: staleViolations.map((v) => v.symbolPath),
+      };
+    }
+
     stepNum++;
   }
 
