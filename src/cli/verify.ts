@@ -122,7 +122,11 @@ async function runCompatCheckInner(
     for (const v of diff.violations) {
       console.log(`  [${v.category}] ${v.severity}: ${v.symbolPath} — ${v.message}`);
     }
-    return { passed: false, diff, scopedToSpec, scopedSymbolCount };
+    // Only fail on breaking violations — warnings are backwards-compatible
+    const breakingViolations = diff.violations.filter(v => v.severity === 'breaking');
+    if (breakingViolations.length > 0) {
+      return { passed: false, diff, scopedToSpec, scopedSymbolCount };
+    }
   }
   if (diff.additions.length > 0) {
     console.log(`  + ${diff.additions.length} new symbols added`);

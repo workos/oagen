@@ -41,7 +41,29 @@ export function loadOverlayContext(opts: {
   const resolvedManifestPath = opts.manifestPath ?? path.join(opts.outputDir, 'smoke-manifest.json');
   if (opts.manifestPath || existsSync(resolvedManifestPath)) {
     try {
-      manifest = JSON.parse(readFileSync(resolvedManifestPath, 'utf-8')) as ManifestEntry[];
+      const parsed = JSON.parse(readFileSync(resolvedManifestPath, 'utf-8'));
+      if (Array.isArray(parsed)) {
+        manifest = parsed as ManifestEntry[];
+      } else if (typeof parsed === 'object' && parsed !== null) {
+        // Convert object-format manifest { "METHOD /path": { sdkMethod, service } }
+        // into ManifestEntry[] for buildOverlayLookup
+        manifest = Object.entries(parsed).map(([httpKey, value]) => {
+          const spaceIdx = httpKey.indexOf(' ');
+          const httpMethod = httpKey.slice(0, spaceIdx);
+          const httpPath = httpKey.slice(spaceIdx + 1);
+          const v = value as { sdkMethod?: string; service?: string };
+          return {
+            operationId: '',
+            sdkResourceProperty: v.service ?? '',
+            sdkMethodName: v.sdkMethod ?? '',
+            httpMethod,
+            path: httpPath,
+            pathParams: [],
+            bodyFields: [],
+            queryFields: [],
+          };
+        });
+      }
     } catch {
       if (opts.manifestPath) {
         throw new Error(`Failed to read manifest: ${resolvedManifestPath}`);
