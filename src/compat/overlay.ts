@@ -112,16 +112,16 @@ function normalizeFieldName(name: string): string {
 
 /**
  * Compute the Jaccard similarity between two sets of normalized field names.
- * Returns a value between 0 (no overlap) and 1 (identical).
+ * Returns score (0–1) and raw intersection count.
  */
-function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 && b.size === 0) return 0;
+function jaccardSimilarity(a: Set<string>, b: Set<string>): { score: number; intersection: number } {
+  if (a.size === 0 && b.size === 0) return { score: 0, intersection: 0 };
   let intersection = 0;
   for (const item of a) {
     if (b.has(item)) intersection++;
   }
   const union = a.size + b.size - intersection;
-  return union === 0 ? 0 : intersection / union;
+  return { score: union === 0 ? 0 : intersection / union, intersection };
 }
 
 /**
@@ -200,6 +200,8 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
     }
   }
 
+  const sdkSignatureNames = new Set(sdkSignatures.map((s) => s.name));
+
   for (const model of spec.models) {
     if (mapped.has(model.name)) continue;
     if (model.fields.length < 2) continue;
@@ -208,13 +210,10 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
     // interface name exactly, use it without Jaccard scoring. This prevents
     // false positives when a superset interface (e.g., DirectoryUserWithGroups)
     // scores higher than the exact match (DirectoryUser).
-    const exactMatch = sdkSignatures.find(
-      (sdk) => sdk.name === model.name && !usedSdkNames.has(sdk.name),
-    );
-    if (exactMatch) {
-      lookup.modelNameByIR.set(model.name, exactMatch.name);
+    if (sdkSignatureNames.has(model.name) && !usedSdkNames.has(model.name)) {
+      lookup.modelNameByIR.set(model.name, model.name);
       mapped.add(model.name);
-      usedSdkNames.add(exactMatch.name);
+      usedSdkNames.add(model.name);
       continue;
     }
 
@@ -226,14 +225,9 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
     for (const sdk of sdkSignatures) {
       if (usedSdkNames.has(sdk.name)) continue;
 
-      const score = jaccardSimilarity(irFields, sdk.fields);
+      const { score, intersection } = jaccardSimilarity(irFields, sdk.fields);
 
       // Require ≥60% Jaccard AND ≥3 fields in common
-      let intersection = 0;
-      for (const f of irFields) {
-        if (sdk.fields.has(f)) intersection++;
-      }
-
       if (score > bestScore && score >= 0.6 && intersection >= 3) {
         bestScore = score;
         bestMatch = sdk.name;
