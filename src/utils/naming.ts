@@ -99,7 +99,6 @@ const SINGULAR_SAFE_LIST = new Set([
   'Process',
   'Progress',
   'Success',
-  'Widgets',
   'Radius',
   'Canvas',
   'Alias',
