@@ -123,16 +123,15 @@ export const nodeHints: LanguageHints = {
       }
     }
 
-    // Tolerate array of equivalent model names:
-    // e.g., baseline: 'ConnectionDomain[]', candidate: 'ConnectionDomainResponse[]'
-    // Both point to the same underlying model just named differently in domain vs wire
-    const baseArray = baselineType.match(/^(.+)\[\]$/);
-    const candArray = candidateType.match(/^(.+)\[\]$/);
-    if (baseArray && candArray) {
-      const baseName = baseArray[1];
-      const candName = candArray[1];
-      // If one is a "Response" suffixed version of the other, tolerate
-      if (candName === baseName + 'Response' || baseName === candName + 'Response') {
+    // Tolerate Response-suffix equivalence for model names (with or without []):
+    // e.g., 'DirectoryStateResponse' ≡ 'DirectoryState'
+    //        'ConnectionDomain[]' ≡ 'ConnectionDomainResponse[]'
+    //        'RoleAssignmentRole' ≡ 'RoleAssignmentRoleResponse'
+    const baseStripped = baselineType.replace(/\[\]$/, '');
+    const candStripped = candidateType.replace(/\[\]$/, '');
+    const bothArray = baselineType.endsWith('[]') === candidateType.endsWith('[]');
+    if (bothArray || baselineType.endsWith('[]') === candidateType.endsWith('[]')) {
+      if (candStripped === baseStripped + 'Response' || baseStripped === candStripped + 'Response') {
         return true;
       }
     }
