@@ -114,7 +114,7 @@ describe('parseSpec – schema types', () => {
     const field = findField('Widget', 'settings');
     expect(field?.type.kind).toBe('model');
     if (field?.type.kind === 'model') {
-      expect(field.type.name).toBe('Settings');
+      expect(field.type.name).toBe('WidgetSetting');
     }
   });
 
@@ -602,7 +602,7 @@ describe('parseSpec – integration', () => {
   });
 
   it('inline models from nested objects are extracted', () => {
-    const settings = findModel('Settings');
+    const settings = findModel('WidgetSetting');
     expect(settings).toBeDefined();
     expect(settings!.fields.map((f) => f.name)).toContain('theme');
     expect(settings!.fields.map((f) => f.name)).toContain('notifications');

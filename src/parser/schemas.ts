@@ -1,5 +1,5 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
-import { toPascalCase, toUpperSnakeCase, cleanSchemaName } from '../utils/naming.js';
+import { toPascalCase, toUpperSnakeCase, cleanSchemaName, stripListItemMarkers, singularize } from '../utils/naming.js';
 
 interface SchemaObject {
   type?: string | string[];
@@ -279,9 +279,12 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
   // Handle enum
   if (schema.enum) {
     const baseName = toPascalCase(contextName ?? 'UnknownEnum');
+    // Strip ListItem/ByExternalId markers from parent name so enum names are clean:
+    // e.g., DirectoryListItem + State → Directory + State = DirectoryState
+    const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
     const qualifiedName =
-      parentModelName && !baseName.startsWith(parentModelName) ? `${parentModelName}${baseName}` : baseName;
+      cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
     return {
       kind: 'enum',
       name: qualifiedName,
@@ -289,18 +292,18 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
     };
   }
 
-  // Handle array
+  // Handle array — pass parentModelName through to qualify inline items
   if (schema.type === 'array' && schema.items) {
     return {
       kind: 'array',
-      items: schemaToTypeRef(schema.items, contextName),
+      items: schemaToTypeRef(schema.items, contextName, parentModelName),
     };
   }
   // Handle array without explicit type but with items (valid OAS 3.1)
   if (!schema.type && schema.items) {
     return {
       kind: 'array',
-      items: schemaToTypeRef(schema.items, contextName),
+      items: schemaToTypeRef(schema.items, contextName, parentModelName),
     };
   }
 
@@ -312,9 +315,10 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
         `[oagen] Warning: additionalProperties with object schema ignored (context: ${contextName ?? 'unknown'})`,
       );
     }
+    const baseName = toPascalCase(contextName ?? 'UnknownModel');
     return {
       kind: 'model',
-      name: toPascalCase(contextName ?? 'UnknownModel'),
+      name: qualifyInlineModelName(baseName, parentModelName),
     };
   }
 
@@ -359,9 +363,10 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
 
   // Handle schemas with no type — if it has properties, treat as model
   if (!schema.type && schema.properties) {
+    const baseName = toPascalCase(contextName ?? 'UnknownModel');
     return {
       kind: 'model',
-      name: toPascalCase(contextName ?? 'UnknownModel'),
+      name: qualifyInlineModelName(baseName, parentModelName),
     };
   }
 
@@ -387,6 +392,26 @@ export function schemaToTypeRef(schema: any, contextName?: string, parentModelNa
 }
 
 /**
+ * Qualify an inline model name with the parent schema name.
+ * If `parentName` is provided and the field name doesn't already start with
+ * the parent, the result is `${parentName}${PascalField}` with the trailing
+ * word singularized (e.g., Connection + Domains → ConnectionDomain).
+ */
+function qualifyInlineModelName(baseName: string, parentName?: string): string {
+  if (!parentName) return baseName;
+  if (baseName.startsWith(parentName)) return baseName;
+  // Singularize the trailing PascalCase word of the combined name.
+  // Split baseName into leading words + trailing word, singularize trailing.
+  const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
+  if (trailingMatch) {
+    const [, prefix, trailingWord] = trailingMatch;
+    const singular = singularize(trailingWord);
+    return `${parentName}${prefix}${singular}`;
+  }
+  return `${parentName}${baseName}`;
+}
+
+/**
  * Walk all component schemas and extract inline Model definitions for fields
  * that are objects with properties (or arrays of such objects).
  * These correspond to the ModelRef entries created by schemaToTypeRef.
@@ -397,38 +422,41 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, any> | un
 
   const inlineModels: Model[] = [];
 
-  for (const [, schema] of Object.entries(schemas)) {
-    extractInlineModelsFromProperties(schema, inlineModels);
+  for (const [schemaName, schema] of Object.entries(schemas)) {
+    const parentName = cleanSchemaName(toPascalCase(schemaName));
+    extractInlineModelsFromProperties(schema, inlineModels, parentName);
   }
 
   return inlineModels;
 }
 
-function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[]): void {
+function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[], parentName?: string): void {
   const properties = schema.properties ?? {};
   const allOfSchemas = schema.allOf ?? [];
 
   for (const sub of allOfSchemas) {
     if (sub.properties) {
-      extractInlineModelsFromProperties(sub, results);
+      extractInlineModelsFromProperties(sub, results, parentName);
     }
   }
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     // Direct inline object with properties (with or without explicit type: 'object')
     if (fieldSchema.properties && (fieldSchema.type === 'object' || !fieldSchema.type)) {
-      const modelName = toPascalCase(fieldName);
+      const baseName = toPascalCase(fieldName);
+      const modelName = qualifyInlineModelName(baseName, parentName);
       results.push(buildInlineModel(modelName, fieldSchema));
-      extractInlineModelsFromProperties(fieldSchema, results);
+      extractInlineModelsFromProperties(fieldSchema, results, modelName);
     }
 
     // Array of inline objects
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items as SchemaObject;
       if (items.properties && (items.type === 'object' || !items.type)) {
-        const modelName = toPascalCase(fieldName);
+        const baseName = toPascalCase(fieldName);
+        const modelName = qualifyInlineModelName(baseName, parentName);
         results.push(buildInlineModel(modelName, items));
-        extractInlineModelsFromProperties(items, results);
+        extractInlineModelsFromProperties(items, results, modelName);
       }
     }
 
@@ -439,11 +467,12 @@ function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[
         (v) => v.properties && (v.type === 'object' || !v.type),
       );
       if (objectVariant) {
-        const modelName = toPascalCase(fieldName);
+        const baseName = toPascalCase(fieldName);
+        const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
         if (!existingNames.has(modelName)) {
           results.push(buildInlineModel(modelName, objectVariant));
-          extractInlineModelsFromProperties(objectVariant, results);
+          extractInlineModelsFromProperties(objectVariant, results, modelName);
         }
       }
     }
@@ -457,7 +486,7 @@ function buildInlineModel(name: string, schema: SchemaObject): Model {
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     fields.push({
       name: fieldName,
-      type: schemaToTypeRef(fieldSchema, fieldName),
+      type: schemaToTypeRef(fieldSchema, fieldName, name),
       required: requiredSet.has(fieldName),
       description: fieldSchema.description,
     });

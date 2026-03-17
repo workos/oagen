@@ -1,5 +1,5 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
-import { toPascalCase } from '../utils/naming.js';
+import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming.js';
 import { schemaToTypeRef } from './schemas.js';
 
 export interface ResponseExtractionResult {
@@ -260,6 +260,28 @@ function deriveModelName(schema: Record<string, unknown>, fallback: string): str
   return toPascalCase(fallback);
 }
 
+/**
+ * Qualify a nested inline model name with its parent to avoid generic names.
+ * e.g., parent="Connection" + field="domains" → "ConnectionDomain" (singularized)
+ * Only qualifies when the field name alone would be too generic.
+ */
+function qualifyNestedName(parentName: string, fieldName: string): string {
+  const pascalField = toPascalCase(fieldName);
+  // If the field name already starts with the parent name, don't double-prefix
+  if (pascalField.startsWith(parentName)) return pascalField;
+  // Qualify with parent and singularize:
+  // Connection + Domains → ConnectionDomains → singularize lead word → ConnectionDomain
+  const cleanParent = stripListItemMarkers(parentName);
+  const qualified = `${cleanParent}${pascalField}`;
+  // Singularize the trailing word: ConnectionDomains → ConnectionDomain
+  const match = qualified.match(/^(.+?)([A-Z][a-z]+s?)$/);
+  if (match && match[2]) {
+    const trailing = singularize(match[2]);
+    return match[1] + trailing;
+  }
+  return qualified;
+}
+
 function extractInlineModel(name: string, schema: Record<string, unknown>): Model[] {
   const requiredSet = new Set((schema.required as string[] | undefined) ?? []);
   const fields: Field[] = [];
@@ -274,14 +296,17 @@ function extractInlineModel(name: string, schema: Record<string, unknown>): Mode
       description: (fieldSchema.description as string) ?? undefined,
     });
 
-    // Recursively extract nested inline objects
+    // Recursively extract nested inline objects — qualify with parent name
+    // to avoid generic names like "Domains" when multiple parents have a "domains" field
     if (fieldSchema.type === 'object' && fieldSchema.properties) {
-      nestedModels.push(...extractInlineModel(toPascalCase(fieldName), fieldSchema));
+      const nestedName = qualifyNestedName(name, fieldName);
+      nestedModels.push(...extractInlineModel(nestedName, fieldSchema));
     }
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items as Record<string, unknown>;
       if (items.type === 'object' && items.properties) {
-        nestedModels.push(...extractInlineModel(toPascalCase(fieldName), items));
+        const nestedName = qualifyNestedName(name, fieldName);
+        nestedModels.push(...extractInlineModel(nestedName, items));
       }
     }
   }

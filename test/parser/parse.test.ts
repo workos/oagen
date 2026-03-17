@@ -95,23 +95,23 @@ describe('parseSpec', () => {
     await expect(parseSpec('nonexistent.yml')).rejects.toThrow();
   });
 
-  it('warns on inline model name collision with different fields', async () => {
+  it('qualifies inline model name to avoid collision with component schema', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const ir = await parseSpec(`${FIXTURES}/collision.yml`);
-      // The Detail inline model from Thing.detail has fields {color, size}
-      // The Detail component schema has fields {id, description} — these differ
-      // The component schema Detail should win; only one Detail model in the output
+      // The inline model from Thing.detail is now qualified as ThingDetail
+      // so it no longer collides with the component schema Detail
       const detailModels = ir.models.filter((m) => m.name === 'Detail');
       expect(detailModels).toHaveLength(1);
       // The component schema version has {id, description}
       const fieldNames = detailModels[0].fields.map((f) => f.name);
       expect(fieldNames).toContain('id');
       expect(fieldNames).toContain('description');
-      // The warning was emitted for the collision
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Inline model "Detail" has different fields than component schema'),
-      );
+      // The inline model is now ThingDetail — no collision, no warning
+      const thingDetail = ir.models.find((m) => m.name === 'ThingDetail');
+      expect(thingDetail).toBeDefined();
+      expect(thingDetail!.fields.map((f) => f.name)).toContain('color');
+      expect(thingDetail!.fields.map((f) => f.name)).toContain('size');
     } finally {
       warnSpy.mockRestore();
     }

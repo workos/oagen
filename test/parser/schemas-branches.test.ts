@@ -142,7 +142,7 @@ describe('extractInlineModelsFromSchemas — uncovered branches', () => {
       },
     });
 
-    const lineItemModel = models.find((m) => m.name === 'LineItems');
+    const lineItemModel = models.find((m) => m.name === 'OrderLineItem');
     expect(lineItemModel).toBeDefined();
     expect(lineItemModel!.fields.map((f) => f.name)).toContain('product_id');
     expect(lineItemModel!.fields.map((f) => f.name)).toContain('quantity');
@@ -171,9 +171,9 @@ describe('extractInlineModelsFromSchemas — uncovered branches', () => {
       },
     });
 
-    // Should extract both Child and Grandchild
-    const childModel = models.find((m) => m.name === 'Child');
-    const grandchildModel = models.find((m) => m.name === 'Grandchild');
+    // Should extract both ParentChild and ParentChildGrandchild
+    const childModel = models.find((m) => m.name === 'ParentChild');
+    const grandchildModel = models.find((m) => m.name === 'ParentChildGrandchild');
     expect(childModel).toBeDefined();
     expect(grandchildModel).toBeDefined();
   });
