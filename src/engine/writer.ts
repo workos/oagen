@@ -2,7 +2,6 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { GeneratedFile } from './types.js';
 import { mergeIntoExisting, hasGrammar } from './merger.js';
-import { getLanguageCapabilities } from '../capabilities.js';
 
 export interface WriteOptions {
   /** The emitter language (e.g., "node", "ruby"). Used to select the
@@ -78,7 +77,7 @@ export async function writeFiles(
     }
 
     // Source files with grammar → AST-level merge
-    if (language && getLanguageCapabilities(language).supportsAstMerge && hasGrammar(language)) {
+    if (language && hasGrammar(language)) {
       const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header);
 
       if (!mergeResult.changed) {

@@ -97,7 +97,6 @@ export { generateIncremental } from './engine/incremental.js';
 export { getExtractor, registerExtractor } from './compat/extractor-registry.js';
 export { buildOverlayLookup, patchOverlay } from './compat/overlay.js';
 export { diffSurfaces, specDerivedNames, specDerivedFieldPaths, filterSurface } from './compat/differ.js';
-export { getLanguageCapabilities } from './capabilities.js';
 
 // Utilities
 export {

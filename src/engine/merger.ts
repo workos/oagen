@@ -10,7 +10,6 @@
  */
 
 import Parser from 'tree-sitter';
-import { getLanguageCapabilities } from '../capabilities.js';
 import { getMergeAdapter } from './merge-adapters/index.js';
 import type { MergeImport, ParsedMergeFile } from './merge-adapters/types.js';
 
@@ -23,7 +22,7 @@ import { safeParse } from '../utils/tree-sitter.js';
  * Check if a tree-sitter grammar is configured for the given language.
  */
 export function hasGrammar(language: string): boolean {
-  return getLanguageCapabilities(language).supportsAstMerge && getMergeAdapter(language) !== undefined;
+  return getMergeAdapter(language) !== undefined;
 }
 
 async function getParser(language: string): Promise<Parser> {
