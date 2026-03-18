@@ -11,6 +11,7 @@
 
 import Parser from 'tree-sitter';
 import { normalizeJsExtension } from '../utils/naming.js';
+import { getLanguageCapabilities } from '../capabilities.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
@@ -31,7 +32,7 @@ const GRAMMAR_MODULES: Record<string, string> = {
  * Check if a tree-sitter grammar is configured for the given language.
  */
 export function hasGrammar(language: string): boolean {
-  return language in GRAMMAR_MODULES;
+  return getLanguageCapabilities(language).supportsAstMerge && language in GRAMMAR_MODULES;
 }
 
 async function getParser(language: string): Promise<Parser> {

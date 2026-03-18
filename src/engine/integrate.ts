@@ -1,0 +1,22 @@
+import type { GeneratedFile } from './types.js';
+import { writeFiles, type WriteResult } from './writer.js';
+
+export function mapFilesForTargetIntegration(files: GeneratedFile[], language: string): GeneratedFile[] {
+  const langPrefix = `${language}/`;
+  return files.map((f) => ({
+    ...f,
+    path: f.path.startsWith(langPrefix) ? f.path.replace(langPrefix, '') : f.path,
+  }));
+}
+
+export async function integrateGeneratedFiles(opts: {
+  files: GeneratedFile[];
+  language: string;
+  targetDir: string;
+  header: string;
+}): Promise<WriteResult> {
+  return writeFiles(mapFilesForTargetIntegration(opts.files, opts.language), opts.targetDir, {
+    language: opts.language,
+    header: opts.header,
+  });
+}

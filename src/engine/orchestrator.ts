@@ -1,33 +1,9 @@
-import { IR_VERSION } from '../ir/types.js';
 import type { ApiSpec } from '../ir/types.js';
-import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
+import type { Emitter, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
-import { toSnakeCase } from '../utils/naming.js';
 import { writeFiles } from './writer.js';
-
-/** Collect all generated files from an emitter (no headers, no path prefixes). */
-export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterContext): GeneratedFile[] {
-  return [
-    ...emitter.generateModels(spec.models, ctx),
-    ...emitter.generateEnums(spec.enums, ctx),
-    ...emitter.generateResources(spec.services, ctx),
-    ...emitter.generateClient(spec, ctx),
-    ...emitter.generateErrors(ctx),
-    ...emitter.generateConfig(ctx),
-    ...(emitter.generateTypeSignatures?.(spec, ctx) ?? []),
-    ...emitter.generateTests(spec, ctx),
-    ...(emitter.generateManifest?.(spec, ctx) ?? []),
-  ];
-}
-
-/** Apply file header to generated files, respecting headerPlacement and JSON files. */
-export function applyFileHeaders(files: GeneratedFile[], header: string): GeneratedFile[] {
-  return files.map((f) => ({
-    ...f,
-    content: f.path.endsWith('.json') || f.headerPlacement === 'skip' ? f.content : header + '\n\n' + f.content,
-    skipIfExists: f.skipIfExists ?? false,
-  }));
-}
+import { generateFiles } from './generate-files.js';
+import { integrateGeneratedFiles } from './integrate.js';
 
 export async function generate(
   spec: ApiSpec,
@@ -41,20 +17,7 @@ export async function generate(
     overlayLookup?: OverlayLookup;
   },
 ): Promise<GeneratedFile[]> {
-  const ctx: EmitterContext = {
-    namespace: toSnakeCase(options.namespace),
-    namespacePascal: options.namespace,
-    spec,
-    outputDir: options.outputDir,
-    apiSurface: options.apiSurface,
-    overlayLookup: options.overlayLookup,
-    irVersion: IR_VERSION,
-  };
-
-  const files = generateAllFiles(spec, emitter, ctx);
-
-  const header = emitter.fileHeader();
-  const withHeaders = applyFileHeaders(files, header);
+  const { files: withHeaders, header } = generateFiles(spec, emitter, options);
 
   if (options.dryRun) {
     if (options.target) {
@@ -77,8 +40,10 @@ export async function generate(
 
   // Target integration pass
   if (options.target) {
-    const targetResult = await writeFiles(withHeaders, options.target, {
+    const targetResult = await integrateGeneratedFiles({
+      files: withHeaders,
       language: emitter.language,
+      targetDir: options.target,
       header,
     });
 
