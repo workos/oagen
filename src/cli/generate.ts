@@ -2,6 +2,7 @@ import { parseSpec } from '../parser/parse.js';
 import { generate } from '../engine/orchestrator.js';
 import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
+import { expandDocUrls } from '../utils/expand-doc-urls.js';
 
 export async function generateCommand(opts: {
   spec: string;
@@ -14,8 +15,12 @@ export async function generateCommand(opts: {
   manifest?: string;
   compatCheck?: boolean;
   operationIdTransform?: (id: string) => string;
+  docUrl?: string;
 }): Promise<void> {
-  const ir = await parseSpec(opts.spec, { operationIdTransform: opts.operationIdTransform });
+  let ir = await parseSpec(opts.spec, { operationIdTransform: opts.operationIdTransform });
+  if (opts.docUrl) {
+    ir = expandDocUrls(ir, opts.docUrl);
+  }
   const emitter = getEmitter(opts.lang);
   const namespace = opts.namespace ?? ir.name;
 

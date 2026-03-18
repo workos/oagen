@@ -21,6 +21,9 @@ export interface OagenConfig {
    *
    */
   operationIdTransform?: (id: string) => string;
+  /** Base URL for documentation links. When set, relative paths in descriptions
+   *  (e.g. `/reference/authkit/user`) are expanded to full URLs. */
+  docUrl?: string;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];

@@ -22,12 +22,14 @@ function handleError(err: unknown): never {
 // we use top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
+let configDocUrl: string | undefined;
 try {
   const config = await loadConfig();
   if (config) {
     applyConfig(config);
     configSmokeRunners = config.smokeRunners;
     configOperationIdTransform = config.operationIdTransform;
+    configDocUrl = config.docUrl;
   }
 } catch (err) {
   handleError(err);
@@ -66,7 +68,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform }).catch(handleError);
+    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(handleError);
   });
 
 program
@@ -82,7 +84,7 @@ program
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
   .option('--manifest <path>', 'Path to smoke-manifest.json for method overlay')
   .action((opts) => {
-    diffCommand({ ...opts, operationIdTransform: configOperationIdTransform }).catch(handleError);
+    diffCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(handleError);
   });
 
 program

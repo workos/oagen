@@ -4,6 +4,7 @@ import { generateIncremental } from '../engine/incremental.js';
 import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
 import { CommandError } from '../errors.js';
+import { expandDocUrls } from '../utils/expand-doc-urls.js';
 
 export async function diffCommand(opts: {
   old: string;
@@ -16,10 +17,15 @@ export async function diffCommand(opts: {
   apiSurface?: string;
   manifest?: string;
   operationIdTransform?: (id: string) => string;
+  docUrl?: string;
 }): Promise<void> {
   const parseOptions = { operationIdTransform: opts.operationIdTransform };
-  const oldSpec = await parseSpec(opts.old, parseOptions);
-  const newSpec = await parseSpec(opts.new, parseOptions);
+  let oldSpec = await parseSpec(opts.old, parseOptions);
+  let newSpec = await parseSpec(opts.new, parseOptions);
+  if (opts.docUrl) {
+    oldSpec = expandDocUrls(oldSpec, opts.docUrl);
+    newSpec = expandDocUrls(newSpec, opts.docUrl);
+  }
 
   if (opts.report) {
     const diff = diffSpecs(oldSpec, newSpec);
