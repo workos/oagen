@@ -138,8 +138,19 @@ export async function mergeIntoExisting(
   const existingReexports = new Set<string>();
   let lastImportEndIndex = -1;
 
+  // Collect import keys AND imported identifiers (to prevent adding declarations
+  // that clash with already-imported names)
+  const existingImportedNames = new Set<string>();
   for (const imp of existingStatements.imports) {
     existingImportKeys.add(imp.key);
+    // Extract identifiers from import text: import { Foo, Bar } from '...'
+    const braceMatch = imp.text.match(/\{([^}]+)\}/);
+    if (braceMatch) {
+      for (const name of braceMatch[1].split(',')) {
+        const trimmed = name.replace(/\btype\b/, '').trim();
+        if (trimmed) existingImportedNames.add(trimmed);
+      }
+    }
   }
   for (const anchor of existingStatements.importAnchors) {
     const linesBefore = existingContent.slice(0, existingContent.indexOf(anchor)).split('\n').length - 1;
@@ -195,7 +206,7 @@ export async function mergeIntoExisting(
       }
     }
 
-    if (stmt.key && existingKeys.has(stmt.key)) {
+    if (stmt.key && (existingKeys.has(stmt.key) || existingImportedNames.has(stmt.key))) {
       preserved++;
       continue;
     }
@@ -219,19 +230,7 @@ export async function mergeIntoExisting(
 
   let result = existingContent;
 
-  // Don't prepend auto-generated header to hand-written files
-
-  // Insert new imports after the last existing import (using AST-derived position)
-  if (newImports.length > 0) {
-    const renderedImports = adapter.renderImports
-      ? adapter.renderImports(newImports)
-      : newImports.map((entry) => entry.text);
-    const lines = result.split('\n');
-    const insertIdx = lastImportEndIndex + 1;
-    lines.splice(insertIdx, 0, ...renderedImports);
-    result = lines.join('\n');
-  }
-
+  // Append new top-level symbols first (so deep merge can see them)
   if (toAppend.length > 0) {
     result = result.trimEnd() + '\n\n' + toAppend.join('\n\n') + '\n';
   }
@@ -272,6 +271,18 @@ export async function mergeIntoExisting(
       }
       result = resultLines.join('\n');
     }
+  }
+
+  // Insert new imports only when new symbols or members were actually added.
+  // This prevents orphaned imports for generated code that wasn't merged in.
+  if (newImports.length > 0 && (toAppend.length > 0 || deepAdded > 0)) {
+    const renderedImports = adapter.renderImports
+      ? adapter.renderImports(newImports)
+      : newImports.map((entry) => entry.text);
+    const lines = result.split('\n');
+    const insertIdx = lastImportEndIndex + 1;
+    lines.splice(insertIdx, 0, ...renderedImports);
+    result = lines.join('\n');
   }
 
   // Docstring refresh pass: update existing docstrings to match generated content
@@ -350,7 +361,8 @@ export async function mergeIntoExisting(
     }
   }
 
-  const topLevelAdded = (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) + toAppend.length;
+  const importsActuallyAdded = (toAppend.length > 0 || deepAdded > 0) ? (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) : 0;
+  const topLevelAdded = importsActuallyAdded + toAppend.length;
   const totalAdded = topLevelAdded + deepAdded;
 
   if (totalAdded === 0 && docstringUpdates === 0) {

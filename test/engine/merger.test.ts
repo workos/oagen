@@ -283,7 +283,7 @@ export interface Foo {
     expect(result.added).toBe(0);
   });
 
-  it('does not add imports when no new symbols need them', async () => {
+  it('does not add imports when no new symbols were added', async () => {
     const existing = `
 import { Foo } from './foo';
 
@@ -301,10 +301,8 @@ export interface Bar { name: string; }
 `;
 
     const result = await mergeIntoExisting(existing, generated, 'node', header);
-    // All symbols exist, but Baz import is new — should still be added since
-    // the merger doesn't analyze import usage, just deduplicates
-    expect(result.changed).toBe(true);
-    expect(result.content).toContain("import { Baz } from './baz.js'");
+    // All symbols exist and no new members — orphaned imports should not be added
+    expect(result.content).not.toContain("import { Baz } from './baz.js'");
   });
 
   it('handles barrel export lines', async () => {

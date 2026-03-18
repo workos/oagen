@@ -150,7 +150,11 @@ export const nodeMergeAdapter: MergeAdapter = {
 
       if (child.type === 'import_statement') {
         const text = source.slice(child.startIndex, child.endIndex);
-        imports.push({ key: normalizeJsExtension(text.trim()), text });
+        // Key on module path so `import { X }` and `import type { X }` from
+        // the same module are treated as duplicates
+        const sourceNode = child.childForFieldName('source');
+        const modulePath = sourceNode ? normalizeJsExtension(sourceNode.text) : normalizeJsExtension(text.trim());
+        imports.push({ key: modulePath, text });
         importAnchors.push(text);
         continue;
       }
