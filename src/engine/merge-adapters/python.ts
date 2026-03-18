@@ -2,9 +2,23 @@ import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport } from './types.js';
 
 function extractPythonDeclarationName(node: Parser.SyntaxNode): string | null {
-  if (node.type !== 'class_definition' && node.type !== 'function_definition') return null;
-  const nameNode = node.childForFieldName('name');
-  return nameNode?.text ?? null;
+  if (node.type === 'class_definition' || node.type === 'function_definition') {
+    const nameNode = node.childForFieldName('name');
+    return nameNode?.text ?? null;
+  }
+
+  // Detect `__all__ = [...]` assignments so they get a key and can be deduplicated
+  if (node.type === 'expression_statement') {
+    const firstChild = node.firstNamedChild;
+    if (firstChild?.type === 'assignment') {
+      const left = firstChild.childForFieldName('left');
+      if (left?.type === 'identifier' && left.text === '__all__') {
+        return '__all__';
+      }
+    }
+  }
+
+  return null;
 }
 
 export const pythonMergeAdapter: MergeAdapter = {
