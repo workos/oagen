@@ -11,6 +11,7 @@ export interface OperationPlan {
   responseModelName: string | null;
   isModelResponse: boolean;
   hasQueryParams: boolean;
+  isAsync: boolean;
 }
 
 export function planOperation(op: Operation): OperationPlan {
@@ -22,6 +23,7 @@ export function planOperation(op: Operation): OperationPlan {
   const isPaginated = op.pagination !== undefined;
   const responseModelName = resolveResponseModelName(op);
   const isModelResponse = responseModelName !== null;
+  const isAsync = op.async ?? true;
 
   return {
     operation: op,
@@ -33,6 +35,7 @@ export function planOperation(op: Operation): OperationPlan {
     responseModelName,
     isModelResponse,
     hasQueryParams,
+    isAsync,
   };
 }
 

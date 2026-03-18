@@ -24,6 +24,7 @@ describe('planOperation', () => {
       {
         "hasBody": false,
         "hasQueryParams": false,
+        "isAsync": true,
         "isDelete": true,
         "isIdempotentPost": false,
         "isModelResponse": false,
@@ -54,6 +55,7 @@ describe('planOperation', () => {
       {
         "hasBody": false,
         "hasQueryParams": false,
+        "isAsync": true,
         "isDelete": false,
         "isIdempotentPost": false,
         "isModelResponse": true,
@@ -91,6 +93,7 @@ describe('planOperation', () => {
       {
         "hasBody": true,
         "hasQueryParams": false,
+        "isAsync": true,
         "isDelete": false,
         "isIdempotentPost": true,
         "isModelResponse": true,
@@ -225,6 +228,21 @@ describe('planOperation', () => {
     );
     expect(plan.responseModelName).toBeNull();
     expect(plan.isModelResponse).toBe(false);
+  });
+
+  it('async defaults to true when not set', () => {
+    const plan = planOperation(makeOp());
+    expect(plan.isAsync).toBe(true);
+  });
+
+  it('respects async: false', () => {
+    const plan = planOperation(makeOp({ async: false }));
+    expect(plan.isAsync).toBe(false);
+  });
+
+  it('respects async: true', () => {
+    const plan = planOperation(makeOp({ async: true }));
+    expect(plan.isAsync).toBe(true);
   });
 });
 

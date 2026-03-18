@@ -385,4 +385,33 @@ describe('extractOperations', () => {
     const { services } = extractOperations(paths, (id) => id);
     expect(services[0].operations[0].name).toBe('FooController_bar');
   });
+
+  it('reads x-oagen-async extension', () => {
+    const paths = {
+      '/sync': {
+        get: {
+          operationId: 'syncOp',
+          'x-oagen-async': false,
+          responses: { '200': { description: 'ok' } },
+        } as Record<string, unknown>,
+      },
+    };
+
+    const { services } = extractOperations(paths as never);
+    expect(services[0].operations[0].async).toBe(false);
+  });
+
+  it('omits async when extension not present', () => {
+    const paths = {
+      '/users': {
+        get: {
+          operationId: 'listUsers',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].async).toBeUndefined();
+  });
 });

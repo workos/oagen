@@ -33,6 +33,7 @@ interface OperationObject {
   requestBody?: RequestBodyObject;
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
+  'x-oagen-async'?: boolean;
 }
 
 interface ParameterObject {
@@ -328,6 +329,7 @@ function buildOperation(
       pagination,
       injectIdempotencyKey: method === 'post',
       deprecated: op.deprecated || undefined,
+      async: op['x-oagen-async'],
     },
     inlineModels,
   };

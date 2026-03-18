@@ -42,6 +42,7 @@ export interface Operation {
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
+  async?: boolean;
 }
 
 /** Structured pagination metadata for auto-paging iterator generation */
