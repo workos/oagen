@@ -74,7 +74,7 @@ function redactBody(body: unknown): unknown {
  * don't cause false-positive mismatches.
  *
  * Handles:
- *  - WorkOS ULIDs: {prefix}_{ULID} (e.g. org_01HZDS...)
+ *  - ULIDs: {prefix}_{ULID} (e.g. org_01HZDS...)
  *  - UUIDs: 550e8400-e29b-41d4-a716-446655440000
  *  - Numeric IDs: 4+ digit numbers in path segments (e.g. /users/12345)
  */

@@ -1,6 +1,5 @@
 import { resolve, relative } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
 import {
   packageJson,
   tsconfigJson,
@@ -55,19 +54,11 @@ export async function initCommand(opts: { lang: string; project?: string }): Pro
     console.log(`  ${dir}/`);
   }
 
-  // Run npm install
-  console.log('');
-  console.log('Installing dependencies...');
-  try {
-    execSync('npm install', { cwd: projectDir, stdio: 'inherit' });
-  } catch {
-    console.warn('npm install failed — you can run it manually.');
-  }
-
   // Print next steps
   console.log('');
   console.log('Next steps:');
-  console.log(`  1. Implement your emitter in src/${lang}/index.ts`);
-  console.log('  2. npm run sdk:generate -- --spec <path-to-spec> --namespace <Name>');
-  console.log('  3. npm run sdk:verify -- --spec <path-to-spec>');
+  console.log('  1. npm install');
+  console.log(`  2. Implement your emitter in src/${lang}/index.ts`);
+  console.log('  3. npm run sdk:generate -- --spec <path-to-spec> --namespace <Name>');
+  console.log('  4. npm run sdk:verify -- --spec <path-to-spec>');
 }
