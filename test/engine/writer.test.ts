@@ -117,17 +117,13 @@ describe('writeFiles', () => {
     try {
       const filePath = path.join(tmpDir, 'lib/client.rb');
       await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(
-        filePath,
-        "require_relative 'client'\n\nclass Client\n  def initialize; end\nend\n",
-      );
+      await fs.writeFile(filePath, "require_relative 'client'\n\nclass Client\n  def initialize; end\nend\n");
 
       const result = await writeFiles(
         [
           {
             path: 'lib/client.rb',
-            content:
-              "require_relative 'client'\nrequire_relative 'user'\n\nclass Client\nend\n\nclass User\nend\n",
+            content: "require_relative 'client'\nrequire_relative 'user'\n\nclass Client\nend\n\nclass User\nend\n",
           },
         ],
         tmpDir,
@@ -149,17 +145,13 @@ describe('writeFiles', () => {
     try {
       const filePath = path.join(tmpDir, 'workos/client.py');
       await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(
-        filePath,
-        'import os\n\nclass Client:\n    def __init__(self):\n        pass\n',
-      );
+      await fs.writeFile(filePath, 'import os\n\nclass Client:\n    def __init__(self):\n        pass\n');
 
       const result = await writeFiles(
         [
           {
             path: 'workos/client.py',
-            content:
-              'import os\nfrom workos.user import User\n\nclass Client:\n    pass\n\nclass User:\n    pass\n',
+            content: 'import os\nfrom workos.user import User\n\nclass Client:\n    pass\n\nclass User:\n    pass\n',
           },
         ],
         tmpDir,
@@ -181,10 +173,7 @@ describe('writeFiles', () => {
     try {
       const filePath = path.join(tmpDir, 'lib/Client.php');
       await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.writeFile(
-        filePath,
-        '<?php\n\nnamespace WorkOS;\n\nuse WorkOS\\Client;\n\nclass Client {}\n',
-      );
+      await fs.writeFile(filePath, '<?php\n\nnamespace WorkOS;\n\nuse WorkOS\\Client;\n\nclass Client {}\n');
 
       const result = await writeFiles(
         [
@@ -218,8 +207,7 @@ describe('writeFiles', () => {
         [
           {
             path: 'client.go',
-            content:
-              'package workos\n\nimport "context"\n\ntype Client struct{}\n\nfunc helper() {}\n',
+            content: 'package workos\n\nimport "context"\n\ntype Client struct{}\n\nfunc helper() {}\n',
           },
         ],
         tmpDir,
@@ -242,14 +230,23 @@ describe('writeFiles', () => {
       const filePath = path.join(tmpDir, 'package.json');
       await fs.writeFile(
         filePath,
-        JSON.stringify({ name: 'my-sdk', version: '1.0.0', author: 'Alice', scripts: { test: 'vitest', custom: 'echo hi' } }, null, 2) + '\n',
+        JSON.stringify(
+          { name: 'my-sdk', version: '1.0.0', author: 'Alice', scripts: { test: 'vitest', custom: 'echo hi' } },
+          null,
+          2,
+        ) + '\n',
       );
 
       const result = await writeFiles(
         [
           {
             path: 'package.json',
-            content: JSON.stringify({ name: 'my-sdk', version: '2.0.0', scripts: { test: 'vitest run', lint: 'eslint' } }, null, 2) + '\n',
+            content:
+              JSON.stringify(
+                { name: 'my-sdk', version: '2.0.0', scripts: { test: 'vitest run', lint: 'eslint' } },
+                null,
+                2,
+              ) + '\n',
           },
         ],
         tmpDir,
@@ -292,10 +289,7 @@ describe('writeFiles', () => {
       const filePath = path.join(tmpDir, 'broken.json');
       await fs.writeFile(filePath, 'not valid json {{{');
 
-      const result = await writeFiles(
-        [{ path: 'broken.json', content: '{"valid": true}' }],
-        tmpDir,
-      );
+      const result = await writeFiles([{ path: 'broken.json', content: '{"valid": true}' }], tmpDir);
 
       expect(result.written).toContain('broken.json');
       const content = await fs.readFile(filePath, 'utf-8');

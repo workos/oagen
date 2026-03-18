@@ -147,9 +147,9 @@ export async function mergeIntoExisting(
     lastImportEndIndex = linesBefore + stmtLines - 1;
   }
   if (lastImportEndIndex === -1 && existingStatements.importInsertionAnchor) {
-    const linesBefore = existingContent
-      .slice(0, existingContent.indexOf(existingStatements.importInsertionAnchor))
-      .split('\n').length - 1;
+    const linesBefore =
+      existingContent.slice(0, existingContent.indexOf(existingStatements.importInsertionAnchor)).split('\n').length -
+      1;
     const stmtLines = existingStatements.importInsertionAnchor.split('\n').length;
     lastImportEndIndex = linesBefore + stmtLines - 1;
   }
@@ -188,9 +188,7 @@ export async function mergeIntoExisting(
     // (e.g., generated uses .js extension but existing doesn't).
     // Allow genuinely new re-exports through.
     if (stmt.kind === 'reexport') {
-      const normalizedText = adapter.normalizeReexport
-        ? adapter.normalizeReexport(stmt.text.trim())
-        : stmt.text.trim();
+      const normalizedText = adapter.normalizeReexport ? adapter.normalizeReexport(stmt.text.trim()) : stmt.text.trim();
       if (existingReexports.has(normalizedText) || (stmt.key !== null && existingKeys.has(stmt.key))) {
         preserved++;
         continue;
@@ -222,7 +220,9 @@ export async function mergeIntoExisting(
 
   // Insert new imports after the last existing import (using AST-derived position)
   if (newImports.length > 0) {
-    const renderedImports = adapter.renderImports ? adapter.renderImports(newImports) : newImports.map((entry) => entry.text);
+    const renderedImports = adapter.renderImports
+      ? adapter.renderImports(newImports)
+      : newImports.map((entry) => entry.text);
     const lines = result.split('\n');
     const insertIdx = lastImportEndIndex + 1;
     lines.splice(insertIdx, 0, ...renderedImports);

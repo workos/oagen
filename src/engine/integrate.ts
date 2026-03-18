@@ -3,10 +3,12 @@ import { writeFiles, type WriteResult } from './writer.js';
 
 export function mapFilesForTargetIntegration(files: GeneratedFile[], language: string): GeneratedFile[] {
   const langPrefix = `${language}/`;
-  return files.map((f) => ({
-    ...f,
-    path: f.path.startsWith(langPrefix) ? f.path.replace(langPrefix, '') : f.path,
-  }));
+  return files
+    .filter((f) => !f.skipIfExists) // skipIfExists files are standalone-only, never integrated
+    .map((f) => ({
+      ...f,
+      path: f.path.startsWith(langPrefix) ? f.path.replace(langPrefix, '') : f.path,
+    }));
 }
 
 export async function integrateGeneratedFiles(opts: {

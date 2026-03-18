@@ -18,8 +18,8 @@ This is the final phase of `/generate-sdk` setup — after the emitter, extracto
 - **output** — path to the generated SDK output directory
 - **project** — path to the emitter project
 - **namespace** — SDK namespace/package name
-- **sdk_path** *(optional, Scenario A)* — path to the live SDK for target integration
-- **api-surface** *(optional, Scenario A)* — path to `sdk-{language}-surface.json`
+- **sdk_path** _(optional, Scenario A)_ — path to the live SDK for target integration
+- **api-surface** _(optional, Scenario A)_ — path to `sdk-{language}-surface.json`
 
 ## Reference Docs
 

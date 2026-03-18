@@ -50,9 +50,9 @@ The `format` field on `PrimitiveType` carries additional type information:
 
 ```typescript
 type AuthScheme =
-  | { kind: 'bearer' }
-  | { kind: 'apiKey'; in: 'header' | 'query'; name: string }
-  | { kind: 'oauth2'; flows: Record<string, unknown> };
+  | { kind: "bearer" }
+  | { kind: "apiKey"; in: "header" | "query"; name: string }
+  | { kind: "oauth2"; flows: Record<string, unknown> };
 ```
 
 Emitters use `AuthScheme` to generate authentication configuration and client constructors.
@@ -62,8 +62,8 @@ Emitters use `AuthScheme` to generate authentication configuration and client co
 ```typescript
 interface PaginationMeta {
   cursorParam: string; // Query param name for the cursor (e.g., "after")
-  dataPath: string;    // JSON path to the data array (e.g., "data")
-  itemType: TypeRef;   // Type of each item in the paginated list
+  dataPath: string; // JSON path to the data array (e.g., "data")
+  itemType: TypeRef; // Type of each item in the paginated list
 }
 ```
 

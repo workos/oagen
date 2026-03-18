@@ -46,7 +46,7 @@ Collect these values via `AskUserQuestion`. If any were provided as arguments, s
    > **A. Backwards compatible** — There's a published SDK with consumers who depend on its public API. The generated SDK must match the existing surface.
    >
    > **B. Fresh** — No existing SDK to preserve, or you're intentionally replacing one. No compat constraints.
-3. **`sdk_path`** *(Scenario A only)* — path to the existing SDK. Validate the path exists (look for `package.json`, `Gemfile`, `go.mod`, `pyproject.toml`, or similar).
+3. **`sdk_path`** _(Scenario A only)_ — path to the existing SDK. Validate the path exists (look for `package.json`, `Gemfile`, `go.mod`, `pyproject.toml`, or similar).
 4. **`project`** — emitter project path (e.g., `../oagen-emitters/node`). Create if needed:
    ```bash
    mkdir -p {project}/src/{language} && mkdir -p {project}/test/{language}
@@ -143,40 +143,6 @@ Validation:
 ```
 
 Only include this next section in the output if this is Scenario A:
-
-```
-Next steps:
-  cd {project}
-
-  # Use oagen skills directly from the emitter project:
-  claude --plugin-dir node_modules/@workos/oagen
-  # (or: claude --plugin-dir ../oagen)
-  #
-  # Then run the compat-fixing loop:
-  /oagen:verify-compat {language}
-  #
-  # This iterates: generate → verify → fix emitter → repeat
-  # until the preservation score stops improving.
-
-  # Or run manually via the scaffolded npm scripts:
-  npm run sdk:extract -- --sdk-path {sdk_path}
-  npm run sdk:generate -- --spec {spec} --namespace <ns> --api-surface ./sdk-{language}-surface.json
-  npm run sdk:verify -- --spec {spec} --api-surface ./sdk-{language}-surface.json
-```
-
-In both Scenario A and Scenario B, include this section on running smoke tests:
-
-```Next steps:
-  cd {project}
-
-  # Use oagen skills directly from the emitter project:
-  claude --plugin-dir node_modules/@workos/oagen
-  # (or: claude --plugin-dir ../oagen)
-  # Then run the generate-verify loop:
-  /oagen:verify-smoke-test {language}
-  # This iterates: generate → verify → fix emitter → repeat
-  # until the smoke tests pass without emitter changes.
-```
 
 ## Output
 

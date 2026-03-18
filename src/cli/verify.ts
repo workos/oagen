@@ -6,11 +6,7 @@ import { runCompatCheck } from '../verify/run-compat-check.js';
 import { runOverlayRetryLoop } from '../verify/run-overlay-retry-loop.js';
 import { runStalenessCheck } from '../verify/run-staleness-check.js';
 import { runSmokeCheck } from '../verify/run-smoke-check.js';
-import {
-  summarizeCompatCheck,
-  setRetryDiagnostics,
-  writeDiagnostics,
-} from '../verify/write-diagnostics.js';
+import { summarizeCompatCheck, setRetryDiagnostics, writeDiagnostics } from '../verify/write-diagnostics.js';
 import type { VerifyDiagnostics } from '../verify/types.js';
 
 export type { VerifyDiagnostics } from '../verify/types.js';
@@ -121,9 +117,13 @@ export async function verifyCommand(opts: {
       }
 
       if (compatFlow.status === 'no-patchable') {
-        console.log('No patchable violations — cannot self-correct. Remaining violations require emitter code changes.');
+        console.log(
+          'No patchable violations — cannot self-correct. Remaining violations require emitter code changes.',
+        );
       } else if (compatFlow.status === 'stalled') {
-        console.log(`Stalled at ${compatFlow.compatResult.diff.preservationScore}% — overlay patching is not making progress.`);
+        console.log(
+          `Stalled at ${compatFlow.compatResult.diff.preservationScore}% — overlay patching is not making progress.`,
+        );
       }
 
       throw new CommandError('\nCompat violations found — fix the emitter and re-run `oagen verify`.', '', 1);

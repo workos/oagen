@@ -109,7 +109,7 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     const jsonIdx = normalizedModels.indexOf(model);
     if (jsonIdx !== -1) normalizedModels.splice(jsonIdx, 1);
     rewriteModelRefsInServices(services, model.name, baseName);
-    console.warn(`[oagen] Warning: Merged "${model.name}" into "${baseName}" (${model.fields.length} fields, superset)`);
+    console.warn(`[oagen] Merged "${model.name}" into "${baseName}" (${model.fields.length} fields, superset)`);
   }
 
   return normalizedModels;

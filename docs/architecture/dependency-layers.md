@@ -16,16 +16,16 @@ Top-level entrypoints (`src/index.ts`, `src/errors.ts`) are exempt from these di
 
 ## Allowed Imports
 
-| File in...     | Can import from...                                              | Cannot import from...              |
-| -------------- | --------------------------------------------------------------- | ---------------------------------- |
-| `src/ir/`      | (nothing in `src/`)                                             | everything                         |
-| `src/utils/`   | `src/ir/`, `src/errors.ts`                                      | parser, engine, differ, compat...  |
-| `src/parser/`  | `src/ir/`, `src/utils/`, `src/errors.ts`                        | engine, differ, compat, verify, cli |
-| `src/engine/`  | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`         | parser, verify, cli                |
-| `src/differ/`  | `src/ir/`, `src/utils/`, `src/errors.ts`                        | parser, compat, verify, cli        |
-| `src/compat/`  | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`         | parser, verify, cli                |
-| `src/verify/`  | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/engine/`, `src/compat/` | parser, cli                        |
-| `src/cli/`     | anything in `src/`                                              | (top level, can import all)        |
+| File in...    | Can import from...                                                     | Cannot import from...               |
+| ------------- | ---------------------------------------------------------------------- | ----------------------------------- |
+| `src/ir/`     | (nothing in `src/`)                                                    | everything                          |
+| `src/utils/`  | `src/ir/`, `src/errors.ts`                                             | parser, engine, differ, compat...   |
+| `src/parser/` | `src/ir/`, `src/utils/`, `src/errors.ts`                               | engine, differ, compat, verify, cli |
+| `src/engine/` | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`                | parser, verify, cli                 |
+| `src/differ/` | `src/ir/`, `src/utils/`, `src/errors.ts`                               | parser, compat, verify, cli         |
+| `src/compat/` | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`                | parser, verify, cli                 |
+| `src/verify/` | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/engine/`, `src/compat/` | parser, cli                         |
+| `src/cli/`    | anything in `src/`                                                     | (top level, can import all)         |
 
 `src/utils/` contains naming utilities (`naming.ts`) and tree-sitter helpers (`tree-sitter.ts`). The `safeParse()` function in `tree-sitter.ts` is used by all tree-sitter-based extractors and the engine merger to work around a 32KB buffer limit in the tree-sitter 0.21.x native binding.
 

@@ -143,23 +143,32 @@ The verify pipeline returns structured result types that consumers can use progr
 
 ```typescript
 interface VerifyDiagnostics {
-  compatCheck?: { totalBaselineSymbols, preservedSymbols, preservationScore, violationsByCategory, violationsBySeverity, additions, scopedToSpec, scopedSymbolCount? };
-  smokeCheck?: { passed, findingsCount?, compileErrors?, baselinePath };
+  compatCheck?: {
+    totalBaselineSymbols;
+    preservedSymbols;
+    preservationScore;
+    violationsByCategory;
+    violationsBySeverity;
+    additions;
+    scopedToSpec;
+    scopedSymbolCount?;
+  };
+  smokeCheck?: { passed; findingsCount?; compileErrors?; baselinePath };
   stalenessCheck?: { violations };
 }
 
 interface CompatCheckResult {
-  passed: boolean;          // true if no breaking violations
-  diff: DiffResult;         // detailed diff between baseline and candidate
-  scopedToSpec: boolean;    // true if --spec was used to filter
+  passed: boolean; // true if no breaking violations
+  diff: DiffResult; // detailed diff between baseline and candidate
+  scopedToSpec: boolean; // true if --spec was used to filter
   scopedSymbolCount?: number;
 }
 
 interface SmokeCheckResult {
   passed: boolean;
-  findingsCount?: number;   // number of CRITICAL/WARNING findings
-  compileErrors?: boolean;  // true if SDK failed type check
-  baselinePath: string;     // path to the baseline used
+  findingsCount?: number; // number of CRITICAL/WARNING findings
+  compileErrors?: boolean; // true if SDK failed type check
+  baselinePath: string; // path to the baseline used
   generatedBaseline: boolean;
 }
 ```
@@ -168,23 +177,23 @@ The compat differ returns a `DiffResult`:
 
 ```typescript
 interface DiffResult {
-  preservationScore: number;   // 0–100% of baseline symbols preserved
+  preservationScore: number; // 0–100% of baseline symbols preserved
   totalBaselineSymbols: number;
   preservedSymbols: number;
-  violations: Violation[];     // breaking changes found
-  additions: Addition[];       // new symbols not in baseline
+  violations: Violation[]; // breaking changes found
+  additions: Addition[]; // new symbols not in baseline
 }
 ```
 
 Each `Violation` carries a `ViolationCategory` that indicates the kind of breaking change:
 
-| ViolationCategory    | Meaning                                                |
-| -------------------- | ------------------------------------------------------ |
-| `public-api`         | A public class, method, or type was renamed or removed |
-| `signature`          | A method's parameter list or return type changed       |
-| `export-structure`   | A barrel export is missing or reorganized              |
-| `behavioral`         | A behavioral contract changed (e.g., async to sync)    |
-| `staleness`          | A symbol was removed from the spec but still exists    |
+| ViolationCategory  | Meaning                                                |
+| ------------------ | ------------------------------------------------------ |
+| `public-api`       | A public class, method, or type was renamed or removed |
+| `signature`        | A method's parameter list or return type changed       |
+| `export-structure` | A barrel export is missing or reorganized              |
+| `behavioral`       | A behavioral contract changed (e.g., async to sync)    |
+| `staleness`        | A symbol was removed from the spec but still exists    |
 
 The spec differ (used by `oagen diff`) returns a `DiffReport`:
 
@@ -192,8 +201,8 @@ The spec differ (used by `oagen diff`) returns a `DiffReport`:
 interface DiffReport {
   oldVersion: string;
   newVersion: string;
-  changes: Change[];  // ModelAdded, ModelRemoved, EnumAdded, OperationAdded, etc.
-  summary: { added, removed, modified, breaking, additive };
+  changes: Change[]; // ModelAdded, ModelRemoved, EnumAdded, OperationAdded, etc.
+  summary: { added; removed; modified; breaking; additive };
 }
 ```
 
