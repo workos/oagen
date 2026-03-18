@@ -7,6 +7,7 @@ import type {
   ModelRef,
   NullableType,
   UnionType,
+  LiteralType,
   Model,
   Enum,
   PaginationMeta,
@@ -176,7 +177,7 @@ describe('mapTypeRef', () => {
     enum: (r: { kind: 'enum'; name: string }) => r.name,
     union: (_r: UnionType, variants: string[]) => variants.join(' | '),
     nullable: (_r: NullableType, inner: string) => `${inner} | null`,
-    literal: (r: { kind: 'literal'; value: string }) => `"${r.value}"`,
+    literal: (r: LiteralType) => `"${r.value}"`,
     map: (_r: { kind: 'map'; valueType: TypeRef }, value: string) => `Map<string, ${value}>`,
   };
 

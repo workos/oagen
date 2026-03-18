@@ -3,27 +3,20 @@ import { resolve } from 'node:path';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 
-vi.mock('node:child_process', () => ({
-  execSync: vi.fn(),
-}));
-
 import { initCommand } from '../../src/cli/init.js';
 
 describe('initCommand', () => {
   let tmpDir: string;
   let consoleSpy: ReturnType<typeof vi.spyOn>;
-  let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     tmpDir = resolve(os.tmpdir(), `oagen-init-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     consoleSpy.mockRestore();
-    warnSpy.mockRestore();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -126,5 +119,12 @@ describe('initCommand', () => {
     } finally {
       process.chdir(origCwd);
     }
+  });
+
+  it('prints install as a next step instead of running it', async () => {
+    await initCommand({ lang: 'ruby', project: tmpDir });
+
+    expect(consoleSpy).toHaveBeenCalledWith('Next steps:');
+    expect(consoleSpy).toHaveBeenCalledWith('  1. npm install');
   });
 });

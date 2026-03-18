@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { extractSchemas, schemaToTypeRef } from '../../src/parser/schemas.js';
 
 describe('extractSchemas – backend suffix stripping', () => {
@@ -283,23 +283,17 @@ describe('schemaToTypeRef', () => {
     expect(ref).toEqual({ kind: 'primitive', type: 'unknown' });
   });
 
-  it('warns on ignored additionalProperties with object schema that also has properties', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      const ref = schemaToTypeRef(
-        {
-          type: 'object',
-          properties: { id: { type: 'string' } },
-          additionalProperties: { type: 'string' },
-        },
-        'myField',
-      );
-      // Model fields are still extracted correctly
-      expect(ref).toEqual({ kind: 'model', name: 'MyField' });
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('additionalProperties with object schema ignored'));
-    } finally {
-      warnSpy.mockRestore();
-    }
+  it('returns model ref for object with both properties and additionalProperties', () => {
+    const ref = schemaToTypeRef(
+      {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        additionalProperties: { type: 'string' },
+      },
+      'myField',
+    );
+    // Model ref is returned — extractModel surfaces additionalProperties as a map field
+    expect(ref).toEqual({ kind: 'model', name: 'MyField' });
   });
 
   it('maps freeform object to MapType with unknown value', () => {

@@ -59,10 +59,10 @@ describe('loadConfig', () => {
   });
 
   it('loads config successfully when irVersion matches', async () => {
-    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 5 };`);
+    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 6 };`);
     const config = await loadConfig(tmpDir);
     expect(config).not.toBeNull();
-    expect(config!.irVersion).toBe(5);
+    expect(config!.irVersion).toBe(6);
   });
 
   it('exits with error when config file exists but fails to load', async () => {
