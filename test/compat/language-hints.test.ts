@@ -121,6 +121,10 @@ describe('nodeHints', () => {
       expect(nodeHints.propertyMatchesClass('organizations', 'Organizations')).toBe(true);
     });
 
+    it('matches all-caps class names', () => {
+      expect(nodeHints.propertyMatchesClass('fga', 'FGA')).toBe(true);
+    });
+
     it('does not match unrelated names', () => {
       expect(nodeHints.propertyMatchesClass('users', 'Organizations')).toBe(false);
     });

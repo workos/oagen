@@ -296,6 +296,47 @@ describe('buildOverlayLookup', () => {
     expect(lookup.methodByOperation.get('POST /users')!.methodName).toBe('createUser');
   });
 
+  it('resolves class via word-suffix fallback (adminPortal → Portal)', () => {
+    const surface = emptySurface({
+      classes: {
+        Portal: {
+          name: 'Portal',
+          methods: {
+            generateLink: [
+              {
+                name: 'generateLink',
+                params: [{ name: 'options', type: 'GenerateLinkOptions', optional: false }],
+                returnType: 'Promise<string>',
+                async: true,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+    });
+
+    const manifest: ManifestEntry[] = [
+      {
+        operationId: 'AdminPortal.Create',
+        sdkResourceProperty: 'adminPortal',
+        sdkMethodName: 'generate',
+        httpMethod: 'POST',
+        path: '/portal/generate_link',
+        pathParams: [],
+        bodyFields: [],
+        queryFields: [],
+      },
+    ];
+
+    const lookup = buildOverlayLookup(surface, manifest);
+    const entry = lookup.methodByOperation.get('POST /portal/generate_link');
+    expect(entry).toBeDefined();
+    expect(entry!.className).toBe('Portal');
+    expect(entry!.methodName).toBe('generateLink');
+  });
+
   it('skips manifest entries with no matching class', () => {
     const surface = emptySurface(); // no classes
 

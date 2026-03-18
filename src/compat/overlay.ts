@@ -1,6 +1,6 @@
 import type { ApiSurface, ApiInterface, Violation, OverlayLookup, LanguageHints } from './types.js';
 import type { ApiSpec, Model } from '../ir/types.js';
-import { toSnakeCase } from '../utils/naming.js';
+import { toSnakeCase, splitWords } from '../utils/naming.js';
 import { nodeHints as defaultNodeHints } from './language-hints.js';
 
 export type { MethodOverlay, OverlayLookup } from './types.js';
@@ -45,6 +45,23 @@ function findClassForProperty(
       }
     }
   }
+
+  // Strategy 3: Word-suffix fallback
+  // "adminPortal" → ["admin","portal"]; class "Portal" → ["portal"]
+  // ["portal"] is a suffix of ["admin","portal"] → match
+  const propWords = splitWords(sdkResourceProperty).map((w) => w.toLowerCase());
+  if (propWords.length > 1) {
+    for (const [className] of Object.entries(surface.classes)) {
+      const classWords = splitWords(className).map((w) => w.toLowerCase());
+      if (classWords.length > 0 && classWords.length < propWords.length) {
+        const suffix = propWords.slice(propWords.length - classWords.length);
+        if (classWords.every((w, i) => w === suffix[i])) {
+          return className;
+        }
+      }
+    }
+  }
+
   return undefined;
 }
 

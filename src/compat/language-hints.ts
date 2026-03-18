@@ -92,7 +92,7 @@ export const nodeHints: LanguageHints = {
   },
 
   propertyMatchesClass(propertyName: string, className: string): boolean {
-    return propertyName === className.charAt(0).toLowerCase() + className.slice(1);
+    return propertyName.toLowerCase() === className.toLowerCase();
   },
 
   derivedModelNames(modelName: string): string[] {
