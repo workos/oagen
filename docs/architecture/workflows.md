@@ -85,7 +85,6 @@ Phase 2 (spec-driven updates) takes over.
 npx tsc --noEmit        # type check
 npx vitest run          # tests
 npx tsup                # build
-npm run lint:structure  # dependency layers, naming, file size
 ```
 
 ---

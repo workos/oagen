@@ -190,5 +190,4 @@ npm install
 npm run build           # build CLI binary
 npm test                # run tests
 npm run typecheck       # type check
-npm run lint:structure  # verify dependency layers
 ```

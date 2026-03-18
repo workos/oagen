@@ -10,7 +10,7 @@ Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if
 
 ## Critical Rules
 
-- **Dependency layers are one-way:** `ir → utils → parser → engine/differ → cli` (compat is used by engine and cli). Never import rightward into leftward layers. Emitters live in a separate project directory and import from `@workos/oagen`.
+- **Dependency layers are one-way:** `ir → utils → parser → engine/differ/compat → cli`. Never import rightward into leftward layers. Emitters live in a separate project directory and import from `@workos/oagen`.
 - **Emitters are pure:** receive IR, return `GeneratedFile[]`. No I/O, no side effects.
 - **Never remove or edit existing tests.** Test coverage can be improved, but not weakend.
 - **Tests:** prefer `toMatchInlineSnapshot()` for complex output; most tests use standard assertions. `test/` mirrors `src/` structure.
