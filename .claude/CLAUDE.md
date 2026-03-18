@@ -1,8 +1,8 @@
-# oagen — OpenAPI SDK Generator
+# oagen — OpenAPI SDK Emitter Framework
 
-Generate idiomatic SDKs from OpenAPI 3.x specs via a language-agnostic IR.
+Framework for building language emitters that transform OpenAPI 3.x specs into idiomatic SDK code via a language-agnostic IR.
 
-Pipeline: `OpenAPI spec → Parser → IR → Emitter → GeneratedFile[] → Writer → disk`
+Pipeline: `OpenAPI spec → Parser → IR → Emitter → GeneratedFile[] → Writer → disk`. Use `oagen init` to scaffold a new emitter project.
 
 Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if preserving an existing SDK, and always smoke test) then ongoing spec updates (`oagen diff` → `oagen generate` → `oagen verify`). For more information, see `docs/architecture/workflows.md`.
 

@@ -1,8 +1,6 @@
 # oagen
 
-Generate SDKs from an OpenAPI 3.x specification.
-
-`oagen` parses an OpenAPI spec into a language-agnostic intermediate representation (IR), then emits SDK code for a target language. Emitters are plugins — you bring your own for whatever language you need, and register them via `oagen.config.ts`.
+A framework for building language emitters that transform OpenAPI 3.x specifications into idiomatic SDK code. It provides the parsing pipeline, intermediate representation, compatibility verification, and CLI tooling — you supply the emitter for your target language.
 
 ## Quickstart
 
@@ -10,10 +8,13 @@ Generate SDKs from an OpenAPI 3.x specification.
 npm install @workos/oagen
 ```
 
-Generate an SDK:
+Initialize an emitter project and generate:
 
 ```bash
-oagen generate --spec openapi.yml --lang ruby --output ./sdk --namespace MyService
+oagen init --lang ruby --project ./my-emitter
+cd ./my-emitter
+npm run sdk:generate -- --spec ../openapi.yml --namespace MyService
+npm run sdk:verify -- --spec ../openapi.yml
 ```
 
 When a new spec version arrives, diff and regenerate:
@@ -21,38 +22,93 @@ When a new spec version arrives, diff and regenerate:
 ```bash
 oagen diff --old v1.yml --new v2.yml --report          # review what changed
 oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk  # regenerate affected files
-oagen verify --spec v2.yml --lang ruby --output ./sdk   # smoke test the result
+oagen verify --spec v2.yml --lang ruby --output ./sdk   # verify the result
 ```
 
 ## Commands
 
-| Command          | Description                                          |
-| ---------------- | ---------------------------------------------------- |
-| `oagen generate` | Generate SDK code from an OpenAPI spec               |
-| `oagen diff`     | Review or incrementally apply spec changes           |
-| `oagen extract`  | Extract public API surface from an existing SDK      |
-| `oagen verify`   | Run smoke tests and compat checks on a generated SDK |
-| `oagen parse`    | Parse a spec and output the IR as JSON               |
+| Command          | Description                                           |
+| ---------------- | ----------------------------------------------------- |
+| `oagen init`     | Scaffold a new emitter project with stub emitter      |
+| `oagen generate` | Run a registered emitter against an OpenAPI spec      |
+| `oagen diff`     | Review or incrementally apply spec changes            |
+| `oagen extract`  | Extract public API surface from an existing SDK       |
+| `oagen verify`   | Run smoke tests and compat checks on generated output |
+| `oagen parse`    | Parse a spec and output the IR as JSON                |
 
 Run `oagen <command> --help` for full argument details, or see [docs/cli.md](docs/cli.md).
 
 ## Configuration
 
-Register custom emitters, extractors, and smoke runners via `oagen.config.ts` in your project root:
+Register emitters, extractors, and smoke runners via `oagen.config.ts` in your project root.
 
 ```ts
 // oagen.config.ts
 import { myGoEmitter } from "./emitters/go/index.js";
-import { myGoExtractor } from "./extractors/go/index.js"; // must include hints: LanguageHints
+import { myGoExtractor } from "./extractors/go/index.js";
+import { nestjsOperationIdTransform } from "@workos/oagen";
 
 export default {
   emitters: [myGoEmitter],
-  extractors: [myGoExtractor], // extractor.hints drives language-specific compat logic
+  extractors: [myGoExtractor],
   smokeRunners: { go: "./smoke/go-runner.ts" },
   emitterProject: "./path/to/emitter-project",
-  irVersion: 1, // pin to the IR version your emitters were built against
+  irVersion: 2, // pin to the IR version your emitters were built against
+  operationIdTransform: nestjsOperationIdTransform, // or a custom (id) => string
 };
 ```
+
+| Field | Type | Description |
+|---|---|---|
+| `emitters` | `Emitter[]` | Language emitters to register. |
+| `extractors` | `Extractor[]` | API surface extractors for compat verification. |
+| `smokeRunners` | `Record<string, string>` | Map from language key to custom smoke runner script path. |
+| `emitterProject` | `string` | Path to the emitter project (where skills scaffold new emitters/tests). |
+| `irVersion` | `number` | Pin to the IR version your emitters target. Mismatch exits with an error. |
+| `operationIdTransform` | `(id: string) => string` | Custom transform for raw operationIds. Default: camelCase pass-through. Use `nestjsOperationIdTransform` for NestJS-style `FooController_bar` → `bar` stripping. |
+
+## Building an emitter
+
+Emitters implement the `Emitter` interface: receive IR nodes, return `GeneratedFile[]`. No I/O, no side effects.
+
+```ts
+import type { Emitter } from "@workos/oagen";
+
+const myEmitter: Emitter = {
+  language: "go",
+  contractVersion: 5, // must match oagen's IR_VERSION
+  generateModels: (models, ctx) => [
+    /* ... */
+  ],
+  generateEnums: (enums, ctx) => [
+    /* ... */
+  ],
+  generateResources: (services, ctx) => [
+    /* ... */
+  ],
+  generateClient: (spec, ctx) => [
+    /* ... */
+  ],
+  generateErrors: (ctx) => [],
+  generateConfig: (ctx) => [],
+  generateTests: (spec, ctx) => [],
+  fileHeader: () => "// Auto-generated by oagen. Do not edit.",
+};
+```
+
+See [Emitter Contract](docs/architecture/emitter-contract.md) for the full interface, `EmitterContext`, overlay integration, and `OperationPlan`.
+
+## Compat verification
+
+When preserving an existing SDK's public API, use `--api-surface` to enable compat overlay:
+
+```bash
+oagen extract --sdk-path ./existing-sdk --lang node --output surface.json
+oagen generate --spec openapi.yml --lang node --output ./sdk --api-surface surface.json
+oagen verify --spec openapi.yml --lang node --output ./sdk --api-surface surface.json
+```
+
+The verify command includes a self-correcting overlay loop (`--max-retries`, default 3) that automatically patches naming mismatches between generated and existing SDK code. Pass `--max-retries 0` for single-pass behavior.
 
 ## Using as a library
 
@@ -68,16 +124,7 @@ const files = await generate(ir, myEmitter, {
 });
 ```
 
-All IR, engine, differ, and compat types are exported from `@workos/oagen`.
-
-## Adding a new language
-
-There are two scenarios depending on whether you need to preserve an existing SDK's public API:
-
-- **Scenario A** (existing SDK): Scaffold an emitter, build an extractor, extract the live SDK's API surface, generate with compat overlay, verify
-- **Scenario B** (fresh): Scaffold an emitter, generate, verify
-
-Both follow the same shape: scaffold, generate, verify, test. See [Workflows](docs/architecture/workflows.md) for the full step-by-step walkthrough, including the compat overlay loop and emitter-fixing loop.
+All IR, engine, differ, and compat types are exported from `@workos/oagen`. The `patchOverlay()` function is also available as a library export for custom retry loops.
 
 ## Claude Code Plugin
 
@@ -93,14 +140,14 @@ claude --plugin-dir node_modules/@workos/oagen
 
 This makes the following skills available:
 
-| Skill                               | Description                                                                  |
-| ----------------------------------- | ---------------------------------------------------------------------------- |
-| `/oagen:generate-sdk <lang>`        | End-to-end orchestrator — determines scenario and sequences the skills below |
-| `/oagen:generate-emitter <lang>`    | Scaffold a new language emitter                                              |
-| `/oagen:generate-extractor <lang>`  | Scaffold an API surface extractor for compat verification                    |
-| `/oagen:generate-smoke-test <lang>` | Create smoke tests for a generated SDK                                       |
-| `/oagen:verify-compat <lang>`       | Verify emitter output preserves backwards compatibility                      |
-| `/oagen:integrate <lang>`           | Merge generated code into a live SDK via `--target`                          |
+| Skill                               | Description                                                                   |
+| ----------------------------------- | ----------------------------------------------------------------------------- |
+| `/oagen:generate-sdk <lang>`        | End-to-end orchestrator — determines scenario and sequences the skills below  |
+| `/oagen:generate-emitter <lang>`    | Scaffold a new language emitter                                               |
+| `/oagen:generate-extractor <lang>`  | Scaffold an API surface extractor for compat verification                     |
+| `/oagen:generate-smoke-test <lang>` | Create smoke tests for a generated SDK                                        |
+| `/oagen:verify-compat <lang>`       | Verify emitter output preserves backwards compatibility                       |
+| `/oagen:integrate <lang>`           | Merge generated code into a live SDK via `--target`                           |
 | `/oagen:verify-smoke-test <lang>`   | Run generate-verify loop to iteratively fix an emitter until smoke tests pass |
 
 ### Local development

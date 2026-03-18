@@ -12,6 +12,8 @@ gets written or fixed.
 
 ### Skill sequence
 
+**Project setup:** Run `oagen init --lang {language}` to create the emitter project, then implement the emitter methods.
+
 **Scenario A** (existing SDK to preserve):
 
 1. `/generate-emitter` — scaffold emitter, design doc, tests
@@ -46,15 +48,22 @@ language-appropriate.
 
 **Caps:**
 
-- `--max-retries` (default 3) — hard stop after N attempts
-- Stall detection — if the preservation score doesn't improve between attempts,
+- `--max-retries <n>` flag on `oagen verify` (default 3, set to 0 for single-pass)
+- Stall detection — if the preservation score doesn't improve between iterations,
   stops early (the remaining violations can't be fixed by overlay patching)
+- Only `public-api` and `export-structure` violations are patchable; `signature`
+  and `behavioral` violations require emitter code changes
+
+**Guard rails:** The retry loop only activates when BOTH `--api-surface` AND
+`--spec` are provided (the spec is needed to regenerate). Without both,
+verify runs a single pass.
 
 **What it can't fix:** Structural emitter issues (e.g., wrong method signature
-shape, missing exports). Those require changing emitter code — the loop exits 1
-and the emitter-fixing loop takes over.
+shape, async/sync mismatches). Those require changing emitter code — the loop
+exits 1 and the emitter-fixing loop takes over.
 
-**Code:** `src/cli/verify.ts` (compat check) and `src/compat/overlay.ts` (patch loop)
+**Code:** `src/cli/verify.ts` (retry loop + compat check) and `src/compat/overlay.ts`
+(`patchOverlay` — also available as a library export for custom loops)
 
 ### Emitter-fixing loop (Phase 1 only)
 

@@ -5,6 +5,7 @@ import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
 import { extractCommand } from './extract.js';
 import { verifyCommand } from './verify.js';
+import { initCommand } from './init.js';
 import { loadConfig } from './config-loader.js';
 import { applyConfig } from './plugin-loader.js';
 
@@ -113,6 +114,15 @@ program
     // CLI --smoke-runner takes precedence, then per-language smokeRunners map from config
     opts.smokeRunner ??= configSmokeRunners?.[opts.lang];
     verifyCommand({ ...opts, maxRetries: parseInt(opts.maxRetries, 10) }).catch(handleError);
+  });
+
+program
+  .command('init')
+  .description('Scaffold a new emitter project')
+  .requiredOption('--lang <language>', 'Target language')
+  .option('--project <dir>', 'Project directory', '.')
+  .action((opts) => {
+    initCommand(opts).catch(handleError);
   });
 
 program.parse();
