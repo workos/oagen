@@ -207,4 +207,59 @@ describe('writeFiles', () => {
       await fs.rm(tmpDir, { recursive: true });
     }
   });
+
+  it('merges additive Go declarations into existing files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'client.go');
+      await fs.writeFile(filePath, 'package workos\n\ntype Client struct{}\n');
+
+      const result = await writeFiles(
+        [
+          {
+            path: 'client.go',
+            content:
+              'package workos\n\nimport "context"\n\ntype Client struct{}\n\nfunc helper() {}\n',
+          },
+        ],
+        tmpDir,
+        { language: 'go', header: '// generated' },
+      );
+
+      expect(result.merged).toContain('client.go');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toContain('import "context"');
+      expect(content).toContain('func helper() {}');
+      expect(content.match(/package workos/g)).toHaveLength(1);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('merges additive Rust declarations into existing files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'lib.rs');
+      await fs.writeFile(filePath, 'pub struct Client {}\n');
+
+      const result = await writeFiles(
+        [
+          {
+            path: 'lib.rs',
+            content: 'use std::fmt;\n\npub struct Client {}\n\npub fn helper() {}\n',
+          },
+        ],
+        tmpDir,
+        { language: 'rust', header: '// generated' },
+      );
+
+      expect(result.merged).toContain('lib.rs');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toContain('use std::fmt;');
+      expect(content).toContain('pub fn helper() {}');
+      expect(content.match(/pub struct Client \{\}/g)).toHaveLength(1);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
 });

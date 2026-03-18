@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement } from './types.js';
+import type { MergeAdapter, MergeStatement, MergeImport } from './types.js';
 
 function isRequireCall(node: Parser.SyntaxNode): boolean {
   if (node.type !== 'call') return false;
@@ -17,19 +17,23 @@ function extractRubyDeclarationName(node: Parser.SyntaxNode): string | null {
 export const rubyMergeAdapter: MergeAdapter = {
   language: 'ruby',
   grammarModule: 'tree-sitter-ruby',
-  normalizeImport: (text) => text.trim(),
   parseStatements(tree, source) {
+    const imports: MergeImport[] = [];
+    const importAnchors: string[] = [];
     const statements: MergeStatement[] = [];
 
     for (const child of tree.rootNode.children) {
       if (child.type === 'comment') continue;
 
       const declarationName = extractRubyDeclarationName(child);
-      const kind: MergeStatement['kind'] = isRequireCall(child)
-        ? 'import'
-        : declarationName
-          ? 'declaration'
-          : 'other';
+      if (isRequireCall(child)) {
+        const text = source.slice(child.startIndex, child.endIndex);
+        imports.push({ key: text.trim(), text });
+        importAnchors.push(text);
+        continue;
+      }
+
+      const kind: MergeStatement['kind'] = declarationName ? 'declaration' : 'other';
 
       statements.push({
         key: declarationName,
@@ -38,6 +42,9 @@ export const rubyMergeAdapter: MergeAdapter = {
       });
     }
 
-    return { statements };
+    return { imports, importAnchors, statements };
+  },
+  renderImports(imports) {
+    return imports.map((entry) => entry.text);
   },
 };

@@ -12,7 +12,7 @@
 import Parser from 'tree-sitter';
 import { getLanguageCapabilities } from '../capabilities.js';
 import { getMergeAdapter } from './merge-adapters/index.js';
-import type { MergeStatement } from './merge-adapters/types.js';
+import type { MergeImport, ParsedMergeFile } from './merge-adapters/types.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
@@ -70,6 +70,9 @@ export async function extractTopLevelSymbols(source: string, language: string): 
   const unnamedTexts = new Set<string>();
   const parsed = adapter.parseStatements(tree, source);
 
+  for (const imp of parsed.imports) {
+    names.add(imp.key);
+  }
   for (const statement of parsed.statements) {
     if (statement.key) {
       names.add(statement.key);
@@ -90,14 +93,14 @@ export async function extractTopLevelNames(source: string, language: string): Pr
  * Extract top-level statements from generated source with their names
  * and exact text span.
  */
-async function extractStatements(source: string, language: string): Promise<MergeStatement[]> {
+async function extractStatements(source: string, language: string): Promise<ParsedMergeFile> {
   const parser = await getParser(language);
   const adapter = getMergeAdapter(language);
   if (!adapter) {
     throw new Error(`No merge adapter configured for language "${language}"`);
   }
   const tree = safeParse(parser, source);
-  return adapter.parseStatements(tree, source).statements;
+  return adapter.parseStatements(tree, source);
 }
 
 export interface MergeResult {
@@ -132,17 +135,27 @@ export async function mergeIntoExisting(
 
   const existingKeys = new Set<string>();
   const existingUnnamedTexts = new Set<string>();
-  const existingImports = new Set<string>();
+  const existingImportKeys = new Set<string>();
   const existingReexports = new Set<string>();
   let lastImportEndIndex = -1;
 
-  for (const stmt of existingStatements) {
-    if (stmt.kind === 'import') {
-      existingImports.add(adapter.normalizeImport ? adapter.normalizeImport(stmt.text.trim()) : stmt.text.trim());
-      const linesBefore = existingContent.slice(0, existingContent.indexOf(stmt.text)).split('\n').length - 1;
-      const stmtLines = stmt.text.split('\n').length;
-      lastImportEndIndex = linesBefore + stmtLines - 1;
-    }
+  for (const imp of existingStatements.imports) {
+    existingImportKeys.add(imp.key);
+  }
+  for (const anchor of existingStatements.importAnchors) {
+    const linesBefore = existingContent.slice(0, existingContent.indexOf(anchor)).split('\n').length - 1;
+    const stmtLines = anchor.split('\n').length;
+    lastImportEndIndex = linesBefore + stmtLines - 1;
+  }
+  if (lastImportEndIndex === -1 && existingStatements.importInsertionAnchor) {
+    const linesBefore = existingContent
+      .slice(0, existingContent.indexOf(existingStatements.importInsertionAnchor))
+      .split('\n').length - 1;
+    const stmtLines = existingStatements.importInsertionAnchor.split('\n').length;
+    lastImportEndIndex = linesBefore + stmtLines - 1;
+  }
+
+  for (const stmt of existingStatements.statements) {
     if (stmt.kind === 'reexport') {
       existingReexports.add(adapter.normalizeReexport ? adapter.normalizeReexport(stmt.text.trim()) : stmt.text.trim());
     }
@@ -155,25 +168,22 @@ export async function mergeIntoExisting(
 
   const headerLine = header.trim();
 
-  const newImports: string[] = [];
+  const newImports: MergeImport[] = [];
   const toAppend: string[] = [];
   let preserved = 0;
 
-  for (const stmt of generatedStatements) {
-    // Skip the header comment
-    if (stmt.text.trim() === headerLine) continue;
-
-    // For import statements, only skip if an equivalent exists in the existing file.
-    // This allows new imports (required by appended code) to be included.
-    if (stmt.kind === 'import') {
-      const normalizedText = adapter.normalizeImport ? adapter.normalizeImport(stmt.text.trim()) : stmt.text.trim();
-      if (existingImports.has(normalizedText)) {
-        preserved++;
-        continue;
-      }
-      newImports.push(stmt.text);
+  for (const imp of generatedStatements.imports) {
+    if (imp.text.trim() === headerLine) continue;
+    if (existingImportKeys.has(imp.key)) {
+      preserved++;
       continue;
     }
+    newImports.push(imp);
+  }
+
+  for (const stmt of generatedStatements.statements) {
+    // Skip the header comment
+    if (stmt.text.trim() === headerLine) continue;
 
     // Skip re-export statements that duplicate existing re-exports
     // (e.g., generated uses .js extension but existing doesn't).
@@ -213,9 +223,10 @@ export async function mergeIntoExisting(
 
   // Insert new imports after the last existing import (using AST-derived position)
   if (newImports.length > 0) {
+    const renderedImports = adapter.renderImports ? adapter.renderImports(newImports) : newImports.map((entry) => entry.text);
     const lines = result.split('\n');
     const insertIdx = lastImportEndIndex + 1;
-    lines.splice(insertIdx, 0, ...newImports);
+    lines.splice(insertIdx, 0, ...renderedImports);
     result = lines.join('\n');
   }
 
@@ -223,5 +234,10 @@ export async function mergeIntoExisting(
     result = result.trimEnd() + '\n\n' + toAppend.join('\n\n') + '\n';
   }
 
-  return { content: result, added: newImports.length + toAppend.length, preserved, changed: true };
+  return {
+    content: result,
+    added: (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) + toAppend.length,
+    preserved,
+    changed: true,
+  };
 }

@@ -38,13 +38,13 @@ const CAPABILITIES: Record<string, LanguageCapabilities> = {
     supportsTargetIntegration: true,
   },
   go: {
-    supportsAstMerge: false,
+    supportsAstMerge: true,
     supportsExtractor: true,
     supportsSmokeRunner: true,
     supportsTargetIntegration: true,
   },
   rust: {
-    supportsAstMerge: false,
+    supportsAstMerge: true,
     supportsExtractor: true,
     supportsSmokeRunner: true,
     supportsTargetIntegration: true,

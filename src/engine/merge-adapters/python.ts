@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement } from './types.js';
+import type { MergeAdapter, MergeStatement, MergeImport } from './types.js';
 
 function extractPythonDeclarationName(node: Parser.SyntaxNode): string | null {
   if (node.type !== 'class_definition' && node.type !== 'function_definition') return null;
@@ -10,20 +10,23 @@ function extractPythonDeclarationName(node: Parser.SyntaxNode): string | null {
 export const pythonMergeAdapter: MergeAdapter = {
   language: 'python',
   grammarModule: 'tree-sitter-python',
-  normalizeImport: (text) => text.trim(),
   parseStatements(tree, source) {
+    const imports: MergeImport[] = [];
+    const importAnchors: string[] = [];
     const statements: MergeStatement[] = [];
 
     for (const child of tree.rootNode.children) {
       if (child.type === 'comment') continue;
 
+      if (child.type === 'import_statement' || child.type === 'import_from_statement') {
+        const text = source.slice(child.startIndex, child.endIndex);
+        imports.push({ key: text.trim(), text });
+        importAnchors.push(text);
+        continue;
+      }
+
       const declarationName = extractPythonDeclarationName(child);
-      const kind: MergeStatement['kind'] =
-        child.type === 'import_statement' || child.type === 'import_from_statement'
-          ? 'import'
-          : declarationName
-            ? 'declaration'
-            : 'other';
+      const kind: MergeStatement['kind'] = declarationName ? 'declaration' : 'other';
 
       statements.push({
         key: declarationName,
@@ -32,6 +35,9 @@ export const pythonMergeAdapter: MergeAdapter = {
       });
     }
 
-    return { statements };
+    return { imports, importAnchors, statements };
+  },
+  renderImports(imports) {
+    return imports.map((entry) => entry.text);
   },
 };

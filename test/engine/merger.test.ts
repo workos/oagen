@@ -102,6 +102,41 @@ function helper() {}
     expect(names).toContain('Client');
     expect(names).toContain('helper');
   });
+
+  it('extracts function and method keys from Go', async () => {
+    const source = `
+package workos
+
+import "fmt"
+
+type Client struct{}
+
+func helper() {}
+
+func (c *Client) Get() {}
+`;
+    const names = await extractTopLevelNames(source, 'go');
+    expect(names).toContain('helper');
+    expect(names).toContain('method:Client.Get');
+  });
+
+  it('extracts function and impl keys from Rust', async () => {
+    const source = `
+use crate::models::User;
+
+pub struct Client {}
+
+pub fn helper() {}
+
+impl Client {
+  pub fn get(&self) {}
+}
+`;
+    const names = await extractTopLevelNames(source, 'rust');
+    expect(names).toContain('Client');
+    expect(names).toContain('helper');
+    expect(names).toContain('impl:Client');
+  });
 });
 
 describe('mergeIntoExisting', () => {
@@ -461,5 +496,120 @@ function helper() {
     expect(result.changed).toBe(false);
     expect(result.added).toBe(0);
     expect(result.content).toContain('return 1;');
+  });
+
+  it('merges Go grouped imports and additive methods', async () => {
+    const existing = `
+package workos
+
+import (
+  "fmt"
+)
+
+type Client struct{}
+
+func (c *Client) Get() {}
+`;
+    const generated = `
+${header}
+
+package workos
+
+import (
+  "fmt"
+  "context"
+)
+
+type Client struct{}
+
+func helper() {}
+
+func (c *Client) Get() {}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'go', header);
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain('import "context"');
+    expect(result.content.match(/package workos/g)).toHaveLength(1);
+    expect(result.content).toContain('func helper() {}');
+  });
+
+  it('does not duplicate an existing Go method with the same receiver', async () => {
+    const existing = `
+package workos
+
+type Client struct{}
+
+func (c *Client) Get() {
+  println("old")
+}
+`;
+    const generated = `
+${header}
+
+package workos
+
+type Client struct{}
+
+func (c *Client) Get() {}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'go', header);
+    expect(result.changed).toBe(false);
+    expect(result.content).toContain('println("old")');
+  });
+
+  it('merges Rust imports and additive impl blocks', async () => {
+    const existing = `
+use crate::models::User;
+
+pub struct Client {}
+
+impl Client {
+  pub fn get(&self) {}
+}
+`;
+    const generated = `
+${header}
+
+use crate::models::User;
+use std::fmt;
+
+pub struct Client {}
+
+impl Client {
+  pub fn get(&self) {}
+}
+
+impl Display for Client {
+  fn fmt(&self, f: &mut Formatter<'_>) {}
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'rust', header);
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain('use std::fmt;');
+    expect(result.content).toContain('impl Display for Client');
+  });
+
+  it('does not duplicate an existing Rust impl block', async () => {
+    const existing = `
+impl Client {
+  pub fn get(&self) {
+    println!("old");
+  }
+}
+`;
+    const generated = `
+${header}
+
+impl Client {
+  pub fn get(&self) {}
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'rust', header);
+    expect(result.changed).toBe(false);
+    expect(result.content).toContain('println!("old");');
   });
 });
