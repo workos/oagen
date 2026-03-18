@@ -7,6 +7,7 @@ export function mapFilesForTargetIntegration(files: GeneratedFile[], language: s
     .filter((f) => f.integrateTarget !== false) // integrateTarget: false files are standalone-only
     .map((f) => ({
       ...f,
+      skipIfExists: false, // Always merge in target — never hard-skip
       path: f.path.startsWith(langPrefix) ? f.path.replace(langPrefix, '') : f.path,
     }));
 }

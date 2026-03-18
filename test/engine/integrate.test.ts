@@ -20,13 +20,14 @@ describe('mapFilesForTargetIntegration', () => {
     expect(result).toHaveLength(0);
   });
 
-  it('includes files with skipIfExists: true (regression test)', () => {
+  it('includes files with skipIfExists: true and clears the flag (regression test)', () => {
     const files: GeneratedFile[] = [
       { path: 'node/src/resources/sso.ts', content: 'export class SSO {}', skipIfExists: true },
     ];
     const result = mapFilesForTargetIntegration(files, 'node');
     expect(result).toHaveLength(1);
     expect(result[0].path).toBe('src/resources/sso.ts');
+    expect(result[0].skipIfExists).toBe(false);
   });
 
   it('excludes files with both skipIfExists: true and integrateTarget: false', () => {
