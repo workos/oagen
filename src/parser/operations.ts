@@ -32,6 +32,7 @@ interface OperationObject {
   parameters?: ParameterObject[];
   requestBody?: RequestBodyObject;
   responses?: Record<string, ResponseObject>;
+  deprecated?: boolean;
 }
 
 interface ParameterObject {
@@ -40,6 +41,7 @@ interface ParameterObject {
   required?: boolean;
   description?: string;
   schema?: SchemaObject;
+  deprecated?: boolean;
 }
 
 interface RequestBodyObject {
@@ -325,6 +327,7 @@ function buildOperation(
       errors,
       pagination,
       injectIdempotencyKey: method === 'post',
+      deprecated: op.deprecated || undefined,
     },
     inlineModels,
   };
@@ -338,6 +341,8 @@ function extractParams(params: ParameterObject[], location: 'path' | 'query' | '
       type: p.schema ? schemaToTypeRef(p.schema, p.name) : ({ kind: 'primitive', type: 'string' } as TypeRef),
       required: p.required ?? false,
       description: p.description,
+      deprecated: p.deprecated || p.schema?.deprecated || undefined,
+      default: p.schema?.default,
     }));
 }
 
@@ -392,7 +397,70 @@ function extractRequestBody(
     return { body: { kind: 'model', name: contextName }, encoding };
   }
 
+  // If the request body is a oneOf, extract each variant as an inline model
+  // and build a union type pointing to them by name.
+  if (schema.oneOf) {
+    const variants: TypeRef[] = [];
+
+    for (const variant of schema.oneOf) {
+      if (variant.$ref) {
+        const ref = schemaToTypeRef(variant, contextName);
+        variants.push(ref);
+      } else if (variant.type === 'null') {
+        // skip null variant in union, handle separately
+      } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
+        const variantName = deriveOneOfVariantName(variant, contextName, inlineModels);
+        const requiredSet = new Set(variant.required ?? []);
+        const fields: Field[] = [];
+        for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+          if (!fieldSchema) continue;
+          fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet));
+        }
+        inlineModels.push({ name: variantName, description: variant.description, fields });
+        variants.push({ kind: 'model', name: variantName });
+      } else {
+        variants.push(schemaToTypeRef(variant, contextName));
+      }
+    }
+
+    const hasNull = schema.oneOf.some(
+      (v: SchemaObject) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
+    );
+    const union: TypeRef = {
+      kind: 'union',
+      variants,
+      ...(schema.discriminator
+        ? {
+            discriminator: { property: schema.discriminator.propertyName, mapping: schema.discriminator.mapping ?? {} },
+          }
+        : {}),
+    };
+    const body = hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
+    return { body, encoding };
+  }
+
   return { body: schemaToTypeRef(schema, contextName), encoding };
+}
+
+/** Derive a unique variant name for a oneOf inline model. */
+function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existingModels: Model[]): string {
+  // Try to use a distinguishing property (e.g., "grant_type" field's const/enum value)
+  if (variant.properties) {
+    for (const [, propSchema] of Object.entries(variant.properties)) {
+      if (propSchema?.const && typeof propSchema.const === 'string') {
+        return toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
+      }
+    }
+  }
+  // Fallback: append a numeric suffix
+  const existingNames = new Set(existingModels.map((m) => m.name));
+  let name = baseName;
+  let suffix = 2;
+  while (existingNames.has(name)) {
+    name = `${baseName}${suffix}`;
+    suffix++;
+  }
+  return name;
 }
 
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
@@ -439,6 +507,27 @@ function extractResponses(
         isPaginated = result.isPaginated;
         dataPath = result.dataPath;
         itemType = result.itemType;
+      } else if (resp.content) {
+        // Handle non-JSON response content types (text/plain, binary, XML, etc.)
+        if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
+          response = { kind: 'primitive', type: 'string', format: 'binary' };
+        } else if (
+          resp.content['text/plain'] ||
+          resp.content['text/html'] ||
+          resp.content['text/xml'] ||
+          resp.content['application/xml']
+        ) {
+          response = { kind: 'primitive', type: 'string' };
+        } else {
+          // Try the first available content type's schema
+          const firstKey = Object.keys(resp.content)[0];
+          if (firstKey) {
+            const firstContent = resp.content[firstKey];
+            if (firstContent?.schema) {
+              response = schemaToTypeRef(firstContent.schema, deriveResponseName(op, path ?? '/', method ?? 'get'));
+            }
+          }
+        }
       }
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];

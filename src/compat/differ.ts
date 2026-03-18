@@ -361,12 +361,13 @@ function signaturesMatch(baseline: ApiMethod, candidate: ApiMethod): boolean {
   // Return type must match
   if (baseline.returnType !== candidate.returnType) return false;
 
-  // All baseline params must exist with matching types
+  // All baseline params must exist with matching types and names
   for (let i = 0; i < baseline.params.length; i++) {
     const baseParam = baseline.params[i];
     const candParam = candidate.params[i];
     if (!candParam) return false;
     if (baseParam.type !== candParam.type) return false;
+    if (baseParam.name !== candParam.name) return false;
   }
 
   // New params in candidate must be optional

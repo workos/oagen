@@ -91,6 +91,11 @@ export {
 } from './utils/naming.js';
 
 export { nodeExtractor } from './compat/extractors/node.js';
+export { phpExtractor } from './compat/extractors/php.js';
+export { pythonExtractor } from './compat/extractors/python.js';
+export { rubyExtractor } from './compat/extractors/ruby.js';
+export { goExtractor } from './compat/extractors/go.js';
+export { rustExtractor } from './compat/extractors/rust.js';
 export { nodeHints, resolveHints } from './compat/language-hints.js';
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';

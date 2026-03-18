@@ -108,6 +108,20 @@ export interface LanguageHints {
    *  so the hint can look up enum definitions.
    *  Returns true to suppress the mismatch, false to report it. */
   isTypeEquivalent?(baselineType: string, candidateType: string, candidateSurface: ApiSurface): boolean;
+
+  /** Base class names that indicate a data model (→ ApiInterface).
+   *  Python: ["BaseModel"]; PHP: ["BaseResource"].
+   *  Extractors should provide these for their SDK. */
+  modelBaseClasses?: string[];
+
+  /** Base class names that indicate an exception class.
+   *  Python: ["Exception", "BaseException"]; PHP: ["Exception"]. */
+  exceptionBaseClasses?: string[];
+
+  /** Type names for list/paginated resource wrappers (for return type unwrapping).
+   *  The first type argument is extracted as the inner item type.
+   *  e.g., ["ListResource"] causes `ListResource[Org, ...]` → `Org`. */
+  listResourcePatterns?: string[];
 }
 
 export interface Extractor {

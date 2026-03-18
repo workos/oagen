@@ -233,7 +233,28 @@ function extractDirectResource(schema: SchemaObject, contextName: string): Respo
     }
   }
 
-  // Non-object schema (primitive, array, union, etc.) — delegate to schemaToTypeRef
+  // Array with inline object items — extract the item model
+  if (schema.type === 'array' && schema.items) {
+    const items = schema.items;
+    if (items.$ref) {
+      return {
+        response: { kind: 'array', items: schemaToTypeRef(items, contextName) },
+        inlineModels,
+        isPaginated: false,
+      };
+    }
+    if (items.properties && (items.type === 'object' || !items.type)) {
+      const itemName = contextName.replace(/Response$/, '') + 'Item';
+      inlineModels.push(...extractInlineModel(itemName, items));
+      return {
+        response: { kind: 'array', items: { kind: 'model', name: itemName } },
+        inlineModels,
+        isPaginated: false,
+      };
+    }
+  }
+
+  // Non-object schema (primitive, union, etc.) — delegate to schemaToTypeRef
   return {
     response: schemaToTypeRef(schema, contextName),
     inlineModels,
@@ -294,6 +315,34 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
       if (items.type === 'object' && items.properties) {
         const nestedName = qualifyNestedName(name, fieldName);
         nestedModels.push(...extractInlineModel(nestedName, items));
+      }
+    }
+    // Handle allOf with inline object properties — merge into a single nested model
+    if (fieldSchema.allOf) {
+      const mergedProperties: Record<string, SchemaObject | undefined> = {};
+      const mergedRequired: string[] = [];
+      for (const sub of fieldSchema.allOf) {
+        if (sub.properties) Object.assign(mergedProperties, sub.properties);
+        if (sub.required) mergedRequired.push(...sub.required);
+      }
+      if (Object.keys(mergedProperties).length > 0) {
+        const nestedName = qualifyNestedName(name, fieldName);
+        const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
+        const existingNames = new Set(nestedModels.map((m) => m.name));
+        if (!existingNames.has(nestedName)) {
+          nestedModels.push(...extractInlineModel(nestedName, merged));
+        }
+      }
+    }
+    // Handle oneOf containing inline objects — extract the first non-null object variant
+    if (fieldSchema.oneOf) {
+      const objectVariant = fieldSchema.oneOf.find((v) => v.properties && (v.type === 'object' || !v.type));
+      if (objectVariant) {
+        const nestedName = qualifyNestedName(name, fieldName);
+        const existingNames = new Set(nestedModels.map((m) => m.name));
+        if (!existingNames.has(nestedName)) {
+          nestedModels.push(...extractInlineModel(nestedName, objectVariant));
+        }
       }
     }
   }

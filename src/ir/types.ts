@@ -1,5 +1,5 @@
 /** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
-export const IR_VERSION = 5;
+export const IR_VERSION = 6;
 
 /** Authentication scheme extracted from OpenAPI securitySchemes */
 export type AuthScheme =
@@ -41,6 +41,7 @@ export interface Operation {
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean;
+  deprecated?: boolean;
 }
 
 /** Structured pagination metadata for auto-paging iterator generation */
@@ -57,6 +58,8 @@ export interface Parameter {
   type: TypeRef;
   required: boolean;
   description?: string;
+  deprecated?: boolean;
+  default?: unknown;
 }
 
 /** Type reference — the core type system of the IR */
@@ -81,18 +84,21 @@ export interface ModelRef {
 export interface EnumRef {
   kind: 'enum';
   name: string;
-  values?: string[];
+  values?: (string | number)[];
 }
 
 export interface LiteralType {
   kind: 'literal';
-  value: string;
+  value: string | number | boolean;
 }
 
 export interface UnionType {
   kind: 'union';
   variants: TypeRef[];
   discriminator?: { property: string; mapping: Record<string, string> };
+  /** Which OAS composition keyword produced this union. Emitters can use this to
+   *  distinguish inheritance (allOf) from exclusive union (oneOf) from open union (anyOf). */
+  compositionKind?: 'allOf' | 'oneOf' | 'anyOf';
 }
 
 export interface NullableType {
@@ -132,6 +138,8 @@ export interface Field {
   description?: string;
   readOnly?: boolean;
   writeOnly?: boolean;
+  deprecated?: boolean;
+  default?: unknown;
 }
 
 /** Enum definition */
@@ -142,8 +150,9 @@ export interface Enum {
 
 export interface EnumValue {
   name: string;
-  value: string;
+  value: string | number;
   description?: string;
+  deprecated?: boolean;
 }
 
 /**

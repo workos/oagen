@@ -9,7 +9,7 @@ export interface SchemaObject {
   properties?: Record<string, SchemaObject | undefined>;
   required?: string[];
   items?: SchemaObject;
-  enum?: string[];
+  enum?: (string | number)[];
   allOf?: SchemaObject[];
   oneOf?: SchemaObject[];
   anyOf?: SchemaObject[];
@@ -21,6 +21,8 @@ export interface SchemaObject {
   additionalProperties?: boolean | SchemaObject;
   const?: unknown;
   patternProperties?: Record<string, SchemaObject>;
+  deprecated?: boolean;
+  default?: unknown;
   [key: string]: unknown;
 }
 
@@ -45,6 +47,17 @@ export function extractSchemas(schemas: Record<string, SchemaObject> | undefined
     }
   }
 
+  // Collect inline models from nested object/oneOf properties
+  // that schemaToTypeRef created model refs for but weren't extracted
+  const modelNames = new Set(models.map((m) => m.name));
+  const inlineQueue: Model[] = [...models];
+  while (inlineQueue.length > 0) {
+    const model = inlineQueue.pop()!;
+    for (const field of model.fields) {
+      collectNestedInlineModels(field.type, field.name, model.name, schemas ?? {}, models, modelNames, inlineQueue);
+    }
+  }
+
   // Collect inline enums from model fields
   for (const model of models) {
     collectInlineEnums(model.fields, enums);
@@ -65,7 +78,7 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
         enums.push({
           name: r.name,
           values: r.values.map((v) => ({
-            name: toUpperSnakeCase(v),
+            name: toUpperSnakeCase(String(v)),
             value: v,
             description: undefined,
           })),
@@ -86,6 +99,130 @@ function collectInlineEnums(fields: Field[], enums: Enum[]): void {
   }
 }
 
+/**
+ * Walk a TypeRef tree and extract inline models for any model refs that point
+ * to schemas with inline object properties (not in components/schemas).
+ * This handles nested objects like `totp: { oneOf: [{ type: object, properties: {...} }] }`
+ * that schemaToTypeRef turns into model refs but aren't extracted from components.
+ */
+function collectNestedInlineModels(
+  ref: TypeRef,
+  fieldName: string,
+  parentModelName: string,
+  schemas: Record<string, SchemaObject>,
+  models: Model[],
+  modelNames: Set<string>,
+  queue: Model[],
+): void {
+  walkTypeRef(ref, {
+    model: (modelRef) => {
+      if (modelNames.has(modelRef.name)) return; // already extracted
+      // Check if this model name corresponds to a component schema
+      // by checking all possible original names that would map to this PascalCase name
+      const isComponent = Object.keys(schemas).some((k) => cleanSchemaName(toPascalCase(k)) === modelRef.name);
+      if (isComponent) return; // will be extracted from components
+
+      // This is a reference to a nested inline model that wasn't extracted.
+      // Look up the field schema in the parent model's component schema to extract it.
+      const parentSchema = findSchemaByName(parentModelName, schemas);
+      if (!parentSchema) return;
+
+      const fieldSchema = findNestedFieldSchema(fieldName, parentSchema, schemas);
+      if (!fieldSchema) return;
+
+      // Extract inline models from the field schema
+      const extracted = extractNestedSchema(modelRef.name, fieldSchema);
+      for (const m of extracted) {
+        if (!modelNames.has(m.name)) {
+          models.push(m);
+          modelNames.add(m.name);
+          queue.push(m); // re-scan for deeper nesting
+        }
+      }
+    },
+  });
+}
+
+/** Find a component schema by PascalCase name. */
+function findSchemaByName(pascalName: string, schemas: Record<string, SchemaObject>): SchemaObject | null {
+  for (const [k, v] of Object.entries(schemas)) {
+    if (cleanSchemaName(toPascalCase(k)) === pascalName) return v;
+  }
+  return null;
+}
+
+/** Walk into a schema to find a field's sub-schema, resolving allOf. */
+function findNestedFieldSchema(
+  fieldName: string,
+  parentSchema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+): SchemaObject | null {
+  if (parentSchema.properties?.[fieldName]) {
+    return parentSchema.properties[fieldName]!;
+  }
+  if (parentSchema.allOf) {
+    for (const sub of parentSchema.allOf) {
+      let resolved = sub;
+      if (sub.$ref) {
+        const segments = sub.$ref.split('/');
+        const refName = segments[segments.length - 1];
+        if (refName && schemas[refName]) resolved = schemas[refName];
+      }
+      if (resolved.properties?.[fieldName]) {
+        return resolved.properties[fieldName]!;
+      }
+    }
+  }
+  return null;
+}
+
+/** Extract a model (and nested models) from an inline field schema. */
+function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
+  // Handle oneOf: extract each object variant as its own model
+  if (schema.oneOf) {
+    const models: Model[] = [];
+    for (const variant of schema.oneOf) {
+      if (variant.$ref) continue;
+      if (variant.properties && (variant.type === 'object' || !variant.type)) {
+        const requiredSet = new Set(variant.required ?? []);
+        const fields: Field[] = [];
+        for (const [fn, fs] of Object.entries(variant.properties)) {
+          if (!fs) continue;
+          fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
+        }
+        // Use the name for the first variant, suffix for subsequent
+        const variantName = models.length === 0 ? name : `${name}${models.length + 1}`;
+        models.push({ name: variantName, description: variant.description, fields });
+      }
+    }
+    return models;
+  }
+
+  // Handle direct object
+  if (schema.properties && (schema.type === 'object' || !schema.type)) {
+    const requiredSet = new Set(schema.required ?? []);
+    const fields: Field[] = [];
+    for (const [fn, fs] of Object.entries(schema.properties)) {
+      if (!fs) continue;
+      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
+    }
+    return [{ name, description: schema.description, fields }];
+  }
+
+  // Handle array with inline items
+  if (schema.type === 'array' && schema.items?.properties) {
+    const requiredSet = new Set(schema.items.required ?? []);
+    const fields: Field[] = [];
+    for (const [fn, fs] of Object.entries(schema.items.properties)) {
+      if (!fs) continue;
+      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
+    }
+    return [{ name, description: schema.items.description, fields }];
+  }
+
+  return [];
+}
+
 /** Build a single Field from a schema property entry. Shared across all extraction sites. */
 export function buildFieldFromSchema(
   fieldName: string,
@@ -100,13 +237,15 @@ export function buildFieldFromSchema(
     description: fieldSchema.description,
     readOnly: fieldSchema.readOnly || undefined,
     writeOnly: fieldSchema.writeOnly || undefined,
+    deprecated: fieldSchema.deprecated || undefined,
+    default: fieldSchema.default,
   };
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
   const values: EnumValue[] = (schema.enum ?? []).map((v) => ({
-    name: toUpperSnakeCase(v),
-    value: v,
+    name: toUpperSnakeCase(String(v)),
+    value: typeof v === 'number' ? v : String(v),
     description: undefined,
   }));
 
@@ -123,6 +262,21 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+  }
+
+  // When additionalProperties is an object schema alongside properties,
+  // surface it as a catch-all map field so emitters can generate Map<string, T>.
+  if (schema.additionalProperties && typeof schema.additionalProperties === 'object' && schema.properties) {
+    const apKeys = Object.keys(schema.additionalProperties);
+    if (apKeys.length > 0) {
+      const valueType = schemaToTypeRef(schema.additionalProperties as SchemaObject, 'additionalProperties', name);
+      fields.push({
+        name: 'additionalProperties',
+        type: { kind: 'map', valueType },
+        required: false,
+        description: 'Additional properties not captured by named fields',
+      });
+    }
   }
 
   return { name, description: schema.description, fields };
@@ -189,6 +343,10 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
   if (Array.isArray(schema.type)) {
     const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
+    // type: ['null'] — only null, no real type
+    if (nonNullTypes.length === 0) {
+      return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
+    }
     if (schema.type.includes('null') && nonNullTypes.length === 1) {
       return {
         kind: 'nullable',
@@ -230,9 +388,10 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // If allOf items all have properties, treat as a merged model
     const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
     if (hasProperties) {
+      const baseName = toPascalCase(contextName ?? 'UnknownModel');
       return {
         kind: 'model',
-        name: toPascalCase(contextName ?? 'UnknownModel'),
+        name: qualifyInlineModelName(baseName, parentModelName),
       };
     }
     // Fall through to other checks
@@ -242,6 +401,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   // Valid OAS 3.1: properties can have { oneOf: [{ type: object }, { type: 'null' }] }
   // without a wrapping `type` field.
   if (schema.oneOf || schema.anyOf) {
+    const compositionKind: 'oneOf' | 'anyOf' = schema.oneOf ? 'oneOf' : 'anyOf';
     const rawVariants: SchemaObject[] = schema.oneOf ?? schema.anyOf ?? [];
 
     // Check for nullable pattern: oneOf: [realType, { type: 'null' }]
@@ -261,11 +421,12 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // General union
     const variants = rawVariants
       .filter((v: SchemaObject) => v.type !== 'null')
-      .map((v: SchemaObject) => schemaToTypeRef(v, contextName));
+      .map((v: SchemaObject) => schemaToTypeRef(v, contextName, parentModelName));
     const hasNull = !!nullVariant;
     const union: TypeRef = {
       kind: 'union',
       variants,
+      compositionKind,
       ...(schema.discriminator
         ? {
             discriminator: {
@@ -278,12 +439,19 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     return hasNull ? { kind: 'nullable', inner: union } : union;
   }
 
-  // Handle const or single-value enum → LiteralType
-  if (schema.const !== undefined && typeof schema.const === 'string') {
-    return { kind: 'literal', value: schema.const };
+  // Handle const → LiteralType (supports string, number, boolean)
+  if (schema.const !== undefined) {
+    if (typeof schema.const === 'string' || typeof schema.const === 'number' || typeof schema.const === 'boolean') {
+      return { kind: 'literal', value: schema.const };
+    }
+    // null const → nullable unknown
+    if (schema.const === null) {
+      return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
+    }
   }
   if (schema.enum && schema.enum.length === 1) {
-    return { kind: 'literal', value: schema.enum[0] };
+    const v = schema.enum[0];
+    return { kind: 'literal', value: typeof v === 'number' ? v : String(v) };
   }
 
   // Handle enum
@@ -297,7 +465,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     return {
       kind: 'enum',
       name: qualifiedName,
-      values: schema.enum as string[],
+      values: schema.enum.map((v) => (typeof v === 'number' ? String(v) : String(v))),
     };
   }
 
@@ -317,13 +485,10 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   }
 
   // Handle object → ModelRef (if it has properties, it's a named model reference)
+  // When additionalProperties is also present, we still return a ModelRef so the
+  // named properties are preserved. The extractModel path will pick up the extra
+  // properties as a catch-all map field named `additionalProperties`.
   if (schema.type === 'object' && schema.properties) {
-    // Warn when additionalProperties is an object schema — not yet modeled in IR
-    if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
-      console.warn(
-        `[oagen] Warning: additionalProperties with object schema ignored (context: ${contextName ?? 'unknown'})`,
-      );
-    }
     const baseName = toPascalCase(contextName ?? 'UnknownModel');
     return {
       kind: 'model',
