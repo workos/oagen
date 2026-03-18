@@ -15,9 +15,11 @@ export interface OagenConfig {
   irVersion?: number;
   /**
    * Custom transform for operation IDs. When provided, replaces the default
-   * NestJS-specific stripping logic (e.g. `FooController_bar` → `bar`).
-   * Receives the raw operationId string; return the desired operation name.
-   * The result is used as-is (no additional camelCase conversion is applied).
+   * camelCase pass-through. Receives the raw operationId string; return the
+   * desired operation name (no additional conversion is applied).
+   *
+   * For NestJS-style operationIds (`FooController_bar` → `bar`), use the
+   * built-in `nestjsOperationIdTransform` from `@workos/oagen`.
    */
   operationIdTransform?: (id: string) => string;
 }

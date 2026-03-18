@@ -59,6 +59,17 @@ export interface OperationExtractionResult {
   inlineModels: Model[];
 }
 
+/**
+ * NestJS-style operationId transform. Strips "Controller" and extracts the
+ * action after the first underscore: `FooController_bar` → `bar`.
+ * Pass as `operationIdTransform` in oagen.config to opt in.
+ */
+export function nestjsOperationIdTransform(id: string): string {
+  const stripped = id.replace(/Controller/g, '');
+  const idx = stripped.indexOf('_');
+  return idx !== -1 ? toCamelCase(stripped.slice(idx + 1)) : toCamelCase(stripped);
+}
+
 export function extractOperations(
   paths: Record<string, PathItem> | undefined,
   operationIdTransform?: (id: string) => string,
@@ -124,16 +135,7 @@ function inferOperationName(
     if (operationIdTransform) {
       return operationIdTransform(operationId);
     }
-    // Default: NestJS operationIds follow the pattern: {Resource}Controller_{action}
-    // Extract the action part (after _) which is the actual method name.
-    const stripped = operationId.replace(/Controller/g, '');
-    const underscoreIdx = stripped.indexOf('_');
-    if (underscoreIdx !== -1) {
-      const action = stripped.slice(underscoreIdx + 1);
-      return toCamelCase(action);
-    }
-    // No underscore — use the full cleaned operationId
-    return toCamelCase(stripped);
+    return toCamelCase(operationId);
   }
 
   // Fallback when no operationId is available — use method + path to build

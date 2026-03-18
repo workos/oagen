@@ -70,6 +70,7 @@ export type {
 } from './compat/types.js';
 
 export { parseSpec } from './parser/parse.js';
+export { nestjsOperationIdTransform } from './parser/operations.js';
 export { generate } from './engine/orchestrator.js';
 export { getEmitter, registerEmitter } from './engine/registry.js';
 export { getExtractor, registerExtractor } from './compat/extractor-registry.js';
