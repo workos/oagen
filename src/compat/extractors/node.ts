@@ -21,6 +21,7 @@ export const nodeExtractor: Extractor = {
   hints: nodeHints,
 
   async extract(sdkPath: string): Promise<ApiSurface> {
+    sdkPath = resolve(sdkPath);
     const configPath = ts.findConfigFile(sdkPath, ts.sys.fileExists, 'tsconfig.json');
     if (!configPath)
       throw new ExtractorError(

@@ -17,8 +17,9 @@ export default defineConfig([
     format: ['esm'],
     clean: false,
     target: 'node20',
+    external: ['dotenv/config'],
     banner: {
-      js: '#!/usr/bin/env node',
+      js: '#!/usr/bin/env tsx',
     },
   },
   {
