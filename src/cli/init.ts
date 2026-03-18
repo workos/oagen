@@ -15,8 +15,8 @@ export async function initCommand(opts: { lang: string; project?: string }): Pro
   const projectDir = resolve(opts.project ?? '.');
   const lang = opts.lang;
 
-  if (existsSync(resolve(projectDir, 'package.json'))) {
-    throw new Error('Project already initialized — package.json exists');
+  if (existsSync(resolve(projectDir, 'oagen.config.ts'))) {
+    throw new Error('Project already initialized — oagen.config.ts exists');
   }
 
   // Create directories

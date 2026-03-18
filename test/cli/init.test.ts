@@ -48,8 +48,8 @@ describe('initCommand', () => {
     }
   });
 
-  it('aborts if package.json already exists', async () => {
-    writeFileSync(resolve(tmpDir, 'package.json'), '{}');
+  it('aborts if oagen.config.ts already exists', async () => {
+    writeFileSync(resolve(tmpDir, 'oagen.config.ts'), '{}');
 
     await expect(initCommand({ lang: 'ruby', project: tmpDir })).rejects.toThrow('Project already initialized');
   });
