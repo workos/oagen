@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport } from './types.js';
+import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
 
 function extractPhpDeclarationName(node: Parser.SyntaxNode): string | null {
   switch (node.type) {
@@ -18,6 +18,22 @@ function extractPhpDeclarationName(node: Parser.SyntaxNode): string | null {
     default:
       return null;
   }
+}
+
+function findPhpDocstring(children: Parser.SyntaxNode[], index: number, source: string): DocstringInfo | null {
+  for (let k = index - 1; k >= 0; k--) {
+    const prev = children[k];
+    if (prev.type === 'comment') {
+      const text = source.slice(prev.startIndex, prev.endIndex);
+      if (text.startsWith('/**')) {
+        return { text, startIndex: prev.startIndex, endIndex: prev.endIndex };
+      }
+      return null;
+    }
+    if (prev.type === ';' || prev.type === '{') continue;
+    return null;
+  }
+  return null;
 }
 
 export const phpMergeAdapter: MergeAdapter = {
@@ -61,5 +77,44 @@ export const phpMergeAdapter: MergeAdapter = {
   },
   renderImports(imports) {
     return imports.map((entry) => entry.text);
+  },
+  extractDocstrings(tree, source) {
+    const result = new Map<string, SymbolDocstrings>();
+    const rootChildren = tree.rootNode.children;
+
+    for (let i = 0; i < rootChildren.length; i++) {
+      const child = rootChildren[i];
+      const name = extractPhpDeclarationName(child);
+      if (!name || name.startsWith('__namespace:')) continue;
+
+      const docstring = findPhpDocstring(rootChildren, i, source);
+      const members = new Map<string, { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }>();
+
+      const body = child.childForFieldName('body');
+      if (body) {
+        const bodyChildren = body.children;
+        for (let j = 0; j < bodyChildren.length; j++) {
+          const member = bodyChildren[j];
+          if (member.type !== 'method_declaration') continue;
+          const memberName = member.childForFieldName('name')?.text;
+          if (!memberName) continue;
+          const memberDoc = findPhpDocstring(bodyChildren, j, source);
+          members.set(memberName, {
+            docstring: memberDoc,
+            declStartIndex: member.startIndex,
+            declColumn: member.startPosition.column,
+          });
+        }
+      }
+
+      result.set(name, {
+        docstring,
+        declStartIndex: child.startIndex,
+        declColumn: child.startPosition.column,
+        members,
+      });
+    }
+
+    return result;
   },
 };

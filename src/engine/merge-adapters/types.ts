@@ -54,5 +54,5 @@ export interface MergeAdapter {
   normalizeReexport?(text: string): string;
   renderImports?(imports: MergeImport[]): string[];
   extractMembers?(tree: Parser.Tree, source: string): Map<string, DeepMergeSymbol>;
-  extractDocstrings?(tree: Parser.Tree, source: string): Map<string, SymbolDocstrings>;
+  extractDocstrings(tree: Parser.Tree, source: string): Map<string, SymbolDocstrings>;
 }

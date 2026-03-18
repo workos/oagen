@@ -211,9 +211,9 @@ export async function mergeIntoExisting(
   }
 
   if (newImports.length === 0 && toAppend.length === 0) {
-    // No top-level changes — check for deep merge or docstring refresh before returning
-    if (!adapter.extractMembers && !adapter.extractDocstrings) {
-      return { content: existingContent, added: 0, preserved, changed: false };
+    // No top-level changes — check for deep merge before returning
+    if (!adapter.extractMembers) {
+      // Still need to check docstring refresh below
     }
   }
 
@@ -276,7 +276,7 @@ export async function mergeIntoExisting(
 
   // Docstring refresh pass: update existing docstrings to match generated content
   let docstringUpdates = 0;
-  if (adapter.extractDocstrings) {
+  {
     const parser = await getParser(language);
     const resultTree = safeParse(parser, result);
     const generatedTree = safeParse(parser, generatedContent);
@@ -289,14 +289,17 @@ export async function mergeIntoExisting(
       const existInfo = resultDocs.get(symbolName);
       if (!existInfo) continue;
 
+      // Skip header comments being treated as docstrings
+      const genDoc = genInfo.docstring && genInfo.docstring.text.trim() !== headerLine ? genInfo.docstring : null;
+
       // Top-level docstring
-      if (genInfo.docstring) {
+      if (genDoc) {
         if (existInfo.docstring) {
-          if (existInfo.docstring.text !== genInfo.docstring.text) {
+          if (existInfo.docstring.text !== genDoc.text) {
             edits.push({
               start: existInfo.docstring.startIndex,
               end: existInfo.docstring.endIndex,
-              newText: genInfo.docstring.text,
+              newText: genDoc.text,
             });
             docstringUpdates++;
           }
@@ -306,7 +309,7 @@ export async function mergeIntoExisting(
           edits.push({
             start: lineStart,
             end: lineStart,
-            newText: indent + genInfo.docstring.text + '\n',
+            newText: indent + genDoc.text + '\n',
           });
           docstringUpdates++;
         }

@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport } from './types.js';
+import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
 
 function declarationKey(node: Parser.SyntaxNode): string | null {
   switch (node.type) {
@@ -19,6 +19,29 @@ function declarationKey(node: Parser.SyntaxNode): string | null {
     default:
       return null;
   }
+}
+
+function collectPrecedingRustDocComments(children: Parser.SyntaxNode[], index: number, source: string): DocstringInfo | null {
+  let lastIdx = -1;
+  let firstIdx = -1;
+  for (let k = index - 1; k >= 0; k--) {
+    const prev = children[k];
+    if (prev.type === 'line_comment') {
+      const text = source.slice(prev.startIndex, prev.endIndex);
+      if (text.startsWith('///')) {
+        if (lastIdx === -1) lastIdx = k;
+        firstIdx = k;
+      } else {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+  if (firstIdx === -1) return null;
+  const first = children[firstIdx];
+  const last = children[lastIdx];
+  return { text: source.slice(first.startIndex, last.endIndex), startIndex: first.startIndex, endIndex: last.endIndex };
 }
 
 export const rustMergeAdapter: MergeAdapter = {
@@ -51,5 +74,25 @@ export const rustMergeAdapter: MergeAdapter = {
   },
   renderImports(imports) {
     return imports.map((entry) => entry.text);
+  },
+  extractDocstrings(tree, source) {
+    const result = new Map<string, SymbolDocstrings>();
+    const rootChildren = tree.rootNode.children;
+
+    for (let i = 0; i < rootChildren.length; i++) {
+      const child = rootChildren[i];
+      const key = declarationKey(child);
+      if (!key) continue;
+
+      const docstring = collectPrecedingRustDocComments(rootChildren, i, source);
+      result.set(key, {
+        docstring,
+        declStartIndex: child.startIndex,
+        declColumn: child.startPosition.column,
+        members: new Map(),
+      });
+    }
+
+    return result;
   },
 };
