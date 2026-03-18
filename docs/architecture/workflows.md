@@ -19,8 +19,9 @@ gets written or fixed.
 1. `/generate-emitter` — scaffold emitter, design doc, tests
 2. `/generate-extractor` — scaffold extractor for API surface extraction
 3. `/verify-compat` — extract baseline, generate with overlay, verify (includes overlay loop)
-4. `/integrate` — merge generated code into the live SDK
-5. `/generate-smoke-test` — wire-level HTTP parity tests (run against the integrated live SDK)
+4. `/generate-smoke-test` — wire-level HTTP parity tests against output dir
+5. `/verify-smoke-test` — iterate until smoke tests pass
+6. `/integrate` — merge generated code into the live SDK
 
 **Scenario B** (fresh, no compat constraints):
 
@@ -132,6 +133,58 @@ over time.
 ```bash
 oagen verify --spec v2.yml --lang node --output ./sdk --api-surface surface.json --diagnostics
 # → verify-diagnostics.json
+```
+
+### Verify Result Types
+
+Source: `src/verify/types.ts`, `src/compat/types.ts`, `src/differ/types.ts`
+
+The verify pipeline returns structured result types that consumers can use programmatically:
+
+```typescript
+interface VerifyDiagnostics {
+  compatCheck?: { totalBaselineSymbols, preservedSymbols, preservationScore, violationsByCategory, violationsBySeverity, additions, scopedToSpec, scopedSymbolCount? };
+  smokeCheck?: { passed, findingsCount?, compileErrors?, baselinePath };
+  stalenessCheck?: { violations };
+}
+
+interface CompatCheckResult {
+  passed: boolean;          // true if no breaking violations
+  diff: DiffResult;         // detailed diff between baseline and candidate
+  scopedToSpec: boolean;    // true if --spec was used to filter
+  scopedSymbolCount?: number;
+}
+
+interface SmokeCheckResult {
+  passed: boolean;
+  findingsCount?: number;   // number of CRITICAL/WARNING findings
+  compileErrors?: boolean;  // true if SDK failed type check
+  baselinePath: string;     // path to the baseline used
+  generatedBaseline: boolean;
+}
+```
+
+The compat differ returns a `DiffResult`:
+
+```typescript
+interface DiffResult {
+  preservationScore: number;   // 0–100% of baseline symbols preserved
+  totalBaselineSymbols: number;
+  preservedSymbols: number;
+  violations: Violation[];     // breaking changes found
+  additions: Addition[];       // new symbols not in baseline
+}
+```
+
+The spec differ (used by `oagen diff`) returns a `DiffReport`:
+
+```typescript
+interface DiffReport {
+  oldVersion: string;
+  newVersion: string;
+  changes: Change[];  // ModelAdded, ModelRemoved, EnumAdded, OperationAdded, etc.
+  summary: { added, removed, modified, breaking, additive };
+}
 ```
 
 ### Exit codes from `oagen verify`

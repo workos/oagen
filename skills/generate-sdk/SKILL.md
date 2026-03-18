@@ -5,7 +5,22 @@ description: Orchestrate generating an SDK for a target language end-to-end. Det
 
 # /generate-sdk
 
+## Overview
+
 Orchestrate the end-to-end workflow for generating an SDK for a target language. This skill does not implement anything itself — it determines the right scenario, sequences the correct skills, and tracks progress across steps.
+
+## Inputs
+
+- **language** — target language (e.g., `ruby`, `python`, `node`, `go`)
+- **scenario** — `A` (backwards-compatible with existing SDK) or `B` (fresh, no existing SDK)
+- **project** — path to the emitter project
+- **spec** — path to the OpenAPI spec
+- **sdk_path** — path to the live SDK (Scenario A only)
+
+## Reference Docs
+
+- [Workflows](../../docs/architecture/workflows.md) — Phase 1 setup vs. Phase 2 ongoing spec updates
+- [Pipeline](../../docs/architecture/pipeline.md) — three-stage parse/emit/write flow
 
 ## Architecture
 
@@ -62,9 +77,9 @@ Store as `spec` and pass it to all sub-skill invocations.
 Step 1: /generate-emitter {language} {project} sdk_path={sdk_path}    — study existing SDK, scaffold emitter
 Step 2: /generate-extractor {language} sdk_path={sdk_path}            — scaffold extractor
 Step 3: /verify-compat {language} sdk_path={sdk_path}                 — extract baseline, verify
-Step 4: /integrate {language} sdk_path={sdk_path}                     — merge into live SDK
-Step 5: /generate-smoke-test {language}                               — test the integrated live SDK
-Step 6: /verify-smoke-test {language}                                 — iterate until clean
+Step 4: /generate-smoke-test {language}                               — smoke tests against output dir
+Step 5: /verify-smoke-test {language}                                 — iterate until clean
+Step 6: /integrate {language} sdk_path={sdk_path}                     — merge into live SDK
 ```
 
 ### Scenario B — Fresh
@@ -95,11 +110,13 @@ grep -l "hints" {project}/src/compat/extractors/{language}.ts
 
 # After /verify-compat — handled by the skill itself
 
-# After /integrate — changes visible in live SDK
-cd {sdk_path} && git diff --stat
-
 # After /generate-smoke-test — script exists
 ls {project}/smoke/sdk-{language}.ts
+
+# After /verify-smoke-test — handled by the skill itself
+
+# After /integrate — changes visible in live SDK
+cd {sdk_path} && git diff --stat
 ```
 
 **For Scenario A:** After `/generate-emitter`, also verify the design doc references real SDK patterns:
@@ -174,3 +191,13 @@ In both Scenario A and Scenario B, include this section on running smoke tests:
   # This iterates: generate → verify → fix emitter → repeat
   # until the smoke tests pass without emitter changes.
 ```
+
+## Output
+
+This skill produces, via its sub-skills:
+
+- A complete language emitter registered in `oagen.config.ts`
+- An API surface extractor (Scenario A only)
+- A smoke test script at `smoke/sdk-{language}.ts`
+- Generated SDK code at `{project}/sdk/`
+- Integration into the live SDK (Scenario A only)
