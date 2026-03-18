@@ -1,5 +1,14 @@
 import { toCamelCase } from '../../utils/naming.js';
 
+export function oagenScripts(lang: string): Record<string, string> {
+  return {
+    [`sdk:generate:${lang}`]: `oagen generate --lang ${lang} --output ./sdk --namespace workos --spec open-api-spec.yaml --api-surface ./sdk-${lang}-surface.json --target ../your-${lang}-sdk`,
+    [`sdk:diff:${lang}`]: `oagen diff --old ./sdk/spec-snapshot.yaml --new open-api-spec.yaml --lang ${lang} --output ./sdk --target ../your-${lang}-sdk --api-surface ./sdk-${lang}-surface.json`,
+    [`sdk:verify:${lang}`]: `oagen verify --lang ${lang} --output ./sdk --spec open-api-spec.yaml --api-surface ./sdk-${lang}-surface.json`,
+    [`sdk:extract:${lang}`]: `oagen extract --lang ${lang} --sdk-path ../your-${lang}-sdk --output ./sdk-${lang}-surface.json`,
+  };
+}
+
 export function packageJson(lang: string): string {
   return JSON.stringify(
     {
@@ -16,9 +25,7 @@ export function packageJson(lang: string): string {
         test: 'vitest run',
         'test:watch': 'vitest',
         typecheck: 'tsc --noEmit',
-        'sdk:generate': `oagen generate --lang ${lang} --output ./sdk`,
-        'sdk:verify': `oagen verify --lang ${lang} --output ./sdk`,
-        'sdk:extract': `oagen extract --lang ${lang} --output ./sdk-${lang}-surface.json`,
+        ...oagenScripts(lang),
       },
       dependencies: {
         '@workos/oagen': '^0.0.1',
@@ -104,6 +111,9 @@ export function gitignore(): string {
   return `node_modules/
 dist/
 .env
+sdk-*-surface.json
+smoke-*.json
+sdk/
 `;
 }
 
