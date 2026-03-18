@@ -58,9 +58,7 @@ describe('initCommand', () => {
   it('aborts if package.json already exists', async () => {
     writeFileSync(resolve(tmpDir, 'package.json'), '{}');
 
-    await expect(initCommand({ lang: 'ruby', project: tmpDir })).rejects.toThrow(
-      'Project already initialized',
-    );
+    await expect(initCommand({ lang: 'ruby', project: tmpDir })).rejects.toThrow('Project already initialized');
   });
 
   it('substitutes language in package.json', async () => {

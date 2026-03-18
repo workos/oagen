@@ -236,9 +236,7 @@ export async function mergeIntoExisting(
     // Allow genuinely new re-exports through.
     if (stmt.nodeType === 'export_statement' && stmt.text.includes(' from ')) {
       const normalizedText = normalizeJsExtension(stmt.text.trim());
-      const existsNormalized = [...existingUnnamedTexts].some(
-        (t) => normalizeJsExtension(t) === normalizedText,
-      );
+      const existsNormalized = [...existingUnnamedTexts].some((t) => normalizeJsExtension(t) === normalizedText);
       if (existsNormalized) {
         preserved++;
         continue;
