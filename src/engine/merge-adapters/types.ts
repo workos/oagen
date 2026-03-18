@@ -18,6 +18,17 @@ export interface ParsedMergeFile {
   statements: MergeStatement[];
 }
 
+export interface MergeMember {
+  key: string;
+  text: string;
+}
+
+export interface DeepMergeSymbol {
+  members: MergeMember[];
+  /** 0-based line number of the closing brace (for insertion point). */
+  bodyEndLine: number;
+}
+
 export interface MergeAdapter {
   language: string;
   grammarModule: string;
@@ -25,4 +36,5 @@ export interface MergeAdapter {
   parseStatements(tree: Parser.Tree, source: string): ParsedMergeFile;
   normalizeReexport?(text: string): string;
   renderImports?(imports: MergeImport[]): string[];
+  extractMembers?(tree: Parser.Tree, source: string): Map<string, DeepMergeSymbol>;
 }

@@ -66,7 +66,7 @@ export async function generateIncremental(
         console.log(`Target: merged into ${targetResult.merged.length} existing files (additive only)`);
       }
       if (targetResult.skipped.length > 0) {
-        console.log(`Target: skipped ${targetResult.skipped.length} files (no grammar or skipIfExists)`);
+        console.log(`Target: skipped ${targetResult.skipped.length} files (excluded or no grammar)`);
       }
     }
 

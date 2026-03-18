@@ -6,6 +6,8 @@ export interface GeneratedFile {
   content: string;
   skipIfExists?: boolean;
   headerPlacement?: 'prepend' | 'skip';
+  /** When false, exclude this file from --target integration. Defaults to true. */
+  integrateTarget?: boolean;
 }
 
 export interface EmitterContext {

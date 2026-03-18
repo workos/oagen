@@ -211,7 +211,10 @@ export async function mergeIntoExisting(
   }
 
   if (newImports.length === 0 && toAppend.length === 0) {
-    return { content: existingContent, added: 0, preserved, changed: false };
+    // No top-level changes — check for deep merge before returning
+    if (!adapter.extractMembers) {
+      return { content: existingContent, added: 0, preserved, changed: false };
+    }
   }
 
   let result = existingContent;
@@ -233,9 +236,54 @@ export async function mergeIntoExisting(
     result = result.trimEnd() + '\n\n' + toAppend.join('\n\n') + '\n';
   }
 
+  // Deep merge pass: add new members to existing symbols
+  // Runs after import/symbol merge so line numbers are based on the updated content
+  let deepAdded = 0;
+  if (adapter.extractMembers) {
+    const parser = await getParser(language);
+    const resultTree = safeParse(parser, result);
+    const generatedTree = safeParse(parser, generatedContent);
+    const resultSymbols = adapter.extractMembers(resultTree, result);
+    const generatedSymbols = adapter.extractMembers(generatedTree, generatedContent);
+
+    // Collect insertions: {line, text} for new members
+    const insertions: { line: number; text: string }[] = [];
+
+    for (const [symbolName, genSymbol] of generatedSymbols) {
+      const existSymbol = resultSymbols.get(symbolName);
+      if (!existSymbol) continue; // New symbol — handled by top-level append
+
+      const existingMemberKeys = new Set(existSymbol.members.map((m) => m.key));
+      const newMembers = genSymbol.members.filter((m) => !existingMemberKeys.has(m.key));
+
+      if (newMembers.length > 0) {
+        const insertText = newMembers.map((m) => '  ' + m.text).join('\n');
+        insertions.push({ line: existSymbol.bodyEndLine, text: insertText });
+        deepAdded += newMembers.length;
+      }
+    }
+
+    if (insertions.length > 0) {
+      // Apply bottom-up to avoid offset shifting
+      insertions.sort((a, b) => b.line - a.line);
+      const resultLines = result.split('\n');
+      for (const ins of insertions) {
+        resultLines.splice(ins.line, 0, ins.text);
+      }
+      result = resultLines.join('\n');
+    }
+  }
+
+  const topLevelAdded = (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) + toAppend.length;
+  const totalAdded = topLevelAdded + deepAdded;
+
+  if (totalAdded === 0) {
+    return { content: existingContent, added: 0, preserved, changed: false };
+  }
+
   return {
     content: result,
-    added: (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) + toAppend.length,
+    added: totalAdded,
     preserved,
     changed: true,
   };
