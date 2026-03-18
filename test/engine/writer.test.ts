@@ -175,4 +175,36 @@ describe('writeFiles', () => {
       await fs.rm(tmpDir, { recursive: true });
     }
   });
+
+  it('merges additive PHP declarations into existing files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'lib/Client.php');
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(
+        filePath,
+        '<?php\n\nnamespace WorkOS;\n\nuse WorkOS\\Client;\n\nclass Client {}\n',
+      );
+
+      const result = await writeFiles(
+        [
+          {
+            path: 'lib/Client.php',
+            content:
+              '<?php\n\nnamespace WorkOS;\n\nuse WorkOS\\Client;\nuse WorkOS\\User;\n\nclass Client {}\n\nclass User {}\n',
+          },
+        ],
+        tmpDir,
+        { language: 'php', header: '// generated' },
+      );
+
+      expect(result.merged).toContain('lib/Client.php');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toContain('use WorkOS\\User;');
+      expect(content).toContain('class User {}');
+      expect(content.match(/namespace WorkOS;/g)).toHaveLength(1);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
 });

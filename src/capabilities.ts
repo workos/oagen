@@ -20,7 +20,7 @@ const CAPABILITIES: Record<string, LanguageCapabilities> = {
     supportsTargetIntegration: true,
   },
   php: {
-    supportsAstMerge: false,
+    supportsAstMerge: true,
     supportsExtractor: true,
     supportsSmokeRunner: true,
     supportsTargetIntegration: true,

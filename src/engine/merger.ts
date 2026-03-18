@@ -39,7 +39,8 @@ async function getParser(language: string): Promise<Parser> {
   }
 
   const mod = await import(adapter.grammarModule);
-  const grammar = mod.default ?? mod;
+  const exported = adapter.resolveGrammar ? adapter.resolveGrammar(mod) : mod;
+  const grammar = (exported as { default?: unknown }).default ?? exported;
   const parser = new Parser();
   parser.setLanguage(grammar);
   parserCache.set(language, parser);
