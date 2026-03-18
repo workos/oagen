@@ -22,6 +22,7 @@ removedFieldPaths = specDerivedFieldPaths(oldSpec) − specDerivedFieldPaths(new
 ```
 
 This catches:
+
 - Removed models, enums, services, and type aliases at the symbol level
 - Removed fields from models that still exist in the new spec
 
@@ -49,6 +50,7 @@ oagen verify \
 ```
 
 Flags:
+
 - `--old-spec <path>` — previous version of the OpenAPI spec
 - `--spec <path>` — current version of the OpenAPI spec
 - `--api-surface <path>` — extracted API surface of the live SDK

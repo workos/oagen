@@ -9,6 +9,12 @@ Run `oagen generate` → `oagen verify` in a loop, diagnosing and fixing the emi
 
 This is the final phase of `/generate-sdk` setup — after the emitter, extractor, compat overlay, and smoke tests are all scaffolded, this loop gets the emitter actually producing correct output.
 
+## Reference Docs
+
+- [Workflows](docs/architecture/workflows.md) — emitter-fixing loop and final validation
+- [Emitter Contract](docs/architecture/emitter-contract.md) — generator methods and `GeneratedFile` shape
+- [Testing & Smoke Validation](docs/agents/testing.md) — smoke testing guide and exit codes
+
 ## When to Use
 
 - After `/generate-smoke-test` completes and you need to iterate the emitter to passing

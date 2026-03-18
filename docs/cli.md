@@ -98,12 +98,13 @@ oagen init --lang ruby
 oagen init --lang go --project ./my-emitter
 ```
 
-| Argument           | Required | Default | Description                          |
-| ------------------ | -------- | ------- | ------------------------------------ |
-| `--lang <language>`| Yes      |         | Target language (e.g., `ruby`, `go`) |
-| `--project <dir>`  | No       | `.`     | Directory to create the project in   |
+| Argument            | Required | Default | Description                          |
+| ------------------- | -------- | ------- | ------------------------------------ |
+| `--lang <language>` | Yes      |         | Target language (e.g., `ruby`, `go`) |
+| `--project <dir>`   | No       | `.`     | Directory to create the project in   |
 
 Creates:
+
 - `package.json` with `@workos/oagen` dependency and `sdk:generate`/`sdk:verify`/`sdk:extract` scripts
 - `tsconfig.json`, `vitest.config.ts`, `tsup.config.ts` — build/test tooling
 - `oagen.config.ts` — registers the stub emitter

@@ -1,6 +1,6 @@
 # Testing And Smoke Validation
 
-Use this guide when changing behavior, generated output, or emitter coverage.
+Use this guide when changing framework behavior, emitter-generated output, or compat verification coverage.
 
 ## Quick Start: Spec Update Pipeline
 

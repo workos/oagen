@@ -58,13 +58,13 @@ export default {
 };
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `emitters` | `Emitter[]` | Language emitters to register. |
-| `extractors` | `Extractor[]` | API surface extractors for compat verification. |
-| `smokeRunners` | `Record<string, string>` | Map from language key to custom smoke runner script path. |
-| `emitterProject` | `string` | Path to the emitter project (where skills scaffold new emitters/tests). |
-| `irVersion` | `number` | Pin to the IR version your emitters target. Mismatch exits with an error. |
+| Field                  | Type                     | Description                                                                                                                                                      |
+| ---------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `emitters`             | `Emitter[]`              | Language emitters to register.                                                                                                                                   |
+| `extractors`           | `Extractor[]`            | API surface extractors for compat verification.                                                                                                                  |
+| `smokeRunners`         | `Record<string, string>` | Map from language key to custom smoke runner script path.                                                                                                        |
+| `emitterProject`       | `string`                 | Path to the emitter project (where skills scaffold new emitters/tests).                                                                                          |
+| `irVersion`            | `number`                 | Pin to the IR version your emitters target. Mismatch exits with an error.                                                                                        |
 | `operationIdTransform` | `(id: string) => string` | Custom transform for raw operationIds. Default: camelCase pass-through. Use `nestjsOperationIdTransform` for NestJS-style `FooController_bar` → `bar` stripping. |
 
 ## Building an emitter
@@ -113,18 +113,43 @@ The verify command includes a self-correcting overlay loop (`--max-retries`, def
 ## Using as a library
 
 ```ts
-import { parseSpec, generate, registerEmitter } from "@workos/oagen";
+import {
+  parseSpec,
+  generate,
+  registerEmitter,
+  diffSpecs,
+  buildOverlayLookup,
+  patchOverlay,
+  diffSurfaces,
+  IR_VERSION,
+} from "@workos/oagen";
+import type {
+  ApiSpec,
+  Emitter,
+  GeneratedFile,
+  DiffReport,
+} from "@workos/oagen";
 
-const ir = await parseSpec("openapi.yml");
+// Parse an OpenAPI spec into the IR
+const ir: ApiSpec = await parseSpec("openapi.yml");
 
+// Register and run an emitter
 registerEmitter(myEmitter);
-const files = await generate(ir, myEmitter, {
+const files: GeneratedFile[] = await generate(ir, myEmitter, {
   namespace: "MyService",
   outputDir: "./sdk",
 });
+
+// Diff two specs
+const oldIr = await parseSpec("v1.yml");
+const diff: DiffReport = diffSpecs(oldIr, ir);
+
+// Build an overlay for compat preservation
+const overlay = buildOverlayLookup(apiSurface, ir);
+const patched = patchOverlay(overlay, violations, apiSurface);
 ```
 
-All IR, engine, differ, and compat types are exported from `@workos/oagen`. The `patchOverlay()` function is also available as a library export for custom retry loops.
+All IR, engine, differ, and compat types are exported from `@workos/oagen`. Naming utilities (`toSnakeCase`, `toCamelCase`, `toPascalCase`, etc.) and the `planOperation()` helper are also available. See `src/index.ts` for the full export list.
 
 ## Claude Code Plugin
 

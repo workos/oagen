@@ -2,7 +2,7 @@
 
 ## Overview
 
-oagen processes OpenAPI specs in three stages: Parse → Emit → Write.
+oagen provides a three-stage pipeline for transforming OpenAPI specs into SDK code: Parse → Emit → Write. Emitters are registered plugins that implement the `Emitter` interface.
 
 ```
 ┌──────────────────┐     ┌─────────────────────┐      ┌──────────────┐

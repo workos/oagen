@@ -96,12 +96,13 @@ const emitter: Emitter = {
 };
 ```
 
-When registered, the CLI compares `contractVersion` against the current `IR_VERSION`:
+When registered via `registerEmitter()`, the registry validates `contractVersion` against the current `IR_VERSION`:
 
-- **Lower** than current: warning — the emitter may not handle new TypeRef variants
-- **Higher** than current: error — the emitter expects a newer IR than this CLI provides
+- **Matches**: registration succeeds silently
+- **Mismatches**: throws `RegistryError` — `Emitter "ruby" declares contractVersion 3, but oagen requires IR_VERSION 5.`
+- **Undefined**: emits `console.warn` — `Warning: Emitter "ruby" does not declare a contractVersion.` — but still registers
 
-Consumers can also set `irVersion` in `oagen.config.ts` for a project-level version pin.
+Consumers can also set `irVersion` in `oagen.config.ts` for a project-level version pin (checked at config load time, before emitter registration).
 
 ## Rules
 

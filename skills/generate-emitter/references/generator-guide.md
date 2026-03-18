@@ -103,7 +103,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
 ## Resources
 
 - Input: `Service[]` (each has `name`, `operations[]`)
-- Each `Operation` has: `name`, `httpMethod`, `path`, `pathParams`, `queryParams`, `requestBody?`, `response`, `paginated`, `idempotent`
+- Each `Operation` has: `name`, `httpMethod`, `path`, `pathParams`, `queryParams`, `requestBody?`, `response`, `paginated`, `injectIdempotencyKey`
 - Output: One file per service/resource
 - Handle:
   - Path parameter interpolation (e.g., `/orgs/{id}` to target language's format string mechanism)

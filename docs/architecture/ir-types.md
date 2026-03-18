@@ -67,7 +67,7 @@ interface Operation {
   response: TypeRef;
   errors: ErrorResponse[];
   paginated: boolean;
-  idempotent: boolean;
+  injectIdempotencyKey: boolean;
 }
 ```
 
