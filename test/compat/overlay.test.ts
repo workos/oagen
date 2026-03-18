@@ -582,6 +582,125 @@ describe('buildOverlayLookup', () => {
     expect(lookup.modelNameByIR.get('SmallModel')).toBeUndefined();
   });
 
+  it('matches via derived model names', () => {
+    const surface = emptySurface({
+      interfaces: {
+        FooResponse: {
+          name: 'FooResponse',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            value: { name: 'value', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'Foo',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'value', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    // "Foo" should match "FooResponse" via derivedModelNames
+    expect(lookup.modelNameByIR.get('Foo')).toBe('FooResponse');
+  });
+
+  it('tightened threshold rejects borderline matches with small models', () => {
+    const surface = emptySurface({
+      interfaces: {
+        SmallWidget: {
+          name: 'SmallWidget',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+            color: { name: 'color', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    // 3 fields, 3 in common → Jaccard=1.0, intersection=3
+    // minIntersection = max(3, ceil(3*0.5)) = 3 → still matches
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'MyWidget',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'color', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('MyWidget')).toBe('SmallWidget');
+  });
+
+  it('strict mode skips Jaccard entirely', () => {
+    const surface = emptySurface({
+      interfaces: {
+        Organization: {
+          name: 'Organization',
+          fields: {
+            id: { name: 'id', type: 'string', optional: false },
+            name: { name: 'name', type: 'string', optional: false },
+            createdAt: { name: 'createdAt', type: 'string', optional: false },
+            updatedAt: { name: 'updatedAt', type: 'string', optional: false },
+          },
+          extends: [],
+        },
+      },
+    });
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        {
+          name: 'ControllerOrgResponse',
+          fields: [
+            { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'created_at', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'updated_at', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    // Without strict: would match via Jaccard
+    const normalLookup = buildOverlayLookup(surface, undefined, spec);
+    expect(normalLookup.modelNameByIR.get('ControllerOrgResponse')).toBe('Organization');
+
+    // With strict: skips Jaccard, no match
+    const strictLookup = buildOverlayLookup(surface, undefined, spec, undefined, { strictModelMatch: true });
+    expect(strictLookup.modelNameByIR.get('ControllerOrgResponse')).toBeUndefined();
+  });
+
   it('does not produce duplicate mappings', () => {
     const surface = emptySurface({
       interfaces: {

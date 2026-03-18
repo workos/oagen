@@ -46,6 +46,7 @@ export function buildOverlayLookup(
   manifest?: ManifestEntry[],
   spec?: ApiSpec,
   hints?: LanguageHints,
+  options?: { strictModelMatch?: boolean },
 ): OverlayLookup {
   const resolvedHints = hints ?? defaultNodeHints;
   const lookup: OverlayLookup = {
@@ -104,7 +105,7 @@ export function buildOverlayLookup(
 
   // Auto-infer IR model name → SDK interface name mappings
   if (spec) {
-    buildModelNameMap(surface, spec, lookup, resolvedHints);
+    buildModelNameMap(surface, spec, lookup, resolvedHints, options);
 
     // Remap fileBySymbol so IR model names point to the SDK symbol's file
     for (const [irName, sdkName] of lookup.modelNameByIR) {
@@ -171,7 +172,13 @@ function sdkInterfaceFieldSignature(iface: ApiInterface): Set<string> {
  *    against all SDK interfaces using Jaccard similarity. A match requires
  *    ≥60% field overlap with ≥3 fields in common.
  */
-function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLookup, hints: LanguageHints): void {
+function buildModelNameMap(
+  surface: ApiSurface,
+  spec: ApiSpec,
+  lookup: OverlayLookup,
+  hints: LanguageHints,
+  options?: { strictModelMatch?: boolean },
+): void {
   const mapped = new Set<string>(); // IR model names already mapped
   const usedSdkNames = new Set<string>(); // SDK names already claimed
 
@@ -237,6 +244,21 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
       continue;
     }
 
+    // Strategy 2a+: Try derived model names before falling back to Jaccard
+    const derivedNames = hints.derivedModelNames(model.name);
+    for (const derived of derivedNames) {
+      if (sdkSignatureNames.has(derived) && !usedSdkNames.has(derived)) {
+        lookup.modelNameByIR.set(model.name, derived);
+        mapped.add(model.name);
+        usedSdkNames.add(derived);
+        break;
+      }
+    }
+    if (mapped.has(model.name)) continue;
+
+    // In strict mode, skip Jaccard entirely
+    if (options?.strictModelMatch) continue;
+
     // Strategy 2b: Fall back to Jaccard field-similarity matching
     const irFields = irModelFieldSignature(model);
     let bestMatch: string | null = null;
@@ -247,8 +269,9 @@ function buildModelNameMap(surface: ApiSurface, spec: ApiSpec, lookup: OverlayLo
 
       const { score, intersection } = jaccardSimilarity(irFields, sdk.fields);
 
-      // Require ≥60% Jaccard AND ≥3 fields in common
-      if (score > bestScore && score >= 0.6 && intersection >= 3) {
+      // Require ≥60% Jaccard AND enough fields in common (scaled by model size)
+      const minIntersection = Math.max(3, Math.ceil(irFields.size * 0.5));
+      if (score > bestScore && score >= 0.6 && intersection >= minIntersection) {
         bestScore = score;
         bestMatch = sdk.name;
       }
