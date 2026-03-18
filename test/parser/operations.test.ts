@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractOperations, nestjsOperationIdTransform } from '../../src/parser/operations.js';
+import { extractOperations } from '../../src/parser/operations.js';
 
 describe('extractOperations', () => {
   it('groups operations by first path segment', () => {
@@ -342,20 +342,6 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('fooControllerBar');
-  });
-
-  it('nestjsOperationIdTransform strips Controller prefix and underscore action', () => {
-    const paths = {
-      '/foo': {
-        get: {
-          operationId: 'FooController_bar',
-          responses: { '200': { description: 'ok' } },
-        },
-      },
-    };
-
-    const { services } = extractOperations(paths, nestjsOperationIdTransform);
-    expect(services[0].operations[0].name).toBe('bar');
   });
 
   it('custom operationIdTransform replaces default logic', () => {

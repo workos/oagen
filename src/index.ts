@@ -63,7 +63,6 @@ export type {
 
 // Core parse + generate
 export { parseSpec } from './parser/parse.js';
-export { nestjsOperationIdTransform } from './parser/operations.js';
 export { generate } from './engine/orchestrator.js';
 export { generateFiles, buildEmitterContext, generateAllFiles, applyFileHeaders } from './engine/generate-files.js';
 export { integrateGeneratedFiles, mapFilesForTargetIntegration } from './engine/integrate.js';

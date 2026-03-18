@@ -19,8 +19,6 @@ export interface OagenConfig {
    * camelCase pass-through. Receives the raw operationId string; return the
    * desired operation name (no additional conversion is applied).
    *
-   * For NestJS-style operationIds (`FooController_bar` → `bar`), use the
-   * built-in `nestjsOperationIdTransform` from `@workos/oagen`.
    */
   operationIdTransform?: (id: string) => string;
 }
