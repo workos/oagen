@@ -31,10 +31,17 @@ function findClassForProperty(
     if (hints.propertyMatchesClass(sdkResourceProperty, className)) {
       return className;
     }
-    // Check constructor params or properties for a match
-    for (const propName of Object.keys(cls.properties)) {
+    // Check properties — resolve to the property's type class, not the parent.
+    // This prevents generic parent classes (e.g., WorkOS) from being returned
+    // when the actual resource class (e.g., ApiKeys) should be used.
+    for (const [propName, prop] of Object.entries(cls.properties)) {
       if (propName === sdkResourceProperty) {
-        return className;
+        const propType = (prop as { type?: string }).type;
+        if (propType && surface.classes[propType]) {
+          return propType;
+        }
+        // Property type not in surface — skip rather than return the parent
+        return undefined;
       }
     }
   }
