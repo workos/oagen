@@ -3,7 +3,7 @@ import { toCamelCase } from '../../utils/naming.js';
 export function packageJson(lang: string): string {
   return JSON.stringify(
     {
-      name: `@workos/oagen-emitters-${lang}`,
+      name: `custom-oagen-emitters`,
       version: '0.0.1',
       type: 'module',
       main: 'dist/index.js',
