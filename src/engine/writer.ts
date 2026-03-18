@@ -58,8 +58,11 @@ export async function writeFiles(
       continue;
     }
 
-    // skipIfExists → hard skip, no merge
+    // skipIfExists → hard skip, no merge (but ensure header is present)
     if (file.skipIfExists) {
+      if (header && !existingContent.startsWith(header)) {
+        await fs.writeFile(fullPath, header + '\n\n' + existingContent, 'utf-8');
+      }
       result.skipped.push(file.path);
       continue;
     }
