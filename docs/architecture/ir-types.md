@@ -71,6 +71,8 @@ Present on `Operation` when `paginated: true`. Emitters use this to generate pag
 
 ## Service & Operation
 
+Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to the first path segment (e.g., `/organizations/{id}` → `Organizations`). Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
+
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"

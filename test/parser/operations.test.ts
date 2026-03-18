@@ -400,4 +400,67 @@ describe('extractOperations', () => {
     const { services } = extractOperations(paths);
     expect(services[0].operations[0].async).toBeUndefined();
   });
+
+  it('uses OpenAPI tag for service name when present', () => {
+    const paths = {
+      '/auth/factors/enroll': {
+        post: {
+          operationId: 'enrollFactor',
+          tags: ['multi-factor-auth'],
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services).toHaveLength(1);
+    expect(services[0].name).toBe('MultiFactorAuth');
+  });
+
+  it('groups operations with same tag into one service', () => {
+    const paths = {
+      '/auth/factors/enroll': {
+        post: {
+          operationId: 'enrollFactor',
+          tags: ['multi-factor-auth'],
+          responses: { '201': { description: 'created' } },
+        },
+      },
+      '/auth/factors/{id}/verify': {
+        post: {
+          operationId: 'verifyFactor',
+          tags: ['multi-factor-auth'],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services).toHaveLength(1);
+    expect(services[0].name).toBe('MultiFactorAuth');
+    expect(services[0].operations).toHaveLength(2);
+  });
+
+  it('falls back to path segment when no tag', () => {
+    const paths = {
+      '/widgets': {
+        get: {
+          operationId: 'listWidgets',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+      '/widgets/{id}': {
+        get: {
+          operationId: 'getWidget',
+          parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services).toHaveLength(1);
+    expect(services[0].name).toBe('Widgets');
+    expect(services[0].operations).toHaveLength(2);
+  });
 });
