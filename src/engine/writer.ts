@@ -98,12 +98,18 @@ export async function writeFiles(
     if (language && hasGrammar(language)) {
       const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header);
 
-      if (!mergeResult.changed) {
+      // Ensure header is present on merged content
+      let finalContent = mergeResult.content;
+      if (header && !finalContent.startsWith(header)) {
+        finalContent = header + '\n\n' + finalContent;
+      }
+
+      if (!mergeResult.changed && finalContent === existingContent) {
         result.identical.push(file.path);
         continue;
       }
 
-      await fs.writeFile(fullPath, mergeResult.content, 'utf-8');
+      await fs.writeFile(fullPath, finalContent, 'utf-8');
       result.merged.push(file.path);
       continue;
     }
