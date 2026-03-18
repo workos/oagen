@@ -26,7 +26,7 @@ const CAPABILITIES: Record<string, LanguageCapabilities> = {
     supportsTargetIntegration: true,
   },
   python: {
-    supportsAstMerge: false,
+    supportsAstMerge: true,
     supportsExtractor: true,
     supportsSmokeRunner: true,
     supportsTargetIntegration: true,

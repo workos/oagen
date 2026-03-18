@@ -143,4 +143,36 @@ describe('writeFiles', () => {
       await fs.rm(tmpDir, { recursive: true });
     }
   });
+
+  it('merges additive Python declarations into existing files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'workos/client.py');
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(
+        filePath,
+        'import os\n\nclass Client:\n    def __init__(self):\n        pass\n',
+      );
+
+      const result = await writeFiles(
+        [
+          {
+            path: 'workos/client.py',
+            content:
+              'import os\nfrom workos.user import User\n\nclass Client:\n    pass\n\nclass User:\n    pass\n',
+          },
+        ],
+        tmpDir,
+        { language: 'python', header: '# generated' },
+      );
+
+      expect(result.merged).toContain('workos/client.py');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toContain('from workos.user import User');
+      expect(content).toContain('class User');
+      expect(content).toContain('def __init__');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
 });
