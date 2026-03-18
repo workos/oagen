@@ -28,6 +28,7 @@ Start here when working on a specific area:
 
 ## Deep Reference
 
+- [Docs Overview](../docs/index.md) — full documentation index organized by adoption stage
 - [Workflows](docs/architecture/workflows.md) — setup (`/generate-sdk`) vs. ongoing (spec update pipeline), with loop diagrams
 - [Pipeline](docs/architecture/pipeline.md) — three-stage parse/emit/write flow with orchestrator details
 - [Dependency Layers](docs/architecture/dependency-layers.md) — full import matrix and enforcement via structural linter

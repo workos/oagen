@@ -120,11 +120,4 @@ describe('initCommand', () => {
       process.chdir(origCwd);
     }
   });
-
-  it('prints install as a next step instead of running it', async () => {
-    await initCommand({ lang: 'ruby', project: tmpDir });
-
-    expect(consoleSpy).toHaveBeenCalledWith('Next steps:');
-    expect(consoleSpy).toHaveBeenCalledWith('  1. npm install');
-  });
 });

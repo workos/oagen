@@ -22,6 +22,14 @@ Read these when you need migration or verification workflows beyond basic genera
 - [Extractor Contract](architecture/extractor-contract.md)
 - [Non-Additive Changes](architecture/non-additive-changes.md)
 
+## Agent Task Guides
+
+Focused guides for AI agents working on specific areas of the codebase:
+
+- [Architecture & Core Contracts](agents/architecture.md)
+- [Emitter Implementation](agents/emitters.md)
+- [Testing & Smoke Validation](agents/testing.md)
+
 ## Contributor
 
 Read these if you are maintaining oagen itself or depending on its public API surface:

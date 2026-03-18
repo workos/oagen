@@ -15,6 +15,11 @@ Live SDK → Extractor → ApiSurface JSON → Differ ← Generated SDK → Viol
 
 Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface and is registered via `oagen.config.ts` in the emitter project.
 
+## Reference Docs
+
+- [Extractor Contract](../../docs/architecture/extractor-contract.md) — `Extractor` interface, `ApiSurface` type, language-specific strategies
+- [Dependency Layers](../../docs/architecture/dependency-layers.md) — where compat fits in the import hierarchy
+
 ## Resolve Paths
 
 **Emitter project:** Use the `project` argument if provided, otherwise use `AskUserQuestion`.
@@ -39,7 +44,7 @@ Use the `Agent` tool with `subagent_type: Explore` and a prompt like:
 
 The real SDK is the ground truth.
 
-## Step 0: Determine Analysis Strategy
+## Step 1: Determine Analysis Strategy
 
 Before writing any code, determine how to analyze the target language's SDK:
 
@@ -61,7 +66,7 @@ Extractors run as TypeScript code. For non-TS/JS SDKs, choose one:
 
 Present your proposed strategy to the user for confirmation, including any runtime dependencies.
 
-## Step 1: Create the Extractor
+## Step 2: Create the Extractor
 
 Create `src/compat/extractors/{language}.ts` **in the emitter project**.
 
@@ -108,7 +113,7 @@ export const {language}Extractor: Extractor = {
 5. **Populate all ApiSurface fields** — `classes`, `interfaces`, `typeAliases`, `enums`, `exports`. Map as closely as possible even if the language doesn't have a direct equivalent for every category.
 6. **Provide `hints`** — Every extractor must include a `hints: LanguageHints` field. Use `resolveHints({...})` to start from Node defaults and override only the language-specific methods. Test that your hints produce correct results for the target language's type strings.
 
-## Step 2: Register the Extractor
+## Step 3: Register the Extractor
 
 Add to `oagen.config.ts`:
 
@@ -120,7 +125,7 @@ const config: OagenConfig = {
 };
 ```
 
-## Step 3: Create a Fixture SDK
+## Step 4: Create a Fixture SDK
 
 Create a minimal but representative fixture at `test/fixtures/sample-sdk-{language}/` **in the emitter project**. It must include:
 
@@ -133,7 +138,7 @@ Create a minimal but representative fixture at `test/fixtures/sample-sdk-{langua
 
 Mirror the Node fixture at `{oagen}/test/fixtures/sample-sdk/` in terms of what it tests, using the target language's idioms.
 
-## Step 4: Create Tests
+## Step 5: Create Tests
 
 Create `test/compat/extractors/{language}.test.ts` **in the emitter project** covering:
 
@@ -147,7 +152,7 @@ Create `test/compat/extractors/{language}.test.ts` **in the emitter project** co
 
 Use `toMatchObject` for partial assertions and `toMatchInlineSnapshot()` for at least one representative snapshot per category.
 
-## Step 5: Validate
+## Step 6: Validate
 
 ```bash
 # All tests pass
@@ -174,6 +179,15 @@ Modified:        oagen.config.ts
 Validation:      Tests / Fixture extract / Determinism / Real SDK extract
 ApiSurface:      {N} classes, {N} interfaces, {N} type aliases, {N} enums, {N} exports
 ```
+
+## Output
+
+This skill produces, in the emitter project:
+
+- `src/compat/extractors/{language}.ts` — extractor implementing the `Extractor` interface with `LanguageHints`
+- `test/compat/extractors/{language}.test.ts` — extraction tests against fixture SDK
+- `test/fixtures/sample-sdk-{language}/` — minimal fixture SDK for testing
+- Updated `oagen.config.ts` with the new extractor registered
 
 ## Common Pitfalls
 

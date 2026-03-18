@@ -13,6 +13,12 @@ oagen has a plugin architecture for code generation. Each target language is an 
 
 Emitters live in **external projects** (not inside the oagen core repo). They import all oagen types from `@workos/oagen` and register via `oagen.config.ts` in their project.
 
+## Reference Docs
+
+- [Emitter Contract](../../docs/architecture/emitter-contract.md) — `Emitter` interface, `GeneratedFile` shape, overlay integration
+- [IR Types](../../docs/architecture/ir-types.md) — `ApiSpec`, `TypeRef` discriminated union, `Model`, `Enum`, `Service`, `Operation`
+- [Pipeline](../../docs/architecture/pipeline.md) — three-stage parse/emit/write flow
+
 ## Resolve Emitter Project
 
 Determine the emitter project path before doing anything:
@@ -37,9 +43,9 @@ Before starting, read and understand these oagen core types (all imported from `
 
 Also read the project's `oagen.config.ts` to understand how emitters are registered.
 
-If an `sdk_path` argument is provided, you MUST thoroughly study that SDK before proceeding to Step 0. The existing SDK's actual code — not generic conventions — drives every design decision.
+If an `sdk_path` argument is provided, you MUST thoroughly study that SDK before proceeding to Step 1. The existing SDK's actual code — not generic conventions — drives every design decision.
 
-## Step 0: Study Target Language Patterns
+## Step 1: Study Target Language Patterns
 
 Before writing any code, establish the exact patterns the emitter will replicate.
 
@@ -47,7 +53,7 @@ Before writing any code, establish the exact patterns the emitter will replicate
 
 The existing SDK is the **sole source of truth**. Study it thoroughly before making any design decisions.
 
-#### 0a. Explore the Existing SDK (via subagent)
+#### 1a. Explore the Existing SDK (via subagent)
 
 **Delegate this to a subagent to keep file-reading noise out of the main context.**
 
@@ -63,7 +69,7 @@ The subagent reads 10+ files and returns only the structured findings — interm
 
 **Do NOT skip this step.** The entire emitter is derived from these findings.
 
-#### File Path Hints (C1)
+#### File Path Hints
 
 When generating for a live SDK, the overlay provides `fileBySymbol` — a map from
 IR symbol names to the relative file paths where those symbols live in the live SDK.
@@ -88,7 +94,7 @@ This is opt-in. Emitters that don't check `fileBySymbol` generate into their
 default layout. The hint is most valuable during `/integrate` (Phase 3), when
 generated files need to merge into the live SDK at the correct locations.
 
-#### 0b. Present Findings
+#### 1b. Present Findings
 
 After receiving the subagent's structured summary, present it to the user. For each pattern, include the pattern name, a 1–2 sentence description, a real code snippet from the SDK, and the source file path.
 
@@ -99,11 +105,11 @@ Ask the user to confirm the findings are complete and accurate.
 1. Check if `docs/sdk-architecture/{language}.md` already exists in the emitter project. If it does, confirm with the user whether changes are needed.
 2. If no design doc exists, present the Structural Guidelines Table and ask the user to confirm or override each category: Testing Framework, HTTP Mocking, Documentation, Type Signatures, Linting/Formatting, HTTP Client, JSON Parsing, Package Manager, Build Tool.
 
-### 0c. Create SDK Design Document
+### 1c. Create SDK Design Document
 
 Write the full design document to `docs/sdk-architecture/{language}.md` **in the emitter project**.
 
-**For Scenario A:** Derive the doc entirely from the patterns extracted in Step 0a. Every code example must come from the real SDK, not be invented. The design doc is the contract between the study phase and the implementation phase.
+**For Scenario A:** Derive the doc entirely from the patterns extracted in Step 1a. Every code example must come from the real SDK, not be invented. The design doc is the contract between the study phase and the implementation phase.
 
 **For Scenario B:** Use the confirmed structural guidelines plus your knowledge of the language ecosystem.
 
@@ -111,7 +117,7 @@ The design doc must include: architecture overview, naming conventions, type map
 
 **CRITICAL for Scenario A:** If the existing SDK has patterns NOT covered by the standard emitter scaffold (e.g., serializers, factory functions, dual type systems), those patterns MUST be documented as additional generator files.
 
-## Step 1: Scaffold Emitter Files
+## Step 2: Scaffold Emitter Files
 
 Create the following files under `src/{language}/` **in the emitter project**:
 
@@ -132,7 +138,7 @@ Create the following files under `src/{language}/` **in the emitter project**:
 └── manifest.ts       # Smoke test manifest (operation → SDK method mapping)
 ```
 
-Not every language needs every file, and some languages may need **additional** files beyond this scaffold. **For Scenario A**, the design doc from Step 0c may identify additional generators needed (e.g., `serializers.ts`, `common.ts`, `factory.ts`, `request-types.ts`). The file list in the design doc is authoritative, not this generic scaffold.
+Not every language needs every file, and some languages may need **additional** files beyond this scaffold. **For Scenario A**, the design doc from Step 1c may identify additional generators needed (e.g., `serializers.ts`, `common.ts`, `factory.ts`, `request-types.ts`). The file list in the design doc is authoritative, not this generic scaffold.
 
 Omit files that don't apply, and add language-specific utility files as needed. The `index.ts` must still implement all `Emitter` interface methods (return `[]` for inapplicable ones).
 
@@ -163,7 +169,7 @@ import { mapTypeRef } from "./type-map.js";
 import { className, fileName } from "./naming.js";
 ```
 
-## Steps 2–4: Implement Generators
+## Steps 3–5: Implement Generators
 
 Read `references/generator-guide.md` for detailed instructions on implementing each generator file: type-map.ts, naming.ts, models.ts, enums.ts, resources.ts, serializers.ts (if applicable), client.ts, errors.ts, config.ts, common.ts (if applicable), type signatures, tests.ts, and fixtures.ts.
 
@@ -193,7 +199,7 @@ Then, for each generator, follow this pattern:
 
 **CRITICAL for Scenario A:** Each generator must produce output that matches the patterns documented in the design doc. Do NOT invent patterns that weren't found in the existing SDK.
 
-## Step 5: Create Entry Point (`index.ts`)
+## Step 6: Create Entry Point (`index.ts`)
 
 Wire everything together by implementing the `Emitter` interface:
 
@@ -219,7 +225,7 @@ export const {language}Emitter: Emitter = {
 };
 ```
 
-## Step 6: Register Emitter
+## Step 7: Register Emitter
 
 Add the emitter to `oagen.config.ts` and re-export from `src/index.ts`:
 
@@ -232,7 +238,7 @@ const config: OagenConfig = { emitters: [/* existing, */ {language}Emitter] };
 export { {language}Emitter } from './{language}/index.js';
 ```
 
-## Step 7: Create Tests
+## Step 8: Create Tests
 
 Create test files under `test/{language}/` **in the emitter project**:
 
@@ -271,7 +277,7 @@ const ctx: EmitterContext = {
 };
 ```
 
-## Step 8: Validate
+## Step 9: Validate
 
 ```bash
 # In the emitter project — all tests pass
@@ -372,6 +378,15 @@ Also check `interfaceByName` and `typeAliasByName` for type names, and `required
 ## Common Pitfalls
 
 Read `references/common-pitfalls.md` before finalizing the emitter, and when debugging failures. Key ones: don't invent patterns (replicate), keep generators pure, namespace everywhere, don't ignore overlay, match the existing test framework exactly.
+
+## Output
+
+This skill produces, in the emitter project:
+
+- `src/{language}/*.ts` — emitter generator files implementing the `Emitter` interface
+- `test/{language}/*.ts` — unit tests for each generator
+- `docs/sdk-architecture/{language}.md` — SDK design document
+- Updated `oagen.config.ts` with the new emitter registered
 
 ## Backwards Compatibility
 

@@ -5,15 +5,27 @@ description: Run the generate-verify loop to iteratively fix an emitter until sm
 
 # /verify-smoke-test
 
+## Purpose
+
 Run `oagen generate` → `oagen verify` in a loop, diagnosing and fixing the emitter (or smoke script) after each iteration until verify exits 0.
 
 This is the final phase of `/generate-sdk` setup — after the emitter, extractor, compat overlay, and smoke tests are all scaffolded, this loop gets the emitter actually producing correct output.
 
+## Inputs
+
+- **language** — target language (e.g., `node`, `ruby`, `python`)
+- **spec** — path to the OpenAPI spec
+- **output** — path to the generated SDK output directory
+- **project** — path to the emitter project
+- **namespace** — SDK namespace/package name
+- **sdk_path** *(optional, Scenario A)* — path to the live SDK for target integration
+- **api-surface** *(optional, Scenario A)* — path to `sdk-{language}-surface.json`
+
 ## Reference Docs
 
-- [Workflows](docs/architecture/workflows.md) — emitter-fixing loop and final validation
-- [Emitter Contract](docs/architecture/emitter-contract.md) — generator methods and `GeneratedFile` shape
-- [Testing & Smoke Validation](docs/agents/testing.md) — smoke testing guide and exit codes
+- [Workflows](../../docs/architecture/workflows.md) — emitter-fixing loop and final validation
+- [Emitter Contract](../../docs/architecture/emitter-contract.md) — generator methods and `GeneratedFile` shape
+- [Testing & Smoke Validation](../../docs/agents/testing.md) — smoke testing guide and exit codes
 
 ## When to Use
 
@@ -156,3 +168,9 @@ The findings file (`smoke-diff-findings.json` or `smoke-compile-errors.json`) is
 1. Read the existing findings file
 2. Skip straight to the fix step (Step 4 or 5)
 3. After fixing, resume the loop from Step 1
+
+## Output
+
+- Clean verify exit (exit 0) with all smoke tests passing
+- Unit tests and type check passing in the emitter project
+- Iteration summary showing number of rounds and fixes applied

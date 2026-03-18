@@ -39,7 +39,7 @@ Read and understand these files before writing any code:
 4. **`{oagen}/scripts/smoke/diff.ts`** — diff tool severity levels (CRITICAL/WARNING/INFO)
 5. **`docs/sdk-architecture/{language}.md`** (in emitter project) — target language patterns and HTTP client
 
-## Resolve Emitter Project
+## Resolve Spec Path
 
 Determine the location of the OpenAPI spec before doing anything:
 
@@ -176,3 +176,10 @@ If many operations are skipped with "No matching SDK method", check that the emi
 | 2    | Compile error | `smoke-compile-errors.json` | Read errors, fix emitter                |
 
 See `scripts/smoke/README.md` (in oagen core) for the full remediation guide. See [Workflows](../../docs/architecture/workflows.md) for the overall workflow diagram.
+
+## Output
+
+This skill produces, in the emitter project:
+
+- `smoke/sdk-{language}.ts` — self-contained smoke test script
+- Updated `oagen.config.ts` with the smoke runner path registered

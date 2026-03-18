@@ -32,44 +32,30 @@ Sub-skills use **subagents** (via the built-in `Explore` agent type) to keep the
 
 Each sub-skill documents where it uses subagents:
 
-- `/generate-emitter` — Step 0a (SDK exploration) and Steps 2-4 (reference emitter reading)
+- `/generate-emitter` — Step 1a (SDK exploration) and Steps 3-5 (reference emitter reading)
 - `/generate-extractor` — Prerequisites (SDK exploration)
 - `/generate-smoke-test` — Prerequisites (reference smoke script reading) and Step 2 (SDK SERVICE_MAP)
 - `/verify-compat` — Step 1 (baseline extraction spot-check)
 
-## Step 1: Determine Language
+## Step 1: Gather Inputs
 
-Use `AskUserQuestion` to determine the target language (e.g., "ruby", "python", "php", "node"). Store `language` and pass it to all sub-skill invocations.
+Collect these values via `AskUserQuestion`. If any were provided as arguments, skip the corresponding question.
 
-## Step 2: Determine Scenario
+1. **`language`** — target language (e.g., `ruby`, `python`, `php`, `node`)
+2. **`scenario`** — which workflow to use:
+   > **A. Backwards compatible** — There's a published SDK with consumers who depend on its public API. The generated SDK must match the existing surface.
+   >
+   > **B. Fresh** — No existing SDK to preserve, or you're intentionally replacing one. No compat constraints.
+3. **`sdk_path`** *(Scenario A only)* — path to the existing SDK. Validate the path exists (look for `package.json`, `Gemfile`, `go.mod`, `pyproject.toml`, or similar).
+4. **`project`** — emitter project path (e.g., `../oagen-emitters/node`). Create if needed:
+   ```bash
+   mkdir -p {project}/src/{language} && mkdir -p {project}/test/{language}
+   ```
+5. **`spec`** — path to the OpenAPI spec (e.g., `../openapi.yaml`)
 
-Use `AskUserQuestion` to determine which scenario applies:
+Store all values and pass them to all sub-skill invocations.
 
-> **A. Backwards compatible** — There's a published SDK with consumers who depend on its public API. The generated SDK must match the existing surface.
->
-> **B. Fresh** — No existing SDK to preserve, or you're intentionally replacing one. No compat constraints.
-
-**For Scenario A:** Also ask: "Where is the existing SDK? (absolute or relative path)" Validate the path exists (look for `package.json`, `Gemfile`, `go.mod`, `pyproject.toml`, or similar). Store `sdk_path`.
-
-## Step 3: Determine Project Location
-
-Use `AskUserQuestion`: "Where is your emitter project located? (absolute or relative path, e.g. `../oagen-emitters/node`)"
-
-Validate and create if needed:
-
-```bash
-mkdir -p {project}/src/{language} && mkdir -p {project}/test/{language}
-```
-
-Store `project` and pass it to all sub-skill invocations.
-
-## Step 4: Determine OpenAPI spec Location
-
-Use `AskUserQuestion`: "Where is your OpenAPI spec located? (absolute or relative path, e.g. `../openapi.yaml`)"
-
-Store as `spec` and pass it to all sub-skill invocations.
-
-## Step 5: Present the Plan
+## Step 2: Present the Plan
 
 ### Scenario A — Backwards compatible
 
@@ -94,7 +80,7 @@ Step 3: /verify-smoke-test {language}              — run smoke tests
 
 Confirm with the user, then invoke the first skill.
 
-## Step 6: Run Skills in Sequence
+## Step 3: Run Skills in Sequence
 
 Invoke each skill in order using the `Skill` tool, passing `project` through. After each skill, validate:
 
@@ -127,7 +113,7 @@ grep -c "existing SDK\|from src/" {project}/docs/sdk-architecture/{language}.md
 
 If a skill fails or the user wants to pause, note where they stopped. They can resume by running the remaining skills individually.
 
-## Step 7: Final Checklist
+## Step 4: Final Checklist
 
 Run the full validation suite:
 

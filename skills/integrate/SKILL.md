@@ -5,13 +5,15 @@ description: Integrate generated SDK code into a live SDK by running `oagen gene
 
 # /integrate
 
+## Purpose
+
 Integrate generated SDK code into a live SDK by running `oagen generate --target`. This runs every time code is generated for a live SDK, not just once — both during initial setup and on every subsequent spec update. The writer's additive merge makes it safe to run on every regeneration.
 
 ## Reference Docs
 
-- [Pipeline Architecture](docs/architecture/pipeline.md) — how the writer's additive merge works
-- [Workflows](docs/architecture/workflows.md) — where `/integrate` fits in the overall workflow
-- [Emitter Contract](docs/architecture/emitter-contract.md) — overlay integration and `skipIfExists`
+- [Pipeline Architecture](../../docs/architecture/pipeline.md) — how the writer's additive merge works
+- [Workflows](../../docs/architecture/workflows.md) — where `/integrate` fits in the overall workflow
+- [Emitter Contract](../../docs/architecture/emitter-contract.md) — overlay integration and `skipIfExists`
 
 ## Prerequisites
 
@@ -98,3 +100,9 @@ Next steps:
   - Run tests: cd {sdk_path} && npm test
   - If needed, re-run /integrate after fixing issues
 ```
+
+## Output
+
+- Generated files written to `{output}` directory
+- Files merged into the live SDK at `{sdk_path}` via the writer's additive merge
+- Summary report showing new files created, existing files merged, and files skipped

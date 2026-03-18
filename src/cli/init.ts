@@ -57,8 +57,7 @@ export async function initCommand(opts: { lang: string; project?: string }): Pro
   // Print next steps
   console.log('');
   console.log('Next steps:');
-  console.log('  1. npm install');
-  console.log(`  2. Implement your emitter in src/${lang}/index.ts`);
-  console.log('  3. npm run sdk:generate -- --spec <path-to-spec> --namespace <Name>');
-  console.log('  4. npm run sdk:verify -- --spec <path-to-spec>');
+  console.log(`  - Implement your emitter in src/${lang}/index.ts`);
+  console.log('  - npm run sdk:generate -- --spec <path-to-spec> --namespace <Name>');
+  console.log('  - npm run sdk:verify -- --spec <path-to-spec>');
 }

@@ -17,6 +17,15 @@ This is the middle tier of the three-tier testing pyramid:
 - **Compat verification** — verify the API surface (names, signatures, exports) matches the live SDK
 - **Smoke tests** — verify wire-level HTTP behavior against the real API
 
+## Reference Docs
+
+- [Extractor Contract](../../docs/architecture/extractor-contract.md) — `Extractor` interface, `ApiSurface` type, Language Hints reference
+- [Workflows](../../docs/architecture/workflows.md) — where compat verification fits in the overall setup flow
+- Language hints: `src/compat/language-hints.ts` (`nodeHints`, `resolveHints`)
+- Node extractor (reference): `src/compat/extractors/node.ts`
+- Overlay logic: `src/compat/overlay.ts`
+- Differ: `src/compat/differ.ts`
+
 ## Resolve oagen Core Path
 
 Check for `node_modules/@workos/oagen/`, or `src/engine/types.ts` in the current directory, otherwise ask.
@@ -135,11 +144,8 @@ For languages where backwards compatibility isn't relevant (full rewrites, new S
 oagen generate --spec <spec> --lang <language> --output <path> --no-compat-check
 ```
 
-## Reference
+## Output
 
-- Extractor contract: `{oagen}/docs/architecture/extractor-contract.md` (includes Language Hints reference)
-- Language hints: `{oagen}/src/compat/language-hints.ts` (`nodeHints`, `resolveHints`)
-- Compat types: `{oagen}/src/compat/types.ts` (`LanguageHints`, `Extractor`)
-- Node extractor (reference): `{oagen}/src/compat/extractors/node.ts`
-- Overlay logic: `{oagen}/src/compat/overlay.ts`
-- Differ: `{oagen}/src/compat/differ.ts`
+- `{project}/sdk-{language}-surface.json` — extracted API surface baseline
+- Generated SDK at `{project}/sdk/` with compat overlay applied
+- Violation report (exit 1) or clean pass (exit 0)

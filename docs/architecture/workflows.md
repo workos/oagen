@@ -176,6 +176,16 @@ interface DiffResult {
 }
 ```
 
+Each `Violation` carries a `ViolationCategory` that indicates the kind of breaking change:
+
+| ViolationCategory    | Meaning                                                |
+| -------------------- | ------------------------------------------------------ |
+| `public-api`         | A public class, method, or type was renamed or removed |
+| `signature`          | A method's parameter list or return type changed       |
+| `export-structure`   | A barrel export is missing or reorganized              |
+| `behavioral`         | A behavioral contract changed (e.g., async to sync)    |
+| `staleness`          | A symbol was removed from the spec but still exists    |
+
 The spec differ (used by `oagen diff`) returns a `DiffReport`:
 
 ```typescript

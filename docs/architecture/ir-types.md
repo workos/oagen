@@ -46,6 +46,29 @@ The `format` field on `PrimitiveType` carries additional type information:
 | `number`  | (none)      | Floating point    |
 | `boolean` | (none)      | Boolean           |
 
+## AuthScheme
+
+```typescript
+type AuthScheme =
+  | { kind: 'bearer' }
+  | { kind: 'apiKey'; in: 'header' | 'query'; name: string }
+  | { kind: 'oauth2'; flows: Record<string, unknown> };
+```
+
+Emitters use `AuthScheme` to generate authentication configuration and client constructors.
+
+## PaginationMeta
+
+```typescript
+interface PaginationMeta {
+  cursorParam: string; // Query param name for the cursor (e.g., "after")
+  dataPath: string;    // JSON path to the data array (e.g., "data")
+  itemType: TypeRef;   // Type of each item in the paginated list
+}
+```
+
+Present on `Operation` when `paginated: true`. Emitters use this to generate pagination helpers (iterators, auto-paging methods).
+
 ## Service & Operation
 
 ```typescript
