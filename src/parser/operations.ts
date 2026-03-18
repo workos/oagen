@@ -72,12 +72,13 @@ export function extractOperations(
   const inlineModels: Model[] = [];
 
   for (const [path, pathItem] of Object.entries(paths)) {
-    const serviceName = inferServiceName(path);
     const pathLevelParams = pathItem.parameters ?? [];
 
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
       if (!op) continue;
+
+      const serviceName = inferServiceName(path, op.tags?.[0]);
 
       const { operation, inlineModels: opModels } = buildOperation(
         method,
@@ -108,8 +109,13 @@ export function extractOperations(
   return { services, inlineModels };
 }
 
-function inferServiceName(path: string): string {
-  // Extract first meaningful path segment: /widgets/{id}/sub → "Widgets"
+function inferServiceName(path: string, tag?: string): string {
+  // Prefer OpenAPI tag when available — tags represent the logical grouping
+  // (e.g., "multi-factor-auth" for /auth/factors/* endpoints).
+  if (tag) {
+    return toPascalCase(tag);
+  }
+  // Fallback: extract first meaningful path segment: /widgets/{id}/sub → "Widgets"
   const segments = path.split('/').filter(Boolean);
   const first = segments[0] ?? 'Default';
   // Skip path params
@@ -305,7 +311,7 @@ function buildOperation(
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
-      description: op.description ?? op.summary,
+      description: buildDescription(op.summary, op.description),
       httpMethod: method,
       path,
       pathParams,
@@ -322,6 +328,13 @@ function buildOperation(
     },
     inlineModels,
   };
+}
+
+function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
+  if (summary && description && summary !== description) {
+    return `${summary}\n\n${description}`;
+  }
+  return description ?? summary;
 }
 
 function extractParams(params: ParameterObject[], location: 'path' | 'query' | 'header'): Parameter[] {
