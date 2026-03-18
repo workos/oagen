@@ -236,6 +236,75 @@ describe('writeFiles', () => {
     }
   });
 
+  it('deep merges JSON preserving existing keys', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'package.json');
+      await fs.writeFile(
+        filePath,
+        JSON.stringify({ name: 'my-sdk', version: '1.0.0', author: 'Alice', scripts: { test: 'vitest', custom: 'echo hi' } }, null, 2) + '\n',
+      );
+
+      const result = await writeFiles(
+        [
+          {
+            path: 'package.json',
+            content: JSON.stringify({ name: 'my-sdk', version: '2.0.0', scripts: { test: 'vitest run', lint: 'eslint' } }, null, 2) + '\n',
+          },
+        ],
+        tmpDir,
+      );
+
+      expect(result.merged).toContain('package.json');
+      const content = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+      expect(content.version).toBe('2.0.0');
+      expect(content.author).toBe('Alice');
+      expect(content.scripts.custom).toBe('echo hi');
+      expect(content.scripts.test).toBe('vitest run');
+      expect(content.scripts.lint).toBe('eslint');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('replaces arrays in JSON merge', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'data.json');
+      await fs.writeFile(filePath, JSON.stringify({ items: ['old'] }, null, 2) + '\n');
+
+      const result = await writeFiles(
+        [{ path: 'data.json', content: JSON.stringify({ items: ['new', 'values'] }, null, 2) + '\n' }],
+        tmpDir,
+      );
+
+      expect(result.merged).toContain('data.json');
+      const content = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+      expect(content.items).toEqual(['new', 'values']);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  it('falls back to overwrite for invalid JSON', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'broken.json');
+      await fs.writeFile(filePath, 'not valid json {{{');
+
+      const result = await writeFiles(
+        [{ path: 'broken.json', content: '{"valid": true}' }],
+        tmpDir,
+      );
+
+      expect(result.written).toContain('broken.json');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toBe('{"valid": true}');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
   it('merges additive Rust declarations into existing files', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
     try {

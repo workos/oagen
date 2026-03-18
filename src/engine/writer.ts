@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { GeneratedFile } from './types.js';
 import { mergeIntoExisting, hasGrammar } from './merger.js';
+import { deepMergeJson } from './json-merge.js';
 
 export interface WriteOptions {
   /** The emitter language (e.g., "node", "ruby"). Used to select the
@@ -69,10 +70,24 @@ export async function writeFiles(
       continue;
     }
 
-    // JSON files → overwrite (data files like manifests)
+    // JSON files → deep merge preserving existing keys
     if (file.path.endsWith('.json')) {
-      await fs.writeFile(fullPath, file.content, 'utf-8');
-      result.written.push(file.path);
+      try {
+        const existingJson = JSON.parse(existingContent);
+        const generatedJson = JSON.parse(file.content);
+        const merged = deepMergeJson(existingJson, generatedJson);
+        const mergedContent = JSON.stringify(merged, null, 2) + '\n';
+        if (mergedContent === existingContent) {
+          result.identical.push(file.path);
+        } else {
+          await fs.writeFile(fullPath, mergedContent, 'utf-8');
+          result.merged.push(file.path);
+        }
+      } catch {
+        // Parse failed — fall back to overwrite
+        await fs.writeFile(fullPath, file.content, 'utf-8');
+        result.written.push(file.path);
+      }
       continue;
     }
 
