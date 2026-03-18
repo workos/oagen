@@ -96,6 +96,22 @@ export async function writeFiles(
 
     // Source files with grammar → AST-level merge
     if (language && hasGrammar(language)) {
+      if (file.mergeMode === 'docstring-only') {
+        // Only update docstrings and ensure header — no new imports/symbols/members
+        const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header, { docstringOnly: true });
+        let finalContent = mergeResult.content;
+        if (header && !finalContent.startsWith(header)) {
+          finalContent = header + '\n\n' + finalContent;
+        }
+        if (finalContent === existingContent) {
+          result.identical.push(file.path);
+        } else {
+          await fs.writeFile(fullPath, finalContent, 'utf-8');
+          result.merged.push(file.path);
+        }
+        continue;
+      }
+
       const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header);
 
       // Ensure header is present on merged content
