@@ -2,9 +2,29 @@
   "name": "@workos/oagen",
   "version": "0.0.1",
   "description": "Framework for building OpenAPI SDK emitters",
+  "author": "WorkOS",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=24.10.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workos/oagen.git"
+  },
+  "bugs": {
+    "url": "https://github.com/workos/oagen/issues"
+  },
+  "homepage": "https://github.com/workos/oagen#readme",
+  "keywords": [
+    "openapi",
+    "sdk",
+    "generator",
+    "codegen",
+    "api"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -77,7 +97,5 @@
     "prettier": "^3.8.1",
     "tsup": "^8.4.0",
     "vitest": "^3.0.0"
-  },
-  "author": "WorkOS",
-  "license": "MIT"
+  }
 }
