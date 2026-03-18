@@ -29,6 +29,23 @@ export interface DeepMergeSymbol {
   bodyEndLine: number;
 }
 
+export interface DocstringInfo {
+  text: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+export interface SymbolDocstrings {
+  docstring: DocstringInfo | null;
+  declStartIndex: number;
+  declColumn: number;
+  members: Map<string, {
+    docstring: DocstringInfo | null;
+    declStartIndex: number;
+    declColumn: number;
+  }>;
+}
+
 export interface MergeAdapter {
   language: string;
   grammarModule: string;
@@ -37,4 +54,5 @@ export interface MergeAdapter {
   normalizeReexport?(text: string): string;
   renderImports?(imports: MergeImport[]): string[];
   extractMembers?(tree: Parser.Tree, source: string): Map<string, DeepMergeSymbol>;
+  extractDocstrings?(tree: Parser.Tree, source: string): Map<string, SymbolDocstrings>;
 }

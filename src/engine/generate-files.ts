@@ -43,7 +43,7 @@ export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterCo
 export function applyFileHeaders(files: GeneratedFile[], header: string): GeneratedFile[] {
   return files.map((f) => ({
     ...f,
-    content: f.path.endsWith('.json') || f.headerPlacement === 'skip' ? f.content : header + '\n\n' + f.content,
+    content: !header || f.path.endsWith('.json') || f.headerPlacement === 'skip' ? f.content : header + '\n\n' + f.content,
     skipIfExists: f.skipIfExists ?? false,
   }));
 }

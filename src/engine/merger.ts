@@ -211,8 +211,8 @@ export async function mergeIntoExisting(
   }
 
   if (newImports.length === 0 && toAppend.length === 0) {
-    // No top-level changes — check for deep merge before returning
-    if (!adapter.extractMembers) {
+    // No top-level changes — check for deep merge or docstring refresh before returning
+    if (!adapter.extractMembers && !adapter.extractDocstrings) {
       return { content: existingContent, added: 0, preserved, changed: false };
     }
   }
@@ -274,10 +274,83 @@ export async function mergeIntoExisting(
     }
   }
 
+  // Docstring refresh pass: update existing docstrings to match generated content
+  let docstringUpdates = 0;
+  if (adapter.extractDocstrings) {
+    const parser = await getParser(language);
+    const resultTree = safeParse(parser, result);
+    const generatedTree = safeParse(parser, generatedContent);
+    const resultDocs = adapter.extractDocstrings(resultTree, result);
+    const generatedDocs = adapter.extractDocstrings(generatedTree, generatedContent);
+
+    const edits: { start: number; end: number; newText: string }[] = [];
+
+    for (const [symbolName, genInfo] of generatedDocs) {
+      const existInfo = resultDocs.get(symbolName);
+      if (!existInfo) continue;
+
+      // Top-level docstring
+      if (genInfo.docstring) {
+        if (existInfo.docstring) {
+          if (existInfo.docstring.text !== genInfo.docstring.text) {
+            edits.push({
+              start: existInfo.docstring.startIndex,
+              end: existInfo.docstring.endIndex,
+              newText: genInfo.docstring.text,
+            });
+            docstringUpdates++;
+          }
+        } else {
+          const lineStart = existInfo.declStartIndex - existInfo.declColumn;
+          const indent = ' '.repeat(existInfo.declColumn);
+          edits.push({
+            start: lineStart,
+            end: lineStart,
+            newText: indent + genInfo.docstring.text + '\n',
+          });
+          docstringUpdates++;
+        }
+      }
+
+      // Member-level docstrings
+      for (const [memberName, genMember] of genInfo.members) {
+        const existMember = existInfo.members.get(memberName);
+        if (!existMember || !genMember.docstring) continue;
+
+        if (existMember.docstring) {
+          if (existMember.docstring.text !== genMember.docstring.text) {
+            edits.push({
+              start: existMember.docstring.startIndex,
+              end: existMember.docstring.endIndex,
+              newText: genMember.docstring.text,
+            });
+            docstringUpdates++;
+          }
+        } else {
+          const lineStart = existMember.declStartIndex - existMember.declColumn;
+          const indent = ' '.repeat(existMember.declColumn);
+          edits.push({
+            start: lineStart,
+            end: lineStart,
+            newText: indent + genMember.docstring.text + '\n',
+          });
+          docstringUpdates++;
+        }
+      }
+    }
+
+    if (edits.length > 0) {
+      edits.sort((a, b) => b.start - a.start);
+      for (const edit of edits) {
+        result = result.slice(0, edit.start) + edit.newText + result.slice(edit.end);
+      }
+    }
+  }
+
   const topLevelAdded = (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) + toAppend.length;
   const totalAdded = topLevelAdded + deepAdded;
 
-  if (totalAdded === 0) {
+  if (totalAdded === 0 && docstringUpdates === 0) {
     return { content: existingContent, added: 0, preserved, changed: false };
   }
 
