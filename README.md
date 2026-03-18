@@ -2,6 +2,14 @@
 
 A framework for building language emitters that transform OpenAPI 3.x specifications into idiomatic SDK code. It provides the parsing pipeline, intermediate representation, compatibility verification, and CLI tooling — you supply the emitter for your target language.
 
+## Architecture
+
+oagen has three layers that build on each other:
+
+- Core: parse OpenAPI into IR, run emitters, diff specs, and produce generated files.
+- Compat: extract SDK API surfaces, diff generated output against an existing SDK, and apply overlay-based name preservation.
+- Workflow: CLI commands, smoke verification, retry loops, scaffolding, and integration helpers.
+
 ## Quickstart
 
 ```bash

@@ -14,8 +14,8 @@ function run(
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile(
-      'npx',
-      ['tsx', CLI, ...args],
+      'node',
+      ['--import', 'tsx', CLI, ...args],
       {
         cwd: opts?.cwd,
         env: { ...process.env, ...env, OPENAPI_SPEC_PATH: undefined, DOTENV_CONFIG_PATH: '/dev/null' },
