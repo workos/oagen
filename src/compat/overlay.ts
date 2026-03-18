@@ -72,16 +72,33 @@ export function buildOverlayLookup(
       const key = `${entry.httpMethod.toUpperCase()} ${entry.path}`;
       const className = findClassForProperty(surface, entry.sdkResourceProperty, resolvedHints);
       if (className) {
-        const methods = surface.classes[className]?.methods[entry.sdkMethodName];
+        let resolvedMethodName = entry.sdkMethodName;
+        let methods = surface.classes[className]?.methods[resolvedMethodName];
+
+        // Exact match failed — try prefix match on the resolved class.
+        // Handles cases where the generated name is shorter than the existing name
+        // (e.g., manifest says "delete" but existing SDK has "deleteApiKey").
+        if (!methods) {
+          const classMethods = surface.classes[className]?.methods ?? {};
+          const prefix = resolvedMethodName.toLowerCase();
+          for (const [name, overloads] of Object.entries(classMethods)) {
+            if (name.toLowerCase().startsWith(prefix) && name !== resolvedMethodName) {
+              methods = overloads;
+              resolvedMethodName = name;
+              break;
+            }
+          }
+        }
+
         const method = methods?.[0];
         if (method) {
           lookup.methodByOperation.set(key, {
             className,
-            methodName: entry.sdkMethodName,
+            methodName: resolvedMethodName,
             params: method.params,
             returnType: method.returnType,
           });
-          lookup.httpKeyByMethod.set(`${className}.${entry.sdkMethodName}`, key);
+          lookup.httpKeyByMethod.set(`${className}.${resolvedMethodName}`, key);
         }
       }
     }

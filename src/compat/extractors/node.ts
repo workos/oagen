@@ -75,6 +75,10 @@ export const nodeExtractor: Extractor = {
       }
     }
 
+    // Follow property types on extracted classes to discover resource classes
+    // (e.g., WorkOS.apiKeys: ApiKeys → extract ApiKeys)
+    followPropertyTypeClasses(exportedSymbols, checker, classes, sdkPath);
+
     const exports = buildExportMap(entrySourceFile, checker, sdkPath, program);
 
     return {
@@ -89,6 +93,63 @@ export const nodeExtractor: Extractor = {
     };
   },
 };
+
+function followPropertyTypeClasses(
+  exportedSymbols: ts.Symbol[],
+  checker: ts.TypeChecker,
+  classes: Record<string, ApiClass>,
+  sdkPath: string,
+): void {
+  // Build initial set of class symbols from exports
+  const classSymbols = new Map<string, ts.Symbol>();
+  for (const sym of exportedSymbols) {
+    const resolved = resolveAlias(sym, checker);
+    const decls = resolved.getDeclarations();
+    if (decls?.some((d) => ts.isClassDeclaration(d))) {
+      classSymbols.set(resolved.name, resolved);
+    }
+  }
+
+  const toVisit = [...classSymbols.values()];
+  const visited = new Set(classSymbols.keys());
+
+  while (toVisit.length > 0) {
+    const sym = toVisit.pop()!;
+    const type = checker.getDeclaredTypeOfSymbol(sym);
+    const decls = sym.getDeclarations();
+    if (!decls || decls.length === 0) continue;
+
+    for (const prop of type.getProperties()) {
+      const propDecls = prop.getDeclarations();
+      if (!propDecls || propDecls.length === 0) continue;
+      const propDecl = propDecls[0];
+
+      // Skip private/protected
+      const modifiers = ts.canHaveModifiers(propDecl) ? ts.getModifiers(propDecl) : undefined;
+      if (
+        modifiers?.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword || m.kind === ts.SyntaxKind.ProtectedKeyword)
+      ) {
+        continue;
+      }
+
+      const propType = checker.getTypeOfSymbolAtLocation(prop, propDecl);
+      const propSymbol = propType.getSymbol();
+      if (!propSymbol) continue;
+
+      const propName = propSymbol.name;
+      if (visited.has(propName)) continue;
+
+      const propSymDecls = propSymbol.getDeclarations();
+      if (!propSymDecls?.some((d) => ts.isClassDeclaration(d))) continue;
+
+      // Found a class referenced by property type — extract it
+      visited.add(propName);
+      const sourceFile = relative(sdkPath, propSymDecls[0].getSourceFile().fileName);
+      classes[propName] = { ...extractClass(propSymbol, checker), sourceFile };
+      toVisit.push(propSymbol);
+    }
+  }
+}
 
 function resolveEntryPoint(sdkPath: string, program: ts.Program): string {
   const pkgPath = resolve(sdkPath, 'package.json');
