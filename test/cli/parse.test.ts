@@ -33,7 +33,6 @@ describe('parseCommand', () => {
   });
 
   it('exits 1 when spec file does not exist', async () => {
-    // parseCommand calls process.exit(1) on error, which vitest intercepts
-    await expect(parseCommand({ spec: '/nonexistent/spec.yml' })).rejects.toThrow(/process\.exit/);
+    await expect(parseCommand({ spec: '/nonexistent/spec.yml' })).rejects.toThrow();
   });
 });

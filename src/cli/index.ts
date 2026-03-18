@@ -8,23 +8,29 @@ import { verifyCommand } from './verify.js';
 import { initCommand } from './init.js';
 import { loadConfig } from './config-loader.js';
 import { applyConfig } from './plugin-loader.js';
+import { CommandError } from '../errors.js';
 
 function handleError(err: unknown): never {
+  const exitCode = err instanceof CommandError ? err.exitCode : 1;
   const message = err instanceof Error ? err.message : String(err);
-  console.error(message);
-  process.exit(1);
+  if (message) console.error(message);
+  process.exit(exitCode);
 }
 
 // Load config synchronously at startup so user-provided emitters/extractors are
 // registered before any command runs. loadConfig is async (dynamic import), so
 // we use top-level await.
-const config = await loadConfig();
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
-if (config) {
-  applyConfig(config);
-  configSmokeRunners = config.smokeRunners;
-  configOperationIdTransform = config.operationIdTransform;
+try {
+  const config = await loadConfig();
+  if (config) {
+    applyConfig(config);
+    configSmokeRunners = config.smokeRunners;
+    configOperationIdTransform = config.operationIdTransform;
+  }
+} catch (err) {
+  handleError(err);
 }
 
 const program = new Command().name('oagen').description('Framework for building OpenAPI SDK emitters').version('0.0.1');

@@ -3,6 +3,7 @@ import { diffSpecs } from '../differ/diff.js';
 import { generateIncremental } from '../engine/incremental.js';
 import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
+import { CommandError } from '../errors.js';
 
 export async function diffCommand(opts: {
   old: string;
@@ -23,7 +24,9 @@ export async function diffCommand(opts: {
   if (opts.report) {
     const diff = diffSpecs(oldSpec, newSpec);
     console.log(JSON.stringify(diff, null, 2));
-    process.exit(
+    throw new CommandError(
+      '',
+      '',
       diff.summary.breaking > 0
         ? 2
         : diff.summary.modified > 0 || diff.summary.removed > 0
@@ -35,8 +38,7 @@ export async function diffCommand(opts: {
   }
 
   if (!opts.lang || !opts.output) {
-    console.error('--lang and --output are required for incremental generation');
-    process.exit(1);
+    throw new CommandError('--lang and --output are required for incremental generation', '', 1);
   }
 
   // Build overlay from API surface if provided

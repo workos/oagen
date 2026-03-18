@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -6,6 +6,7 @@ import { loadConfig } from '../../src/cli/config-loader.js';
 import { applyConfig } from '../../src/cli/plugin-loader.js';
 import { getEmitter } from '../../src/engine/registry.js';
 import type { Emitter } from '../../src/engine/types.js';
+import { ConfigLoadError, ConfigVersionMismatchError } from '../../src/errors.js';
 
 describe('loadConfig', () => {
   let tmpDir: string;
@@ -46,16 +47,8 @@ describe('loadConfig', () => {
 
   it('exits with error when irVersion does not match IR_VERSION', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 9999 };`);
-    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    const mockError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      await loadConfig(tmpDir);
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('IR version mismatch'));
-    } finally {
-      mockExit.mockRestore();
-      mockError.mockRestore();
-    }
+    await expect(loadConfig(tmpDir)).rejects.toBeInstanceOf(ConfigVersionMismatchError);
+    await expect(loadConfig(tmpDir)).rejects.toThrow('IR version mismatch');
   });
 
   it('loads config successfully when irVersion matches', async () => {
@@ -67,16 +60,8 @@ describe('loadConfig', () => {
 
   it('exits with error when config file exists but fails to load', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `throw new Error('bad config');`);
-    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    const mockError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      await loadConfig(tmpDir);
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('Failed to load oagen.config.mjs'));
-    } finally {
-      mockExit.mockRestore();
-      mockError.mockRestore();
-    }
+    await expect(loadConfig(tmpDir)).rejects.toBeInstanceOf(ConfigLoadError);
+    await expect(loadConfig(tmpDir)).rejects.toThrow('Failed to load oagen.config.mjs');
   });
 });
 

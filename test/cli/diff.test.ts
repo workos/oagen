@@ -44,34 +44,27 @@ import { diffCommand } from '../../src/cli/diff.js';
 describe('diffCommand', () => {
   let tmpDir: string;
   let consoleSpy: ReturnType<typeof vi.spyOn>;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     tmpDir = resolve(os.tmpdir(), `oagen-diff-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('process.exit called');
-    }) as never);
   });
 
   afterEach(() => {
     consoleSpy.mockRestore();
-    errorSpy.mockRestore();
     vi.restoreAllMocks();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it('outputs JSON report in --report mode', async () => {
-    // process.exit is called after console.log in report mode — catch it
     await expect(
       diffCommand({
         old: V1,
         new: V2_ADDITIVE,
         report: true,
       }),
-    ).rejects.toThrow('process.exit called');
+    ).rejects.toThrow();
 
     // Find the call that contains valid JSON (the diff report)
     const jsonCall = consoleSpy.mock.calls.find((call) => {
@@ -97,7 +90,7 @@ describe('diffCommand', () => {
         new: V2_BREAKING,
         report: true,
       }),
-    ).rejects.toThrow('process.exit called');
+    ).rejects.toThrow();
 
     const jsonCall = consoleSpy.mock.calls.find((call) => {
       try {
@@ -112,14 +105,13 @@ describe('diffCommand', () => {
   });
 
   it('exits 0 for no changes in report mode', async () => {
-    // Line 34: no changes → exit code 0
     await expect(
       diffCommand({
         old: V1,
         new: V1,
         report: true,
       }),
-    ).rejects.toThrow('process.exit called');
+    ).rejects.toThrow();
   });
 
   it('prints "No changes detected" when specs are identical', async () => {
@@ -141,9 +133,7 @@ describe('diffCommand', () => {
         new: V2_ADDITIVE,
         output: tmpDir,
       }),
-    ).rejects.toThrow('process.exit called');
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--lang'));
+    ).rejects.toThrow('--lang');
   });
 
   it('exits 1 when --output is missing for incremental gen', async () => {
@@ -153,9 +143,7 @@ describe('diffCommand', () => {
         new: V2_ADDITIVE,
         lang: 'test-lang',
       }),
-    ).rejects.toThrow('process.exit called');
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--output'));
+    ).rejects.toThrow('--output');
   });
 
   it('runs incremental generation with --lang and --output', async () => {

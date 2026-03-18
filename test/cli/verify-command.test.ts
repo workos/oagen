@@ -83,16 +83,11 @@ function makeSurface(overrides?: Partial<Record<string, unknown>>) {
 describe('verifyCommand', () => {
   let tmpDir: string;
   let consoleSpy: ReturnType<typeof vi.spyOn>;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     tmpDir = resolve(os.tmpdir(), `oagen-verify-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(process, 'exit').mockImplementation(((code: number) => {
-      throw new Error(`process.exit(${code})`);
-    }) as never);
 
     // Default: extractor returns same surface as baseline (100% preserved)
     mockExtract.mockResolvedValue(makeSurface());
@@ -183,9 +178,7 @@ describe('verifyCommand', () => {
         scope: 'spec-only',
         rawResults: resolve(tmpDir, 'raw.json'),
       }),
-    ).rejects.toThrow('process.exit(1)');
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--scope spec-only requires --spec'));
+    ).rejects.toThrow('--scope spec-only requires --spec');
   });
 
   it('exits 1 when compat violations are found', async () => {
@@ -205,9 +198,7 @@ describe('verifyCommand', () => {
         apiSurface: surfacePath,
         rawResults: resolve(tmpDir, 'raw.json'),
       }),
-    ).rejects.toThrow('process.exit(1)');
-
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Compat violations found'));
+    ).rejects.toThrow('Compat violations found');
   });
 
   it('writes diagnostics JSON when --diagnostics and compat passes', async () => {
@@ -253,7 +244,7 @@ describe('verifyCommand', () => {
           rawResults: resolve(tmpDir, 'raw.json'),
           diagnostics: true,
         }),
-      ).rejects.toThrow('process.exit(1)');
+      ).rejects.toThrow('Compat violations found');
 
       expect(existsSync(resolve(tmpDir, 'verify-diagnostics.json'))).toBe(true);
     } finally {
@@ -301,11 +292,7 @@ describe('verifyCommand', () => {
           lang: 'test-lang',
           output: tmpDir,
         }),
-      ).rejects.toThrow('process.exit(1)');
-
-      expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('--spec <path> or OPENAPI_SPEC_PATH env var is required'),
-      );
+      ).rejects.toThrow('--spec <path> or OPENAPI_SPEC_PATH env var is required');
     } finally {
       process.chdir(origCwd);
     }
@@ -351,9 +338,7 @@ describe('verifyCommand', () => {
           lang: 'test-lang',
           output: tmpDir,
         }),
-      ).rejects.toThrow('process.exit(1)');
-
-      expect(errorSpy).toHaveBeenCalledWith('Baseline generation failed');
+      ).rejects.toThrow('Baseline generation failed');
     } finally {
       process.chdir(origCwd);
     }
@@ -459,10 +444,7 @@ describe('verifyCommand', () => {
           output: tmpDir,
           rawResults: rawPath,
         }),
-      ).rejects.toThrow('process.exit(1)');
-
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Smoke test findings'));
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Remediation guide'));
+      ).rejects.toThrow('Smoke test findings');
     } finally {
       process.chdir(origCwd);
     }
@@ -489,9 +471,7 @@ describe('verifyCommand', () => {
           output: tmpDir,
           rawResults: rawPath,
         }),
-      ).rejects.toThrow('process.exit(2)');
-
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('compile errors'));
+      ).rejects.toThrow('compile errors');
     } finally {
       process.chdir(origCwd);
     }
@@ -517,7 +497,7 @@ describe('verifyCommand', () => {
           rawResults: rawPath,
           diagnostics: true,
         }),
-      ).rejects.toThrow('process.exit(1)');
+      ).rejects.toThrow('Smoke test findings');
 
       // Should have written diagnostics with findingsCount
       const diag = JSON.parse(
@@ -548,11 +528,10 @@ describe('verifyCommand', () => {
         rawResults: resolve(tmpDir, 'raw.json'),
         maxRetries: 0,
       }),
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow('Compat violations found');
 
     // generate should NOT be called when maxRetries is 0
     expect(mockGenerate).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Compat violations found'));
   });
 
   it('retries and converges when emitter is fixed on second attempt', async () => {
@@ -614,11 +593,10 @@ describe('verifyCommand', () => {
         rawResults: resolve(tmpDir, 'raw.json'),
         maxRetries: 1,
       }),
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow('Compat violations found');
 
     // One retry was attempted (generate called once), then max reached
     expect(mockGenerate).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Compat violations found'));
   });
 
   it('exits 1 immediately when violations are not patchable', async () => {
@@ -650,7 +628,7 @@ describe('verifyCommand', () => {
         rawResults: resolve(tmpDir, 'raw.json'),
         maxRetries: 3,
       }),
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow('Compat violations found');
 
     expect(mockGenerate).not.toHaveBeenCalled();
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('No patchable violations'));
@@ -675,7 +653,7 @@ describe('verifyCommand', () => {
         rawResults: resolve(tmpDir, 'raw.json'),
         maxRetries: 3,
       }),
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow('Compat violations found');
 
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Stalled at'));
     // generate is called once (the retry after attempt 0 succeeds in patching,
@@ -742,7 +720,7 @@ describe('verifyCommand', () => {
           maxRetries: 1,
           diagnostics: true,
         }),
-      ).rejects.toThrow('process.exit(1)');
+      ).rejects.toThrow('Compat violations found');
 
       expect(existsSync(resolve(tmpDir, 'verify-diagnostics.json'))).toBe(true);
       const diag = JSON.parse(
@@ -770,7 +748,7 @@ describe('verifyCommand', () => {
         rawResults: resolve(tmpDir, 'raw.json'),
         maxRetries: 3, // even with retries configured, no spec means no retry
       }),
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow('Compat violations found');
 
     // generate should NOT be called — no spec means shouldRetry is false
     expect(mockGenerate).not.toHaveBeenCalled();

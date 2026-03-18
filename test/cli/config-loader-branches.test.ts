@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { loadConfig } from '../../src/cli/config-loader.js';
+import { ConfigLoadError } from '../../src/errors.js';
 
 describe('loadConfig — .ts config hint', () => {
   let tmpDir: string;
@@ -18,15 +19,7 @@ describe('loadConfig — .ts config hint', () => {
 
   it('shows TypeScript hint when .ts config file fails to load', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.ts'), `throw new Error('ts config broken');`);
-    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    const mockError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      await loadConfig(tmpDir);
-      expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('TypeScript config files require'));
-    } finally {
-      mockExit.mockRestore();
-      mockError.mockRestore();
-    }
+    await expect(loadConfig(tmpDir)).rejects.toBeInstanceOf(ConfigLoadError);
+    await expect(loadConfig(tmpDir)).rejects.toThrow('TypeScript config files require');
   });
 });

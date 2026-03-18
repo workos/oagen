@@ -17,6 +17,17 @@ export class OagenError extends Error {
   }
 }
 
+/** Thrown when a command should terminate with a specific exit code. */
+export class CommandError extends OagenError {
+  readonly exitCode: number;
+
+  constructor(message: string, hint: string, exitCode: number) {
+    super(message, hint);
+    this.name = 'CommandError';
+    this.exitCode = exitCode;
+  }
+}
+
 /** Thrown when an OpenAPI spec cannot be parsed or has an unsupported version. */
 export class SpecParseError extends OagenError {
   constructor(message: string, hint: string) {
@@ -30,6 +41,22 @@ export class ConfigError extends OagenError {
   constructor(message: string, hint: string) {
     super(message, hint);
     this.name = 'ConfigError';
+  }
+}
+
+/** Thrown when a config file exists but cannot be loaded or evaluated. */
+export class ConfigLoadError extends ConfigError {
+  constructor(message: string, hint: string) {
+    super(message, hint);
+    this.name = 'ConfigLoadError';
+  }
+}
+
+/** Thrown when a config targets a different IR version than the installed package. */
+export class ConfigVersionMismatchError extends ConfigError {
+  constructor(message: string, hint: string) {
+    super(message, hint);
+    this.name = 'ConfigVersionMismatchError';
   }
 }
 
