@@ -125,3 +125,33 @@ oagen parse --spec openapi.yml
 | Argument        | Required | Default                 | Description                                      |
 | --------------- | -------- | ----------------------- | ------------------------------------------------ |
 | `--spec <path>` | No       | `OPENAPI_SPEC_PATH` env | Path to an OpenAPI 3.x spec file (YAML or JSON). |
+
+## Configuration (`oagen.config.ts`)
+
+Place an `oagen.config.ts` (or `.js`/`.mjs`) in your project root to register emitters, extractors, and customize pipeline behavior. The CLI loads this file at startup before any command runs.
+
+```ts
+import type { OagenConfig } from '@workos/oagen';
+import { nodeEmitter } from './src/node/index.js';
+import { nodeExtractor } from './src/node/extractor.js';
+
+const config: OagenConfig = {
+  emitters: [nodeEmitter],
+  extractors: [nodeExtractor],
+  docUrl: 'https://workos.com/docs',
+};
+
+export default config;
+```
+
+### Options
+
+| Key                    | Type                         | Description                                                                                                                                                                                                                       |
+| ---------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `emitters`             | `Emitter[]`                  | Language emitters to register. Each emitter implements the `Emitter` interface and generates SDK files for one target language.                                                                                                    |
+| `extractors`           | `Extractor[]`                | API surface extractors to register. Each extractor parses a live SDK and produces an `ApiSurface` JSON used for compat verification.                                                                                              |
+| `emitterProject`       | `string`                     | Path to the emitter project directory. Used by skills to scaffold new emitters, tests, and smoke runners in the correct location.                                                                                                 |
+| `smokeRunners`         | `Record<string, string>`     | Map from language key to custom smoke runner script path. Overrides the built-in `sdk-test.ts` for `oagen verify`. Can also be set per-invocation with `--smoke-runner`.                                                          |
+| `irVersion`            | `number`                     | Pin the expected IR version. If the installed `@workos/oagen` has a different `IR_VERSION`, the CLI exits with an error at startup. Useful for catching breaking IR changes before they silently produce incorrect output.         |
+| `operationIdTransform` | `(id: string) => string`     | Custom transform for operation IDs. Receives the raw `operationId` from the spec; return the desired operation name. No additional casing conversion is applied. When omitted, `operationId` values are converted to `camelCase`. |
+| `docUrl`               | `string`                     | Base URL for documentation links. When set, relative markdown paths in descriptions (e.g. `[User](/reference/authkit/user)`) are expanded to full URLs (e.g. `[User](https://workos.com/docs/reference/authkit/user)`).           |
