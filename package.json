@@ -77,5 +77,7 @@
     "prettier": "^3.8.1",
     "tsup": "^8.4.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "author": "WorkOS",
+  "license": "MIT"
 }
