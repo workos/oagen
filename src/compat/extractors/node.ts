@@ -188,14 +188,16 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
     const callSignatures = propType.getCallSignatures();
 
     if (callSignatures.length > 0) {
-      const sig = callSignatures[0];
       if (!methods[prop.name]) methods[prop.name] = [];
-      methods[prop.name].push({
-        name: prop.name,
-        params: sig.getParameters().map((p) => extractParam(p, checker)),
-        returnType: checker.typeToString(sig.getReturnType()),
-        async: checker.typeToString(sig.getReturnType()).startsWith('Promise<'),
-      });
+      // Extract ALL overloads, not just the first
+      for (const sig of callSignatures) {
+        methods[prop.name].push({
+          name: prop.name,
+          params: sig.getParameters().map((p) => extractParam(p, checker)),
+          returnType: checker.typeToString(sig.getReturnType()),
+          async: checker.typeToString(sig.getReturnType()).startsWith('Promise<'),
+        });
+      }
     } else {
       const typeStr = checker.typeToString(propType);
       const isReadonly = propDeclarations?.some((d) => {
