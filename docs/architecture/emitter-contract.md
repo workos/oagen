@@ -2,6 +2,8 @@
 
 Source: `src/engine/types.ts`
 
+If you want the smallest possible implementation first, start with [Minimal Emitter](../core/minimal-emitter.md). This document is the full contract reference.
+
 ## Interface
 
 Every language emitter must implement the `Emitter` interface:

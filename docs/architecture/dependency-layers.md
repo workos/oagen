@@ -6,22 +6,26 @@
 Layer 0: ir/types        ← Pure type definitions, no imports from other layers
 Layer 1: utils           ← Only imports from Layer 0 (naming, tree-sitter helpers)
 Layer 2: parser          ← Imports from Layers 0-1
-Layer 3: engine, differ  ← Imports from Layers 0-1 (differ may also import engine/types)
+Layer 3: engine, differ  ← Imports from Layers 0-1
 Layer 3: compat          ← Imports from Layers 0-1 (extractors, overlay, staleness, differ)
-Layer 4: cli             ← Imports from Layers 0-3
+Layer 4: verify          ← Imports from Layers 0-3
+Layer 5: cli             ← Imports from Layers 0-4
+
+Top-level entrypoints (`src/index.ts`, `src/errors.ts`) are exempt from these directional rules because they exist to re-export public APIs and shared error types.
 ```
 
 ## Allowed Imports
 
-| File in...    | Can import from...                                  | Cannot import from...       |
-| ------------- | --------------------------------------------------- | --------------------------- |
-| `src/ir/`     | (nothing in src/)                                   | everything                  |
-| `src/utils/`  | `src/ir/`                                           | parser, engine, compat, cli |
-| `src/parser/` | `src/ir/`, `src/utils/`                             | engine, compat, cli         |
-| `src/engine/` | `src/ir/`, `src/utils/`                             | parser, compat, cli         |
-| `src/differ/` | `src/ir/`, `src/utils/`, `src/engine/` (types only) | parser, compat, cli         |
-| `src/compat/` | `src/ir/`, `src/utils/`                             | parser, engine, cli         |
-| `src/cli/`    | anything in `src/`                                  | (top level, can import all) |
+| File in...     | Can import from...                                              | Cannot import from...              |
+| -------------- | --------------------------------------------------------------- | ---------------------------------- |
+| `src/ir/`      | (nothing in `src/`)                                             | everything                         |
+| `src/utils/`   | `src/ir/`, `src/errors.ts`                                      | parser, engine, differ, compat...  |
+| `src/parser/`  | `src/ir/`, `src/utils/`, `src/errors.ts`                        | engine, differ, compat, verify, cli |
+| `src/engine/`  | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`         | parser, verify, cli                |
+| `src/differ/`  | `src/ir/`, `src/utils/`, `src/errors.ts`                        | parser, compat, verify, cli        |
+| `src/compat/`  | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`         | parser, verify, cli                |
+| `src/verify/`  | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/engine/`, `src/compat/` | parser, cli                        |
+| `src/cli/`     | anything in `src/`                                              | (top level, can import all)        |
 
 `src/utils/` contains naming utilities (`naming.ts`) and tree-sitter helpers (`tree-sitter.ts`). The `safeParse()` function in `tree-sitter.ts` is used by all tree-sitter-based extractors and the engine merger to work around a 32KB buffer limit in the tree-sitter 0.21.x native binding.
 
@@ -50,8 +54,22 @@ import { loadConfig } from "../cli/config-loader.js";
 
 ## Cross-Layer Exceptions
 
-The `differ → engine` cross-layer import exists for shared generation types such as `EmitterContext` and `GeneratedFile`. If you add a new exception, keep it narrow and document the reason in the code and docs.
+Two type-only exceptions are currently allowed:
+
+- `differ -> engine/types` for shared generation types such as `EmitterContext` and `GeneratedFile`
+- `engine -> compat/types` because overlay-aware generation threads compat types through `EmitterContext` and generation options without depending on compat implementation modules
+
+One runtime exception is currently allowed:
+
+- `engine -> differ` for incremental generation, which depends on spec diffing and file mapping
+
+If you add a new exception, keep it narrow, make it type-only when possible, and document the reason in both code and docs.
 
 ## Enforcement
 
-These layer rules are guidance for contributors rather than an automated gate. If you intentionally cross a layer boundary, document why the dependency is warranted.
+These layer rules are enforced by `test/architecture/dependency-layers.test.ts`.
+
+If you intentionally cross a layer boundary, either:
+
+1. refactor the shared code to a lower layer, or
+2. add a narrow documented exception here and update the enforcement test

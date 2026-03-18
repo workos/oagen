@@ -3,6 +3,7 @@
 These documents define the stable center of oagen as an OSS framework.
 
 - [Minimal Quickstart](quickstart.md)
+- [Minimal Emitter](minimal-emitter.md)
 - [CLI Reference](../cli.md)
 - [Pipeline Architecture](../architecture/pipeline.md)
 - [IR Type System Reference](../architecture/ir-types.md)
