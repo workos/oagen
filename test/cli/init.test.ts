@@ -58,10 +58,10 @@ describe('initCommand', () => {
     await initCommand({ lang: 'go', project: tmpDir });
 
     const pkg = JSON.parse(readFileSync(resolve(tmpDir, 'package.json'), 'utf-8'));
-    expect(pkg.name).toBe('@workos/oagen-emitters-go');
-    expect(pkg.scripts['sdk:generate']).toContain('--lang go');
-    expect(pkg.scripts['sdk:verify']).toContain('--lang go');
-    expect(pkg.scripts['sdk:extract']).toContain('--lang go');
+    expect(pkg.name).toBe('custom-oagen-emitters');
+    expect(pkg.scripts['sdk:generate:go']).toContain('--lang go');
+    expect(pkg.scripts['sdk:verify:go']).toContain('--lang go');
+    expect(pkg.scripts['sdk:extract:go']).toContain('--lang go');
   });
 
   it('stub emitter references IR_VERSION and has all Emitter methods', async () => {
@@ -119,5 +119,125 @@ describe('initCommand', () => {
     } finally {
       process.chdir(origCwd);
     }
+  });
+
+  it('appends scripts to existing package.json without overwriting', async () => {
+    // Create an existing package.json
+    const existingPkg = {
+      name: 'my-existing-project',
+      version: '1.0.0',
+      scripts: {
+        build: 'tsc',
+        test: 'jest',
+        'sdk:generate:python': 'existing-script',
+      },
+    };
+    writeFileSync(resolve(tmpDir, 'package.json'), JSON.stringify(existingPkg, null, 2));
+
+    await initCommand({ lang: 'go', project: tmpDir });
+
+    const pkg = JSON.parse(readFileSync(resolve(tmpDir, 'package.json'), 'utf-8'));
+
+    // Original properties preserved
+    expect(pkg.name).toBe('my-existing-project');
+    expect(pkg.version).toBe('1.0.0');
+
+    // Original scripts preserved
+    expect(pkg.scripts.build).toBe('tsc');
+    expect(pkg.scripts.test).toBe('jest');
+
+    // New oagen scripts added
+    expect(pkg.scripts['sdk:generate:go']).toContain('--lang go');
+    expect(pkg.scripts['sdk:verify:go']).toContain('--lang go');
+    expect(pkg.scripts['sdk:extract:go']).toContain('--lang go');
+
+    // Existing oagen script with same key gets overwritten
+    expect(pkg.scripts['sdk:generate:python']).toBe('existing-script');
+  });
+
+  it('merges devDependencies, dependencies, exports, and type from template', async () => {
+    // Create an existing package.json with some overlapping deps
+    const existingPkg = {
+      name: 'my-existing-project',
+      version: '2.0.0',
+      scripts: { build: 'tsc' },
+      devDependencies: {
+        tsup: '^7.0.0', // older version, should be overwritten
+        'existing-dep': '^1.0.0',
+      },
+      dependencies: {
+        '@workos/oagen': '^0.0.5', // older version, should be overwritten
+        'another-dep': '^2.0.0',
+      },
+    };
+    writeFileSync(resolve(tmpDir, 'package.json'), JSON.stringify(existingPkg, null, 2));
+
+    await initCommand({ lang: 'ruby', project: tmpDir });
+
+    const pkg = JSON.parse(readFileSync(resolve(tmpDir, 'package.json'), 'utf-8'));
+
+    // Type should be set
+    expect(pkg.type).toBe('module');
+
+    // Exports should be added
+    expect(pkg.exports).toEqual({
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+    });
+
+    // devDependencies merged (existing takes precedence for tsup, new ones added)
+    expect(pkg.devDependencies['existing-dep']).toBe('^1.0.0');
+    expect(pkg.devDependencies.tsx).toBe('^4.19.0');
+    expect(pkg.devDependencies.vitest).toBe('^3.0.0');
+
+    // dependencies merged (existing takes precedence)
+    expect(pkg.dependencies['another-dep']).toBe('^2.0.0');
+    expect(pkg.dependencies['@workos/oagen']).toBe('^0.0.5');
+  });
+
+  it('appends to existing .gitignore without overwriting', async () => {
+    // Create an existing .gitignore
+    const existingGitignore = `node_modules/
+.env
+coverage/
+# Custom entries
+custom-dir/
+`;
+    writeFileSync(resolve(tmpDir, '.gitignore'), existingGitignore);
+
+    await initCommand({ lang: 'python', project: tmpDir });
+
+    const gitignoreContent = readFileSync(resolve(tmpDir, '.gitignore'), 'utf-8');
+
+    // Original entries preserved
+    expect(gitignoreContent).toContain('node_modules/');
+    expect(gitignoreContent).toContain('.env');
+    expect(gitignoreContent).toContain('coverage/');
+    expect(gitignoreContent).toContain('custom-dir/');
+
+    // New oagen entries added
+    expect(gitignoreContent).toContain('dist/');
+    expect(gitignoreContent).toContain('sdk-*-surface.json');
+    expect(gitignoreContent).toContain('smoke-*.json');
+    expect(gitignoreContent).toContain('sdk/');
+  });
+
+  it('does not duplicate entries in .gitignore', async () => {
+    // Create an existing .gitignore with some overlapping entries
+    const existingGitignore = `node_modules/
+dist/
+.env
+`;
+    writeFileSync(resolve(tmpDir, '.gitignore'), existingGitignore);
+
+    await initCommand({ lang: 'go', project: tmpDir });
+
+    const gitignoreContent = readFileSync(resolve(tmpDir, '.gitignore'), 'utf-8');
+
+    // Count occurrences of node_modules/ and dist/
+    const nodeModulesCount = (gitignoreContent.match(/node_modules\//g) || []).length;
+    const distCount = (gitignoreContent.match(/dist\//g) || []).length;
+
+    expect(nodeModulesCount).toBe(1);
+    expect(distCount).toBe(1);
   });
 });
