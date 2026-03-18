@@ -111,4 +111,36 @@ describe('writeFiles', () => {
       await fs.rm(tmpDir, { recursive: true });
     }
   });
+
+  it('merges additive Ruby declarations into existing files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const filePath = path.join(tmpDir, 'lib/client.rb');
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(
+        filePath,
+        "require_relative 'client'\n\nclass Client\n  def initialize; end\nend\n",
+      );
+
+      const result = await writeFiles(
+        [
+          {
+            path: 'lib/client.rb',
+            content:
+              "require_relative 'client'\nrequire_relative 'user'\n\nclass Client\nend\n\nclass User\nend\n",
+          },
+        ],
+        tmpDir,
+        { language: 'ruby', header: '# generated' },
+      );
+
+      expect(result.merged).toContain('lib/client.rb');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toContain("require_relative 'user'");
+      expect(content).toContain('class User');
+      expect(content).toContain('def initialize');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
 });

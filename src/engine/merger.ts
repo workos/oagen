@@ -10,86 +10,40 @@
  */
 
 import Parser from 'tree-sitter';
-import { normalizeJsExtension } from '../utils/naming.js';
 import { getLanguageCapabilities } from '../capabilities.js';
+import { getMergeAdapter } from './merge-adapters/index.js';
+import type { MergeStatement } from './merge-adapters/types.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
 
-/** Synthetic name prefix for `export * from '...'` re-export dedup */
-const REEXPORT_PREFIX = '__export:';
-
 import { safeParse } from '../utils/tree-sitter.js';
-
-/**
- * Map emitter language names to tree-sitter grammar module names.
- */
-const GRAMMAR_MODULES: Record<string, string> = {
-  node: 'tree-sitter-typescript/bindings/node/typescript.js',
-};
 
 /**
  * Check if a tree-sitter grammar is configured for the given language.
  */
 export function hasGrammar(language: string): boolean {
-  return getLanguageCapabilities(language).supportsAstMerge && language in GRAMMAR_MODULES;
+  return getLanguageCapabilities(language).supportsAstMerge && getMergeAdapter(language) !== undefined;
 }
 
 async function getParser(language: string): Promise<Parser> {
   const cached = parserCache.get(language);
   if (cached) return cached;
 
-  const grammarModule = GRAMMAR_MODULES[language];
-  if (!grammarModule) {
+  const adapter = getMergeAdapter(language);
+  if (!adapter) {
     throw new Error(
       `No tree-sitter grammar configured for language "${language}". ` +
-        `Add it to GRAMMAR_MODULES in merger.ts and install the corresponding npm package.`,
+        `Add a merge adapter and install the corresponding tree-sitter grammar package.`,
     );
   }
 
-  const mod = await import(grammarModule);
+  const mod = await import(adapter.grammarModule);
   const grammar = mod.default ?? mod;
   const parser = new Parser();
   parser.setLanguage(grammar);
   parserCache.set(language, parser);
   return parser;
-}
-
-/**
- * Extract the name of a top-level node. Handles export-wrapped declarations.
- */
-function extractNodeName(node: Parser.SyntaxNode): string | null {
-  // export_statement wraps the actual declaration
-  if (node.type === 'export_statement') {
-    const decl = node.childForFieldName('declaration');
-    if (decl) {
-      return extractDeclName(decl);
-    }
-    // export * from '...' — use the source string as identifier
-    const source = node.childForFieldName('source');
-    if (source) {
-      return `${REEXPORT_PREFIX}${source.text}`;
-    }
-    return null;
-  }
-
-  return extractDeclName(node);
-}
-
-function extractDeclName(node: Parser.SyntaxNode): string | null {
-  const nameNode = node.childForFieldName('name');
-  if (nameNode) return nameNode.text;
-
-  // const foo = ... → variable_declarator → name
-  if (node.type === 'lexical_declaration') {
-    const declarator = node.firstNamedChild;
-    if (declarator?.type === 'variable_declarator') {
-      const name = declarator.childForFieldName('name');
-      if (name) return name.text;
-    }
-  }
-
-  return null;
 }
 
 interface ParsedSymbols {
@@ -103,19 +57,23 @@ interface ParsedSymbols {
  */
 export async function extractTopLevelSymbols(source: string, language: string): Promise<ParsedSymbols> {
   const parser = await getParser(language);
+  const adapter = getMergeAdapter(language);
+  if (!adapter) {
+    throw new Error(`No merge adapter configured for language "${language}"`);
+  }
   if (typeof source !== 'string') {
     throw new Error(`extractTopLevelSymbols: expected string source, got ${typeof source}`);
   }
   const tree = safeParse(parser, source);
   const names = new Set<string>();
   const unnamedTexts = new Set<string>();
+  const parsed = adapter.parseStatements(tree, source);
 
-  for (const child of tree.rootNode.children) {
-    const name = extractNodeName(child);
-    if (name) {
-      names.add(name);
-    } else if (child.type !== 'comment') {
-      unnamedTexts.add(source.slice(child.startIndex, child.endIndex).trim());
+  for (const statement of parsed.statements) {
+    if (statement.key) {
+      names.add(statement.key);
+    } else {
+      unnamedTexts.add(statement.text.trim());
     }
   }
 
@@ -131,22 +89,14 @@ export async function extractTopLevelNames(source: string, language: string): Pr
  * Extract top-level statements from generated source with their names
  * and exact text span.
  */
-async function extractStatements(
-  source: string,
-  language: string,
-): Promise<Array<{ name: string | null; text: string; nodeType: string }>> {
+async function extractStatements(source: string, language: string): Promise<MergeStatement[]> {
   const parser = await getParser(language);
-  const tree = safeParse(parser, source);
-  const statements: Array<{ name: string | null; text: string; nodeType: string }> = [];
-
-  for (const child of tree.rootNode.children) {
-    if (child.type === 'comment') continue;
-
-    const name = extractNodeName(child);
-    statements.push({ name, text: source.slice(child.startIndex, child.endIndex), nodeType: child.type });
+  const adapter = getMergeAdapter(language);
+  if (!adapter) {
+    throw new Error(`No merge adapter configured for language "${language}"`);
   }
-
-  return statements;
+  const tree = safeParse(parser, source);
+  return adapter.parseStatements(tree, source).statements;
 }
 
 export interface MergeResult {
@@ -171,26 +121,32 @@ export async function mergeIntoExisting(
   language: string,
   header: string,
 ): Promise<MergeResult> {
+  const adapter = getMergeAdapter(language);
+  if (!adapter) {
+    throw new Error(`No merge adapter configured for language "${language}"`);
+  }
   // Parse existing file once — extract both symbols and statements from the same AST pass
   const existingStatements = await extractStatements(existingContent, language);
   const generatedStatements = await extractStatements(generatedContent, language);
 
-  // Build symbol/text sets from existing statements (avoids a second tree-sitter parse)
-  const existingNames = new Set<string>();
+  const existingKeys = new Set<string>();
   const existingUnnamedTexts = new Set<string>();
   const existingImports = new Set<string>();
+  const existingReexports = new Set<string>();
   let lastImportEndIndex = -1;
 
   for (const stmt of existingStatements) {
-    if (stmt.nodeType === 'import_statement') {
-      existingImports.add(normalizeJsExtension(stmt.text.trim()));
-      // Track end position of last import for insertion point
+    if (stmt.kind === 'import') {
+      existingImports.add(adapter.normalizeImport ? adapter.normalizeImport(stmt.text.trim()) : stmt.text.trim());
       const linesBefore = existingContent.slice(0, existingContent.indexOf(stmt.text)).split('\n').length - 1;
       const stmtLines = stmt.text.split('\n').length;
       lastImportEndIndex = linesBefore + stmtLines - 1;
     }
-    if (stmt.name) {
-      existingNames.add(stmt.name);
+    if (stmt.kind === 'reexport') {
+      existingReexports.add(adapter.normalizeReexport ? adapter.normalizeReexport(stmt.text.trim()) : stmt.text.trim());
+    }
+    if (stmt.key) {
+      existingKeys.add(stmt.key);
     } else {
       existingUnnamedTexts.add(stmt.text.trim());
     }
@@ -208,8 +164,8 @@ export async function mergeIntoExisting(
 
     // For import statements, only skip if an equivalent exists in the existing file.
     // This allows new imports (required by appended code) to be included.
-    if (stmt.nodeType === 'import_statement') {
-      const normalizedText = normalizeJsExtension(stmt.text.trim());
+    if (stmt.kind === 'import') {
+      const normalizedText = adapter.normalizeImport ? adapter.normalizeImport(stmt.text.trim()) : stmt.text.trim();
       if (existingImports.has(normalizedText)) {
         preserved++;
         continue;
@@ -221,33 +177,22 @@ export async function mergeIntoExisting(
     // Skip re-export statements that duplicate existing re-exports
     // (e.g., generated uses .js extension but existing doesn't).
     // Allow genuinely new re-exports through.
-    if (stmt.nodeType === 'export_statement' && stmt.text.includes(' from ')) {
-      const normalizedText = normalizeJsExtension(stmt.text.trim());
-      const existsNormalized = [...existingUnnamedTexts].some((t) => normalizeJsExtension(t) === normalizedText);
-      if (existsNormalized) {
+    if (stmt.kind === 'reexport') {
+      const normalizedText = adapter.normalizeReexport
+        ? adapter.normalizeReexport(stmt.text.trim())
+        : stmt.text.trim();
+      if (existingReexports.has(normalizedText) || (stmt.key !== null && existingKeys.has(stmt.key))) {
         preserved++;
         continue;
       }
-      // Also check named re-exports against existing names.
-      // Strip .js extension from the module specifier before comparing,
-      // since the existing file may use extensionless imports.
-      // Name format: __export:'./path/to/module.js' → __export:'./path/to/module'
-      if (stmt.name?.startsWith(REEXPORT_PREFIX)) {
-        const normalizedName = normalizeJsExtension(stmt.name);
-        if (existingNames.has(normalizedName) || existingNames.has(stmt.name)) {
-          preserved++;
-          continue;
-        }
-      }
     }
 
-    if (stmt.name && existingNames.has(stmt.name)) {
+    if (stmt.key && existingKeys.has(stmt.key)) {
       preserved++;
       continue;
     }
 
-    // For unnamed statements, check text dedup via pre-built Set (O(1))
-    if (!stmt.name) {
+    if (!stmt.key) {
       if (existingUnnamedTexts.has(stmt.text.trim())) {
         preserved++;
         continue;

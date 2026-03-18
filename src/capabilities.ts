@@ -32,7 +32,7 @@ const CAPABILITIES: Record<string, LanguageCapabilities> = {
     supportsTargetIntegration: true,
   },
   ruby: {
-    supportsAstMerge: false,
+    supportsAstMerge: true,
     supportsExtractor: true,
     supportsSmokeRunner: true,
     supportsTargetIntegration: true,
