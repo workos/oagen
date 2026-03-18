@@ -2,7 +2,11 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig([
   {
-    entry: { index: 'src/index.ts' },
+    entry: {
+      index: 'src/index.ts',
+      'compat/index': 'src/compat/index.ts',
+      'verify/index': 'src/verify/index.ts',
+    },
     format: ['esm'],
     dts: true,
     clean: true,
