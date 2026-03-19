@@ -2,7 +2,7 @@ import { toCamelCase } from '../../utils/naming.js';
 
 export function oagenScripts(lang: string): Record<string, string> {
   return {
-    [`sdk:generate:${lang}`]: `oagen generate --lang ${lang} --output ./sdk --namespace workos --spec open-api-spec.yaml --api-surface ./sdk-${lang}-surface.json --target ../your-${lang}-sdk`,
+    [`sdk:generate:${lang}`]: `oagen generate --lang ${lang} --output ./sdk --namespace my-api --spec open-api-spec.yaml --api-surface ./sdk-${lang}-surface.json --target ../your-${lang}-sdk`,
     [`sdk:diff:${lang}`]: `oagen diff --old ./sdk/spec-snapshot.yaml --new open-api-spec.yaml --lang ${lang} --output ./sdk --target ../your-${lang}-sdk --api-surface ./sdk-${lang}-surface.json`,
     [`sdk:verify:${lang}`]: `oagen verify --lang ${lang} --output ./sdk --spec open-api-spec.yaml --api-surface ./sdk-${lang}-surface.json`,
     [`sdk:extract:${lang}`]: `oagen extract --lang ${lang} --sdk-path ../your-${lang}-sdk --output ./sdk-${lang}-surface.json`,
@@ -120,11 +120,9 @@ sdk/
 export function stubEmitter(lang: string): string {
   const varName = `${toCamelCase(lang)}Emitter`;
   return `import type { Emitter, EmitterContext, GeneratedFile, ApiSpec, Model, Enum, Service } from '@workos/oagen';
-import { IR_VERSION } from '@workos/oagen';
 
 export const ${varName}: Emitter = {
   language: '${lang}',
-  contractVersion: IR_VERSION,
 
   generateModels(_models: Model[], _ctx: EmitterContext): GeneratedFile[] {
     return [];

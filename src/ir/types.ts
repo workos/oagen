@@ -1,6 +1,3 @@
-/** IR contract version. Bump when a TypeRef variant is added or a required field is added to any IR node. */
-export const IR_VERSION = 6;
-
 /** Authentication scheme extracted from OpenAPI securitySchemes */
 export type AuthScheme =
   | { kind: 'bearer' }
@@ -47,7 +44,9 @@ export interface Operation {
 
 /** Structured pagination metadata for auto-paging iterator generation */
 export interface PaginationMeta {
-  cursorParam: string;
+  strategy: 'cursor' | 'offset';
+  param: string;
+  limitParam?: string;
   dataPath: string;
   itemType: TypeRef;
 }
