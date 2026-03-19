@@ -109,6 +109,13 @@ export interface LanguageHints {
    *  Returns true to suppress the mismatch, false to report it. */
   isTypeEquivalent?(baselineType: string, candidateType: string, candidateSurface: ApiSurface): boolean;
 
+  /** True if two method signatures should be considered equivalent despite
+   *  structural differences. Called as a fallback when strict positional
+   *  matching fails — e.g., when the baseline unpacks body fields into
+   *  individual params while the candidate uses a dict/array payload.
+   *  Returns true to suppress the mismatch. */
+  isSignatureEquivalent?(baseline: ApiMethod, candidate: ApiMethod, candidateSurface: ApiSurface): boolean;
+
   /** Base class names that indicate a data model (→ ApiInterface).
    *  Python: ["BaseModel"]; PHP: ["BaseResource"].
    *  Extractors should provide these for their SDK. */

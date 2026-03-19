@@ -92,7 +92,10 @@ export const nodeHints: LanguageHints = {
   },
 
   propertyMatchesClass(propertyName: string, className: string): boolean {
-    return propertyName.toLowerCase() === className.toLowerCase();
+    // Support both camelCase and snake_case properties matching PascalCase classes
+    // e.g., "organizations" ≡ "Organizations", "api_keys" ≡ "ApiKeys"
+    const normalizedProp = propertyName.replace(/[-_]/g, '').toLowerCase();
+    return normalizedProp === className.toLowerCase();
   },
 
   derivedModelNames(modelName: string): string[] {
