@@ -1,5 +1,12 @@
 import { getExtractor } from '../compat/extractor-registry.js';
-import { diffSurfaces, specDerivedNames, specDerivedFieldPaths, filterSurface } from '../compat/differ.js';
+import {
+  diffSurfaces,
+  specDerivedNames,
+  specDerivedFieldPaths,
+  specDerivedMethodPaths,
+  specDerivedEnumValues,
+  filterSurface,
+} from '../compat/differ.js';
 import type { ApiSpec } from '../ir/types.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { CompatCheckResult } from './types.js';
@@ -19,7 +26,9 @@ export async function runCompatCheck(
   if (spec) {
     const allowed = specDerivedNames(spec, extractor.hints);
     const fieldPaths = specDerivedFieldPaths(spec, extractor.hints);
-    scopedBaseline = filterSurface(baseline, allowed, fieldPaths);
+    const methodPaths = specDerivedMethodPaths(spec);
+    const enumVals = specDerivedEnumValues(spec);
+    scopedBaseline = filterSurface(baseline, allowed, fieldPaths, methodPaths, enumVals);
     scopedToSpec = true;
     scopedSymbolCount =
       Object.keys(scopedBaseline.interfaces).length +

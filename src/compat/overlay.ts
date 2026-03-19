@@ -107,6 +107,22 @@ export function buildOverlayLookup(
           }
         }
 
+        // Suffix match: the existing SDK may use a longer controller-prefixed
+        // method name that ends with the transformed name.
+        // (e.g., manifest says "validate_api_key" but existing SDK has
+        // "api_keys_controller_validate_api_key").
+        if (!methods) {
+          const classMethods = surface.classes[className]?.methods ?? {};
+          const suffix = resolvedMethodName.toLowerCase();
+          for (const [name, overloads] of Object.entries(classMethods)) {
+            if (name.toLowerCase().endsWith(suffix) && name !== resolvedMethodName) {
+              methods = overloads;
+              resolvedMethodName = name;
+              break;
+            }
+          }
+        }
+
         const method = methods?.[0];
         if (method) {
           lookup.methodByOperation.set(key, {
