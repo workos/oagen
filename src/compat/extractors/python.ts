@@ -12,6 +12,8 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import { NAMED_TYPE_RE, typeExistsInSurface } from '../language-hints.js';
+import { splitWords } from '../../utils/naming.js';
 import { walkPythonFiles, findPythonSourceRoot, parsePythonFile } from './python-parser.js';
 import { buildSurface } from './python-surface.js';
 import type { ParsedPythonFile } from './python-parser.js';
@@ -22,15 +24,20 @@ import type { ParsedPythonFile } from './python-parser.js';
 
 const pythonHints: LanguageHints = {
   stripNullable(type: string): string | null {
+    // Normalize whitespace before matching
+    const normalized = type.replace(/\s+/g, ' ').trim();
     // Optional[T] → T
-    const optMatch = type.match(/^Optional\[(.+)\]$/);
-    if (optMatch) return optMatch[1];
+    const optMatch = normalized.match(/^Optional\[(.+)\]$/);
+    if (optMatch) return optMatch[1].trim();
+    // NotRequired[T] → T (TypedDict optionality ≡ nullable for compat purposes)
+    const nrMatch = normalized.match(/^NotRequired\[(.+)\]$/);
+    if (nrMatch) return nrMatch[1].trim();
     // T | None → T, None | T → T
-    const parts = type
+    const parts = normalized
       .split('|')
       .map((p) => p.trim())
       .filter((p) => p !== 'None');
-    if (parts.length < type.split('|').length) return parts.join(' | ');
+    if (parts.length < normalized.split('|').length) return parts.join(' | ');
     return null;
   },
 
@@ -110,7 +117,223 @@ const pythonHints: LanguageHints = {
     return [`${modelName}Response`];
   },
 
-  modelBaseClasses: ['BaseModel'],
+  isTypeEquivalent(baselineType: string, candidateType: string, candidateSurface: ApiSurface): boolean {
+    // Strip nullable wrappers from both sides
+    const stripNullable = (t: string): string => {
+      const normalized = t.replace(/\s+/g, ' ').trim();
+      const optMatch = normalized.match(/^Optional\[(.+)\]$/);
+      if (optMatch) return optMatch[1].trim();
+      const nrMatch = normalized.match(/^NotRequired\[(.+)\]$/);
+      if (nrMatch) return nrMatch[1].trim();
+      const parts = normalized
+        .split('|')
+        .map((p) => p.trim())
+        .filter((p) => p !== 'None');
+      if (parts.length < normalized.split('|').length) return parts.join(' | ');
+      return normalized;
+    };
+    const baseClean = stripNullable(baselineType);
+    const candClean = stripNullable(candidateType);
+
+    // Literal quote style equivalence: Literal["foo"] ≡ Literal['foo']
+    const literalMatch = (t: string) => t.match(/^Literal\[(['"])(.+)\1\]$/);
+    const baseLit = literalMatch(baseClean);
+    const candLit = literalMatch(candClean);
+    if (baseLit && candLit && baseLit[2] === candLit[2]) return true;
+
+    // LiteralOrUntyped[T] ≡ T (custom wrapper type) — strip recursively
+    const stripWrappers = (t: string): string => {
+      let inner = t;
+      // Strip LiteralOrUntyped[...]
+      const louMatch = inner.match(/^LiteralOrUntyped\[(.+)\]$/);
+      if (louMatch) inner = louMatch[1];
+      // Strip Literal[...] to get the enum name if it's a Literal of literals
+      return inner;
+    };
+    const baseUnwrapped = stripWrappers(baseClean);
+    const candUnwrapped = stripWrappers(candClean);
+    if (baseUnwrapped !== baseClean || candUnwrapped !== candClean) {
+      // After unwrapping, check equivalence
+      if (baseUnwrapped === candClean || candUnwrapped === baseClean) return true;
+      if (baseUnwrapped === candUnwrapped) return true;
+      // LiteralOrUntyped[Literal["a", "b"]] ≡ enum type
+      if (baseUnwrapped.startsWith('Literal[') && candidateSurface.enums[candClean]) return true;
+      if (candUnwrapped.startsWith('Literal[') && candidateSurface.enums?.[baseClean]) return true;
+    }
+
+    // Sequence[T] ≡ list[T] ≡ List[T]
+    const seqPattern = /^(?:Sequence|list|List)\[(.+)\]$/;
+    const baseSeq = baseClean.match(seqPattern);
+    const candSeq = candClean.match(seqPattern);
+    if (baseSeq && candSeq) {
+      if (baseSeq[1] === candSeq[1]) return true;
+      // Inner types may differ by named type (InlineRole vs DirectoryUserRole)
+      const baseInner = baseSeq[1];
+      const candInner = candSeq[1];
+      if (NAMED_TYPE_RE.test(baseInner) && NAMED_TYPE_RE.test(candInner)) {
+        if (typeExistsInSurface(candInner, candidateSurface)) {
+          if (candInner.includes(baseInner) || baseInner.includes(candInner)) return true;
+          const baseWords = new Set(
+            splitWords(baseInner.replace(/Response$/, ''))
+              .filter((w) => w.length > 2)
+              .map((w) => w.toLowerCase()),
+          );
+          const candWords = new Set(
+            splitWords(candInner.replace(/Response$/, ''))
+              .filter((w) => w.length > 2)
+              .map((w) => w.toLowerCase()),
+          );
+          const overlap = [...baseWords].filter((w) => candWords.has(w));
+          if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+        }
+      }
+      // Tolerate model collection vs primitive collection: Sequence[OrganizationDomain] ≡ list[str]
+      // The spec may define a field as a primitive array while the live SDK wraps it in a model.
+      const primitiveTypes = new Set(['str', 'int', 'float', 'bool', 'bytes']);
+      if (
+        (primitiveTypes.has(baseInner) && NAMED_TYPE_RE.test(candInner)) ||
+        (primitiveTypes.has(candInner) && NAMED_TYPE_RE.test(baseInner))
+      ) {
+        return true;
+      }
+    }
+    // Cross-container tolerance: Sequence[T] vs list[str] (different container names)
+    if (baseSeq && !candSeq) {
+      const candListMatch = candClean.match(/^(?:list|List)\[(.+)\]$/);
+      if (candListMatch) {
+        const baseInner = baseSeq[1];
+        const candInner = candListMatch[1];
+        if (baseInner === candInner) return true;
+        const primitiveTypes = new Set(['str', 'int', 'float', 'bool', 'bytes']);
+        if (
+          (primitiveTypes.has(baseInner) && NAMED_TYPE_RE.test(candInner)) ||
+          (primitiveTypes.has(candInner) && NAMED_TYPE_RE.test(baseInner))
+        ) {
+          return true;
+        }
+      }
+    }
+
+    // Mapping[K, V] ≡ dict[K, V] (Mapping is the ABC for dict)
+    const mappingPattern = /^(?:Mapping|dict|Dict)\[(.+)\]$/;
+    const baseMapping = baseClean.match(mappingPattern);
+    const candMapping = candClean.match(mappingPattern);
+    if (baseMapping && candMapping) {
+      // Both are map-like — compare key/value types loosely
+      return true;
+    }
+
+    // dict map equivalence: dict[str, str] ≡ dict[str, Any] ≡ Dict[str, Any] ≡ dict[str, str | float | bool]
+    const dictLikePattern = /^(?:dict|Dict|Mapping)\[str,\s*.+\]$/;
+    if (dictLikePattern.test(baseClean) && dictLikePattern.test(candClean)) return true;
+
+    // Named metadata type ≡ dict[str, ...] (custom type alias for dict)
+    const isMapType = (t: string) => dictLikePattern.test(t) || /^(?:Metadata|AuditLog\w*Metadata)$/.test(t);
+    if (isMapType(baseClean) && isMapType(candClean)) return true;
+
+    // Named type alias for a map/dict type ≡ inline dict expression
+    // e.g., AuditLogMetadata ≡ dict[str, str | float | bool]
+    if (NAMED_TYPE_RE.test(baseClean) && dictLikePattern.test(candClean)) {
+      // Assume named types ending in "Metadata" or "Attributes" are dict aliases
+      if (/(?:Metadata|Attributes)$/.test(baseClean)) return true;
+    }
+    if (NAMED_TYPE_RE.test(candClean) && dictLikePattern.test(baseClean)) {
+      if (/(?:Metadata|Attributes)$/.test(candClean)) return true;
+    }
+
+    // str ≡ Literal["..."] (literal string type vs plain str)
+    if (baseClean === 'str' && candClean.startsWith('Literal[')) return true;
+    if (candClean === 'str' && baseClean.startsWith('Literal[')) return true;
+
+    // Literal[...] ≡ enum name (candidate has an enum, baseline has Literal)
+    if (baseClean.startsWith('Literal[') && candidateSurface.enums[candClean]) return true;
+    if (candClean.startsWith('Literal[') && candidateSurface.enums?.[baseClean]) return true;
+
+    // str ≡ enum type (baseline says str, candidate uses enum)
+    if (baseClean === 'str' && candidateSurface.enums[candClean]) return true;
+    if (candClean === 'str' && candidateSurface.enums?.[baseClean]) return true;
+
+    // int ≡ float (JSON number coercion)
+    const numericTypes = new Set(['int', 'float']);
+    if (numericTypes.has(baseClean) && numericTypes.has(candClean)) return true;
+
+    // Named type tolerance
+    if (NAMED_TYPE_RE.test(baseClean) && NAMED_TYPE_RE.test(candClean)) {
+      if (typeExistsInSurface(candClean, candidateSurface)) {
+        if (candClean.includes(baseClean) || baseClean.includes(candClean)) return true;
+        const baseNoResp = baseClean.replace(/Response$/, '');
+        const candNoResp = candClean.replace(/Response$/, '');
+        if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
+        const baseWords = new Set(
+          splitWords(baseNoResp)
+            .filter((w) => w.length > 2)
+            .map((w) => w.toLowerCase()),
+        );
+        const candWords = new Set(
+          splitWords(candNoResp)
+            .filter((w) => w.length > 2)
+            .map((w) => w.toLowerCase()),
+        );
+        const overlap = [...baseWords].filter((w) => candWords.has(w));
+        if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+      }
+    }
+
+    return false;
+  },
+
+  isSignatureEquivalent(
+    baseline: import('../types.js').ApiMethod,
+    candidate: import('../types.js').ApiMethod,
+    _candidateSurface: ApiSurface,
+  ): boolean {
+    // Tolerate methods where the candidate uses a body dict (payload: dict[str, Any])
+    // while the baseline unpacks the body into individual typed params.
+    // The first N params that match by name and type are consumed, then the remaining
+    // baseline params are tolerated if the candidate has a dict payload param.
+
+    // Return types must be equivalent (use named type tolerance)
+    if (baseline.returnType !== candidate.returnType) {
+      const baseRet = baseline.returnType;
+      const candRet = candidate.returnType;
+      if (!(NAMED_TYPE_RE.test(baseRet) && NAMED_TYPE_RE.test(candRet))) return false;
+      // Check named-type containment or word overlap
+      if (!candRet.includes(baseRet) && !baseRet.includes(candRet)) {
+        const baseWords = new Set(
+          splitWords(baseRet.replace(/Response$/, ''))
+            .filter((w: string) => w.length > 2)
+            .map((w: string) => w.toLowerCase()),
+        );
+        const candWords = new Set(
+          splitWords(candRet.replace(/Response$/, ''))
+            .filter((w: string) => w.length > 2)
+            .map((w: string) => w.toLowerCase()),
+        );
+        const overlap = [...baseWords].filter((w: string) => candWords.has(w));
+        if (overlap.length < 1) return false;
+      }
+    }
+
+    // Check if candidate has a body dict param
+    const bodyDictTypes = new Set(['dict[str, Any]', 'Dict[str, Any]', 'dict']);
+    const candBodyIdx = candidate.params.findIndex(
+      (p) => bodyDictTypes.has(p.type) && (p.name === 'payload' || p.name === 'body' || p.name === 'data'),
+    );
+    if (candBodyIdx < 0) return false;
+
+    // All candidate params before the body dict must match baseline params by name and type
+    for (let i = 0; i < candBodyIdx; i++) {
+      if (i >= baseline.params.length) return false;
+      if (baseline.params[i].name !== candidate.params[i].name) return false;
+      if (baseline.params[i].type !== candidate.params[i].type) return false;
+    }
+
+    // Remaining baseline params after the matched prefix are tolerated as body fields
+    return true;
+  },
+
+  // Consumers should configure modelBaseClasses for their framework (e.g., ['BaseModel'] for Pydantic)
+  modelBaseClasses: [],
   exceptionBaseClasses: ['Exception', 'BaseException'],
   listResourcePatterns: [],
 };
