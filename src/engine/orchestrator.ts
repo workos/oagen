@@ -37,6 +37,9 @@ export async function generate(
   if (writeResult.merged.length > 0) {
     console.log(`Merged into ${writeResult.merged.length} existing files (additive only)`);
   }
+  if (writeResult.ignored.length > 0) {
+    console.log(`Ignored ${writeResult.ignored.length} files (@oagen-ignore-file)`);
+  }
 
   // Target integration pass
   if (options.target) {

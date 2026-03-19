@@ -17,6 +17,7 @@ export interface WriteResult {
   merged: string[];
   skipped: string[];
   identical: string[];
+  ignored: string[];
 }
 
 /**
@@ -34,7 +35,7 @@ export async function writeFiles(
   outputDir: string,
   options?: WriteOptions,
 ): Promise<WriteResult> {
-  const result: WriteResult = { written: [], merged: [], skipped: [], identical: [] };
+  const result: WriteResult = { written: [], merged: [], skipped: [], identical: [], ignored: [] };
   const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
   const language = options?.language;
   const header = options?.header ?? '';
@@ -64,6 +65,12 @@ export async function writeFiles(
         await fs.writeFile(fullPath, header + '\n\n' + existingContent, 'utf-8');
       }
       result.skipped.push(file.path);
+      continue;
+    }
+
+    // @oagen-ignore-file → skip entirely (existing file opts out of all generation)
+    if (existingContent.includes('@oagen-ignore-file')) {
+      result.ignored.push(file.path);
       continue;
     }
 

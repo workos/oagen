@@ -45,10 +45,13 @@ export async function generateIncremental(
   );
 
   if (!options.dryRun) {
-    await writeFiles(generated, options.outputDir, {
+    const writeResult = await writeFiles(generated, options.outputDir, {
       language: emitter.language,
       header,
     });
+    if (writeResult.ignored.length > 0) {
+      console.log(`Ignored ${writeResult.ignored.length} files (@oagen-ignore-file)`);
+    }
 
     // Target integration pass — strip language prefix and write to live SDK
     if (options.target) {
@@ -67,6 +70,9 @@ export async function generateIncremental(
       }
       if (targetResult.skipped.length > 0) {
         console.log(`Target: skipped ${targetResult.skipped.length} files (excluded or no grammar)`);
+      }
+      if (targetResult.ignored.length > 0) {
+        console.log(`Target: ignored ${targetResult.ignored.length} files (@oagen-ignore-file)`);
       }
     }
 
