@@ -128,6 +128,16 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
     }
   }
 
+  // Precompute lowercased field/property name sets for field-structure matching
+  const candIfaceFieldSets = new Map<string, Set<string>>();
+  for (const [n, iface] of Object.entries(candidate.interfaces)) {
+    candIfaceFieldSets.set(n, new Set(Object.keys(iface.fields).map((f) => f.toLowerCase())));
+  }
+  const candClassPropSets = new Map<string, Set<string>>();
+  for (const [n, cls] of Object.entries(candidate.classes)) {
+    candClassPropSets.set(n, new Set(Object.keys(cls.properties).map((f) => f.toLowerCase())));
+  }
+
   // Diff interfaces
   for (const [name, baseIface] of Object.entries(baseline.interfaces)) {
     totalBaseline++;
@@ -159,8 +169,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         const baseFieldNamesLower = new Set(Object.keys(baseIface.fields).map((f) => f.toLowerCase()));
         if (baseFieldNamesLower.size > 0) {
           // Check candidate interfaces
-          for (const [, candIfaceEntry] of Object.entries(candidate.interfaces)) {
-            const candFieldNamesLower = new Set(Object.keys(candIfaceEntry.fields).map((f) => f.toLowerCase()));
+          for (const [, candFieldNamesLower] of candIfaceFieldSets) {
             if (
               candFieldNamesLower.size === baseFieldNamesLower.size &&
               [...baseFieldNamesLower].every((f) => candFieldNamesLower.has(f))
@@ -171,8 +180,7 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
           }
           // Check candidate classes (properties match fields)
           if (!tolerated) {
-            for (const [, candClass] of Object.entries(candidate.classes)) {
-              const candPropNamesLower = new Set(Object.keys(candClass.properties).map((f) => f.toLowerCase()));
+            for (const [, candPropNamesLower] of candClassPropSets) {
               if (
                 candPropNamesLower.size === baseFieldNamesLower.size &&
                 [...baseFieldNamesLower].every((f) => candPropNamesLower.has(f))
