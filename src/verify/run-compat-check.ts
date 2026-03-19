@@ -28,7 +28,7 @@ export async function runCompatCheck(
     const fieldPaths = specDerivedFieldPaths(spec, extractor.hints);
     const methodPaths = specDerivedMethodPaths(spec);
     const enumVals = specDerivedEnumValues(spec);
-    scopedBaseline = filterSurface(baseline, allowed, fieldPaths, methodPaths, enumVals);
+    scopedBaseline = filterSurface(baseline, allowed, { fieldPaths, methodPaths, enumValues: enumVals });
     scopedToSpec = true;
     scopedSymbolCount =
       Object.keys(scopedBaseline.interfaces).length +

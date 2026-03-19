@@ -152,10 +152,13 @@ function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Recor
 export function filterSurface(
   surface: ApiSurface,
   allowedNames: Set<string>,
-  fieldPaths?: Set<string>,
-  methodPaths?: Set<string>,
-  enumValues?: Map<string, Set<string | number>>,
+  opts?: {
+    fieldPaths?: Set<string>;
+    methodPaths?: Set<string>;
+    enumValues?: Map<string, Set<string | number>>;
+  },
 ): ApiSurface {
+  const { fieldPaths, methodPaths, enumValues } = opts ?? {};
   const filteredInterfaces = filterRecord(surface.interfaces, allowedNames);
 
   // Filter interface fields by spec-derived field paths if provided
