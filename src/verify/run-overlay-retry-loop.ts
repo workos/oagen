@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, unlinkSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import * as path from 'node:path';
 import { buildOverlayLookup, patchOverlay } from '../compat/overlay.js';
 import type { ManifestEntry } from '../compat/overlay.js';
@@ -41,11 +41,16 @@ function cleanGeneratedFiles(dir: string): void {
     }
     // Skip non-source files and manifests
     if (entry.endsWith('.json') || entry.endsWith('.lock')) continue;
-    // Read file header to check for generation marker
+    // Read only the first 200 bytes to check for generation marker
     try {
-      const fd = readFileSync(full, 'utf-8');
-      // Only check the first 200 chars for the marker
-      const header = fd.slice(0, 200);
+      const buf = Buffer.alloc(200);
+      const fd = openSync(full, 'r');
+      try {
+        readSync(fd, buf, 0, 200, 0);
+      } finally {
+        closeSync(fd);
+      }
+      const header = buf.toString('utf-8');
       if (GENERATED_MARKERS.some((m) => header.includes(m))) {
         unlinkSync(full);
       }
