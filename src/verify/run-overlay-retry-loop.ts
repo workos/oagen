@@ -14,9 +14,10 @@ export async function runOverlayRetryLoop(opts: {
   outputDir: string;
   lang: string;
   maxRetries: number;
+  namespace?: string;
   onRetry?: (attemptNumber: number, maxRetries: number, patchableCount: number) => void;
 }): Promise<OverlayRetryResult> {
-  const { baseline, parsedSpec, outputDir, lang, maxRetries, onRetry } = opts;
+  const { baseline, parsedSpec, outputDir, lang, maxRetries, namespace, onRetry } = opts;
 
   let overlay = buildOverlayLookup(baseline, undefined, parsedSpec);
   let prevScore = -1;
@@ -69,7 +70,7 @@ export async function runOverlayRetryLoop(opts: {
 
     const emitter = getEmitter(lang);
     await generate(parsedSpec, emitter, {
-      namespace: parsedSpec.name,
+      namespace: namespace ?? parsedSpec.name,
       outputDir,
       overlayLookup: overlay,
       apiSurface: baseline,

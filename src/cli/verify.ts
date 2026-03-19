@@ -40,8 +40,10 @@ export async function verifyCommand(opts: {
   scope?: 'full' | 'spec-only';
   diagnostics?: boolean;
   maxRetries?: number;
+  operationIdTransform?: (id: string) => string;
+  namespace?: string;
 }): Promise<void> {
-  const { spec, oldSpec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics } = opts;
+  const { spec, oldSpec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics, operationIdTransform } = opts;
   const maxRetries = opts.maxRetries ?? 3;
   const diagData: VerifyDiagnostics = {};
 
@@ -58,7 +60,7 @@ export async function verifyCommand(opts: {
     const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
     let parsedSpec;
     if (effectiveScope === 'spec-only' && spec) {
-      parsedSpec = await parseSpec(spec);
+      parsedSpec = await parseSpec(spec, { operationIdTransform });
     } else if (effectiveScope === 'spec-only') {
       throw new CommandError('error: --scope spec-only requires --spec <path>', '', 1);
     }
@@ -71,6 +73,7 @@ export async function verifyCommand(opts: {
             outputDir: output,
             lang,
             maxRetries,
+            namespace: opts.namespace,
             onRetry: (attemptNumber, retryLimit, patchableCount) => {
               console.log(`\nRetry ${attemptNumber}/${retryLimit}: patching ${patchableCount} violation(s)...`);
             },
@@ -137,8 +140,8 @@ export async function verifyCommand(opts: {
     console.log(`Step ${stepNum}: Staleness detection`);
     console.log(separator);
 
-    const oldParsedSpec = await parseSpec(oldSpec);
-    const newParsedSpec = await parseSpec(spec);
+    const oldParsedSpec = await parseSpec(oldSpec, { operationIdTransform });
+    const newParsedSpec = await parseSpec(spec, { operationIdTransform });
     const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
 
     if (stalenessResult.violations.length > 0) {

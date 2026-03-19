@@ -115,6 +115,7 @@ program
     'Compat scope: "full" compares all baseline symbols, "spec-only" compares only symbols derivable from the OpenAPI spec (default: spec-only when --spec is provided)',
   )
   .option('--old-spec <path>', 'Previous OpenAPI spec — enables staleness detection for removed/renamed symbols')
+  .option('--namespace <name>', 'SDK namespace/package name (used by retry loop for regeneration)')
   .option('--diagnostics', 'Output verify-diagnostics.json with structured violation breakdown')
   .option('--max-retries <n>', 'Max retry iterations for self-correcting overlay loop (default: 3)', '3')
   .action((opts) => {
@@ -123,7 +124,7 @@ program
     // and no existing smoke-results-raw.json). Defer the check to verifyCommand.
     // CLI --smoke-runner takes precedence, then per-language smokeRunners map from config
     opts.smokeRunner ??= configSmokeRunners?.[opts.lang];
-    verifyCommand({ ...opts, maxRetries: parseInt(opts.maxRetries, 10) }).catch(handleError);
+    verifyCommand({ ...opts, maxRetries: parseInt(opts.maxRetries, 10), operationIdTransform: configOperationIdTransform }).catch(handleError);
   });
 
 program
