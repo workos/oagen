@@ -12,8 +12,7 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
-import { NAMED_TYPE_RE, typeExistsInSurface } from '../language-hints.js';
-import { splitWords } from '../../utils/naming.js';
+import { NAMED_TYPE_RE, typeExistsInSurface, namedTypeWordsOverlap } from '../language-hints.js';
 import { walkPythonFiles, findPythonSourceRoot, parsePythonFile } from './python-parser.js';
 import { buildSurface } from './python-surface.js';
 import type { ParsedPythonFile } from './python-parser.js';
@@ -176,18 +175,7 @@ const pythonHints: LanguageHints = {
       if (NAMED_TYPE_RE.test(baseInner) && NAMED_TYPE_RE.test(candInner)) {
         if (typeExistsInSurface(candInner, candidateSurface)) {
           if (candInner.includes(baseInner) || baseInner.includes(candInner)) return true;
-          const baseWords = new Set(
-            splitWords(baseInner.replace(/Response$/, ''))
-              .filter((w) => w.length > 2)
-              .map((w) => w.toLowerCase()),
-          );
-          const candWords = new Set(
-            splitWords(candInner.replace(/Response$/, ''))
-              .filter((w) => w.length > 2)
-              .map((w) => w.toLowerCase()),
-          );
-          const overlap = [...baseWords].filter((w) => candWords.has(w));
-          if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+          if (namedTypeWordsOverlap(baseInner, candInner)) return true;
         }
       }
       // Tolerate model collection vs primitive collection: Sequence[OrganizationDomain] ≡ list[str]
@@ -267,18 +255,7 @@ const pythonHints: LanguageHints = {
         const baseNoResp = baseClean.replace(/Response$/, '');
         const candNoResp = candClean.replace(/Response$/, '');
         if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
-        const baseWords = new Set(
-          splitWords(baseNoResp)
-            .filter((w) => w.length > 2)
-            .map((w) => w.toLowerCase()),
-        );
-        const candWords = new Set(
-          splitWords(candNoResp)
-            .filter((w) => w.length > 2)
-            .map((w) => w.toLowerCase()),
-        );
-        const overlap = [...baseWords].filter((w) => candWords.has(w));
-        if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+        if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
       }
     }
 
@@ -302,18 +279,7 @@ const pythonHints: LanguageHints = {
       if (!(NAMED_TYPE_RE.test(baseRet) && NAMED_TYPE_RE.test(candRet))) return false;
       // Check named-type containment or word overlap
       if (!candRet.includes(baseRet) && !baseRet.includes(candRet)) {
-        const baseWords = new Set(
-          splitWords(baseRet.replace(/Response$/, ''))
-            .filter((w: string) => w.length > 2)
-            .map((w: string) => w.toLowerCase()),
-        );
-        const candWords = new Set(
-          splitWords(candRet.replace(/Response$/, ''))
-            .filter((w: string) => w.length > 2)
-            .map((w: string) => w.toLowerCase()),
-        );
-        const overlap = [...baseWords].filter((w: string) => candWords.has(w));
-        if (overlap.length < 1) return false;
+        if (!namedTypeWordsOverlap(baseRet, candRet)) return false;
       }
     }
 

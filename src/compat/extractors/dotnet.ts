@@ -12,8 +12,7 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
-import { NAMED_TYPE_RE, typeExistsInSurface } from '../language-hints.js';
-import { splitWords } from '../../utils/naming.js';
+import { NAMED_TYPE_RE, typeExistsInSurface, namedTypeWordsOverlap } from '../language-hints.js';
 import { walkCSharpFiles, parseCSharpFile } from './dotnet-parser.js';
 import { buildSurface } from './dotnet-surface.js';
 import type { CSharpClass, CSharpEnum } from './dotnet-parser.js';
@@ -110,18 +109,7 @@ const dotnetHints: LanguageHints = {
           const candNoResp = candInner.replace(/Response$/, '');
           if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
           // Word overlap
-          const baseWords = new Set(
-            splitWords(baseNoResp)
-              .filter((w) => w.length > 2)
-              .map((w) => w.toLowerCase()),
-          );
-          const candWords = new Set(
-            splitWords(candNoResp)
-              .filter((w) => w.length > 2)
-              .map((w) => w.toLowerCase()),
-          );
-          const overlap = [...baseWords].filter((w) => candWords.has(w));
-          if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+          if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
         }
       }
       // Tolerate model collection vs primitive collection: OrganizationDomain[] ≡ List<string>
@@ -162,18 +150,7 @@ const dotnetHints: LanguageHints = {
           const baseNoResp = baseInner.replace(/Response$/, '');
           const candNoResp = candInner.replace(/Response$/, '');
           if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
-          const baseWords = new Set(
-            splitWords(baseNoResp)
-              .filter((w) => w.length > 2)
-              .map((w) => w.toLowerCase()),
-          );
-          const candWords = new Set(
-            splitWords(candNoResp)
-              .filter((w) => w.length > 2)
-              .map((w) => w.toLowerCase()),
-          );
-          const overlap = [...baseWords].filter((w) => candWords.has(w));
-          if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+          if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
         }
       }
     }
@@ -187,18 +164,7 @@ const dotnetHints: LanguageHints = {
         const candNoResp = candClean.replace(/Response$/, '');
         if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
         // Word-component overlap
-        const baseWords = new Set(
-          splitWords(baseNoResp)
-            .filter((w) => w.length > 2)
-            .map((w) => w.toLowerCase()),
-        );
-        const candWords = new Set(
-          splitWords(candNoResp)
-            .filter((w) => w.length > 2)
-            .map((w) => w.toLowerCase()),
-        );
-        const overlap = [...baseWords].filter((w) => candWords.has(w));
-        if (overlap.length >= 1 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) return true;
+        if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
       }
     }
 

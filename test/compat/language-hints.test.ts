@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nodeHints, resolveHints } from '../../src/compat/language-hints.js';
+import { nodeHints, resolveHints, namedTypeWordsOverlap } from '../../src/compat/language-hints.js';
 import { diffSurfaces, specDerivedNames } from '../../src/compat/differ.js';
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
@@ -138,6 +138,31 @@ describe('nodeHints', () => {
 
   it('tolerateCategoryMismatch is true', () => {
     expect(nodeHints.tolerateCategoryMismatch).toBe(true);
+  });
+});
+
+describe('namedTypeWordsOverlap', () => {
+  it('detects word overlap between reordered names', () => {
+    expect(namedTypeWordsOverlap('AuditLogTargetSchema', 'AuditLogSchemaJsonTarget')).toBe(true);
+  });
+
+  it('strips Response suffix before comparison', () => {
+    expect(namedTypeWordsOverlap('RoleResponse', 'OrganizationMembershipRole')).toBe(true);
+  });
+
+  it('returns false for unrelated names', () => {
+    expect(namedTypeWordsOverlap('Organization', 'Connection')).toBe(false);
+  });
+
+  it('respects minOverlap parameter', () => {
+    // "Role" overlaps with 1 word but not 2
+    expect(namedTypeWordsOverlap('RoleResponse', 'UserRole', 1)).toBe(true);
+    expect(namedTypeWordsOverlap('RoleResponse', 'UserRole', 2)).toBe(false);
+  });
+
+  it('filters short words (<=2 chars)', () => {
+    // "Id" is only 2 chars, should be filtered out
+    expect(namedTypeWordsOverlap('Id', 'Id')).toBe(false);
   });
 });
 

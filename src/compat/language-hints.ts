@@ -22,6 +22,20 @@ function splitPascalWords(s: string): string[] {
   return splitWords(s).filter((w) => w.length > 2);
 }
 
+/**
+ * Check whether two named types share enough PascalCase word components to
+ * be considered equivalent (handles name reordering from Json merges, etc.).
+ * Both names have `Response$` stripped before comparison.
+ */
+export function namedTypeWordsOverlap(a: string, b: string, minOverlap = 1): boolean {
+  const aNoResp = a.replace(/Response$/, '');
+  const bNoResp = b.replace(/Response$/, '');
+  const aWords = new Set(splitPascalWords(aNoResp).map((w) => w.toLowerCase()));
+  const bWords = new Set(splitPascalWords(bNoResp).map((w) => w.toLowerCase()));
+  const overlap = [...aWords].filter((w) => bWords.has(w));
+  return overlap.length >= minOverlap && overlap.length >= Math.min(aWords.size, bWords.size) - 1;
+}
+
 /** Split a pipe-delimited union string into trimmed, non-empty members. */
 function parseUnionMembers(s: string): string[] {
   return s
@@ -171,10 +185,7 @@ export const nodeHints: LanguageHints = {
         // Word-component overlap: split PascalCase into words and check
         // if they share enough meaningful words (handles name reordering
         // from Json merges: AuditLogTargetSchema vs AuditLogSchemaJsonTarget)
-        const baseWords = new Set(splitPascalWords(baseNoResp));
-        const candWords = new Set(splitPascalWords(candNoResp));
-        const overlap = [...baseWords].filter((w) => candWords.has(w));
-        if (overlap.length >= 2 && overlap.length >= Math.min(baseWords.size, candWords.size) - 1) {
+        if (namedTypeWordsOverlap(baseNoResp, candNoResp, 2)) {
           return true;
         }
       }
