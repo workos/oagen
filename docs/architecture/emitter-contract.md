@@ -48,7 +48,6 @@ interface EmitterContext {
   outputDir?: string; // Output directory path
   apiSurface?: ApiSurface; // Baseline API surface (when --api-surface is provided)
   overlayLookup?: OverlayLookup; // Name preservation overlay (when --api-surface is provided)
-  irVersion: number; // IR contract version — see ir-types.md Versioning section
 }
 ```
 
@@ -85,26 +84,6 @@ When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engi
 | `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported |
 
 The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
-
-## Contract Versioning
-
-Emitters can optionally declare `contractVersion` to indicate which IR version they were built against:
-
-```typescript
-const emitter: Emitter = {
-  language: "ruby",
-  contractVersion: 1,
-  // ...
-};
-```
-
-When registered via `registerEmitter()`, the registry validates `contractVersion` against the current `IR_VERSION`:
-
-- **Matches**: registration succeeds silently
-- **Mismatches**: throws `RegistryError` — `Emitter "ruby" declares contractVersion 3, but oagen requires IR_VERSION 5.`
-- **Undefined**: emits `console.warn` — `Warning: Emitter "ruby" does not declare a contractVersion.` — but still registers
-
-Consumers can also set `irVersion` in `oagen.config.ts` for a project-level version pin (checked at config load time, before emitter registration).
 
 ## Rules
 
@@ -147,12 +126,13 @@ function planOperation(op: Operation): OperationPlan;
 
 ## Existing Emitters
 
-Emitters live in the separate `oagen-emitters` project and import types from `@workos/oagen`.
+Production emitters live in the separate `oagen-emitters` project and import types from `@workos/oagen`.
 
-| Language | Location (in oagen-emitters) | Design Doc (in oagen-emitters) |
-| -------- | ---------------------------- | ------------------------------ |
-| Ruby     | `src/ruby/`                  | `docs/ruby.md`                 |
-| Node     | `src/node/`                  | `docs/node.md`                 |
+| Language                | Location                        | Notes                                      |
+| ----------------------- | ------------------------------- | ------------------------------------------ |
+| TypeScript (reference)  | `examples/reference-emitter/`   | Ships with oagen — minimal working example |
+| Ruby                    | `src/ruby/` (in oagen-emitters) | Production emitter                         |
+| Node                    | `src/node/` (in oagen-emitters) | Production emitter                         |
 
 ## Adding a New Emitter
 

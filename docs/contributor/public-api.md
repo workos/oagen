@@ -8,7 +8,7 @@ The default `@workos/oagen` entrypoint is the core public API.
 
 It includes:
 
-- IR types and `IR_VERSION`
+- IR types
 - parser entrypoints such as `parseSpec`
 - emitter-facing types such as `Emitter`, `EmitterContext`, and `GeneratedFile`
 - generation runtime entrypoints such as `generate`, `generateFiles`, and `generateIncremental`

@@ -18,7 +18,7 @@ Three stages transform an OpenAPI spec into SDK files:
 
 When changing pipeline behavior:
 
-- **Adding a new IR node** — Update `src/ir/types.ts`, bump `IR_VERSION`, add `assertNever` branch in emitters. See [IR Types](../architecture/ir-types.md).
+- **Adding a new IR node** — Update `src/ir/types.ts`, add `assertNever` branch in emitters. See [IR Types](../architecture/ir-types.md).
 - **Adding a parser feature** — Add or modify sub-modules in `src/parser/`, wire into `parseSpec()`. Parser tests live in `test/parser/`.
 - **Changing orchestration** — Modify `src/engine/orchestrator.ts`. The `generate()` function builds `EmitterContext`, calls `generateAllFiles()`, then `writeFiles()`.
 - **Changing write behavior** — Modify `src/engine/writer.ts` or `src/engine/merger.ts`. The writer never deletes files; see [Non-Additive Changes](../architecture/non-additive-changes.md) for staleness detection.

@@ -61,13 +61,15 @@ Emitters use `AuthScheme` to generate authentication configuration and client co
 
 ```typescript
 interface PaginationMeta {
-  cursorParam: string; // Query param name for the cursor (e.g., "after")
-  dataPath: string; // JSON path to the data array (e.g., "data")
+  strategy: 'cursor' | 'offset'; // Pagination strategy
+  param: string; // Query param name (e.g., "after" for cursor, "offset" for offset)
+  limitParam?: string; // Limit param name (offset strategy only, e.g., "limit")
+  dataPath: string; // JSON path to the data array (e.g., "data", "results", "items")
   itemType: TypeRef; // Type of each item in the paginated list
 }
 ```
 
-Present on `Operation` when `paginated: true`. Emitters use this to generate pagination helpers (iterators, auto-paging methods).
+Present on `Operation` when pagination is detected. The `strategy` discriminant tells emitters whether to generate cursor-based or offset-based pagination helpers. The `dataPath` is dynamically detected from the response envelope — it is NOT hardcoded to `'data'`.
 
 ## Service & Operation
 
@@ -139,16 +141,6 @@ interface ErrorResponse {
 
 ## Versioning
 
-Source: `IR_VERSION` in `src/ir/types.ts`
+The IR does not currently use a version constant. As a 0.x project with no external consumers yet, formal IR versioning is deferred until post-open-source when external emitters need a stable contract signal.
 
-The IR is versioned with a single integer constant (`IR_VERSION`). This version must be bumped when:
-
-- A new `TypeRef` variant (kind) is added
-- A required field is added to any IR node (Model, Service, Operation, etc.)
-- A field type is changed in an incompatible way
-
-**Compile-time safety:** `assertNever` enforces exhaustive `switch` statements over `TypeRef.kind` at compile time. Adding a new variant causes build failures in any emitter that doesn't handle it.
-
-**Runtime safety:** Pre-compiled emitters (from npm) skip TypeScript checks. `IR_VERSION` lets the config loader detect version mismatches at startup and fail with an actionable error rather than silently producing wrong output.
-
-Consumers can declare `irVersion` in their `oagen.config.ts` to pin the expected IR version. If the installed `@workos/oagen` has a different `IR_VERSION`, the CLI exits with an error.
+**Compile-time safety:** `assertNever` enforces exhaustive `switch` statements over `TypeRef.kind` at compile time. Adding a new variant causes build failures in any emitter that doesn't handle it — this is the primary compatibility mechanism.

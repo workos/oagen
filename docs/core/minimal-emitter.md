@@ -9,7 +9,6 @@ Use it when you want to understand the minimum contract quickly. If you need the
 A minimal emitter should:
 
 - declare a `language`
-- declare `contractVersion`
 - return files from at least one generator method
 - return `[]` from methods the language does not use yet
 
@@ -26,7 +25,6 @@ import type {
   Model,
   Service,
 } from "@workos/oagen";
-import { IR_VERSION } from "@workos/oagen";
 
 function namesFile(path: string, values: string[]): GeneratedFile[] {
   if (values.length === 0) return [];
@@ -35,7 +33,6 @@ function namesFile(path: string, values: string[]): GeneratedFile[] {
 
 export const demoEmitter: Emitter = {
   language: "demo",
-  contractVersion: IR_VERSION,
 
   generateModels(models: Model[]): GeneratedFile[] {
     return namesFile(

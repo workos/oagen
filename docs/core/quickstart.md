@@ -53,7 +53,6 @@ import type {
   Model,
   Service,
 } from "@workos/oagen";
-import { IR_VERSION } from "@workos/oagen";
 
 function renderSummary(spec: ApiSpec): string {
   return [
@@ -96,7 +95,6 @@ function renderServices(services: Service[]): GeneratedFile[] {
 
 export const demoEmitter: Emitter = {
   language: "demo",
-  contractVersion: IR_VERSION,
   generateModels: (models) => renderModels(models),
   generateEnums: (enums) => renderEnums(enums),
   generateResources: (services) => renderServices(services),
@@ -138,6 +136,7 @@ Once the minimal loop works:
 
 ## Next Reads
 
+- [Reference Emitter](../../examples/reference-emitter/) — a working TypeScript emitter you can study and copy
 - [Emitter Contract](../architecture/emitter-contract.md)
 - [IR Type System Reference](../architecture/ir-types.md)
 - [CLI Reference](../cli.md)

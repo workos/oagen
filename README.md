@@ -69,7 +69,6 @@ The default `@workos/oagen` entrypoint is intentionally focused on the framework
 
 ```ts
 import {
-  IR_VERSION,
   diffSpecs,
   generate,
   generateFiles,
@@ -112,11 +111,9 @@ Emitters are pure functions over the IR. They receive typed IR nodes and return 
 
 ```ts
 import type { Emitter } from "@workos/oagen";
-import { IR_VERSION } from "@workos/oagen";
 
 const myEmitter: Emitter = {
   language: "go",
-  contractVersion: IR_VERSION,
   generateModels: (models, ctx) => [
     /* ... */
   ],
@@ -138,6 +135,7 @@ const myEmitter: Emitter = {
 
 Start with:
 
+- [Reference Emitter](examples/reference-emitter/) — a working TypeScript emitter with tests against a GitHub-flavored fixture spec
 - [Minimal Quickstart](docs/core/quickstart.md)
 - [Emitter Contract](docs/architecture/emitter-contract.md)
 - [IR Type System Reference](docs/architecture/ir-types.md)
