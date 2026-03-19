@@ -52,10 +52,10 @@ describe('detectPagination', () => {
   });
 
   it('detects offset-based pagination with strategy and limitParam', () => {
-    const result = detectPagination(
-      { kind: 'array', items: { kind: 'model', name: 'Item' } },
-      [makeParam('offset'), makeParam('limit')],
-    );
+    const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'Item' } }, [
+      makeParam('offset'),
+      makeParam('limit'),
+    ]);
     expect(result).toEqual({
       strategy: 'offset',
       param: 'offset',

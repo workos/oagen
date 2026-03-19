@@ -128,11 +128,11 @@ function planOperation(op: Operation): OperationPlan;
 
 Production emitters live in the separate `oagen-emitters` project and import types from `@workos/oagen`.
 
-| Language                | Location                        | Notes                                      |
-| ----------------------- | ------------------------------- | ------------------------------------------ |
-| TypeScript (reference)  | `examples/reference-emitter/`   | Ships with oagen — minimal working example |
-| Ruby                    | `src/ruby/` (in oagen-emitters) | Production emitter                         |
-| Node                    | `src/node/` (in oagen-emitters) | Production emitter                         |
+| Language               | Location                        | Notes                                      |
+| ---------------------- | ------------------------------- | ------------------------------------------ |
+| TypeScript (reference) | `examples/reference-emitter/`   | Ships with oagen — minimal working example |
+| Ruby                   | `src/ruby/` (in oagen-emitters) | Production emitter                         |
+| Node                   | `src/node/` (in oagen-emitters) | Production emitter                         |
 
 ## Adding a New Emitter
 

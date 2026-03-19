@@ -61,7 +61,7 @@ Emitters use `AuthScheme` to generate authentication configuration and client co
 
 ```typescript
 interface PaginationMeta {
-  strategy: 'cursor' | 'offset'; // Pagination strategy
+  strategy: "cursor" | "offset"; // Pagination strategy
   param: string; // Query param name (e.g., "after" for cursor, "offset" for offset)
   limitParam?: string; // Limit param name (offset strategy only, e.g., "limit")
   dataPath: string; // JSON path to the data array (e.g., "data", "results", "items")

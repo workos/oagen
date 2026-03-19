@@ -227,7 +227,12 @@ describe('diffOperations', () => {
   it('detects paginated false→true as additive', () => {
     const modified: Operation = {
       ...getUser,
-      pagination: { strategy: 'cursor', param: 'after', dataPath: 'data', itemType: { kind: 'primitive', type: 'string' } },
+      pagination: {
+        strategy: 'cursor',
+        param: 'after',
+        dataPath: 'data',
+        itemType: { kind: 'primitive', type: 'string' },
+      },
     };
     const changes = diffOperations('Users', [getUser], [modified]);
     expect(changes).toHaveLength(1);

@@ -62,7 +62,6 @@ const ctx: EmitterContext = {
   namespace: 'test',
   namespacePascal: 'Test',
   spec,
-
 };
 
 describe('mapChangesToFiles', () => {
@@ -160,7 +159,6 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: specWithEnumRef,
-    
     };
     const changes: Change[] = [
       {
@@ -201,7 +199,6 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: specWithEnumRef,
-    
     };
     const changes: Change[] = [{ kind: 'enum-removed', name: 'Status', classification: 'breaking' }];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxWithRef);
@@ -251,7 +248,6 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: multiServiceSpec,
-    
     };
     const changes: Change[] = [
       {
@@ -346,7 +342,6 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: transitiveSpec,
-    
     };
     const changes: Change[] = [
       {
@@ -454,7 +449,6 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: circularSpec,
-    
     };
     const changes: Change[] = [
       {
