@@ -20,18 +20,11 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { RustStruct, RustEnum, RustFunc, RustTrait, RustTypeAlias as RustTypeAliasType } from './rust-parser.js';
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
 
 function rustTypeToString(t: string): string {
   return t;

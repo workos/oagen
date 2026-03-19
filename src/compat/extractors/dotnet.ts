@@ -18,9 +18,12 @@ import { walkCSharpFiles, parseCSharpFile } from './dotnet-parser.js';
 import { buildSurface } from './dotnet-surface.js';
 import type { CSharpClass, CSharpEnum } from './dotnet-parser.js';
 
+
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
+
+const DOTNET_PRIMITIVE_TYPES = new Set(['string', 'int', 'long', 'float', 'double', 'bool', 'decimal']);
 
 const dotnetHints: LanguageHints = {
   stripNullable(type: string): string | null {
@@ -123,10 +126,9 @@ const dotnetHints: LanguageHints = {
       }
       // Tolerate model collection vs primitive collection: OrganizationDomain[] ≡ List<string>
       // The spec may define a field as a primitive array while the live SDK wraps it in a model.
-      const primitiveTypes = new Set(['string', 'int', 'long', 'float', 'double', 'bool', 'decimal']);
       if (
-        (primitiveTypes.has(baseInner) && NAMED_TYPE_RE.test(candInner)) ||
-        (primitiveTypes.has(candInner) && NAMED_TYPE_RE.test(baseInner))
+        (DOTNET_PRIMITIVE_TYPES.has(baseInner) && NAMED_TYPE_RE.test(candInner)) ||
+        (DOTNET_PRIMITIVE_TYPES.has(candInner) && NAMED_TYPE_RE.test(baseInner))
       ) {
         return true;
       }
@@ -221,18 +223,6 @@ const dotnetHints: LanguageHints = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
-
-// ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
 
@@ -279,11 +269,11 @@ export function createDotnetExtractor(hintOverrides?: Partial<LanguageHints>): E
         language: 'dotnet',
         extractedFrom: sdkPath,
         extractedAt: new Date().toISOString(),
-        classes: sortRecord(classes),
-        interfaces: sortRecord(interfaces),
+        classes,
+        interfaces,
         typeAliases: {},
-        enums: sortRecord(enums),
-        exports: sortRecord(exports),
+        enums,
+        exports,
       };
     },
   };

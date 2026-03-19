@@ -13,18 +13,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { KotlinDataClass, KotlinClass, KotlinEnum, KotlinTypeAlias } from './kotlin-parser.js';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Surface builder

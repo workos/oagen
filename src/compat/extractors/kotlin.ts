@@ -15,6 +15,7 @@ import { walkKotlinFiles, parseKotlinFile } from './kotlin-parser.js';
 import { buildSurface } from './kotlin-surface.js';
 import type { KotlinDataClass, KotlinClass, KotlinEnum, KotlinTypeAlias } from './kotlin-parser.js';
 
+
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
@@ -69,18 +70,6 @@ const kotlinHints: LanguageHints = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
-
-// ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
 
@@ -121,11 +110,11 @@ export const kotlinExtractor: Extractor = {
       language: 'kotlin',
       extractedFrom: sdkPath,
       extractedAt: new Date().toISOString(),
-      classes: sortRecord(classes),
-      interfaces: sortRecord(interfaces),
-      typeAliases: sortRecord(typeAliases),
-      enums: sortRecord(enums),
-      exports: sortRecord(exports),
+      classes,
+      interfaces,
+      typeAliases,
+      enums,
+      exports,
     };
   },
 };

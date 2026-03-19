@@ -16,6 +16,7 @@ import { walkGoFiles, parseGoFile } from './go-parser.js';
 import { buildSurface } from './go-surface.js';
 import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
 
+
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
@@ -25,49 +26,22 @@ import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
  * e.g., hand-written uses "Json" / "Uri" while generated uses "JSON" / "URI".
  */
 const GO_ACRONYMS = [
-  'ID',
-  'URL',
-  'API',
-  'HTTP',
-  'HTTPS',
-  'JSON',
-  'XML',
-  'SQL',
-  'HTML',
-  'CSS',
-  'URI',
-  'SSO',
-  'IP',
-  'TLS',
-  'SSL',
-  'DNS',
-  'TCP',
-  'UDP',
-  'SSH',
-  'JWT',
-  'MFA',
-  'SAML',
-  'SCIM',
+  'ID', 'URL', 'API', 'HTTP', 'HTTPS', 'JSON', 'XML', 'SQL', 'HTML', 'CSS',
+  'URI', 'SSO', 'IP', 'TLS', 'SSL', 'DNS', 'TCP', 'UDP', 'SSH', 'JWT', 'MFA', 'SAML', 'SCIM',
 ];
+
+// Precompiled regex matching all acronym forms (uppercase + title-case) in a single pass.
+const GO_ACRONYM_RE = new RegExp(
+  GO_ACRONYMS.flatMap((a) => [a, a.charAt(0) + a.slice(1).toLowerCase()]).join('|'),
+  'g',
+);
 
 /**
  * Normalize a Go type string so that acronym casing differences don't cause
  * false mismatches. Lowercases all known Go acronyms to a canonical form.
- * e.g., "AuditLogSchemaJSONActor" and "AuditLogSchemaJsonActor" both become
- * "AuditLogSchemajsonActor" (or similar canonical form).
  */
 function normalizeGoAcronyms(type: string): string {
-  let result = type;
-  for (const acronym of GO_ACRONYMS) {
-    // Match the fully uppercased form (e.g., "JSON", "URI")
-    // and also the title-cased form (e.g., "Json", "Uri")
-    const titleCase = acronym.charAt(0) + acronym.slice(1).toLowerCase();
-    const lower = acronym.toLowerCase();
-    // Replace both forms with the lowercase canonical form
-    result = result.split(acronym).join(lower);
-    result = result.split(titleCase).join(lower);
-  }
-  return result;
+  return type.replace(GO_ACRONYM_RE, (match) => match.toLowerCase());
 }
 
 const goHints: LanguageHints = {
@@ -144,18 +118,6 @@ const goHints: LanguageHints = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
-
-// ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
 
@@ -196,11 +158,11 @@ export const goExtractor: Extractor = {
       language: 'go',
       extractedFrom: sdkPath,
       extractedAt: new Date().toISOString(),
-      classes: sortRecord(classes),
-      interfaces: sortRecord(interfaces),
-      typeAliases: sortRecord(typeAliases),
-      enums: sortRecord(enums),
-      exports: sortRecord(exports),
+      classes,
+      interfaces,
+      typeAliases,
+      enums,
+      exports,
     };
   },
 };

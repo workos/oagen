@@ -9,18 +9,11 @@
 
 import type { ApiClass, ApiMethod, ApiParam, ApiInterface, ApiField, ApiEnum } from '../types.js';
 import type { ElixirStruct, ElixirFunction, ElixirEnumModule, ElixirTypeSpec } from './elixir-parser.js';
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
 
 /** Get the short name from a fully qualified Elixir module name. */
 function shortName(moduleName: string): string {
@@ -73,7 +66,11 @@ export function buildSurface(
 
       if (typeSpec) {
         // Parse the type definition to find this field's type
-        const fieldTypeMatch = typeSpec.definition.match(new RegExp(`${field}:\\s*([^,}]+)`));
+        const fieldPrefix = field + ':';
+        const prefixIdx = typeSpec.definition.indexOf(fieldPrefix);
+        const fieldTypeMatch = prefixIdx >= 0
+          ? typeSpec.definition.slice(prefixIdx + fieldPrefix.length).match(/^\s*([^,}]+)/)
+          : null;
         if (fieldTypeMatch) {
           fieldType = fieldTypeMatch[1].trim();
           // Check if nullable (contains | nil)

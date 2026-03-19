@@ -47,6 +47,7 @@ interface ParameterObject {
   description?: string;
   schema?: SchemaObject;
   deprecated?: boolean;
+  example?: unknown;
 }
 
 interface RequestBodyObject {
@@ -365,6 +366,7 @@ function extractParams(params: ParameterObject[], location: 'path' | 'query' | '
       description: p.description,
       deprecated: p.deprecated || p.schema?.deprecated || undefined,
       default: p.schema?.default,
+      example: p.example ?? p.schema?.example,
     }));
 }
 

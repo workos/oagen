@@ -15,6 +15,7 @@ import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
 import { walkPhpFiles, parsePhpFile } from './php-parser.js';
 import { buildSurface } from './php-surface.js';
 import type { PhpClass } from './php-parser.js';
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Language hints
@@ -143,18 +144,6 @@ const phpHints: LanguageHints = {
   modelBaseClasses: [],
   exceptionBaseClasses: ['Exception', '\\Exception'],
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
 
 // ---------------------------------------------------------------------------
 // Extractor

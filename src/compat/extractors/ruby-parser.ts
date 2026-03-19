@@ -8,6 +8,7 @@ import Ruby from 'tree-sitter-ruby';
 import type { SyntaxNode } from 'tree-sitter';
 import type { ApiClass, ApiEnum, ApiMethod, ApiParam, ApiProperty } from '../types.js';
 import { safeParse as safeParseWith } from '../../utils/tree-sitter.js';
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Shared parser instance
@@ -414,10 +415,4 @@ function isInsideRanges(line: number, ranges: Array<[number, number]>): boolean 
   return false;
 }
 
-export function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
+export { sortRecord } from './shared.js';

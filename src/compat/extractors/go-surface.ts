@@ -15,18 +15,11 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
 
 function goTypeToString(t: string): string {
   return t.replace(/json\.RawMessage/g, '[]byte').replace(/\bcontext\.Context\b/g, 'context.Context');

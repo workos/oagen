@@ -14,6 +14,7 @@ import { walkRustFiles, parseRustFile } from './rust-parser.js';
 import { buildSurface } from './rust-surface.js';
 import type { RustStruct, RustEnum, RustFunc, RustTrait, RustTypeAlias } from './rust-parser.js';
 
+
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
@@ -73,18 +74,6 @@ const rustHints: LanguageHints = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
-
-// ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
 
@@ -128,11 +117,11 @@ export const rustExtractor: Extractor = {
       language: 'rust',
       extractedFrom: sdkPath,
       extractedAt: new Date().toISOString(),
-      classes: sortRecord(classes),
-      interfaces: sortRecord(interfaces),
-      typeAliases: sortRecord(typeAliases),
-      enums: sortRecord(enums),
-      exports: sortRecord(exports),
+      classes,
+      interfaces,
+      typeAliases,
+      enums,
+      exports,
     };
   },
 };

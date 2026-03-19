@@ -70,6 +70,7 @@ export interface Parameter {
   description?: string;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown;
 }
 
 /** Type reference — the core type system of the IR */

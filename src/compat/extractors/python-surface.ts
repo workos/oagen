@@ -23,18 +23,11 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { PythonClass, ParsedPythonFile } from './python-parser.js';
+import { sortRecord } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
 
 /** Default model base classes. Overridden by hints.modelBaseClasses when provided. */
 const DEFAULT_MODEL_BASES: string[] = [];

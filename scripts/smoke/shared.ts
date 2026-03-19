@@ -7,7 +7,7 @@
 
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
-import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, Parameter, TypeRef } from '../../src/ir/types.js';
 import { toSnakeCase, toCamelCase } from '../../src/utils/naming.js';
 
 // Re-export types and functions that external smoke runners need from oagen core.
@@ -95,18 +95,11 @@ let SERVICE_PRIORITY: Record<string, number> = {};
  */
 export let SERVICE_PROPERTY_MAP: Record<string, string> = {};
 
-/**
- * Map from path param names to the service whose `id` they reference.
- * Populated by loadSmokeConfig(); read by IdRegistry.resolveFromParamName.
- */
-export let PARAM_SERVICE_MAP: Record<string, string> = {};
-
 export interface SmokeConfig {
   skipOperations: string[];
   skipServices: string[];
   servicePriority: Record<string, number>;
   servicePropertyMap: Record<string, string>;
-  paramServiceMap: Record<string, string>;
 }
 
 /** Load smoke test configuration from a JSON file */
@@ -119,7 +112,6 @@ export function loadSmokeConfig(configPath?: string): void {
   if (config.skipServices) SKIP_SERVICES = new Set(config.skipServices);
   if (config.servicePriority) SERVICE_PRIORITY = config.servicePriority;
   if (config.servicePropertyMap) SERVICE_PROPERTY_MAP = config.servicePropertyMap;
-  if (config.paramServiceMap) PARAM_SERVICE_MAP = config.paramServiceMap;
 }
 
 /** Return the current smoke config values (for diff.ts to consume) */
@@ -129,7 +121,6 @@ export function getSmokeConfig() {
     skipServices: SKIP_SERVICES,
     servicePriority: SERVICE_PRIORITY,
     servicePropertyMap: SERVICE_PROPERTY_MAP,
-    paramServiceMap: PARAM_SERVICE_MAP,
   };
 }
 
@@ -473,7 +464,8 @@ export class IdRegistry {
         this.get(service, p.name) ||
         this.get(service, 'id') ||
         this.findAcrossServices(p.name) ||
-        this.resolveFromParamName(p.name);
+        this.resolveFromParamName(p.name) ||
+        this.resolveFromExample(p);
 
       if (!value) return null;
       resolved[p.name] = value;
@@ -483,13 +475,13 @@ export class IdRegistry {
 
   /** Try to find a param value across all services */
   private findAcrossServices(field: string): string | undefined {
-    for (const [key, value] of Array.from(this.ids.entries())) {
+    for (const [key, value] of this.ids.entries()) {
       if (key.endsWith(`.${field}`)) return value;
     }
     // Also try snake_case variant: "organizationId" → "organization_id"
-    const snakeField = field.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+    const snakeField = toSnakeCase(field);
     if (snakeField !== field) {
-      for (const [key, value] of Array.from(this.ids.entries())) {
+      for (const [key, value] of this.ids.entries()) {
         if (key.endsWith(`.${snakeField}`)) return value;
       }
     }
@@ -503,12 +495,6 @@ export class IdRegistry {
    * and looking up the pluralized service name.
    */
   private resolveFromParamName(paramName: string): string | undefined {
-    // Check explicit mapping first (from module-level PARAM_SERVICE_MAP)
-    const mappedService = PARAM_SERVICE_MAP[paramName];
-    if (mappedService) {
-      return this.get(mappedService, 'id') || this.get(mappedService, 'slug');
-    }
-
     // Infer from param name: "resource_id" → "Resources", "role_assignment_id" → "RoleAssignments"
     // Handle snake_case: strip trailing _id, PascalCase+pluralize the rest
     if (paramName.endsWith('_id')) {
@@ -548,13 +534,25 @@ export class IdRegistry {
    * e.g. suffix "Users" matches "UserManagementUsers.id"
    */
   private findByServiceSuffix(suffix: string, field: string): string | undefined {
-    for (const [key, value] of Array.from(this.ids.entries())) {
+    for (const [key, value] of this.ids.entries()) {
       if (key.endsWith(`.${field}`)) {
         const servicePart = key.slice(0, -(field.length + 1));
         if (servicePart.endsWith(suffix)) {
           return value;
         }
       }
+    }
+    return undefined;
+  }
+
+  /**
+   * Last-resort fallback: use the spec's example or default value for a parameter.
+   * Many path params (e.g. actionName, slug, type) have example values in the spec.
+   */
+  private resolveFromExample(param: Parameter): string | undefined {
+    const value = param.example ?? param.default;
+    if (value !== undefined && value !== null) {
+      return String(value);
     }
     return undefined;
   }

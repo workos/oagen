@@ -15,6 +15,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import { nodeHints } from '../language-hints.js';
+import { sortRecord } from './shared.js';
 
 export const nodeExtractor: Extractor = {
   language: 'node',
@@ -430,12 +431,4 @@ function buildExportMap(
 
 function stripUndefined(typeStr: string): string {
   return typeStr.replace(/\s*\|\s*undefined$/, '').replace(/^undefined\s*\|\s*/, '');
-}
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
 }

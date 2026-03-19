@@ -18,9 +18,12 @@ import { walkPythonFiles, findPythonSourceRoot, parsePythonFile } from './python
 import { buildSurface } from './python-surface.js';
 import type { ParsedPythonFile } from './python-parser.js';
 
+
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
+
+const PYTHON_PRIMITIVE_TYPES = new Set(['str', 'int', 'float', 'bool', 'bytes']);
 
 const pythonHints: LanguageHints = {
   stripNullable(type: string): string | null {
@@ -189,7 +192,7 @@ const pythonHints: LanguageHints = {
       }
       // Tolerate model collection vs primitive collection: Sequence[OrganizationDomain] ≡ list[str]
       // The spec may define a field as a primitive array while the live SDK wraps it in a model.
-      const primitiveTypes = new Set(['str', 'int', 'float', 'bool', 'bytes']);
+      const primitiveTypes = PYTHON_PRIMITIVE_TYPES;
       if (
         (primitiveTypes.has(baseInner) && NAMED_TYPE_RE.test(candInner)) ||
         (primitiveTypes.has(candInner) && NAMED_TYPE_RE.test(baseInner))
@@ -204,7 +207,7 @@ const pythonHints: LanguageHints = {
         const baseInner = baseSeq[1];
         const candInner = candListMatch[1];
         if (baseInner === candInner) return true;
-        const primitiveTypes = new Set(['str', 'int', 'float', 'bool', 'bytes']);
+        const primitiveTypes = PYTHON_PRIMITIVE_TYPES;
         if (
           (primitiveTypes.has(baseInner) && NAMED_TYPE_RE.test(candInner)) ||
           (primitiveTypes.has(candInner) && NAMED_TYPE_RE.test(baseInner))
@@ -339,18 +342,6 @@ const pythonHints: LanguageHints = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
-
-// ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
 
@@ -391,11 +382,11 @@ export function createPythonExtractor(hintOverrides?: Partial<LanguageHints>): E
         language: 'python',
         extractedFrom: sdkPath,
         extractedAt: new Date().toISOString(),
-        classes: sortRecord(classes),
-        interfaces: sortRecord(interfaces),
-        typeAliases: sortRecord(typeAliases),
-        enums: sortRecord(enums),
-        exports: sortRecord(exports),
+        classes,
+        interfaces,
+        typeAliases,
+        enums,
+        exports,
       };
     },
   };

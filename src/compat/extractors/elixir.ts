@@ -17,6 +17,7 @@ import { walkElixirFiles, parseElixirFile } from './elixir-parser.js';
 import { buildSurface } from './elixir-surface.js';
 import type { ElixirStruct, ElixirFunction, ElixirEnumModule, ElixirTypeSpec } from './elixir-parser.js';
 
+
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
@@ -88,18 +89,6 @@ const elixirHints: LanguageHints = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  const sorted: Record<string, T> = {};
-  for (const key of Object.keys(record).sort()) {
-    sorted[key] = record[key];
-  }
-  return sorted;
-}
-
-// ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
 
@@ -151,11 +140,11 @@ export const elixirExtractor: Extractor = {
       language: 'elixir',
       extractedFrom: sdkPath,
       extractedAt: new Date().toISOString(),
-      classes: sortRecord(classes),
-      interfaces: sortRecord(interfaces),
+      classes,
+      interfaces,
       typeAliases: {},
-      enums: sortRecord(enums),
-      exports: sortRecord(exports),
+      enums,
+      exports,
     };
   },
 };

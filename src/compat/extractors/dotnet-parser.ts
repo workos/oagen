@@ -303,9 +303,12 @@ function parseMethods(classBody: string): CSharpMethod[] {
 function parseConstructor(classBody: string, className: string): { name: string; type: string }[] {
   const params: { name: string; type: string }[] = [];
 
-  // Match: public ClassName(params)
-  const ctorRegex = new RegExp(`public\\s+${className}\\s*\\(([^)]*)\\)`);
-  const match = classBody.match(ctorRegex);
+  // Match: public ClassName(params) — use indexOf to find the constructor
+  const ctorPrefix = `public ${className}`;
+  const ctorIdx = classBody.indexOf(ctorPrefix);
+  if (ctorIdx < 0) return params;
+  const afterCtor = classBody.slice(ctorIdx + ctorPrefix.length);
+  const match = afterCtor.match(/^\s*\(([^)]*)\)/);
   if (!match) return params;
 
   const paramsStr = match[1];
