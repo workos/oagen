@@ -1,0 +1,400 @@
+openapi: 3.0.3
+info:
+  title: GitHub-Flavored Subset API
+  version: 1.0.0
+  description: >
+    A small GitHub-flavored OpenAPI spec for testing oagen's reference emitter.
+    Exercises: cursor pagination, bearer auth, models, enums, CRUD, nullable fields,
+    error responses, and generic envelope patterns.
+
+servers:
+  - url: https://api.github-example.com/v1
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    PaginationMeta:
+      type: object
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    Visibility:
+      type: string
+      enum: [public, private, internal]
+
+    Repository:
+      type: object
+      required: [id, name, full_name, visibility]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        full_name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        visibility:
+          $ref: '#/components/schemas/Visibility'
+        owner:
+          $ref: '#/components/schemas/User'
+
+    Issue:
+      type: object
+      required: [id, title, state]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        body:
+          type: string
+          nullable: true
+        state:
+          type: string
+          enum: [open, closed]
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Label'
+        assignee:
+          $ref: '#/components/schemas/User'
+          nullable: true
+
+    Label:
+      type: object
+      required: [id, name, color]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        color:
+          type: string
+        description:
+          type: string
+          nullable: true
+
+    User:
+      type: object
+      required: [id, login]
+      properties:
+        id:
+          type: integer
+        login:
+          type: string
+        name:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+
+    ApiError:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        documentation_url:
+          type: string
+
+paths:
+  /repos:
+    get:
+      operationId: listRepos
+      tags: [Repos]
+      summary: List repositories
+      parameters:
+        - name: after
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+        - name: visibility
+          in: query
+          schema:
+            $ref: '#/components/schemas/Visibility'
+      responses:
+        '200':
+          description: A paginated list of repositories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Repository'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /repos/{owner}/{repo}:
+    get:
+      operationId: getRepo
+      tags: [Repos]
+      summary: Get a repository
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Repository details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Repository'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /repos/{owner}/{repo}/issues:
+    get:
+      operationId: listIssues
+      tags: [Issues]
+      summary: List issues
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: after
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [open, closed, all]
+      responses:
+        '200':
+          description: A paginated list of issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Issue'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+    post:
+      operationId: createIssue
+      tags: [Issues]
+      summary: Create an issue
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                body:
+                  type: string
+                labels:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Created issue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /repos/{owner}/{repo}/labels:
+    get:
+      operationId: listLabels
+      tags: [Labels]
+      summary: List labels
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: A paginated list of labels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Label'
+                  total_count:
+                    type: integer
+
+    post:
+      operationId: createLabel
+      tags: [Labels]
+      summary: Create a label
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, color]
+              properties:
+                name:
+                  type: string
+                color:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '201':
+          description: Created label
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Label'
+
+  /repos/{owner}/{repo}/labels/{label_id}:
+    delete:
+      operationId: deleteLabel
+      tags: [Labels]
+      summary: Delete a label
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: label_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Deleted
+
+  /users/{username}:
+    get:
+      operationId: getUser
+      tags: [Users]
+      summary: Get a user
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
