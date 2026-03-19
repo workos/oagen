@@ -13,7 +13,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { KotlinDataClass, KotlinClass, KotlinEnum, KotlinTypeAlias } from './kotlin-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Surface builder
@@ -35,13 +35,8 @@ export function buildSurface(
   const interfaces: Record<string, ApiInterface> = {};
   const typeAliases: Record<string, ApiTypeAlias> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
   // Process data classes as interfaces (they represent data models)
   for (const dc of allDataClasses) {
@@ -60,7 +55,7 @@ export function buildSurface(
       fields: sortRecord(fields),
       extends: [],
     };
-    addExport(dc.sourceFile, dc.name);
+    collector.add(dc.sourceFile, dc.name);
   }
 
   // Process classes (service classes with methods)
@@ -97,7 +92,7 @@ export function buildSurface(
       properties: sortRecord(properties),
       constructorParams,
     };
-    addExport(cls.sourceFile, cls.name);
+    collector.add(cls.sourceFile, cls.name);
   }
 
   // Process enums
@@ -107,7 +102,7 @@ export function buildSurface(
       sourceFile: en.sourceFile,
       members: sortRecord(en.members),
     };
-    addExport(en.sourceFile, en.name);
+    collector.add(en.sourceFile, en.name);
   }
 
   // Process type aliases
@@ -117,13 +112,10 @@ export function buildSurface(
       sourceFile: ta.sourceFile,
       value: ta.value,
     };
-    addExport(ta.sourceFile, ta.name);
+    collector.add(ta.sourceFile, ta.name);
   }
 
-  // Build export map
-  for (const [file, names] of exportsByFile) {
-    exports[file] = [...names].sort();
-  }
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),

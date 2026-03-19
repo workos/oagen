@@ -13,7 +13,7 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { CSharpClass, CSharpEnum } from './dotnet-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Surface builder
@@ -32,13 +32,8 @@ export function buildSurface(
   const classes: Record<string, ApiClass> = {};
   const interfaces: Record<string, ApiInterface> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
   // Process classes
   for (const cls of allClasses) {
@@ -106,7 +101,7 @@ export function buildSurface(
         extends: [],
       };
     }
-    addExport(cls.sourceFile, cls.name);
+    collector.add(cls.sourceFile, cls.name);
   }
 
   // Process enums
@@ -116,13 +111,10 @@ export function buildSurface(
       sourceFile: en.sourceFile,
       members: sortRecord(en.members),
     };
-    addExport(en.sourceFile, en.name);
+    collector.add(en.sourceFile, en.name);
   }
 
-  // Build export map
-  for (const [file, names] of exportsByFile) {
-    exports[file] = [...names].sort();
-  }
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),

@@ -23,7 +23,7 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { PythonClass, ParsedPythonFile } from './python-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -137,7 +137,6 @@ export function buildSurface(
   const interfaces: Record<string, ApiInterface> = {};
   const typeAliases: Record<string, ApiTypeAlias> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
   // Collect all classes for transitive base lookups
   const allClassesByName = new Map<string, PythonClass>();
@@ -158,11 +157,7 @@ export function buildSurface(
   }
 
   // Build export map from __all__ and file-level symbols
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
   for (const file of parsedFiles) {
     // Process type aliases
@@ -175,7 +170,7 @@ export function buildSurface(
           sourceFile: alias.sourceFile,
           members: sortRecord(literalMembers),
         };
-        addExport(alias.sourceFile, alias.name);
+        collector.add(alias.sourceFile, alias.name);
       } else {
         // Regular type alias → ApiTypeAlias
         typeAliases[alias.name] = {
@@ -183,7 +178,7 @@ export function buildSurface(
           sourceFile: alias.sourceFile,
           value: alias.value,
         };
-        addExport(alias.sourceFile, alias.name);
+        collector.add(alias.sourceFile, alias.name);
       }
     }
 
@@ -221,7 +216,7 @@ export function buildSurface(
           properties: {},
           constructorParams: [],
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
         continue;
       }
 
@@ -245,7 +240,7 @@ export function buildSurface(
           fields: sortRecord(fields),
           extends: extendsArr,
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
         continue;
       }
 
@@ -266,7 +261,7 @@ export function buildSurface(
           fields: sortRecord(fields),
           extends: [],
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
         continue;
       }
 
@@ -307,7 +302,7 @@ export function buildSurface(
           properties: {},
           constructorParams: [],
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
         continue;
       }
 
@@ -349,7 +344,7 @@ export function buildSurface(
           properties: {},
           constructorParams,
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
         continue;
       }
 
@@ -369,22 +364,19 @@ export function buildSurface(
           fields: sortRecord(fields),
           extends: [],
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
       }
     }
 
     // Add __all__ exports
     if (file.allExports.length > 0) {
       for (const name of file.allExports) {
-        addExport(file.sourceFile, name);
+        collector.add(file.sourceFile, name);
       }
     }
   }
 
-  // Convert export map
-  for (const [file, names] of exportsByFile) {
-    exports[file] = [...names].sort();
-  }
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),

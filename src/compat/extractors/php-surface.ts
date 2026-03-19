@@ -21,7 +21,7 @@ import type {
   LanguageHints,
 } from '../types.js';
 import type { PhpClass } from './php-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,13 +72,8 @@ export function buildSurface(
   const classes: Record<string, ApiClass> = {};
   const interfaces: Record<string, ApiInterface> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
   for (const cls of allClasses) {
     if (cls.isInterface) {
@@ -98,7 +93,7 @@ export function buildSurface(
         fields: sortRecord(fields),
         extends: [],
       };
-      addExport(cls.sourceFile, cls.name);
+      collector.add(cls.sourceFile, cls.name);
     } else if (isResourceClass(cls, resourceBases)) {
       // Resource class → ApiInterface with fields from RESOURCE_ATTRIBUTES
       const fields: Record<string, ApiField> = {};
@@ -115,7 +110,7 @@ export function buildSurface(
         fields: sortRecord(fields),
         extends: cls.extends ? [cls.extends] : [],
       };
-      addExport(cls.sourceFile, cls.name);
+      collector.add(cls.sourceFile, cls.name);
     } else if (isEnumClass(cls)) {
       // Enum-like class → ApiEnum
       const members: Record<string, string | number> = {};
@@ -127,7 +122,7 @@ export function buildSurface(
         sourceFile: cls.sourceFile,
         members: sortRecord(members),
       };
-      addExport(cls.sourceFile, cls.name);
+      collector.add(cls.sourceFile, cls.name);
     } else {
       // Service class, static utility class, or exception → ApiClass
       const apiMethods: Record<string, ApiMethod[]> = {};
@@ -175,12 +170,12 @@ export function buildSurface(
           properties: sortRecord(properties),
           constructorParams: [],
         };
-        addExport(cls.sourceFile, cls.name);
+        collector.add(cls.sourceFile, cls.name);
       }
     }
   }
 
-  for (const [file, names] of exportsByFile) exports[file] = [...names].sort();
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),

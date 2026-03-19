@@ -20,7 +20,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { RustStruct, RustEnum, RustFunc, RustTrait, RustTypeAlias as RustTypeAliasType } from './rust-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,7 +58,6 @@ export function buildSurface(
   const interfaces: Record<string, ApiInterface> = {};
   const typeAliases: Record<string, ApiTypeAlias> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
   // Group impl methods by receiver type
   const methodsByReceiver = new Map<string, RustFunc[]>();
@@ -173,18 +172,14 @@ export function buildSurface(
   }
 
   // Build export map
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
-  for (const [name, cls] of Object.entries(classes)) if (cls.sourceFile) addExport(cls.sourceFile, name);
-  for (const [name, iface] of Object.entries(interfaces)) if (iface.sourceFile) addExport(iface.sourceFile, name);
-  for (const [name, ta] of Object.entries(typeAliases)) if (ta.sourceFile) addExport(ta.sourceFile, name);
-  for (const [name, en] of Object.entries(enums)) if (en.sourceFile) addExport(en.sourceFile, name);
+  for (const [name, cls] of Object.entries(classes)) if (cls.sourceFile) collector.add(cls.sourceFile, name);
+  for (const [name, iface] of Object.entries(interfaces)) if (iface.sourceFile) collector.add(iface.sourceFile, name);
+  for (const [name, ta] of Object.entries(typeAliases)) if (ta.sourceFile) collector.add(ta.sourceFile, name);
+  for (const [name, en] of Object.entries(enums)) if (en.sourceFile) collector.add(en.sourceFile, name);
 
-  for (const [file, names] of exportsByFile) exports[file] = [...names].sort();
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),

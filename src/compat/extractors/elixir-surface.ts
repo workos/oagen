@@ -9,7 +9,7 @@
 
 import type { ApiClass, ApiMethod, ApiParam, ApiInterface, ApiField, ApiEnum } from '../types.js';
 import type { ElixirStruct, ElixirFunction, ElixirEnumModule, ElixirTypeSpec } from './elixir-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,13 +39,8 @@ export function buildSurface(
   const classes: Record<string, ApiClass> = {};
   const interfaces: Record<string, ApiInterface> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
   // Collect struct module names so we can distinguish struct modules from service modules
   const structModuleNames = new Set(allStructs.map((s) => s.moduleName));
@@ -97,7 +92,7 @@ export function buildSurface(
       fields: sortRecord(fields),
       extends: [],
     };
-    addExport(struct.sourceFile, name);
+    collector.add(struct.sourceFile, name);
   }
 
   // Process enum modules
@@ -108,7 +103,7 @@ export function buildSurface(
       sourceFile: enumModule.sourceFile,
       members: sortRecord(enumModule.members),
     };
-    addExport(enumModule.sourceFile, name);
+    collector.add(enumModule.sourceFile, name);
   }
 
   // Group public functions by module
@@ -165,14 +160,11 @@ export function buildSurface(
         properties: {},
         constructorParams: [],
       };
-      addExport(funcs[0].sourceFile, name);
+      collector.add(funcs[0].sourceFile, name);
     }
   }
 
-  // Build export map
-  for (const [file, names] of exportsByFile) {
-    exports[file] = [...names].sort();
-  }
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),

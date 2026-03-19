@@ -15,7 +15,7 @@ import type {
   ApiEnum,
 } from '../types.js';
 import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
-import { sortRecord } from './shared.js';
+import { sortRecord, ExportCollector } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,7 +85,6 @@ export function buildSurface(
   const interfaces: Record<string, ApiInterface> = {};
   const typeAliases: Record<string, ApiTypeAlias> = {};
   const enums: Record<string, ApiEnum> = {};
-  const exports: Record<string, string[]> = {};
 
   // Group consts by (packageName, typeName)
   const constsByPkgAndType = new Map<string, GoConst[]>();
@@ -184,23 +183,19 @@ export function buildSurface(
   }
 
   // Build export map
-  const exportsByFile = new Map<string, Set<string>>();
-  function addExport(sourceFile: string, name: string) {
-    if (!exportsByFile.has(sourceFile)) exportsByFile.set(sourceFile, new Set());
-    exportsByFile.get(sourceFile)!.add(name);
-  }
+  const collector = new ExportCollector();
 
-  for (const [name, cls] of Object.entries(classes)) if (cls.sourceFile) addExport(cls.sourceFile, name);
-  for (const [name, iface] of Object.entries(interfaces)) if (iface.sourceFile) addExport(iface.sourceFile, name);
-  for (const [name, ta] of Object.entries(typeAliases)) if (ta.sourceFile) addExport(ta.sourceFile, name);
-  for (const [name, en] of Object.entries(enums)) if (en.sourceFile) addExport(en.sourceFile, name);
+  for (const [name, cls] of Object.entries(classes)) if (cls.sourceFile) collector.add(cls.sourceFile, name);
+  for (const [name, iface] of Object.entries(interfaces)) if (iface.sourceFile) collector.add(iface.sourceFile, name);
+  for (const [name, ta] of Object.entries(typeAliases)) if (ta.sourceFile) collector.add(ta.sourceFile, name);
+  for (const [name, en] of Object.entries(enums)) if (en.sourceFile) collector.add(en.sourceFile, name);
   for (const c of allConsts) {
     const typeDecl = allTypes.find((t) => t.name === c.typeName && t.packageName === c.packageName);
-    if (typeDecl) addExport(typeDecl.sourceFile, c.name);
+    if (typeDecl) collector.add(typeDecl.sourceFile, c.name);
   }
-  for (const fn of packageFuncs) addExport(fn.sourceFile, fn.name);
+  for (const fn of packageFuncs) collector.add(fn.sourceFile, fn.name);
 
-  for (const [file, names] of exportsByFile) exports[file] = [...names].sort();
+  const exports = collector.toRecord();
 
   return {
     classes: sortRecord(classes),
