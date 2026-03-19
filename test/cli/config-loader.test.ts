@@ -6,7 +6,7 @@ import { loadConfig } from '../../src/cli/config-loader.js';
 import { applyConfig } from '../../src/cli/plugin-loader.js';
 import { getEmitter } from '../../src/engine/registry.js';
 import type { Emitter } from '../../src/engine/types.js';
-import { ConfigLoadError, ConfigVersionMismatchError } from '../../src/errors.js';
+import { ConfigLoadError } from '../../src/errors.js';
 
 describe('loadConfig', () => {
   let tmpDir: string;
@@ -43,19 +43,6 @@ describe('loadConfig', () => {
       go: './smoke/go-runner.ts',
       python: './smoke/py-runner.ts',
     });
-  });
-
-  it('exits with error when irVersion does not match IR_VERSION', async () => {
-    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 9999 };`);
-    await expect(loadConfig(tmpDir)).rejects.toBeInstanceOf(ConfigVersionMismatchError);
-    await expect(loadConfig(tmpDir)).rejects.toThrow('IR version mismatch');
-  });
-
-  it('loads config successfully when irVersion matches', async () => {
-    writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { irVersion: 6 };`);
-    const config = await loadConfig(tmpDir);
-    expect(config).not.toBeNull();
-    expect(config!.irVersion).toBe(6);
   });
 
   it('exits with error when config file exists but fails to load', async () => {

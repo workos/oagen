@@ -14,7 +14,7 @@ const listUsers: Operation = {
   headerParams: [],
   response: { kind: 'array', items: { kind: 'model', name: 'User' } },
   errors: [],
-  pagination: { cursorParam: 'cursor', dataPath: 'data', itemType: { kind: 'model', name: 'User' } },
+  pagination: { strategy: 'cursor', param: 'cursor', dataPath: 'data', itemType: { kind: 'model', name: 'User' } },
   injectIdempotencyKey: false,
 };
 
@@ -227,7 +227,7 @@ describe('diffOperations', () => {
   it('detects paginated false→true as additive', () => {
     const modified: Operation = {
       ...getUser,
-      pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'primitive', type: 'string' } },
+      pagination: { strategy: 'cursor', param: 'after', dataPath: 'data', itemType: { kind: 'primitive', type: 'string' } },
     };
     const changes = diffOperations('Users', [getUser], [modified]);
     expect(changes).toHaveLength(1);

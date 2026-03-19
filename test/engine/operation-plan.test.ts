@@ -166,7 +166,7 @@ describe('planOperation', () => {
   it('paginated operation', () => {
     const plan = planOperation(
       makeOp({
-        pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'Organization' } },
+        pagination: { strategy: 'cursor', param: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'Organization' } },
         response: { kind: 'model', name: 'Organization' },
       }),
     );

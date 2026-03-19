@@ -39,14 +39,58 @@ describe('detectPagination', () => {
     expect(detectPagination(response, [])).toBeNull();
   });
 
-  it('returns structured PaginationMeta with cursorParam, dataPath, and itemType', () => {
+  it('returns structured PaginationMeta with strategy, param, dataPath, and itemType', () => {
     const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'User' } }, [
       { name: 'after', type: { kind: 'primitive', type: 'string' }, required: false },
     ]);
     expect(result).toEqual({
-      cursorParam: 'after',
+      strategy: 'cursor',
+      param: 'after',
       dataPath: 'data',
       itemType: { kind: 'model', name: 'User' },
+    });
+  });
+
+  it('detects offset-based pagination with strategy and limitParam', () => {
+    const result = detectPagination(
+      { kind: 'array', items: { kind: 'model', name: 'Item' } },
+      [makeParam('offset'), makeParam('limit')],
+    );
+    expect(result).toEqual({
+      strategy: 'offset',
+      param: 'offset',
+      limitParam: 'limit',
+      dataPath: 'data',
+      itemType: { kind: 'model', name: 'Item' },
+    });
+  });
+
+  it('accepts custom dataPath from caller', () => {
+    const result = detectPagination(
+      { kind: 'array', items: { kind: 'model', name: 'Repo' } },
+      [makeParam('after')],
+      'results',
+    );
+    expect(result).toEqual({
+      strategy: 'cursor',
+      param: 'after',
+      dataPath: 'results',
+      itemType: { kind: 'model', name: 'Repo' },
+    });
+  });
+
+  it('offset pagination uses custom dataPath', () => {
+    const result = detectPagination(
+      { kind: 'array', items: { kind: 'model', name: 'Item' } },
+      [makeParam('page'), makeParam('per_page')],
+      'items',
+    );
+    expect(result).toEqual({
+      strategy: 'offset',
+      param: 'page',
+      limitParam: 'per_page',
+      dataPath: 'items',
+      itemType: { kind: 'model', name: 'Item' },
     });
   });
 });

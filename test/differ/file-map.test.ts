@@ -62,7 +62,7 @@ const ctx: EmitterContext = {
   namespace: 'test',
   namespacePascal: 'Test',
   spec,
-  irVersion: 1,
+
 };
 
 describe('mapChangesToFiles', () => {
@@ -160,7 +160,7 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: specWithEnumRef,
-      irVersion: 1,
+    
     };
     const changes: Change[] = [
       {
@@ -201,7 +201,7 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: specWithEnumRef,
-      irVersion: 1,
+    
     };
     const changes: Change[] = [{ kind: 'enum-removed', name: 'Status', classification: 'breaking' }];
     const result = mapChangesToFiles(changes, mockEmitter(), ctxWithRef);
@@ -251,7 +251,7 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: multiServiceSpec,
-      irVersion: 1,
+    
     };
     const changes: Change[] = [
       {
@@ -288,7 +288,7 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxNoRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: noRefSpec, irVersion: 1 };
+    const ctxNoRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: noRefSpec };
     const changes: Change[] = [
       {
         kind: 'model-modified',
@@ -346,7 +346,7 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: transitiveSpec,
-      irVersion: 1,
+    
     };
     const changes: Change[] = [
       {
@@ -395,7 +395,7 @@ describe('mapChangesToFiles', () => {
         },
       ],
     };
-    const ctxSelfRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: selfRefSpec, irVersion: 1 };
+    const ctxSelfRef: EmitterContext = { namespace: 'test', namespacePascal: 'Test', spec: selfRefSpec };
     const changes: Change[] = [
       {
         kind: 'model-modified',
@@ -454,7 +454,7 @@ describe('mapChangesToFiles', () => {
       namespace: 'test',
       namespacePascal: 'Test',
       spec: circularSpec,
-      irVersion: 1,
+    
     };
     const changes: Change[] = [
       {

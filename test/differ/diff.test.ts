@@ -38,7 +38,7 @@ const v1: ApiSpec = {
           headerParams: [],
           response: { kind: 'array', items: { kind: 'model', name: 'User' } },
           errors: [],
-          pagination: { cursorParam: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'User' } },
+          pagination: { strategy: 'cursor', param: 'after', dataPath: 'data', itemType: { kind: 'model', name: 'User' } },
           injectIdempotencyKey: false,
         },
       ],

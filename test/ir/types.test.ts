@@ -140,10 +140,11 @@ describe('IR types', () => {
               },
               errors: [{ statusCode: 401 }],
               pagination: {
-                cursorParam: 'after',
+                strategy: 'cursor',
+                param: 'after',
                 dataPath: 'data',
                 itemType: { kind: 'model', name: 'User' },
-              } as PaginationMeta,
+              },
               injectIdempotencyKey: false,
             },
           ],

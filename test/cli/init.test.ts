@@ -64,12 +64,12 @@ describe('initCommand', () => {
     expect(pkg.scripts['sdk:extract:go']).toContain('--lang go');
   });
 
-  it('stub emitter references IR_VERSION and has all Emitter methods', async () => {
+  it('stub emitter has all Emitter methods and no contractVersion', async () => {
     await initCommand({ lang: 'ruby', project: tmpDir });
 
     const content = readFileSync(resolve(tmpDir, 'src/ruby/index.ts'), 'utf-8');
-    expect(content).toContain('IR_VERSION');
-    expect(content).toContain('contractVersion: IR_VERSION');
+    expect(content).not.toContain('IR_VERSION');
+    expect(content).not.toContain('contractVersion');
     expect(content).toContain('generateModels');
     expect(content).toContain('generateEnums');
     expect(content).toContain('generateResources');

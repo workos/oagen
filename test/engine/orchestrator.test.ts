@@ -5,7 +5,6 @@ import * as path from 'node:path';
 import { generate } from '../../src/engine/orchestrator.js';
 import type { Emitter, EmitterContext } from '../../src/engine/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
-import { IR_VERSION } from '../../src/ir/types.js';
 
 function mockEmitter(): Emitter {
   return {
@@ -84,23 +83,6 @@ describe('generate', () => {
     expect(capturedCtx!.namespace).toBe('work_os');
     expect(capturedCtx!.namespacePascal).toBe('WorkOS');
     expect(capturedCtx!.spec).toBe(minimalSpec);
-  });
-
-  it('sets irVersion on context from IR_VERSION', async () => {
-    let capturedCtx: EmitterContext | undefined;
-    const emitter = mockEmitter();
-    emitter.generateModels = (_models, ctx) => {
-      capturedCtx = ctx;
-      return [];
-    };
-
-    await generate(minimalSpec, emitter, {
-      namespace: 'Test',
-      dryRun: true,
-      outputDir: '/tmp/test',
-    });
-
-    expect(capturedCtx!.irVersion).toBe(IR_VERSION);
   });
 
   it('dry run does not write files', async () => {
