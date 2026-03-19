@@ -135,8 +135,8 @@ When the language separates type definitions from method implementations. The pa
 
 When the AST co-locates methods inside classes (like Ruby), but the classification logic — deciding whether a parsed class becomes an `ApiClass`, `ApiInterface`, or `ApiEnum` — is complex enough to warrant its own file.
 
-- **PHP**: The parser returns `PhpClass[]` with methods, properties, and constants already attached. The surface builder classifies each class: resource classes (extends `BaseWorkOSResource`) → `ApiInterface`, const-only classes → `ApiEnum`, PHP interface declarations → `ApiInterface`, service/exception classes → `ApiClass`.
-- **Python**: The parser returns `PythonClass[]`, `PythonTypeAlias[]`, and `__all__` exports. The surface builder classifies: `Protocol` subclasses → `ApiClass`, `BaseModel`/`WorkOSModel` subclasses → `ApiInterface`, `TypedDict` subclasses → `ApiInterface`, `Literal[...]` type aliases → `ApiEnum`, exception subclasses → `ApiClass`. Transitive base class resolution is needed (a class inheriting from another model class is also a model).
+- **PHP**: The parser returns `PhpClass[]` with methods, properties, and constants already attached. The surface builder classifies each class: resource classes (extends configured model base class via `hints.modelBaseClasses`) → `ApiInterface`, const-only classes → `ApiEnum`, PHP interface declarations → `ApiInterface`, service/exception classes → `ApiClass`.
+- **Python**: The parser returns `PythonClass[]`, `PythonTypeAlias[]`, and `__all__` exports. The surface builder classifies: `Protocol` subclasses → `ApiClass`, model base class subclasses (configured via `hints.modelBaseClasses`, e.g., `BaseModel` for Pydantic) → `ApiInterface`, `TypedDict` subclasses → `ApiInterface`, `Literal[...]` type aliases → `ApiEnum`, exception subclasses → `ApiClass`. Transitive base class resolution is needed (a class inheriting from another model class is also a model).
 
 | Language | Files                                                  | Why                                                                                                                                                               |
 | -------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -188,7 +188,7 @@ All tree-sitter parsers use `safeParse()` from `src/utils/tree-sitter.ts` to han
 
 - Uses tree-sitter-php to parse `.php` files under `lib/` (fallback to `src/`), excluding `vendor/`, `tests/`
 - Parser extracts classes and interfaces with methods, properties, constants, and `RESOURCE_ATTRIBUTES` arrays
-- Surface builder classifies: resource classes (extends `BaseWorkOSResource` with `RESOURCE_ATTRIBUTES`) → `ApiInterface`, const-only classes → `ApiEnum`, PHP `interface` declarations → `ApiInterface`, service/exception classes → `ApiClass`
+- Surface builder classifies: resource classes (extends configured model base class with `RESOURCE_ATTRIBUTES`) → `ApiInterface`, const-only classes → `ApiEnum`, PHP `interface` declarations → `ApiInterface`, service/exception classes → `ApiClass`
 - Reads both native type hints and PHPDoc `@param`/`@return` annotations for type information
 - Files: `src/compat/extractors/php.ts`, `php-parser.ts`, `php-surface.ts`
 
@@ -196,7 +196,7 @@ All tree-sitter parsers use `safeParse()` from `src/utils/tree-sitter.ts` to han
 
 - Uses tree-sitter-python to parse `.py` files, finding the source root via `src/` or top-level package directories (looks for `__init__.py`)
 - Parser extracts classes (with fields, methods, decorators, base classes), module-level type aliases, and `__all__` exports
-- Surface builder classifies: `Protocol` subclasses → `ApiClass` (canonical service), `BaseModel`/`WorkOSModel` subclasses → `ApiInterface`, `TypedDict` subclasses → `ApiInterface`, `Literal[...]` type aliases → `ApiEnum`, exception subclasses → `ApiClass`. Uses transitive base resolution for model and exception detection.
+- Surface builder classifies: `Protocol` subclasses → `ApiClass` (canonical service), model base class subclasses (configured via `hints.modelBaseClasses`, e.g., `BaseModel` for Pydantic) → `ApiInterface`, `TypedDict` subclasses → `ApiInterface`, `Literal[...]` type aliases → `ApiEnum`, exception subclasses → `ApiClass`. Uses transitive base resolution for model and exception detection.
 - Skips private modules (`_*.py` except `__init__.py`), test files, and `__pycache__`
 - Files: `src/compat/extractors/python.ts`, `python-parser.ts`, `python-surface.ts`
 

@@ -99,6 +99,19 @@ The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-mani
 
 6. **Composable generators** — Interface methods can compose multiple internal generators. Example: Node's `generateConfig` returns config files plus shared utility files.
 
+## New IR Variants for Emitters
+
+Emitters should handle these additional variants introduced for open-source readiness:
+
+- **Auth:** `'cookie'` in the `apiKey` auth scheme `in` field
+- **Pagination:** `'link-header'` strategy for RFC 5988 Link header pagination; `dataPath` may be `undefined` (meaning the response IS the data)
+- **Encoding:** `'form-urlencoded'` for `application/x-www-form-urlencoded` request bodies
+- **HTTP methods:** `head`, `options`, `trace` — HEAD returns no body, OPTIONS/TRACE are informational
+- **Cookie params:** Optional `cookieParams` array on operations that use cookie parameters
+- **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`
+- **Multiple responses:** Optional `successResponses: SuccessResponse[]` on `Operation` when more than one 2xx exists
+- **Idempotency:** `injectIdempotencyKey` is now spec-driven (true only when the spec declares an `Idempotency-Key` header)
+
 ## OperationPlan
 
 Source: `src/engine/operation-plan.ts`
