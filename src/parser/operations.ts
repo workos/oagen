@@ -295,12 +295,14 @@ function buildOperation(
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
-  const paginationFromParams = detectPagination(response, queryParams);
+  const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
   let pagination: PaginationMeta | undefined;
   if (isPaginated) {
     const itemType = responseItemType ?? (response.kind === 'array' ? response.items : response);
     pagination = {
-      cursorParam: paginationFromParams?.cursorParam ?? 'after',
+      strategy: paginationFromParams?.strategy ?? 'cursor',
+      param: paginationFromParams?.param ?? 'after',
+      limitParam: paginationFromParams?.limitParam,
       dataPath: responseDataPath ?? 'data',
       itemType,
     };

@@ -22,9 +22,10 @@ export function classifyAndExtractResponse(schema: SchemaObject, contextName: st
     return { response: schemaToTypeRef(schema, contextName), inlineModels: [], isPaginated: false };
   }
 
-  // 2. Check for list envelope (allOf with list_metadata + data array)
-  if (isListEnvelope(schema)) {
-    return extractListResponse(schema, contextName);
+  // 2. Check for list envelope (structural detection: array prop + non-array companion)
+  const envelope = detectListEnvelope(schema);
+  if (envelope.isEnvelope) {
+    return extractListResponse(schema, contextName, envelope.dataPath!);
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
@@ -36,36 +37,53 @@ export function classifyAndExtractResponse(schema: SchemaObject, contextName: st
   return extractDirectResource(schema, contextName);
 }
 
-function isListEnvelope(schema: SchemaObject): boolean {
-  // Check allOf-style list envelope
-  if (schema.allOf) {
-    let hasListMetadata = false;
-    let hasDataArray = false;
-
-    for (const sub of schema.allOf) {
-      if (!sub.properties) continue;
-
-      if (sub.properties.list_metadata) hasListMetadata = true;
-
-      const dataSchema = sub.properties.data;
-      if (dataSchema?.type === 'array') hasDataArray = true;
-    }
-
-    if (hasListMetadata && hasDataArray) return true;
-  }
-
-  // Check flat list envelope (object with data array + list_metadata)
-  if (schema.properties) {
-    const dataSchema = schema.properties.data;
-    const hasDataArray = dataSchema?.type === 'array';
-    const hasListMetadata = !!schema.properties.list_metadata;
-    if (hasDataArray && hasListMetadata) return true;
-  }
-
-  return false;
+interface ListEnvelopeResult {
+  isEnvelope: boolean;
+  dataPath: string | null;
 }
 
-function extractListResponse(schema: SchemaObject, contextName: string): ResponseExtractionResult {
+function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
+  // Collect all property sources (allOf sub-schemas or flat schema)
+  const propSources: Record<string, SchemaObject | undefined>[] = [];
+  if (schema.allOf) {
+    for (const sub of schema.allOf) {
+      if (sub.properties) propSources.push(sub.properties);
+    }
+  }
+  if (schema.properties) {
+    propSources.push(schema.properties);
+  }
+
+  if (propSources.length === 0) return { isEnvelope: false, dataPath: null };
+
+  // Merge all properties into a single view
+  const mergedProps: Record<string, SchemaObject | undefined> = {};
+  for (const source of propSources) {
+    Object.assign(mergedProps, source);
+  }
+
+  // Find array-typed properties and non-array companion properties
+  const arrayProps: string[] = [];
+  let nonArrayCount = 0;
+
+  for (const [key, propSchema] of Object.entries(mergedProps)) {
+    if (!propSchema) continue;
+    if (propSchema.type === 'array') {
+      arrayProps.push(key);
+    } else {
+      nonArrayCount++;
+    }
+  }
+
+  // List envelope heuristic: exactly one array property + at least one non-array companion
+  if (arrayProps.length === 1 && nonArrayCount >= 1) {
+    return { isEnvelope: true, dataPath: arrayProps[0] };
+  }
+
+  return { isEnvelope: false, dataPath: null };
+}
+
+function extractListResponse(schema: SchemaObject, contextName: string, dataPath: string): ResponseExtractionResult {
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
@@ -81,7 +99,7 @@ function extractListResponse(schema: SchemaObject, contextName: string): Respons
   }
 
   for (const props of propSources) {
-    const dataProp = props.data;
+    const dataProp = props[dataPath];
     if (!dataProp) continue;
 
     if (dataProp.type === 'array' && dataProp.items) {
@@ -100,15 +118,39 @@ function extractListResponse(schema: SchemaObject, contextName: string): Respons
     response: { kind: 'array', items: itemTypeRef },
     inlineModels,
     isPaginated: true,
-    dataPath: 'data',
+    dataPath,
     itemType: itemTypeRef,
   };
 }
 
-function hasObjectConstField(schema: SchemaObject): boolean {
-  if (!schema.properties?.object) return false;
-  const objectField = schema.properties.object;
-  return objectField !== undefined && (objectField.const !== undefined || objectField.enum !== undefined);
+function hasDiscriminantConstField(schema: SchemaObject): { property: string; value: string } | null {
+  if (!schema.properties) return null;
+
+  // Prefer well-known discriminant properties for backward compatibility
+  const preferred = ['object', 'type'];
+  for (const name of preferred) {
+    const field = schema.properties[name];
+    if (!field) continue;
+    if (field.const !== undefined && typeof field.const === 'string') {
+      return { property: name, value: field.const };
+    }
+    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
+      return { property: name, value: field.enum[0] };
+    }
+  }
+
+  // Fall back to any property with a const or single-value enum
+  for (const [name, field] of Object.entries(schema.properties)) {
+    if (!field) continue;
+    if (field.const !== undefined && typeof field.const === 'string') {
+      return { property: name, value: field.const };
+    }
+    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
+      return { property: name, value: field.enum[0] };
+    }
+  }
+
+  return null;
 }
 
 function isSingleResourceWrapper(schema: SchemaObject): boolean {
@@ -130,12 +172,12 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   const propSchema = schema.properties[wrapperKey];
   if (!propSchema) return false;
 
-  // Direct object with `object` const field
-  if (propSchema.type === 'object' && hasObjectConstField(propSchema)) return true;
+  // Direct object with a discriminant const field
+  if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;
 
   // oneOf with object + null (nullable resource)
   if (propSchema.oneOf) {
-    return propSchema.oneOf.some((v) => v.type === 'object' && hasObjectConstField(v));
+    return propSchema.oneOf.some((v) => v.type === 'object' && hasDiscriminantConstField(v) !== null);
   }
 
   return false;
@@ -151,7 +193,7 @@ function extractWrappedResource(schema: SchemaObject, contextName: string): Resp
   const resourceName = contextName.replace(/Response$/, '');
 
   if (propSchema.oneOf) {
-    const objectVariant = propSchema.oneOf.find((v) => v.type === 'object' && hasObjectConstField(v));
+    const objectVariant = propSchema.oneOf.find((v) => v.type === 'object' && hasDiscriminantConstField(v) !== null);
 
     if (objectVariant) {
       const modelName = deriveModelName(objectVariant, resourceName);
@@ -263,12 +305,24 @@ function extractDirectResource(schema: SchemaObject, contextName: string): Respo
 }
 
 function deriveModelName(schema: SchemaObject, fallback: string): string {
-  if (schema.properties?.object) {
-    const objectField = schema.properties.object;
-    if (objectField && objectField.const && typeof objectField.const === 'string') {
-      return toPascalCase(objectField.const);
+  if (!schema.properties) return toPascalCase(fallback);
+
+  // Prefer well-known discriminant properties for backward compatibility
+  const preferred = ['object', 'type'];
+  for (const name of preferred) {
+    const field = schema.properties[name];
+    if (field && field.const && typeof field.const === 'string') {
+      return toPascalCase(field.const);
     }
   }
+
+  // Fall back to any property with a const string value
+  for (const [, field] of Object.entries(schema.properties)) {
+    if (field && field.const && typeof field.const === 'string') {
+      return toPascalCase(field.const);
+    }
+  }
+
   return toPascalCase(fallback);
 }
 

@@ -15,15 +15,20 @@ const LIMIT_PARAMS = ['limit', 'page_size', 'per_page', 'size', 'count'];
  *
  * Returns null if no pagination pattern is detected.
  */
-export function detectPagination(response: TypeRef, queryParams: Parameter[]): PaginationMeta | null {
+export function detectPagination(
+  response: TypeRef,
+  queryParams: Parameter[],
+  dataPath?: string,
+): PaginationMeta | null {
   // Try cursor-based first (preferred)
   const cursorParam = queryParams.find((p) => CURSOR_PARAMS.includes(p.name));
 
   if (cursorParam) {
     const itemType: TypeRef = response.kind === 'array' ? response.items : response;
     return {
-      cursorParam: cursorParam.name,
-      dataPath: 'data',
+      strategy: 'cursor',
+      param: cursorParam.name,
+      dataPath: dataPath ?? 'data',
       itemType,
     };
   }
@@ -35,8 +40,10 @@ export function detectPagination(response: TypeRef, queryParams: Parameter[]): P
   if (offsetParam && limitParam) {
     const itemType: TypeRef = response.kind === 'array' ? response.items : response;
     return {
-      cursorParam: offsetParam.name,
-      dataPath: 'data',
+      strategy: 'offset',
+      param: offsetParam.name,
+      limitParam: limitParam.name,
+      dataPath: dataPath ?? 'data',
       itemType,
     };
   }
