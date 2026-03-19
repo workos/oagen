@@ -11,12 +11,51 @@
 
 import Parser from 'tree-sitter';
 import { getMergeAdapter } from './merge-adapters/index.js';
-import type { MergeImport, ParsedMergeFile } from './merge-adapters/types.js';
+import type { MergeImport, ParsedMergeFile, SymbolDocstrings } from './merge-adapters/types.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
 
 import { safeParse } from '../utils/tree-sitter.js';
+
+// --- @oagen-ignore region helpers ---
+
+interface IgnoredRegion {
+  startIndex: number;
+  endIndex: number;
+}
+
+function findIgnoredRegions(source: string): IgnoredRegion[] {
+  const regions: IgnoredRegion[] = [];
+  const startTag = '@oagen-ignore-start';
+  const endTag = '@oagen-ignore-end';
+  let searchFrom = 0;
+
+  while (true) {
+    const startIdx = source.indexOf(startTag, searchFrom);
+    if (startIdx === -1) break;
+    const endIdx = source.indexOf(endTag, startIdx + startTag.length);
+    if (endIdx === -1) break; // Unclosed — silently ignore
+    regions.push({ startIndex: startIdx, endIndex: endIdx + endTag.length });
+    searchFrom = endIdx + endTag.length;
+  }
+
+  return regions;
+}
+
+function buildIgnoredSymbolNames(
+  docstrings: Map<string, SymbolDocstrings>,
+  regions: IgnoredRegion[],
+): Set<string> {
+  if (regions.length === 0) return new Set();
+  const ignored = new Set<string>();
+  for (const [name, info] of docstrings) {
+    if (regions.some((r) => info.declStartIndex >= r.startIndex && info.declStartIndex <= r.endIndex)) {
+      ignored.add(name);
+    }
+  }
+  return ignored;
+}
 
 /**
  * Check if a tree-sitter grammar is configured for the given language.
@@ -139,12 +178,15 @@ export async function mergeIntoExisting(
     const generatedTree = safeParse(parser, generatedContent);
     const resultDocs = adapter.extractDocstrings(resultTree, result);
     const generatedDocs = adapter.extractDocstrings(generatedTree, generatedContent);
+    const ignoredRegions = findIgnoredRegions(result);
+    const ignoredSymbols = buildIgnoredSymbolNames(resultDocs, ignoredRegions);
     const headerLine = header.trim();
     const edits: { start: number; end: number; newText: string }[] = [];
 
     for (const [symbolName, genInfo] of generatedDocs) {
       const existInfo = resultDocs.get(symbolName);
       if (!existInfo) continue;
+      if (ignoredSymbols.has(symbolName)) continue;
       const genDoc = genInfo.docstring && genInfo.docstring.text.trim() !== headerLine ? genInfo.docstring : null;
       if (genDoc) {
         if (existInfo.docstring) {
@@ -311,10 +353,17 @@ export async function mergeIntoExisting(
     const resultSymbols = adapter.extractMembers(resultTree, result);
     const generatedSymbols = adapter.extractMembers(generatedTree, generatedContent);
 
+    // Build ignored symbol set from @oagen-ignore-start/@oagen-ignore-end regions
+    const existingTree = safeParse(parser, existingContent);
+    const existingDocs = adapter.extractDocstrings(existingTree, existingContent);
+    const deepIgnoredRegions = findIgnoredRegions(existingContent);
+    const deepIgnoredSymbols = buildIgnoredSymbolNames(existingDocs, deepIgnoredRegions);
+
     // Collect insertions: {line, text} for new members
     const insertions: { line: number; text: string }[] = [];
 
     for (const [symbolName, genSymbol] of generatedSymbols) {
+      if (deepIgnoredSymbols.has(symbolName)) continue;
       const existSymbol = resultSymbols.get(symbolName);
       if (!existSymbol) continue; // New symbol — handled by top-level append
 
@@ -359,12 +408,15 @@ export async function mergeIntoExisting(
     const generatedTree = safeParse(parser, generatedContent);
     const resultDocs = adapter.extractDocstrings(resultTree, result);
     const generatedDocs = adapter.extractDocstrings(generatedTree, generatedContent);
+    const docIgnoredRegions = findIgnoredRegions(result);
+    const docIgnoredSymbols = buildIgnoredSymbolNames(resultDocs, docIgnoredRegions);
 
     const edits: { start: number; end: number; newText: string }[] = [];
 
     for (const [symbolName, genInfo] of generatedDocs) {
       const existInfo = resultDocs.get(symbolName);
       if (!existInfo) continue;
+      if (docIgnoredSymbols.has(symbolName)) continue;
 
       // Skip header comments being treated as docstrings
       const genDoc = genInfo.docstring && genInfo.docstring.text.trim() !== headerLine ? genInfo.docstring : null;
