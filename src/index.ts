@@ -2,8 +2,10 @@
 export type {
   ApiSpec,
   AuthScheme,
+  ServerEntry,
   Service,
   Operation,
+  SuccessResponse,
   PaginationMeta,
   HttpMethod,
   Parameter,

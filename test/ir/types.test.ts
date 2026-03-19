@@ -11,7 +11,7 @@ import type {
   Model,
   Enum,
 } from '../../src/ir/types.js';
-import { mapTypeRef } from '../../src/ir/types.js';
+import { walkTypeRef, mapTypeRef } from '../../src/ir/types.js';
 
 describe('IR types', () => {
   it('constructs a valid PrimitiveType', () => {
@@ -223,5 +223,46 @@ describe('mapTypeRef', () => {
   it('maps a literal type', () => {
     const result = mapTypeRef({ kind: 'literal', value: 'active' }, stringMapper);
     expect(result).toBe('"active"');
+  });
+
+  it('maps a map type with keyType', () => {
+    const result = mapTypeRef(
+      { kind: 'map', valueType: { kind: 'primitive', type: 'string' }, keyType: { kind: 'enum', name: 'Scope' } },
+      stringMapper,
+    );
+    expect(result).toBe('Map<string, string>');
+  });
+});
+
+describe('LiteralType with null', () => {
+  it('constructs a LiteralType with null value', () => {
+    const t: LiteralType = { kind: 'literal', value: null };
+    expect(t.kind).toBe('literal');
+    expect(t.value).toBeNull();
+  });
+});
+
+describe('walkTypeRef on MapType with keyType', () => {
+  it('visits keyType when present', () => {
+    const visited: string[] = [];
+    walkTypeRef(
+      { kind: 'map', valueType: { kind: 'primitive', type: 'string' }, keyType: { kind: 'enum', name: 'Scope' } },
+      {
+        enum: (ref) => visited.push(`enum:${ref.name}`),
+        primitive: (ref) => visited.push(`primitive:${ref.type}`),
+      },
+    );
+    expect(visited).toEqual(['enum:Scope', 'primitive:string']);
+  });
+
+  it('does not error when keyType is absent', () => {
+    const visited: string[] = [];
+    walkTypeRef(
+      { kind: 'map', valueType: { kind: 'primitive', type: 'integer' } },
+      {
+        primitive: (ref) => visited.push(ref.type),
+      },
+    );
+    expect(visited).toEqual(['integer']);
   });
 });

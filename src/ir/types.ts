@@ -1,8 +1,15 @@
 /** Authentication scheme extracted from OpenAPI securitySchemes */
 export type AuthScheme =
   | { kind: 'bearer' }
-  | { kind: 'apiKey'; in: 'header' | 'query'; name: string }
+  | { kind: 'apiKey'; in: 'header' | 'query' | 'cookie'; name: string }
   | { kind: 'oauth2'; flows: Record<string, unknown> };
+
+/** Root IR node representing the full API surface */
+/** A server entry from the OpenAPI servers array */
+export interface ServerEntry {
+  url: string;
+  description?: string;
+}
 
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
@@ -10,6 +17,7 @@ export interface ApiSpec {
   version: string;
   description?: string;
   baseUrl: string;
+  servers?: ServerEntry[];
   services: Service[];
   models: Model[];
   enums: Enum[];
@@ -32,9 +40,11 @@ export interface Operation {
   pathParams: Parameter[];
   queryParams: Parameter[];
   headerParams: Parameter[];
+  cookieParams?: Parameter[];
   requestBody?: TypeRef;
-  requestBodyEncoding?: 'json' | 'form-data' | 'binary' | 'text';
+  requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
   response: TypeRef;
+  successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean;
@@ -44,14 +54,14 @@ export interface Operation {
 
 /** Structured pagination metadata for auto-paging iterator generation */
 export interface PaginationMeta {
-  strategy: 'cursor' | 'offset';
+  strategy: 'cursor' | 'offset' | 'link-header';
   param: string;
   limitParam?: string;
-  dataPath: string;
+  dataPath?: string;
   itemType: TypeRef;
 }
 
-export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
+export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
 
 export interface Parameter {
   name: string;
@@ -89,7 +99,7 @@ export interface EnumRef {
 
 export interface LiteralType {
   kind: 'literal';
-  value: string | number | boolean;
+  value: string | number | boolean | null;
 }
 
 export interface UnionType {
@@ -109,6 +119,7 @@ export interface NullableType {
 export interface MapType {
   kind: 'map';
   valueType: TypeRef;
+  keyType?: TypeRef;
 }
 
 /**
@@ -210,6 +221,7 @@ export function walkTypeRef(
       for (const v of ref.variants) walkTypeRef(v, visitor);
       break;
     case 'map':
+      if (ref.keyType) walkTypeRef(ref.keyType, visitor);
       walkTypeRef(ref.valueType, visitor);
       break;
     case 'literal':
@@ -239,7 +251,7 @@ export function mapTypeRef<T>(
     union: (ref: UnionType, mappedVariants: T[]) => T;
     nullable: (ref: NullableType, mappedInner: T) => T;
     literal: (ref: LiteralType) => T;
-    map: (ref: MapType, mappedValue: T) => T;
+    map: (ref: MapType, mappedValue: T, mappedKey?: T) => T;
   },
 ): T {
   switch (ref.kind) {
@@ -261,7 +273,11 @@ export function mapTypeRef<T>(
     case 'literal':
       return mapper.literal(ref);
     case 'map':
-      return mapper.map(ref, mapTypeRef(ref.valueType, mapper));
+      return mapper.map(
+        ref,
+        mapTypeRef(ref.valueType, mapper),
+        ref.keyType ? mapTypeRef(ref.keyType, mapper) : undefined,
+      );
     default:
       return assertNever(ref);
   }
@@ -270,4 +286,10 @@ export function mapTypeRef<T>(
 export interface ErrorResponse {
   statusCode: number;
   type?: TypeRef;
+}
+
+/** A successful response entry from a 2xx status code */
+export interface SuccessResponse {
+  statusCode: number;
+  type: TypeRef;
 }
