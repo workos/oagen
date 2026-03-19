@@ -2,8 +2,6 @@
 
 The `@oagen-ignore` system lets you protect hand-written code from being overwritten during regeneration. It operates at three scopes: docstring, region, and file.
 
-> **Migration note:** `@oagen-keep` has been renamed to `@oagen-ignore`. The old tag no longer works.
-
 ## Docstring-Level: `@oagen-ignore`
 
 Add `@oagen-ignore` anywhere inside a docstring to prevent the merger from overwriting it. The tag is a simple substring match — no regex, no parsing.
@@ -65,7 +63,9 @@ Wrap one or more symbols in a region to protect them from **both** deep merge (n
  * The merger will not add new methods or update this docstring.
  */
 export class SSO {
-  getProfileAndToken() { /* custom implementation */ }
+  getProfileAndToken() {
+    /* custom implementation */
+  }
 }
 // @oagen-ignore-end
 
@@ -137,8 +137,8 @@ class CustomClient:
 
 ## Summary
 
-| Marker | Scope | Protects |
-|--------|-------|----------|
-| `@oagen-ignore` | Docstring | That specific docstring from overwrite |
-| `@oagen-ignore-start` / `@oagen-ignore-end` | Region | Enclosed symbols from deep merge + docstring refresh |
-| `@oagen-ignore-file` | File | Entire file from any writer action |
+| Marker                                      | Scope     | Protects                                             |
+| ------------------------------------------- | --------- | ---------------------------------------------------- |
+| `@oagen-ignore`                             | Docstring | That specific docstring from overwrite               |
+| `@oagen-ignore-start` / `@oagen-ignore-end` | Region    | Enclosed symbols from deep merge + docstring refresh |
+| `@oagen-ignore-file`                        | File      | Entire file from any writer action                   |
