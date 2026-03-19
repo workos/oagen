@@ -180,12 +180,21 @@ function isWordEnd(source: string, idx: number): boolean {
 // Module extraction
 // ---------------------------------------------------------------------------
 
-function extractModuleNames(source: string): string[] {
-  const modules: string[] = [];
+interface ExtractedModule {
+  name: string;
+  body: string;
+}
+
+/** Find all defmodule blocks and extract their bodies in a single pass. */
+function extractModules(source: string): ExtractedModule[] {
+  const modules: ExtractedModule[] = [];
   const moduleRegex = /defmodule\s+([\w.]+)\s+do\b/g;
   let match;
   while ((match = moduleRegex.exec(source)) !== null) {
-    modules.push(match[1]);
+    const body = extractModuleBody(source, match.index + match[0].length);
+    if (body) {
+      modules.push({ name: match[1], body });
+    }
   }
   return modules;
 }
@@ -194,16 +203,10 @@ function extractModuleNames(source: string): string[] {
 // Struct extraction
 // ---------------------------------------------------------------------------
 
-function extractStructs(source: string, sourceFile: string): ElixirStruct[] {
+function extractStructs(modules: ExtractedModule[], sourceFile: string): ElixirStruct[] {
   const structs: ElixirStruct[] = [];
 
-  const moduleRegex = /defmodule\s+([\w.]+)\s+do\b/g;
-  let moduleMatch;
-  while ((moduleMatch = moduleRegex.exec(source)) !== null) {
-    const moduleName = moduleMatch[1];
-    const moduleBody = extractModuleBody(source, moduleMatch.index + moduleMatch[0].length);
-    if (!moduleBody) continue;
-
+  for (const { name: moduleName, body: moduleBody } of modules) {
     // Look for defstruct inside this module
     const structMatch = moduleBody.match(/defstruct\s+\[([^\]]*)\]/);
     if (!structMatch) continue;
@@ -228,16 +231,10 @@ function extractStructs(source: string, sourceFile: string): ElixirStruct[] {
 // Function extraction
 // ---------------------------------------------------------------------------
 
-function extractFunctions(source: string, sourceFile: string): ElixirFunction[] {
+function extractFunctions(modules: ExtractedModule[], sourceFile: string): ElixirFunction[] {
   const functions: ElixirFunction[] = [];
 
-  const moduleRegex = /defmodule\s+([\w.]+)\s+do\b/g;
-  let moduleMatch;
-  while ((moduleMatch = moduleRegex.exec(source)) !== null) {
-    const moduleName = moduleMatch[1];
-    const moduleBody = extractModuleBody(source, moduleMatch.index + moduleMatch[0].length);
-    if (!moduleBody) continue;
-
+  for (const { name: moduleName, body: moduleBody } of modules) {
     // Match both styles:
     // 1. Block: def name(params) do ... end
     // 2. Keyword: def name(params), do: ...
@@ -283,16 +280,10 @@ function extractFunctions(source: string, sourceFile: string): ElixirFunction[] 
 // Type spec extraction
 // ---------------------------------------------------------------------------
 
-function extractTypeSpecs(source: string, sourceFile: string): ElixirTypeSpec[] {
+function extractTypeSpecs(modules: ExtractedModule[], sourceFile: string): ElixirTypeSpec[] {
   const specs: ElixirTypeSpec[] = [];
 
-  const moduleRegex = /defmodule\s+([\w.]+)\s+do\b/g;
-  let moduleMatch;
-  while ((moduleMatch = moduleRegex.exec(source)) !== null) {
-    const moduleName = moduleMatch[1];
-    const moduleBody = extractModuleBody(source, moduleMatch.index + moduleMatch[0].length);
-    if (!moduleBody) continue;
-
+  for (const { name: moduleName, body: moduleBody } of modules) {
     // Match @type t :: ... capturing multi-line definitions
     // The definition continues until we hit a blank line, a new @-attribute, or def/defstruct
     const typeRegex = /@type\s+(\w+)\s*::\s*/g;
@@ -352,16 +343,10 @@ function extractTypeSpecs(source: string, sourceFile: string): ElixirTypeSpec[] 
 // Enum module extraction
 // ---------------------------------------------------------------------------
 
-function extractEnumModules(source: string, sourceFile: string): ElixirEnumModule[] {
+function extractEnumModules(modules: ExtractedModule[], sourceFile: string): ElixirEnumModule[] {
   const enumModules: ElixirEnumModule[] = [];
 
-  const moduleRegex = /defmodule\s+([\w.]+)\s+do\b/g;
-  let moduleMatch;
-  while ((moduleMatch = moduleRegex.exec(source)) !== null) {
-    const moduleName = moduleMatch[1];
-    const moduleBody = extractModuleBody(source, moduleMatch.index + moduleMatch[0].length);
-    if (!moduleBody) continue;
-
+  for (const { name: moduleName, body: moduleBody } of modules) {
     // Check if this module has a `values` function (indicator of enum-like module)
     if (!moduleBody.match(/def\s+values[\s,]/)) continue;
 
@@ -397,12 +382,13 @@ export function parseElixirFile(filePath: string, sdkPath: string): ParsedElixir
   const source = readFileSync(filePath, 'utf-8');
   const relPath = relative(sdkPath, filePath);
   const cleaned = stripCommentsAndHeredocs(source);
+  const modules = extractModules(cleaned);
 
   return {
-    structs: extractStructs(cleaned, relPath),
-    functions: extractFunctions(cleaned, relPath),
-    typeSpecs: extractTypeSpecs(cleaned, relPath),
-    enumModules: extractEnumModules(cleaned, relPath),
-    moduleNames: extractModuleNames(cleaned),
+    structs: extractStructs(modules, relPath),
+    functions: extractFunctions(modules, relPath),
+    typeSpecs: extractTypeSpecs(modules, relPath),
+    enumModules: extractEnumModules(modules, relPath),
+    moduleNames: modules.map((m) => m.name),
   };
 }
