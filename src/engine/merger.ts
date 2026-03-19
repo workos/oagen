@@ -148,7 +148,8 @@ export async function mergeIntoExisting(
       const genDoc = genInfo.docstring && genInfo.docstring.text.trim() !== headerLine ? genInfo.docstring : null;
       if (genDoc) {
         if (existInfo.docstring) {
-          if (existInfo.docstring.text !== genDoc.text) {
+          const isPreserved = existInfo.docstring.text.includes('@oagen-keep');
+          if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
             edits.push({
               start: existInfo.docstring.startIndex,
               end: existInfo.docstring.endIndex,
@@ -167,7 +168,8 @@ export async function mergeIntoExisting(
         const existMember = existInfo.members.get(memberName);
         if (!existMember || !genMember.docstring) continue;
         if (existMember.docstring) {
-          if (existMember.docstring.text !== genMember.docstring.text) {
+          const isPreserved = existMember.docstring.text.includes('@oagen-keep');
+          if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
             edits.push({
               start: existMember.docstring.startIndex,
               end: existMember.docstring.endIndex,
@@ -370,7 +372,8 @@ export async function mergeIntoExisting(
       // Top-level docstring
       if (genDoc) {
         if (existInfo.docstring) {
-          if (existInfo.docstring.text !== genDoc.text) {
+          const isPreserved = existInfo.docstring.text.includes('@oagen-keep');
+          if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
             edits.push({
               start: existInfo.docstring.startIndex,
               end: existInfo.docstring.endIndex,
@@ -396,7 +399,8 @@ export async function mergeIntoExisting(
         if (!existMember || !genMember.docstring) continue;
 
         if (existMember.docstring) {
-          if (existMember.docstring.text !== genMember.docstring.text) {
+          const isPreserved = existMember.docstring.text.includes('@oagen-keep');
+          if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
             edits.push({
               start: existMember.docstring.startIndex,
               end: existMember.docstring.endIndex,

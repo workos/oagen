@@ -972,6 +972,104 @@ export class Client {
     expect(result.content).not.toContain('Old multi-line');
   });
 
+  it('preserves top-level docstring containing @oagen-keep', async () => {
+    const existing = `
+/**
+ * Hand-written PKCE flow docs.
+ *
+ * @oagen-keep
+ */
+export class SSO {
+  getProfileAndToken() {}
+}
+`;
+    const generated = `
+${header}
+
+/** Generic API-spec description */
+export class SSO {
+  getProfileAndToken() {}
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.content).toContain('@oagen-keep');
+    expect(result.content).toContain('Hand-written PKCE flow docs');
+    expect(result.content).not.toContain('Generic API-spec description');
+  });
+
+  it('preserves member-level docstring containing @oagen-keep', async () => {
+    const existing = `
+export class SSO {
+  /**
+   * Custom exchange docs.
+   * @oagen-keep
+   */
+  getProfileAndToken() {}
+}
+`;
+    const generated = `
+${header}
+
+export class SSO {
+  /** Terse spec description */
+  getProfileAndToken() {}
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.content).toContain('@oagen-keep');
+    expect(result.content).toContain('Custom exchange docs');
+    expect(result.content).not.toContain('Terse spec description');
+  });
+
+  it('preserves @oagen-keep docstring in docstring-only mode', async () => {
+    const existing = `
+export class SSO {
+  /**
+   * Detailed hand-written docs.
+   * @oagen-keep
+   */
+  getProfileAndToken() {}
+}
+`;
+    const generated = `
+${header}
+
+export class SSO {
+  /** Short spec docs */
+  getProfileAndToken() {}
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header, { docstringOnly: true });
+    expect(result.content).toContain('@oagen-keep');
+    expect(result.content).toContain('Detailed hand-written docs');
+    expect(result.content).not.toContain('Short spec docs');
+  });
+
+  it('still updates docstrings without @oagen-keep', async () => {
+    const existing = `
+/** Old description */
+export interface Foo {
+  id: string;
+}
+`;
+    const generated = `
+${header}
+
+/** New description */
+export interface Foo {
+  id: string;
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain('/** New description */');
+    expect(result.content).not.toContain('Old description');
+  });
+
   it('combines docstring update with new symbol addition', async () => {
     const existing = `
 /** Old description */

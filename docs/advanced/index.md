@@ -7,4 +7,5 @@ Use this section when you need to preserve an existing SDK surface, verify behav
 - [Workflows](../architecture/workflows.md)
 - [Extractor Contract](../architecture/extractor-contract.md)
 - [Non-Additive Changes](../architecture/non-additive-changes.md)
+- [`@oagen-keep` — Preserving Hand-Written Docstrings](./oagen-keep.md)
 - [CLI Reference](../cli.md)
