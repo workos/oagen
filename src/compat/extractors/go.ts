@@ -12,6 +12,7 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkGoFiles, parseGoFile } from './go-parser.js';
 import { buildSurface } from './go-surface.js';
 import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
@@ -50,9 +51,7 @@ const goHints: LanguageHints = {
     return null;
   },
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const strippedA = this.stripNullable(a) ?? a;
-    const strippedB = this.stripNullable(b) ?? b;
-    return strippedA === strippedB && a !== b;
+    return defaultIsNullableOnlyDifference(this, a, b);
   },
   isUnionReorder(_a: string, _b: string): boolean {
     return false;

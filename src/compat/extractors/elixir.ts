@@ -13,6 +13,7 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkElixirFiles, parseElixirFile } from './elixir-parser.js';
 import { buildSurface } from './elixir-surface.js';
 import type { ElixirStruct, ElixirFunction, ElixirEnumModule, ElixirTypeSpec } from './elixir-parser.js';
@@ -30,9 +31,7 @@ const elixirHints: LanguageHints = {
     return null;
   },
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const strippedA = this.stripNullable(a) ?? a;
-    const strippedB = this.stripNullable(b) ?? b;
-    return strippedA === strippedB && a !== b;
+    return defaultIsNullableOnlyDifference(this, a, b);
   },
   isUnionReorder(a: string, b: string): boolean {
     // Parse pipe-separated types, sort, compare

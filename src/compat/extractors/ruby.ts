@@ -11,6 +11,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { ApiSurface, Extractor, LanguageHints } from '../types.js';
+import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import {
   extractClasses,
   extractServiceModules,
@@ -29,9 +30,7 @@ const rubyHints: LanguageHints = {
     return match ? match[1] : null;
   },
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const strippedA = this.stripNullable(a) ?? a;
-    const strippedB = this.stripNullable(b) ?? b;
-    return strippedA === strippedB && a !== b;
+    return defaultIsNullableOnlyDifference(this, a, b);
   },
   isUnionReorder(_a: string, _b: string): boolean {
     return false;

@@ -10,6 +10,7 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkRustFiles, parseRustFile } from './rust-parser.js';
 import { buildSurface } from './rust-surface.js';
 import type { RustStruct, RustEnum, RustFunc, RustTrait, RustTypeAlias } from './rust-parser.js';
@@ -25,9 +26,7 @@ const rustHints: LanguageHints = {
     return match ? match[1] : null;
   },
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const strippedA = this.stripNullable(a) ?? a;
-    const strippedB = this.stripNullable(b) ?? b;
-    return strippedA === strippedB && a !== b;
+    return defaultIsNullableOnlyDifference(this, a, b);
   },
   isUnionReorder(_a: string, _b: string): boolean {
     return false; // Rust doesn't have union types in the TS sense

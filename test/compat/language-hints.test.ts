@@ -41,6 +41,10 @@ describe('nodeHints', () => {
     it('returns false for different types', () => {
       expect(nodeHints.isNullableOnlyDifference('string', 'number')).toBe(false);
     });
+
+    it('returns false when both types are identical (regression)', () => {
+      expect(nodeHints.isNullableOnlyDifference('string', 'string')).toBe(false);
+    });
   });
 
   describe('isUnionReorder', () => {

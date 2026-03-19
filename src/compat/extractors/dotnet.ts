@@ -12,7 +12,7 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
-import { NAMED_TYPE_RE, typeExistsInSurface, namedTypeWordsOverlap } from '../language-hints.js';
+import { NAMED_TYPE_RE, typeExistsInSurface, namedTypeWordsOverlap, defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkCSharpFiles, parseCSharpFile } from './dotnet-parser.js';
 import { buildSurface } from './dotnet-surface.js';
 import type { CSharpClass, CSharpEnum } from './dotnet-parser.js';
@@ -34,9 +34,7 @@ const dotnetHints: LanguageHints = {
     return null;
   },
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const strippedA = this.stripNullable(a) ?? a;
-    const strippedB = this.stripNullable(b) ?? b;
-    return strippedA === strippedB && a !== b;
+    return defaultIsNullableOnlyDifference(this, a, b);
   },
   isUnionReorder(_a: string, _b: string): boolean {
     return false; // C# doesn't have union types

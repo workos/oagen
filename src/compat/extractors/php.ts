@@ -12,6 +12,7 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkPhpFiles, parsePhpFile } from './php-parser.js';
 import { buildSurface } from './php-surface.js';
 import type { PhpClass } from './php-parser.js';
@@ -33,9 +34,7 @@ const phpHints: LanguageHints = {
     return null;
   },
   isNullableOnlyDifference(a: string, b: string): boolean {
-    const strippedA = this.stripNullable(a) ?? a;
-    const strippedB = this.stripNullable(b) ?? b;
-    return strippedA === strippedB && a !== b;
+    return defaultIsNullableOnlyDifference(this, a, b);
   },
   isUnionReorder(a: string, b: string): boolean {
     // Parse pipe-separated types, sort, compare

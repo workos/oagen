@@ -45,6 +45,19 @@ function parseUnionMembers(s: string): string[] {
 }
 
 /**
+ * Default implementation of isNullableOnlyDifference — shared across extractors.
+ * Returns true when stripping nullable wrappers from both sides yields the same
+ * type, but the original types differ (i.e., the only difference is nullability).
+ */
+export function defaultIsNullableOnlyDifference(
+  hints: Pick<LanguageHints, 'stripNullable'>,
+  a: string,
+  b: string,
+): boolean {
+  return (hints.stripNullable(a) ?? a) === (hints.stripNullable(b) ?? b) && a !== b;
+}
+
+/**
  * Node/TypeScript language hints — reference implementation.
  * Extracted from the hardcoded logic previously in differ.ts and overlay.ts.
  */
@@ -59,7 +72,7 @@ export const nodeHints: LanguageHints = {
   },
 
   isNullableOnlyDifference(a: string, b: string): boolean {
-    return (nodeHints.stripNullable(a) ?? a) === (nodeHints.stripNullable(b) ?? b);
+    return (nodeHints.stripNullable(a) ?? a) === (nodeHints.stripNullable(b) ?? b) && a !== b;
   },
 
   isUnionReorder(a: string, b: string): boolean {
