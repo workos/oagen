@@ -48,3 +48,4 @@ oagen ships as a Claude Code plugin. Skills are in `skills/` at the repo root. U
 - `/oagen:verify-compat <language>` — verify emitter output preserves BC with a live SDK
 - `/oagen:integrate <language>` — merge generated code into a live SDK via `--target`
 - `/oagen:verify-smoke-test <language>` — run generate-verify loop to iteratively fix an emitter until smoke tests pass
+- `/oagen:check-emitter-parity <language>` — audit an emitter's coverage of IR fields and produce a gap analysis
