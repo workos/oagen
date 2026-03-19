@@ -379,6 +379,13 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // If allOf contains a $ref, prefer the ref (it's a named type)
     const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
     if (refItem) {
+      // If allOf has $ref AND siblings with properties, return a merged model ref
+      // to avoid losing the augmentation properties
+      const hasAugmentation = schema.allOf.some((s: SchemaObject) => !s.$ref && (s.properties || s.type === 'object'));
+      if (hasAugmentation) {
+        const baseName = toPascalCase(contextName ?? 'UnknownModel');
+        return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
+      }
       return schemaToTypeRef(refItem, contextName, parentModelName);
     }
     // If allOf has a single item, unwrap it
@@ -431,7 +438,12 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
         ? {
             discriminator: {
               property: schema.discriminator.propertyName,
-              mapping: schema.discriminator.mapping ?? {},
+              mapping: Object.fromEntries(
+                Object.entries(schema.discriminator.mapping ?? {}).map(([k, v]) => [
+                  k,
+                  v.replace(/^#\/components\/schemas\//, ''),
+                ]),
+              ),
             },
           }
         : {}),
@@ -447,6 +459,13 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // null const → nullable unknown
     if (schema.const === null) {
       return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
+    }
+    // const of object/array → map or array with unknown values
+    if (typeof schema.const === 'object') {
+      if (Array.isArray(schema.const)) {
+        return { kind: 'array', items: { kind: 'primitive', type: 'unknown' } };
+      }
+      return { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } };
     }
   }
   if (schema.enum && schema.enum.length === 1) {
@@ -465,7 +484,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     return {
       kind: 'enum',
       name: qualifiedName,
-      values: schema.enum.map((v) => (typeof v === 'number' ? String(v) : String(v))),
+      values: schema.enum.map((v) => (typeof v === 'number' ? v : String(v))),
     };
   }
 
@@ -558,11 +577,11 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     return { kind: 'primitive', type: 'unknown' };
   }
 
-  // Fallback: treat unknown schemas as string
+  // Fallback: treat unknown schemas as unknown
   if (contextName) {
-    console.warn(`[oagen] Warning: Unknown schema shape treated as string (context: ${contextName})`);
+    console.warn(`[oagen] Warning: Unknown schema shape treated as unknown (context: ${contextName})`);
   }
-  return { kind: 'primitive', type: 'string' };
+  return { kind: 'primitive', type: 'unknown' };
 }
 
 import { qualifyInlineModelName } from './inline-models.js';

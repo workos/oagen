@@ -46,7 +46,7 @@ describe('detectPagination', () => {
     expect(result).toEqual({
       strategy: 'cursor',
       param: 'after',
-      dataPath: 'data',
+      dataPath: undefined,
       itemType: { kind: 'model', name: 'User' },
     });
   });
@@ -60,7 +60,7 @@ describe('detectPagination', () => {
       strategy: 'offset',
       param: 'offset',
       limitParam: 'limit',
-      dataPath: 'data',
+      dataPath: undefined,
       itemType: { kind: 'model', name: 'Item' },
     });
   });
@@ -92,5 +92,13 @@ describe('detectPagination', () => {
       dataPath: 'items',
       itemType: { kind: 'model', name: 'Item' },
     });
+  });
+
+  it('dataPath propagates as undefined when not detected', () => {
+    const result = detectPagination({ kind: 'array', items: { kind: 'primitive', type: 'string' } }, [
+      makeParam('cursor'),
+    ]);
+    expect(result).not.toBeNull();
+    expect(result!.dataPath).toBeUndefined();
   });
 });

@@ -76,7 +76,8 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     expect(services[0].operations[0].name).toBe('createUser');
-    expect(services[0].operations[0].injectIdempotencyKey).toBe(true);
+    // POST without Idempotency-Key header param → spec-driven default is false
+    expect(services[0].operations[0].injectIdempotencyKey).toBe(false);
     expect(services[0].operations[0].requestBody).toBeDefined();
   });
 
@@ -439,6 +440,206 @@ describe('extractOperations', () => {
     expect(services).toHaveLength(1);
     expect(services[0].name).toBe('MultiFactorAuth');
     expect(services[0].operations).toHaveLength(2);
+  });
+
+  it('extracts cookie parameters', () => {
+    const paths = {
+      '/users': {
+        get: {
+          operationId: 'listUsers',
+          parameters: [{ name: 'session', in: 'cookie' as const, schema: { type: 'string' } }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].cookieParams).toHaveLength(1);
+    expect(services[0].operations[0].cookieParams![0].name).toBe('session');
+  });
+
+  it('sets requestBodyEncoding to form-urlencoded for application/x-www-form-urlencoded', () => {
+    const paths = {
+      '/token': {
+        post: {
+          operationId: 'getToken',
+          requestBody: {
+            required: true,
+            content: {
+              'application/x-www-form-urlencoded': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    grant_type: { type: 'string' },
+                    code: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.requestBodyEncoding).toBe('form-urlencoded');
+  });
+
+  it('POST with Idempotency-Key header param sets injectIdempotencyKey to true', () => {
+    const paths = {
+      '/payments': {
+        post: {
+          operationId: 'createPayment',
+          parameters: [{ name: 'Idempotency-Key', in: 'header' as const, required: false, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { amount: { type: 'integer' } } },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.injectIdempotencyKey).toBe(true);
+    // Idempotency-Key should be stripped from headerParams
+    expect(op.headerParams.some((p) => p.name.toLowerCase() === 'idempotency-key')).toBe(false);
+  });
+
+  it('POST without Idempotency-Key header sets injectIdempotencyKey to false', () => {
+    const paths = {
+      '/payments': {
+        post: {
+          operationId: 'createPayment',
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].injectIdempotencyKey).toBe(false);
+  });
+
+  it('extracts HEAD method operations', () => {
+    const paths = {
+      '/users/{id}': {
+        head: {
+          operationId: 'checkUser',
+          parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          responses: { '200': { description: 'exists' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].httpMethod).toBe('head');
+    expect(services[0].operations[0].name).toBe('checkUser');
+  });
+
+  it('extracts OPTIONS method operations', () => {
+    const paths = {
+      '/cors': {
+        options: {
+          operationId: 'corsCheck',
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].httpMethod).toBe('options');
+  });
+
+  it('extracts TRACE method operations', () => {
+    const paths = {
+      '/debug': {
+        trace: {
+          operationId: 'debugTrace',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].httpMethod).toBe('trace');
+  });
+
+  it('collects multiple 2xx responses with successResponses', () => {
+    const paths = {
+      '/resources': {
+        post: {
+          operationId: 'createResource',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Resource' } } },
+            },
+            '201': {
+              description: 'created',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Resource' } } },
+            },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    // Primary response is 200's type (lowest 2xx with body)
+    expect(op.response).toEqual({ kind: 'model', name: 'Resource' });
+    // Multiple 2xx → successResponses populated
+    expect(op.successResponses).toHaveLength(2);
+    expect(op.successResponses![0].statusCode).toBe(200);
+    expect(op.successResponses![1].statusCode).toBe(201);
+  });
+
+  it('omits successResponses for single 2xx response', () => {
+    const paths = {
+      '/resources/{id}': {
+        get: {
+          operationId: 'getResource',
+          parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Resource' } } },
+            },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].successResponses).toBeUndefined();
+  });
+
+  it('200 + 204 (no content) → primary is 200, successResponses contains both', () => {
+    const paths = {
+      '/resources': {
+        post: {
+          operationId: 'createResource',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Resource' } } },
+            },
+            '204': { description: 'no content' },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.response).toEqual({ kind: 'model', name: 'Resource' });
+    expect(op.successResponses).toHaveLength(2);
   });
 
   it('falls back to path segment when no tag', () => {

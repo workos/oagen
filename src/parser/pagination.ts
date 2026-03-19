@@ -28,7 +28,7 @@ export function detectPagination(
     return {
       strategy: 'cursor',
       param: cursorParam.name,
-      dataPath: dataPath ?? 'data',
+      dataPath: dataPath,
       itemType,
     };
   }
@@ -43,7 +43,7 @@ export function detectPagination(
       strategy: 'offset',
       param: offsetParam.name,
       limitParam: limitParam.name,
-      dataPath: dataPath ?? 'data',
+      dataPath: dataPath,
       itemType,
     };
   }

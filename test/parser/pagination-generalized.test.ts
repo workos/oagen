@@ -74,10 +74,10 @@ describe('generalized pagination detection', () => {
       expect(result!.dataPath).toBe('items');
     });
 
-    it('defaults to data when no dataPath provided', () => {
+    it('dataPath is undefined when not provided', () => {
       const result = detectPagination(arrayResponse, [makeParam('after')]);
       expect(result).not.toBeNull();
-      expect(result!.dataPath).toBe('data');
+      expect(result!.dataPath).toBeUndefined();
     });
   });
 });

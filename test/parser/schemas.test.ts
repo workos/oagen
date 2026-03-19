@@ -317,6 +317,73 @@ describe('schemaToTypeRef', () => {
     expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } });
   });
 
+  it('allOf with $ref and augmentation returns merged model ref', () => {
+    const ref = schemaToTypeRef(
+      {
+        allOf: [
+          { $ref: '#/components/schemas/BaseModel' },
+          { type: 'object', properties: { extra: { type: 'string' } } },
+        ],
+      },
+      'myField',
+    );
+    expect(ref).toEqual({ kind: 'model', name: 'MyField' });
+  });
+
+  it('allOf with $ref only (no augmentation) returns the ref', () => {
+    const ref = schemaToTypeRef(
+      {
+        allOf: [{ $ref: '#/components/schemas/BaseModel' }, { description: 'Just a description, no properties' }],
+      },
+      'myField',
+    );
+    expect(ref).toEqual({ kind: 'model', name: 'BaseModel' });
+  });
+
+  it('discriminator mapping strips #/components/schemas/ prefix', () => {
+    const ref = schemaToTypeRef({
+      oneOf: [
+        { type: 'object', properties: { type: { type: 'string' } } },
+        { type: 'object', properties: { type: { type: 'string' } } },
+      ],
+      discriminator: {
+        propertyName: 'type',
+        mapping: {
+          a: '#/components/schemas/SchemaA',
+          b: 'SchemaB',
+        },
+      },
+    });
+    expect(ref.kind).toBe('union');
+    if (ref.kind === 'union') {
+      expect(ref.discriminator!.mapping).toEqual({ a: 'SchemaA', b: 'SchemaB' });
+    }
+  });
+
+  it('inline enum preserves numeric values', () => {
+    const ref = schemaToTypeRef({ type: 'integer', enum: [1, 2, 3] }, 'status');
+    expect(ref.kind).toBe('enum');
+    if (ref.kind === 'enum') {
+      expect(ref.values).toEqual([1, 2, 3]);
+    }
+  });
+
+  it('const object returns map type', () => {
+    const ref = schemaToTypeRef({ const: { key: 'value' } });
+    expect(ref).toEqual({ kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } });
+  });
+
+  it('const array returns array type', () => {
+    const ref = schemaToTypeRef({ const: [1, 2, 3] });
+    expect(ref).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'unknown' } });
+  });
+
+  it('unknown schema fallback returns unknown, not string', () => {
+    // Schema with an unrecognized type (not string/integer/number/boolean/array/object)
+    const ref = schemaToTypeRef({ type: 'file' }, 'testField');
+    expect(ref).toEqual({ kind: 'primitive', type: 'unknown' });
+  });
+
   it('handles combined OAS 3.1 type array and 3.0 nullable without double-wrapping', () => {
     const ref = schemaToTypeRef({ type: ['string', 'null'], nullable: true });
     expect(ref).toEqual({

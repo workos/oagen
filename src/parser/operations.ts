@@ -5,6 +5,7 @@ import type {
   Parameter,
   TypeRef,
   ErrorResponse,
+  SuccessResponse,
   Model,
   Field,
   PaginationMeta,
@@ -21,6 +22,9 @@ interface PathItem {
   put?: OperationObject;
   patch?: OperationObject;
   delete?: OperationObject;
+  head?: OperationObject;
+  options?: OperationObject;
+  trace?: OperationObject;
   parameters?: ParameterObject[];
 }
 
@@ -55,7 +59,7 @@ interface ResponseObject {
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
-const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
+const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 export interface OperationExtractionResult {
   services: Service[];
@@ -160,6 +164,12 @@ function inferVerb(method: HttpMethod, path: string): string {
       return 'update';
     case 'delete':
       return 'delete';
+    case 'head':
+      return 'check';
+    case 'options':
+      return 'options';
+    case 'trace':
+      return 'trace';
     default:
       return method;
   }
@@ -278,14 +288,18 @@ function buildOperation(
 ): { operation: Operation; inlineModels: Model[] } {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
+  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
+
   const pathParams = extractParams(allParams, 'path');
   const queryParams = extractParams(allParams, 'query');
-  const headerParams = extractParams(allParams, 'header');
+  const headerParams = extractParams(allParams, 'header').filter((p) => p.name.toLowerCase() !== 'idempotency-key');
+  const cookieParams = extractParams(allParams, 'cookie');
 
   const reqBodyModels: Model[] = [];
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
   const {
     response,
+    successResponses,
     errors,
     inlineModels,
     isPaginated,
@@ -303,7 +317,7 @@ function buildOperation(
       strategy: paginationFromParams?.strategy ?? 'cursor',
       param: paginationFromParams?.param ?? 'after',
       limitParam: paginationFromParams?.limitParam,
-      dataPath: responseDataPath ?? 'data',
+      dataPath: responseDataPath ?? paginationFromParams?.dataPath,
       itemType,
     };
   } else if (paginationFromParams) {
@@ -319,12 +333,14 @@ function buildOperation(
       pathParams,
       queryParams,
       headerParams,
+      cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
       requestBody,
       requestBodyEncoding,
       response,
+      successResponses,
       errors,
       pagination,
-      injectIdempotencyKey: method === 'post',
+      injectIdempotencyKey: hasIdempotencyHeader,
       deprecated: op.deprecated || undefined,
       async: op['x-oagen-async'],
     },
@@ -339,7 +355,7 @@ function buildDescription(summary: string | undefined, description: string | und
   return description ?? summary;
 }
 
-function extractParams(params: ParameterObject[], location: 'path' | 'query' | 'header'): Parameter[] {
+function extractParams(params: ParameterObject[], location: 'path' | 'query' | 'header' | 'cookie'): Parameter[] {
   return params
     .filter((p) => p.in === location)
     .map((p) => ({
@@ -356,11 +372,11 @@ function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
   inlineModels: Model[],
-): { body?: TypeRef; encoding?: 'json' | 'form-data' | 'binary' | 'text' } {
+): { body?: TypeRef; encoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text' } {
   if (!body?.content) return {};
 
   // Detect encoding and find schema from content type in priority order
-  let encoding: 'json' | 'form-data' | 'binary' | 'text' = 'json';
+  let encoding: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text' = 'json';
   let schema: SchemaObject | undefined;
 
   if (body.content['application/json']?.schema) {
@@ -369,6 +385,9 @@ function extractRequestBody(
   } else if (body.content['multipart/form-data']?.schema) {
     encoding = 'form-data';
     schema = body.content['multipart/form-data']!.schema;
+  } else if (body.content['application/x-www-form-urlencoded']?.schema) {
+    encoding = 'form-urlencoded';
+    schema = body.content['application/x-www-form-urlencoded']!.schema;
   } else if (body.content['application/octet-stream']) {
     encoding = 'binary';
     schema = body.content['application/octet-stream']!.schema;
@@ -485,6 +504,7 @@ function extractResponses(
   method?: HttpMethod,
 ): {
   response: TypeRef;
+  successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   inlineModels: Model[];
   isPaginated: boolean;
@@ -500,15 +520,19 @@ function extractResponses(
 
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
+  const allSuccessResponses: SuccessResponse[] = [];
+
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
 
     if (code >= 200 && code < 300) {
+      let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
         const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
         const result = classifyAndExtractResponse(jsonContent.schema, contextName);
-        response = result.response;
+        extractedType = result.response;
+        // Keep track of inline models and pagination from the latest 2xx with a schema
         inlineModels = result.inlineModels;
         isPaginated = result.isPaginated;
         dataPath = result.dataPath;
@@ -516,25 +540,29 @@ function extractResponses(
       } else if (resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
         if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
-          response = { kind: 'primitive', type: 'string', format: 'binary' };
+          extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
         } else if (
           resp.content['text/plain'] ||
           resp.content['text/html'] ||
           resp.content['text/xml'] ||
           resp.content['application/xml']
         ) {
-          response = { kind: 'primitive', type: 'string' };
+          extractedType = { kind: 'primitive', type: 'string' };
         } else {
           // Try the first available content type's schema
           const firstKey = Object.keys(resp.content)[0];
           if (firstKey) {
             const firstContent = resp.content[firstKey];
             if (firstContent?.schema) {
-              response = schemaToTypeRef(firstContent.schema, deriveResponseName(op, path ?? '/', method ?? 'get'));
+              extractedType = schemaToTypeRef(
+                firstContent.schema,
+                deriveResponseName(op, path ?? '/', method ?? 'get'),
+              );
             }
           }
         }
       }
+      allSuccessResponses.push({ statusCode: code, type: extractedType });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
@@ -542,5 +570,15 @@ function extractResponses(
     }
   }
 
-  return { response, errors, inlineModels, isPaginated, dataPath, itemType };
+  // Primary response = lowest 2xx with a body schema, falling back to first 2xx
+  if (allSuccessResponses.length > 0) {
+    const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
+    const primary =
+      sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
+    response = primary.type;
+  }
+
+  const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
+
+  return { response, successResponses, errors, inlineModels, isPaginated, dataPath, itemType };
 }

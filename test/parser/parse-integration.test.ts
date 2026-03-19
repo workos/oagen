@@ -435,9 +435,11 @@ describe('parseSpec – operations', () => {
     expect(error400).toBeDefined();
   });
 
-  it('POST sets injectIdempotencyKey flag', () => {
+  it('POST with Idempotency-Key header sets injectIdempotencyKey flag', () => {
     const op = findOperation('Widgets', 'createWidget');
     expect(op!.injectIdempotencyKey).toBe(true);
+    // Idempotency-Key should be stripped from headerParams to avoid duplication
+    expect(op!.headerParams.some((p) => p.name.toLowerCase() === 'idempotency-key')).toBe(false);
   });
 
   it('GET does not set injectIdempotencyKey flag', () => {

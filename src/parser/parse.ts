@@ -1,4 +1,4 @@
-import type { ApiSpec, AuthScheme } from '../ir/types.js';
+import type { ApiSpec, AuthScheme, ServerEntry } from '../ir/types.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
 import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
@@ -21,7 +21,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const spec = parsed as {
     openapi?: string;
     info?: { title?: string; version?: string; description?: string };
-    servers?: Array<{ url?: string }>;
+    servers?: Array<{ url?: string; description?: string }>;
     paths?: Record<string, unknown>;
     components?: {
       schemas?: Record<string, unknown>;
@@ -62,11 +62,16 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
+  const serverEntries: ServerEntry[] = (spec.servers ?? [])
+    .map((s) => ({ url: s.url ?? '', description: s.description }))
+    .filter((s) => s.url);
+
   const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',
     version: spec.info?.version ?? '0.0.0',
     description: spec.info?.description,
-    baseUrl: spec.servers?.[0]?.url ?? '',
+    baseUrl: serverEntries[0]?.url ?? '',
+    servers: serverEntries.length > 0 ? serverEntries : undefined,
     services,
     models: finalModels,
     enums,
@@ -90,7 +95,7 @@ function extractAuthSchemes(
     if (scheme.type === 'http' && scheme.scheme === 'bearer') {
       schemes.push({ kind: 'bearer' });
     } else if (scheme.type === 'apiKey' && scheme.in && scheme.name) {
-      schemes.push({ kind: 'apiKey', in: scheme.in as 'header' | 'query', name: scheme.name });
+      schemes.push({ kind: 'apiKey', in: scheme.in as 'header' | 'query' | 'cookie', name: scheme.name });
     } else if (scheme.type === 'oauth2' && scheme.flows) {
       schemes.push({ kind: 'oauth2', flows: scheme.flows });
     }
