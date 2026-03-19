@@ -56,7 +56,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/cli/index.ts",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt --check .",
     "format:fix": "oxfmt --write .",

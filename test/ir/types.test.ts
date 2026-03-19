@@ -10,7 +10,6 @@ import type {
   LiteralType,
   Model,
   Enum,
-  PaginationMeta,
 } from '../../src/ir/types.js';
 import { mapTypeRef } from '../../src/ir/types.js';
 
