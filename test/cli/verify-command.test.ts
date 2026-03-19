@@ -60,7 +60,7 @@ function makeSurface(overrides?: Partial<Record<string, unknown>>) {
       Users: {
         name: 'Users',
         methods: {
-          list: [{ name: 'list', params: [], returnType: 'User[]', async: true }],
+          listUsers: [{ name: 'listUsers', params: [], returnType: 'User[]', async: true }],
         },
         properties: {},
         constructorParams: [],
@@ -610,8 +610,8 @@ describe('verifyCommand', () => {
         Users: {
           name: 'Users',
           methods: {
-            // list exists but with a changed return type → signature violation
-            list: [{ name: 'list', params: [], returnType: 'string', async: true }],
+            // listUsers exists but with a changed return type → signature violation
+            listUsers: [{ name: 'listUsers', params: [], returnType: 'string', async: true }],
           },
           properties: {},
           constructorParams: [],
