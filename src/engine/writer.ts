@@ -98,7 +98,9 @@ export async function writeFiles(
     if (language && hasGrammar(language)) {
       if (file.mergeMode === 'docstring-only') {
         // Only update docstrings and ensure header — no new imports/symbols/members
-        const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header, { docstringOnly: true });
+        const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header, {
+          docstringOnly: true,
+        });
         let finalContent = mergeResult.content;
         if (header && !finalContent.startsWith(header)) {
           finalContent = header + '\n\n' + finalContent;

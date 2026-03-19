@@ -14,7 +14,11 @@ function extractRubyDeclarationName(node: Parser.SyntaxNode): string | null {
   return nameNode?.text ?? null;
 }
 
-function collectPrecedingRubyComments(children: Parser.SyntaxNode[], index: number, source: string): DocstringInfo | null {
+function collectPrecedingRubyComments(
+  children: Parser.SyntaxNode[],
+  index: number,
+  source: string,
+): DocstringInfo | null {
   let lastIdx = -1;
   let firstIdx = -1;
   for (let k = index - 1; k >= 0; k--) {
@@ -81,7 +85,10 @@ export const rubyMergeAdapter: MergeAdapter = {
       if (!name) continue;
 
       const docstring = collectPrecedingRubyComments(rootChildren, i, source);
-      const members = new Map<string, { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }>();
+      const members = new Map<
+        string,
+        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
+      >();
 
       // Ruby class/module bodies: comments may appear in class children
       // (before body_statement) or in body_statement children (between methods)

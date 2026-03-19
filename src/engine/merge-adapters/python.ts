@@ -38,7 +38,11 @@ function extractPythonDocstring(bodyNode: Parser.SyntaxNode, source: string): Do
   return null;
 }
 
-function collectPrecedingPythonComments(children: Parser.SyntaxNode[], index: number, source: string): DocstringInfo | null {
+function collectPrecedingPythonComments(
+  children: Parser.SyntaxNode[],
+  index: number,
+  source: string,
+): DocstringInfo | null {
   let lastIdx = -1;
   let firstIdx = -1;
   for (let k = index - 1; k >= 0; k--) {
@@ -109,7 +113,10 @@ export const pythonMergeAdapter: MergeAdapter = {
         docstring = collectPrecedingPythonComments(rootChildren, i, source);
       }
 
-      const members = new Map<string, { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }>();
+      const members = new Map<
+        string,
+        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
+      >();
 
       // Extract method docstrings for classes
       if (child.type === 'class_definition' && body) {

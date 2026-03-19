@@ -1,6 +1,14 @@
 import type Parser from 'tree-sitter';
 import { normalizeJsExtension } from '../../utils/naming.js';
-import type { MergeAdapter, MergeStatement, MergeImport, DeepMergeSymbol, MergeMember, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DeepMergeSymbol,
+  MergeMember,
+  DocstringInfo,
+  SymbolDocstrings,
+} from './types.js';
 
 const REEXPORT_PREFIX = '__export:';
 

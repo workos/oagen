@@ -68,7 +68,9 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(handleError);
+    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(
+      handleError,
+    );
   });
 
 program

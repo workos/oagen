@@ -68,7 +68,11 @@ function importEntries(node: Parser.SyntaxNode, source: string): MergeImport[] {
   return entries;
 }
 
-function collectPrecedingGoComments(children: Parser.SyntaxNode[], index: number, source: string): DocstringInfo | null {
+function collectPrecedingGoComments(
+  children: Parser.SyntaxNode[],
+  index: number,
+  source: string,
+): DocstringInfo | null {
   let lastIdx = -1;
   let firstIdx = -1;
   for (let k = index - 1; k >= 0; k--) {

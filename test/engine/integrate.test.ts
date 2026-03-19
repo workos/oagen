@@ -4,9 +4,7 @@ import type { GeneratedFile } from '../../src/engine/types.js';
 
 describe('mapFilesForTargetIntegration', () => {
   it('includes files by default (no flag set)', () => {
-    const files: GeneratedFile[] = [
-      { path: 'node/src/models/user.ts', content: 'export interface User {}' },
-    ];
+    const files: GeneratedFile[] = [{ path: 'node/src/models/user.ts', content: 'export interface User {}' }];
     const result = mapFilesForTargetIntegration(files, 'node');
     expect(result).toHaveLength(1);
     expect(result[0].path).toBe('src/models/user.ts');

@@ -88,7 +88,10 @@ export const phpMergeAdapter: MergeAdapter = {
       if (!name || name.startsWith('__namespace:')) continue;
 
       const docstring = findPhpDocstring(rootChildren, i, source);
-      const members = new Map<string, { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }>();
+      const members = new Map<
+        string,
+        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
+      >();
 
       const body = child.childForFieldName('body');
       if (body) {

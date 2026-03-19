@@ -3,7 +3,11 @@ import * as path from 'node:path';
 import type { GeneratedFile } from './types.js';
 import { writeFiles, type WriteResult } from './writer.js';
 
-export function mapFilesForTargetIntegration(files: GeneratedFile[], language: string, targetDir?: string): GeneratedFile[] {
+export function mapFilesForTargetIntegration(
+  files: GeneratedFile[],
+  language: string,
+  targetDir?: string,
+): GeneratedFile[] {
   const langPrefix = `${language}/`;
   return files
     .filter((f) => f.integrateTarget !== false) // integrateTarget: false files are standalone-only
@@ -16,7 +20,7 @@ export function mapFilesForTargetIntegration(files: GeneratedFile[], language: s
       return {
         ...f,
         skipIfExists: false, // Always merge in target — never hard-skip
-        mergeMode: existsInTarget ? 'docstring-only' as const : 'full' as const,
+        mergeMode: existsInTarget ? ('docstring-only' as const) : ('full' as const),
         path: stripped,
       };
     });

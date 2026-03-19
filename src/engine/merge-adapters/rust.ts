@@ -21,7 +21,11 @@ function declarationKey(node: Parser.SyntaxNode): string | null {
   }
 }
 
-function collectPrecedingRustDocComments(children: Parser.SyntaxNode[], index: number, source: string): DocstringInfo | null {
+function collectPrecedingRustDocComments(
+  children: Parser.SyntaxNode[],
+  index: number,
+  source: string,
+): DocstringInfo | null {
   let lastIdx = -1;
   let firstIdx = -1;
   for (let k = index - 1; k >= 0; k--) {

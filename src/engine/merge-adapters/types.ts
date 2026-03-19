@@ -39,11 +39,14 @@ export interface SymbolDocstrings {
   docstring: DocstringInfo | null;
   declStartIndex: number;
   declColumn: number;
-  members: Map<string, {
-    docstring: DocstringInfo | null;
-    declStartIndex: number;
-    declColumn: number;
-  }>;
+  members: Map<
+    string,
+    {
+      docstring: DocstringInfo | null;
+      declStartIndex: number;
+      declColumn: number;
+    }
+  >;
 }
 
 export interface MergeAdapter {

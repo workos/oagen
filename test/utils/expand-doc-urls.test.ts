@@ -48,8 +48,7 @@ describe('expandDocUrls', () => {
               name: 'org_id',
               type: { kind: 'primitive', type: 'string' },
               required: true,
-              description:
-                'An [Organization](/reference/organization) or [User](/reference/authkit/user) identifier.',
+              description: 'An [Organization](/reference/organization) or [User](/reference/authkit/user) identifier.',
             },
           ],
         },
@@ -80,9 +79,7 @@ describe('expandDocUrls', () => {
     });
 
     const result = expandDocUrls(spec, 'https://workos.com/docs');
-    expect(result.models[0].fields[0].description).toBe(
-      'See [docs](https://example.com/reference/foo).',
-    );
+    expect(result.models[0].fields[0].description).toBe('See [docs](https://example.com/reference/foo).');
   });
 
   it('expands links in operation descriptions', () => {
@@ -143,9 +140,7 @@ describe('expandDocUrls', () => {
     });
 
     const result = expandDocUrls(spec, 'https://workos.com/docs');
-    expect(result.enums[0].values[0].description).toBe(
-      'See [statuses](https://workos.com/docs/reference/statuses).',
-    );
+    expect(result.enums[0].values[0].description).toBe('See [statuses](https://workos.com/docs/reference/statuses).');
   });
 
   it('leaves descriptions without relative links unchanged', () => {

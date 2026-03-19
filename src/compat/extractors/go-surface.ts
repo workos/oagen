@@ -134,7 +134,14 @@ export function buildSurface(
       };
     } else if (typeConsts && typeConsts.length > 0) {
       const members: Record<string, string | number> = {};
-      for (const c of typeConsts) members[c.name] = c.value;
+      for (const c of typeConsts) {
+        // Strip the type name prefix from enum constant names to produce
+        // consistent short member keys (e.g., "AuthenticationFactorTypeGenericOtp"
+        // → "GenericOtp"). This matches Go SDK conventions where the type prefix
+        // is an implementation detail, not part of the public API contract.
+        const memberKey = c.name.startsWith(typeDecl.name) ? c.name.slice(typeDecl.name.length) || c.name : c.name;
+        members[memberKey] = c.value;
+      }
       enums[qName] = { name: qName, sourceFile: typeDecl.sourceFile, members: sortRecord(members) };
     } else {
       typeAliases[qName] = {

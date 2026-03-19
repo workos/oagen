@@ -149,7 +149,11 @@ export async function mergeIntoExisting(
       if (genDoc) {
         if (existInfo.docstring) {
           if (existInfo.docstring.text !== genDoc.text) {
-            edits.push({ start: existInfo.docstring.startIndex, end: existInfo.docstring.endIndex, newText: genDoc.text });
+            edits.push({
+              start: existInfo.docstring.startIndex,
+              end: existInfo.docstring.endIndex,
+              newText: genDoc.text,
+            });
             docstringUpdates++;
           }
         } else {
@@ -164,7 +168,11 @@ export async function mergeIntoExisting(
         if (!existMember || !genMember.docstring) continue;
         if (existMember.docstring) {
           if (existMember.docstring.text !== genMember.docstring.text) {
-            edits.push({ start: existMember.docstring.startIndex, end: existMember.docstring.endIndex, newText: genMember.docstring.text });
+            edits.push({
+              start: existMember.docstring.startIndex,
+              end: existMember.docstring.endIndex,
+              newText: genMember.docstring.text,
+            });
             docstringUpdates++;
           }
         } else {
@@ -417,7 +425,12 @@ export async function mergeIntoExisting(
     }
   }
 
-  const importsActuallyAdded = (toAppend.length > 0 || deepAdded > 0) ? (adapter.renderImports ? adapter.renderImports(newImports).length : newImports.length) : 0;
+  const importsActuallyAdded =
+    toAppend.length > 0 || deepAdded > 0
+      ? adapter.renderImports
+        ? adapter.renderImports(newImports).length
+        : newImports.length
+      : 0;
   const topLevelAdded = importsActuallyAdded + toAppend.length;
   const totalAdded = topLevelAdded + deepAdded;
 
