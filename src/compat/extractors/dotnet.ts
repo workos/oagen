@@ -107,7 +107,7 @@ const dotnetHints: LanguageHints = {
           const candNoResp = candInner.replace(/Response$/, '');
           if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
           // Word overlap
-          if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
+          if (namedTypeWordsOverlap(baseInner, candInner)) return true;
         }
       }
       // Tolerate model collection vs primitive collection: OrganizationDomain[] ≡ List<string>
@@ -148,7 +148,7 @@ const dotnetHints: LanguageHints = {
           const baseNoResp = baseInner.replace(/Response$/, '');
           const candNoResp = candInner.replace(/Response$/, '');
           if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
-          if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
+          if (namedTypeWordsOverlap(baseInner, candInner)) return true;
         }
       }
     }
@@ -162,7 +162,7 @@ const dotnetHints: LanguageHints = {
         const candNoResp = candClean.replace(/Response$/, '');
         if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
         // Word-component overlap
-        if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
+        if (namedTypeWordsOverlap(baseClean, candClean)) return true;
       }
     }
 

@@ -198,7 +198,7 @@ export const nodeHints: LanguageHints = {
         // Word-component overlap: split PascalCase into words and check
         // if they share enough meaningful words (handles name reordering
         // from Json merges: AuditLogTargetSchema vs AuditLogSchemaJsonTarget)
-        if (namedTypeWordsOverlap(baseNoResp, candNoResp, 2)) {
+        if (namedTypeWordsOverlap(baseClean, candClean, 2)) {
           return true;
         }
       }

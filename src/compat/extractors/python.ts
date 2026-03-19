@@ -253,7 +253,7 @@ const pythonHints: LanguageHints = {
         const baseNoResp = baseClean.replace(/Response$/, '');
         const candNoResp = candClean.replace(/Response$/, '');
         if (candNoResp.includes(baseNoResp) || baseNoResp.includes(candNoResp)) return true;
-        if (namedTypeWordsOverlap(baseNoResp, candNoResp)) return true;
+        if (namedTypeWordsOverlap(baseClean, candClean)) return true;
       }
     }
 

@@ -12,8 +12,12 @@ export class ExportCollector {
   private map = new Map<string, Set<string>>();
 
   add(sourceFile: string, name: string): void {
-    if (!this.map.has(sourceFile)) this.map.set(sourceFile, new Set());
-    this.map.get(sourceFile)!.add(name);
+    let set = this.map.get(sourceFile);
+    if (!set) {
+      set = new Set();
+      this.map.set(sourceFile, set);
+    }
+    set.add(name);
   }
 
   toRecord(): Record<string, string[]> {
