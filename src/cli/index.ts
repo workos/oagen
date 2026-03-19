@@ -124,7 +124,11 @@ program
     // and no existing smoke-results-raw.json). Defer the check to verifyCommand.
     // CLI --smoke-runner takes precedence, then per-language smokeRunners map from config
     opts.smokeRunner ??= configSmokeRunners?.[opts.lang];
-    verifyCommand({ ...opts, maxRetries: parseInt(opts.maxRetries, 10), operationIdTransform: configOperationIdTransform }).catch(handleError);
+    verifyCommand({
+      ...opts,
+      maxRetries: parseInt(opts.maxRetries, 10),
+      operationIdTransform: configOperationIdTransform,
+    }).catch(handleError);
   });
 
 program

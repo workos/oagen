@@ -43,7 +43,19 @@ export async function verifyCommand(opts: {
   operationIdTransform?: (id: string) => string;
   namespace?: string;
 }): Promise<void> {
-  const { spec, oldSpec, lang, output, apiSurface, rawResults, smokeConfig, smokeRunner, scope, diagnostics, operationIdTransform } = opts;
+  const {
+    spec,
+    oldSpec,
+    lang,
+    output,
+    apiSurface,
+    rawResults,
+    smokeConfig,
+    smokeRunner,
+    scope,
+    diagnostics,
+    operationIdTransform,
+  } = opts;
   const maxRetries = opts.maxRetries ?? 3;
   const diagData: VerifyDiagnostics = {};
 
