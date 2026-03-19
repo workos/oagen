@@ -193,6 +193,109 @@ export function planOperations(spec: ApiSpec): PlannedGroup[] {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-based operation planning for batched runners
+// ---------------------------------------------------------------------------
+
+/**
+ * A single wave of operations that can be planned and executed together.
+ * Wave 0 contains parameterless operations. Subsequent waves contain
+ * operations whose path params became resolvable after earlier waves ran.
+ */
+export interface OperationWave {
+  /** Operations in this wave, with pre-resolved path params */
+  calls: Array<{
+    op: Operation;
+    irService: string;
+    pathParams: Record<string, string>;
+  }>;
+}
+
+/**
+ * Plan operations in waves so that batched runners can execute each wave,
+ * extract IDs from responses, then plan the next wave.
+ *
+ * Returns an iterator that yields one wave at a time. The caller must
+ * execute each wave and populate the IdRegistry before calling next().
+ *
+ * @param groups - service groups from planOperations()
+ * @param ids - the IdRegistry (mutated by the caller between waves)
+ * @param resolveMethod - optional filter; return null to skip an operation
+ */
+export function* planWaves(
+  groups: PlannedGroup[],
+  ids: IdRegistry,
+  resolveMethod?: (op: Operation, irService: string) => boolean,
+): Generator<OperationWave, PlannedOperation[], void> {
+  // Flatten all operations into a single ordered list
+  const remaining: PlannedOperation[] = [];
+  for (const group of groups) {
+    for (const planned of group.operations) {
+      remaining.push(planned);
+    }
+  }
+
+  // Track which operations have been emitted
+  const emitted = new Set<number>();
+  const skipped: PlannedOperation[] = [];
+
+  // Pre-filter: mark operations that fail the resolveMethod check as skipped
+  for (let i = 0; i < remaining.length; i++) {
+    const { operation: op, service: irService } = remaining[i];
+    if (resolveMethod && !resolveMethod(op, irService)) {
+      emitted.add(i);
+      skipped.push(remaining[i]);
+    }
+  }
+
+  // Wave 0: operations with no path params
+  let wave: OperationWave = { calls: [] };
+  for (let i = 0; i < remaining.length; i++) {
+    if (emitted.has(i)) continue;
+    const { operation: op, service: irService } = remaining[i];
+    if (op.pathParams.length === 0) {
+      wave.calls.push({ op, irService, pathParams: {} });
+      emitted.add(i);
+    }
+  }
+
+  if (wave.calls.length > 0) {
+    yield wave;
+  }
+
+  // Subsequent waves: try to resolve remaining operations
+  let madeProgress = true;
+  while (madeProgress) {
+    madeProgress = false;
+    wave = { calls: [] };
+
+    for (let i = 0; i < remaining.length; i++) {
+      if (emitted.has(i)) continue;
+      const { operation: op, service: irService } = remaining[i];
+
+      const resolved = ids.resolvePathParams(op, irService);
+      if (resolved) {
+        wave.calls.push({ op, irService, pathParams: resolved });
+        emitted.add(i);
+        madeProgress = true;
+      }
+    }
+
+    if (wave.calls.length > 0) {
+      yield wave;
+    }
+  }
+
+  // Collect truly unresolvable operations for the caller to mark as skipped
+  const unresolved: PlannedOperation[] = [];
+  for (let i = 0; i < remaining.length; i++) {
+    if (!emitted.has(i)) {
+      unresolved.push(remaining[i]);
+    }
+  }
+  return unresolved;
+}
+
+// ---------------------------------------------------------------------------
 // Payload generation
 // ---------------------------------------------------------------------------
 
@@ -383,6 +486,13 @@ export class IdRegistry {
     for (const [key, value] of Array.from(this.ids.entries())) {
       if (key.endsWith(`.${field}`)) return value;
     }
+    // Also try snake_case variant: "organizationId" → "organization_id"
+    const snakeField = field.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+    if (snakeField !== field) {
+      for (const [key, value] of Array.from(this.ids.entries())) {
+        if (key.endsWith(`.${snakeField}`)) return value;
+      }
+    }
     return undefined;
   }
 
@@ -410,6 +520,11 @@ export class IdRegistry {
       const plural = pascal.endsWith('s') ? pascal : pascal + 's';
       const val = this.get(plural, 'id') || this.get(plural, 'slug');
       if (val) return val;
+
+      // Fallback: find any service whose name ends with the plural suffix
+      // e.g. "user_id" → "Users" not found → try "UserManagementUsers"
+      const suffixVal = this.findByServiceSuffix(plural, 'id') || this.findByServiceSuffix(plural, 'slug');
+      if (suffixVal) return suffixVal;
     }
 
     // Handle camelCase: "resourceId" → strip "Id", pluralize → "Resources"
@@ -419,8 +534,28 @@ export class IdRegistry {
       const plural = pascal.endsWith('s') ? pascal : pascal + 's';
       const val = this.get(plural, 'id') || this.get(plural, 'slug');
       if (val) return val;
+
+      // Fallback: find any service whose name ends with the plural suffix
+      const suffixVal = this.findByServiceSuffix(plural, 'id') || this.findByServiceSuffix(plural, 'slug');
+      if (suffixVal) return suffixVal;
     }
 
+    return undefined;
+  }
+
+  /**
+   * Find a value by looking for any service name that ends with the given suffix.
+   * e.g. suffix "Users" matches "UserManagementUsers.id"
+   */
+  private findByServiceSuffix(suffix: string, field: string): string | undefined {
+    for (const [key, value] of Array.from(this.ids.entries())) {
+      if (key.endsWith(`.${field}`)) {
+        const servicePart = key.slice(0, -(field.length + 1));
+        if (servicePart.endsWith(suffix)) {
+          return value;
+        }
+      }
+    }
     return undefined;
   }
 
