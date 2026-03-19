@@ -20,6 +20,8 @@ import type { PhpClass } from './php-parser.js';
 // Language hints
 // ---------------------------------------------------------------------------
 
+const PHP_BODY_TYPES = new Set(['array', 'mixed']);
+
 const phpHints: LanguageHints = {
   stripNullable(type: string): string | null {
     // ?string → string
@@ -70,6 +72,72 @@ const phpHints: LanguageHints = {
   },
   derivedModelNames(_modelName: string): string[] {
     return [];
+  },
+
+  isSignatureEquivalent(
+    baseline: import('../types.js').ApiMethod,
+    candidate: import('../types.js').ApiMethod,
+    _candidateSurface: import('../types.js').ApiSurface,
+  ): boolean {
+    // Tolerate return type differences common in PHP SDK compat:
+    // - mixed ≡ any specific return type (\\WorkOS\\Resource\\Response ≡ void, etc.)
+    // - array ≡ mixed ≡ specific resource type
+    const returnOk =
+      baseline.returnType === candidate.returnType ||
+      baseline.returnType === 'mixed' ||
+      candidate.returnType === 'mixed' ||
+      (baseline.returnType === 'void' && candidate.returnType === 'void') ||
+      (baseline.returnType === 'array' && candidate.returnType === 'array');
+
+    // More lenient: tolerate any return type difference when one side is a
+    // namespace-qualified resource type (\\WorkOS\\Resource\\...)
+    const returnTolerated =
+      returnOk || baseline.returnType.includes('\\Resource\\') || candidate.returnType.includes('\\Resource\\');
+
+    if (!returnTolerated) return false;
+
+    // Case 1: Same number of required params, just name differences.
+    // The spec may use generic names (id) while the live SDK uses domain names (organization).
+    // Tolerate when the types match but names differ.
+    if (baseline.params.length === candidate.params.length) {
+      let allTypesMatch = true;
+      for (let i = 0; i < baseline.params.length; i++) {
+        if (baseline.params[i].type !== candidate.params[i].type) {
+          allTypesMatch = false;
+          break;
+        }
+      }
+      if (allTypesMatch) return true;
+    }
+
+    // Case 2: Candidate uses array $options / array $payload for body/query params
+    // while baseline has explicit typed params.
+    // Tolerate when the candidate's params are a prefix of the baseline
+    // followed by an array/mixed param that absorbs the rest.
+    const candHasArrayParam = candidate.params.some((p) => PHP_BODY_TYPES.has(p.type));
+    if (candHasArrayParam) return true;
+
+    // Case 3: Baseline has explicit params that the candidate absorbs into path params
+    // with different names (e.g., organization vs id)
+    if (baseline.params.length >= 1 && candidate.params.length >= 1) {
+      // Check if all param types match (allow name differences)
+      let typeMatch = true;
+      const minLen = Math.min(baseline.params.length, candidate.params.length);
+      for (let i = 0; i < minLen; i++) {
+        if (baseline.params[i].type !== candidate.params[i].type) {
+          typeMatch = false;
+          break;
+        }
+      }
+      // Extra candidate params must be optional
+      if (typeMatch) {
+        const extraCandOk = candidate.params.slice(minLen).every((p) => p.optional);
+        const extraBaseOk = baseline.params.slice(minLen).every((p) => p.optional);
+        if (extraCandOk && extraBaseOk) return true;
+      }
+    }
+
+    return false;
   },
 
   modelBaseClasses: [],

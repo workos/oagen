@@ -20,6 +20,56 @@ import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
 // Language hints
 // ---------------------------------------------------------------------------
 
+/**
+ * Go acronyms that may differ in casing between hand-written and generated code.
+ * e.g., hand-written uses "Json" / "Uri" while generated uses "JSON" / "URI".
+ */
+const GO_ACRONYMS = [
+  'ID',
+  'URL',
+  'API',
+  'HTTP',
+  'HTTPS',
+  'JSON',
+  'XML',
+  'SQL',
+  'HTML',
+  'CSS',
+  'URI',
+  'SSO',
+  'IP',
+  'TLS',
+  'SSL',
+  'DNS',
+  'TCP',
+  'UDP',
+  'SSH',
+  'JWT',
+  'MFA',
+  'SAML',
+  'SCIM',
+];
+
+/**
+ * Normalize a Go type string so that acronym casing differences don't cause
+ * false mismatches. Lowercases all known Go acronyms to a canonical form.
+ * e.g., "AuditLogSchemaJSONActor" and "AuditLogSchemaJsonActor" both become
+ * "AuditLogSchemajsonActor" (or similar canonical form).
+ */
+function normalizeGoAcronyms(type: string): string {
+  let result = type;
+  for (const acronym of GO_ACRONYMS) {
+    // Match the fully uppercased form (e.g., "JSON", "URI")
+    // and also the title-cased form (e.g., "Json", "Uri")
+    const titleCase = acronym.charAt(0) + acronym.slice(1).toLowerCase();
+    const lower = acronym.toLowerCase();
+    // Replace both forms with the lowercase canonical form
+    result = result.split(acronym).join(lower);
+    result = result.split(titleCase).join(lower);
+  }
+  return result;
+}
+
 const goHints: LanguageHints = {
   stripNullable(type: string): string | null {
     if (type.startsWith('*')) return type.slice(1);
@@ -52,8 +102,44 @@ const goHints: LanguageHints = {
   propertyMatchesClass(propertyName: string, className: string): boolean {
     return propertyName.toLowerCase() === className.toLowerCase();
   },
-  derivedModelNames(modelName: string): string[] {
-    return [`${modelName}Response`];
+  derivedModelNames(_modelName: string): string[] {
+    // Go SDK does not generate *Response wrapper types — models are returned directly.
+    // Don't derive extra names, as they would create false positives in compat checks
+    // when the live SDK has hand-written response wrappers.
+    return [];
+  },
+  isTypeEquivalent(baselineType: string, candidateType: string, candidateSurface: ApiSurface): boolean {
+    // Normalize Go acronym casing differences (e.g., "Json" vs "JSON", "Uri" vs "URI")
+    const normBase = normalizeGoAcronyms(baselineType);
+    const normCand = normalizeGoAcronyms(candidateType);
+    if (normBase === normCand) return true;
+
+    // Also try after stripping nullable wrappers and slice prefixes on both sides
+    const stripType = (t: string) => t.replace(/^\*/, '').replace(/^\[\]/, '');
+    const strippedBase = stripType(normBase);
+    const strippedCand = stripType(normCand);
+    if (strippedBase === strippedCand) return true;
+
+    // Strip package qualifiers (e.g., "common.RoleResponse" → "RoleResponse")
+    const unqualBase = strippedBase.includes('.') ? strippedBase.split('.').pop()! : strippedBase;
+    const unqualCand = strippedCand.includes('.') ? strippedCand.split('.').pop()! : strippedCand;
+    if (unqualBase === unqualCand) return true;
+
+    // Suffix match: the baseline may use a shorter shared type name while the
+    // generated code prefixes it with the parent struct name.
+    // e.g., baseline "FactorType" matches generated "AuthenticationFactorType"
+    // Only match if the candidate type actually exists in the generated surface.
+    const candRaw = stripType(candidateType);
+    if (unqualCand.endsWith(unqualBase) && unqualCand.length > unqualBase.length) {
+      const exists =
+        candidateSurface.enums[candRaw] != null ||
+        candidateSurface.interfaces[candRaw] != null ||
+        candidateSurface.classes[candRaw] != null ||
+        candidateSurface.typeAliases[candRaw] != null;
+      if (exists) return true;
+    }
+
+    return false;
   },
 };
 
