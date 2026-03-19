@@ -96,40 +96,50 @@ export async function writeFiles(
 
     // Source files with grammar → AST-level merge
     if (language && hasGrammar(language)) {
-      if (file.mergeMode === 'docstring-only') {
-        // Only update docstrings and ensure header — no new imports/symbols/members
-        const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header, {
-          docstringOnly: true,
-        });
+      try {
+        if (file.mergeMode === 'docstring-only') {
+          // Only update docstrings and ensure header — no new imports/symbols/members
+          const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header, {
+            docstringOnly: true,
+          });
+          let finalContent = mergeResult.content;
+          if (header && !finalContent.startsWith(header)) {
+            finalContent = header + '\n\n' + finalContent;
+          }
+          if (finalContent === existingContent) {
+            result.identical.push(file.path);
+          } else {
+            await fs.writeFile(fullPath, finalContent, 'utf-8');
+            result.merged.push(file.path);
+          }
+          continue;
+        }
+
+        const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header);
+
+        // Ensure header is present on merged content
         let finalContent = mergeResult.content;
         if (header && !finalContent.startsWith(header)) {
           finalContent = header + '\n\n' + finalContent;
         }
-        if (finalContent === existingContent) {
+
+        if (!mergeResult.changed && finalContent === existingContent) {
           result.identical.push(file.path);
-        } else {
-          await fs.writeFile(fullPath, finalContent, 'utf-8');
-          result.merged.push(file.path);
+          continue;
         }
+
+        await fs.writeFile(fullPath, finalContent, 'utf-8');
+        result.merged.push(file.path);
+        continue;
+      } catch (err) {
+        // AST merge failed (e.g. tree-sitter grammar ABI issue) — fall back to overwrite
+        console.warn(
+          `[oagen] AST merge failed for ${file.path}, falling back to overwrite.${err instanceof Error ? ` ${err.message}` : ''}`,
+        );
+        await fs.writeFile(fullPath, file.content, 'utf-8');
+        result.written.push(file.path);
         continue;
       }
-
-      const mergeResult = await mergeIntoExisting(existingContent, file.content, language, header);
-
-      // Ensure header is present on merged content
-      let finalContent = mergeResult.content;
-      if (header && !finalContent.startsWith(header)) {
-        finalContent = header + '\n\n' + finalContent;
-      }
-
-      if (!mergeResult.changed && finalContent === existingContent) {
-        result.identical.push(file.path);
-        continue;
-      }
-
-      await fs.writeFile(fullPath, finalContent, 'utf-8');
-      result.merged.push(file.path);
-      continue;
     }
 
     // No grammar available → skip to avoid clobbering

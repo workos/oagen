@@ -37,7 +37,7 @@ function sortRecord<T>(record: Record<string, T>): Record<string, T> {
 }
 
 /** Default model base classes. Overridden by hints.modelBaseClasses when provided. */
-const DEFAULT_MODEL_BASES = ['BaseModel'];
+const DEFAULT_MODEL_BASES: string[] = [];
 
 /** Known dict-like base classes (→ ApiInterface). */
 const DICT_BASES = new Set(['TypedDict']);
