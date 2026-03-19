@@ -972,12 +972,12 @@ export class Client {
     expect(result.content).not.toContain('Old multi-line');
   });
 
-  it('preserves top-level docstring containing @oagen-keep', async () => {
+  it('preserves top-level docstring containing @oagen-ignore', async () => {
     const existing = `
 /**
  * Hand-written PKCE flow docs.
  *
- * @oagen-keep
+ * @oagen-ignore
  */
 export class SSO {
   getProfileAndToken() {}
@@ -993,17 +993,17 @@ export class SSO {
 `;
 
     const result = await mergeIntoExisting(existing, generated, 'node', header);
-    expect(result.content).toContain('@oagen-keep');
+    expect(result.content).toContain('@oagen-ignore');
     expect(result.content).toContain('Hand-written PKCE flow docs');
     expect(result.content).not.toContain('Generic API-spec description');
   });
 
-  it('preserves member-level docstring containing @oagen-keep', async () => {
+  it('preserves member-level docstring containing @oagen-ignore', async () => {
     const existing = `
 export class SSO {
   /**
    * Custom exchange docs.
-   * @oagen-keep
+   * @oagen-ignore
    */
   getProfileAndToken() {}
 }
@@ -1018,17 +1018,17 @@ export class SSO {
 `;
 
     const result = await mergeIntoExisting(existing, generated, 'node', header);
-    expect(result.content).toContain('@oagen-keep');
+    expect(result.content).toContain('@oagen-ignore');
     expect(result.content).toContain('Custom exchange docs');
     expect(result.content).not.toContain('Terse spec description');
   });
 
-  it('preserves @oagen-keep docstring in docstring-only mode', async () => {
+  it('preserves @oagen-ignore docstring in docstring-only mode', async () => {
     const existing = `
 export class SSO {
   /**
    * Detailed hand-written docs.
-   * @oagen-keep
+   * @oagen-ignore
    */
   getProfileAndToken() {}
 }
@@ -1043,12 +1043,12 @@ export class SSO {
 `;
 
     const result = await mergeIntoExisting(existing, generated, 'node', header, { docstringOnly: true });
-    expect(result.content).toContain('@oagen-keep');
+    expect(result.content).toContain('@oagen-ignore');
     expect(result.content).toContain('Detailed hand-written docs');
     expect(result.content).not.toContain('Short spec docs');
   });
 
-  it('still updates docstrings without @oagen-keep', async () => {
+  it('still updates docstrings without @oagen-ignore', async () => {
     const existing = `
 /** Old description */
 export interface Foo {

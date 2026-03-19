@@ -148,7 +148,7 @@ export async function mergeIntoExisting(
       const genDoc = genInfo.docstring && genInfo.docstring.text.trim() !== headerLine ? genInfo.docstring : null;
       if (genDoc) {
         if (existInfo.docstring) {
-          const isPreserved = existInfo.docstring.text.includes('@oagen-keep');
+          const isPreserved = existInfo.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
             edits.push({
               start: existInfo.docstring.startIndex,
@@ -168,7 +168,7 @@ export async function mergeIntoExisting(
         const existMember = existInfo.members.get(memberName);
         if (!existMember || !genMember.docstring) continue;
         if (existMember.docstring) {
-          const isPreserved = existMember.docstring.text.includes('@oagen-keep');
+          const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
             edits.push({
               start: existMember.docstring.startIndex,
@@ -372,7 +372,7 @@ export async function mergeIntoExisting(
       // Top-level docstring
       if (genDoc) {
         if (existInfo.docstring) {
-          const isPreserved = existInfo.docstring.text.includes('@oagen-keep');
+          const isPreserved = existInfo.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
             edits.push({
               start: existInfo.docstring.startIndex,
@@ -399,7 +399,7 @@ export async function mergeIntoExisting(
         if (!existMember || !genMember.docstring) continue;
 
         if (existMember.docstring) {
-          const isPreserved = existMember.docstring.text.includes('@oagen-keep');
+          const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
             edits.push({
               start: existMember.docstring.startIndex,

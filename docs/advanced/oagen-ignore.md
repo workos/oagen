@@ -1,10 +1,10 @@
-# `@oagen-keep` — Preserving Hand-Written Docstrings
+# `@oagen-ignore` — Preserving Hand-Written Code
 
 The merger's docstring refresh unconditionally replaces existing JSDoc/docstrings with the version from the generated output (typically derived from the OpenAPI spec). Any hand-written documentation is lost on every regeneration.
 
 ## Solution
 
-Add `@oagen-keep` anywhere inside a docstring to prevent the merger from overwriting it. The tag is a simple substring match: if the existing docstring text contains `@oagen-keep`, the merger skips the replacement entirely, regardless of what the generated output says.
+Add `@oagen-ignore` anywhere inside a docstring to prevent the merger from overwriting it. The tag is a simple substring match: if the existing docstring text contains `@oagen-ignore`, the merger skips the replacement entirely, regardless of what the generated output says.
 
 ### Examples
 
@@ -16,7 +16,7 @@ Add `@oagen-keep` anywhere inside a docstring to prevent the merger from overwri
  * - If codeVerifier is provided: Uses PKCE flow (public client)
  * - If no codeVerifier: Uses client_secret from API key (confidential client)
  *
- * @oagen-keep
+ * @oagen-ignore
  * @throws Error if neither codeVerifier nor API key is available
  */
 async getProfileAndToken(...) { ... }
@@ -30,13 +30,13 @@ def get_profile_and_token(self, ...):
 
     Auto-detects public vs confidential client mode.
 
-    @oagen-keep
+    @oagen-ignore
     """
 ```
 
 ## Scope
 
-`@oagen-keep` protects:
+`@oagen-ignore` protects:
 
 - **Top-level symbol docstrings** — classes, interfaces, type aliases, enums
 - **Member-level docstrings** — methods, fields, properties
@@ -48,7 +48,7 @@ It applies in both merge modes:
 
 ## Behavior Details
 
-- The tag is matched via `text.includes('@oagen-keep')` — no regex, no parsing.
-- If the generated output has a docstring and the existing docstring contains `@oagen-keep`, the existing docstring is kept as-is.
+- The tag is matched via `text.includes('@oagen-ignore')` — no regex, no parsing.
+- If the generated output has a docstring and the existing docstring contains `@oagen-ignore`, the existing docstring is kept as-is.
 - If the existing symbol has no docstring at all, a generated docstring is still inserted (there's nothing to preserve).
 - The tag is language-agnostic: it works for any language whose tree-sitter merge adapter implements `extractDocstrings`.
