@@ -33,6 +33,34 @@ describe('extractSchemas – backend suffix stripping', () => {
   });
 });
 
+describe('extractSchemas – name collision dedup', () => {
+  it('keeps the model with more fields when Dto suffix cleaning causes a name collision', () => {
+    const { models } = extractSchemas({
+      RedirectUriDto: {
+        type: 'object',
+        properties: {
+          uri: { type: 'string' },
+          default: { type: 'boolean' },
+        },
+      },
+      RedirectUri: {
+        type: 'object',
+        properties: {
+          object: { type: 'string' },
+          id: { type: 'string' },
+          uri: { type: 'string' },
+          default: { type: 'boolean' },
+          created_at: { type: 'string' },
+          updated_at: { type: 'string' },
+        },
+      },
+    });
+    const redirectUri = models.filter((m) => m.name === 'RedirectUri');
+    expect(redirectUri).toHaveLength(1);
+    expect(redirectUri[0].fields).toHaveLength(6);
+  });
+});
+
 describe('extractSchemas', () => {
   it('extracts a simple model', () => {
     const schemas = {

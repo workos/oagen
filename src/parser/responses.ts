@@ -42,6 +42,14 @@ interface ListEnvelopeResult {
   dataPath: string | null;
 }
 
+const KNOWN_DATA_PATHS = new Set([
+  'data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges',
+]);
+
+const PAGINATION_METADATA_PATTERNS = [
+  'metadata', 'pagination', 'cursor', 'has_more', 'page_info', 'total', 'next_page', 'previous_page', 'offset',
+];
+
 function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema)
   const propSources: Record<string, SchemaObject | undefined>[] = [];
@@ -64,20 +72,33 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
 
   // Find array-typed properties and non-array companion properties
   const arrayProps: string[] = [];
-  let nonArrayCount = 0;
+  const nonArrayKeys: string[] = [];
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
     if (propSchema.type === 'array') {
       arrayProps.push(key);
     } else {
-      nonArrayCount++;
+      nonArrayKeys.push(key);
     }
   }
 
   // List envelope heuristic: exactly one array property + at least one non-array companion
-  if (arrayProps.length === 1 && nonArrayCount >= 1) {
-    return { isEnvelope: true, dataPath: arrayProps[0] };
+  if (arrayProps.length === 1 && nonArrayKeys.length >= 1) {
+    const arrayPropName = arrayProps[0];
+
+    // The array property must be a known data path...
+    if (KNOWN_DATA_PATHS.has(arrayPropName)) {
+      return { isEnvelope: true, dataPath: arrayPropName };
+    }
+
+    // ...OR a companion property must look like pagination metadata
+    const hasPaginationCompanion = nonArrayKeys.some((key) =>
+      PAGINATION_METADATA_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern)),
+    );
+    if (hasPaginationCompanion) {
+      return { isEnvelope: true, dataPath: arrayPropName };
+    }
   }
 
   return { isEnvelope: false, dataPath: null };

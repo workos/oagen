@@ -32,10 +32,11 @@ export interface ExtractedSchemas {
 }
 
 export function extractSchemas(schemas: Record<string, SchemaObject> | undefined): ExtractedSchemas {
-  const models: Model[] = [];
   const enums: Enum[] = [];
 
-  if (!schemas) return { models, enums };
+  if (!schemas) return { models: [], enums };
+
+  const modelsByCleanName = new Map<string, Model>();
 
   for (const [name, schema] of Object.entries(schemas)) {
     const pascalName = cleanSchemaName(toPascalCase(name));
@@ -43,9 +44,20 @@ export function extractSchemas(schemas: Record<string, SchemaObject> | undefined
     if (schema.enum) {
       enums.push(extractEnum(pascalName, schema));
     } else {
-      models.push(extractModel(pascalName, schema, schemas));
+      const model = extractModel(pascalName, schema, schemas);
+      const existing = modelsByCleanName.get(pascalName);
+      if (existing) {
+        // Keep the model with more fields when names collide after cleaning
+        if (model.fields.length > existing.fields.length) {
+          modelsByCleanName.set(pascalName, model);
+        }
+      } else {
+        modelsByCleanName.set(pascalName, model);
+      }
     }
   }
+
+  const models = [...modelsByCleanName.values()];
 
   // Collect inline models from nested object/oneOf properties
   // that schemaToTypeRef created model refs for but weren't extracted

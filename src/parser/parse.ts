@@ -51,13 +51,13 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
-  const jsonCollapsedModels = collapseJsonSuffixModels(responseNormalizedModels, services);
 
   // Extract inline models from model field definitions (objects/arrays with properties)
   const fieldInlineModels = extractInlineModelsFromSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
-  const finalModels = mergeFieldInlineModels(jsonCollapsedModels, fieldInlineModels);
+  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels);
+  const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   collectInlineEnumsFromModels(finalModels, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);

@@ -1,4 +1,4 @@
-import type { Model, Service } from '../ir/types.js';
+import type { Model, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 
 function keepLargestByName(models: Model[]): Model[] {
@@ -12,20 +12,25 @@ function keepLargestByName(models: Model[]): Model[] {
   return [...byName.values()];
 }
 
-function rewriteModelRefsInServices(services: Service[], oldName: string, newName: string): void {
+function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
+  walkTypeRef(ref, {
+    model: (r) => {
+      if (r.name === oldName) (r as { name: string }).name = newName;
+    },
+  });
+}
+
+function rewriteModelRefs(models: Model[], services: Service[], oldName: string, newName: string): void {
+  for (const model of models) {
+    for (const field of model.fields) {
+      rewriteModelRef(field.type, oldName, newName);
+    }
+  }
   for (const service of services) {
     for (const op of service.operations) {
-      walkTypeRef(op.response, {
-        model: (r) => {
-          if (r.name === oldName) (r as { name: string }).name = newName;
-        },
-      });
+      rewriteModelRef(op.response, oldName, newName);
       if (op.requestBody) {
-        walkTypeRef(op.requestBody, {
-          model: (r) => {
-            if (r.name === oldName) (r as { name: string }).name = newName;
-          },
-        });
+        rewriteModelRef(op.requestBody, oldName, newName);
       }
     }
   }
@@ -91,10 +96,37 @@ export function mergeFieldInlineModels(existingModels: Model[], fieldInlineModel
   return [...existingModels, ...keepLargestByName(deduplicatedFieldModels)];
 }
 
+function hasModelConstDiscriminant(model: Model): boolean {
+  return model.fields.some(
+    (f) =>
+      (f.name === 'object' || f.name === 'type') &&
+      f.type.kind === 'literal' &&
+      typeof f.type.value === 'string',
+  );
+}
+
+function isModelReferencedByOthers(name: string, models: Model[], excludeNames: Set<string>): boolean {
+  for (const model of models) {
+    if (excludeNames.has(model.name)) continue;
+    for (const field of model.fields) {
+      let found = false;
+      walkTypeRef(field.type, {
+        model: (r) => {
+          if (r.name === name) found = true;
+        },
+      });
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
 export function collapseJsonSuffixModels(models: Model[], services: Service[]): Model[] {
   const normalizedModels = [...models];
   const byName = new Map(normalizedModels.map((m) => [m.name, m]));
 
+  // Pass 1: collect merge candidates
+  const mergeCandidates: Array<{ jsonModel: Model; baseModel: Model }> = [];
   for (const model of normalizedModels) {
     if (!model.name.endsWith('Json')) continue;
 
@@ -105,12 +137,25 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     const isSuperset = baseModel.fields.every((f) => model.fields.some((mf) => mf.name === f.name));
     if (!isSuperset) continue;
 
-    baseModel.fields = model.fields;
-    const jsonIdx = normalizedModels.indexOf(model);
-    if (jsonIdx !== -1) normalizedModels.splice(jsonIdx, 1);
-    rewriteModelRefsInServices(services, model.name, baseName);
-    console.warn(`[oagen] Merged "${model.name}" into "${baseName}" (${model.fields.length} fields, superset)`);
+    // Guard: both models have a const discriminant — they are distinct entities
+    if (hasModelConstDiscriminant(model) && hasModelConstDiscriminant(baseModel)) continue;
+
+    // Guard: a third model explicitly references the Json-suffix model
+    if (isModelReferencedByOthers(model.name, normalizedModels, new Set([model.name, baseName]))) continue;
+
+    mergeCandidates.push({ jsonModel: model, baseModel });
   }
 
-  return normalizedModels;
+  // Pass 2: apply merges
+  const toRemove = new Set<string>();
+  for (const { jsonModel, baseModel } of mergeCandidates) {
+    baseModel.fields = jsonModel.fields;
+    toRemove.add(jsonModel.name);
+    rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name);
+    console.warn(
+      `[oagen] Merged "${jsonModel.name}" into "${baseModel.name}" (${jsonModel.fields.length} fields, superset)`,
+    );
+  }
+
+  return normalizedModels.filter((m) => !toRemove.has(m.name));
 }

@@ -123,6 +123,25 @@ describe('generalized response classification', () => {
       // Single array property with no companion → NOT a list envelope
       expect(result.isPaginated).toBe(false);
     });
+
+    it('does not classify single-resource with nested array as list envelope', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          slug: { type: 'string' },
+          name: { type: 'string' },
+          permissions: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/Permission' },
+          },
+        },
+        required: ['slug', 'name', 'permissions'],
+      };
+
+      const result = classifyAndExtractResponse(schema, 'GetRoleResponse');
+      // permissions is not a known data path and slug/name are not pagination metadata
+      expect(result.isPaginated).toBe(false);
+    });
   });
 
   describe('deriveModelName with non-object const fields', () => {
