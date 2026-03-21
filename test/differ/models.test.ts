@@ -398,6 +398,11 @@ describe('typeRefsEqual', () => {
     ).toBe(false);
   });
 
+  it('compares literal types', () => {
+    expect(typeRefsEqual({ kind: 'literal', value: 'active' }, { kind: 'literal', value: 'active' })).toBe(true);
+    expect(typeRefsEqual({ kind: 'literal', value: 'active' }, { kind: 'literal', value: 'inactive' })).toBe(false);
+  });
+
   it('returns true when both unions have no discriminator', () => {
     expect(
       typeRefsEqual(

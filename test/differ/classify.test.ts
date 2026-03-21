@@ -26,6 +26,12 @@ describe('classifyFieldChange', () => {
     });
   });
 
+  it('field-access-changed is always breaking', () => {
+    expect(classifyFieldChange('field-access-changed', 'email')).toMatchObject({
+      classification: 'breaking',
+    });
+  });
+
   it('field-required-changed optional→required is breaking', () => {
     const result = classifyFieldChange('field-required-changed', 'age', true);
     expect(result.classification).toBe('breaking');
