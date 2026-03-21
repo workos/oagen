@@ -455,6 +455,58 @@ function parseInterfaceDeclarations(tree: Parser.Tree, sourceFile: string, names
 }
 
 // ---------------------------------------------------------------------------
+// PHP 8.1 enum extraction
+// ---------------------------------------------------------------------------
+
+function parseEnumDeclarations(tree: Parser.Tree, sourceFile: string, namespace: string): PhpClass[] {
+  const enums: PhpClass[] = [];
+
+  for (const node of tree.rootNode.descendantsOfType('enum_declaration')) {
+    const nameNode = node.childForFieldName('name');
+    if (!nameNode) continue;
+
+    const bodyNode = node.childForFieldName('body');
+    if (!bodyNode) continue;
+
+    // Extract enum cases as constants
+    const constants: PhpConstant[] = [];
+    for (const child of bodyNode.namedChildren) {
+      if (child.type !== 'enum_case') continue;
+      const caseNameNode = child.childForFieldName('name');
+      if (!caseNameNode) continue;
+
+      // Get the value (backed enum): case Foo = 'foo'
+      let value = caseNameNode.text;
+      const valueNode = child.namedChildren.find(
+        (c) => c.type === 'encapsed_string' || c.type === 'string' || c.type === 'integer',
+      );
+      if (valueNode) {
+        const contentNode = valueNode.namedChildren.find((c) => c.type === 'string_content');
+        value = contentNode ? contentNode.text : valueNode.text;
+      }
+
+      constants.push({ name: caseNameNode.text, value });
+    }
+
+    const methods = parseMethods(bodyNode);
+
+    enums.push({
+      name: nameNode.text,
+      namespace,
+      extends: null,
+      isInterface: false,
+      methods,
+      properties: [],
+      constants,
+      resourceAttributes: [],
+      sourceFile,
+    });
+  }
+
+  return enums;
+}
+
+// ---------------------------------------------------------------------------
 // Full file parser
 // ---------------------------------------------------------------------------
 
@@ -471,8 +523,9 @@ export function parsePhpFile(filePath: string, sdkPath: string): ParsedPhpFile {
 
   const classDecls = parseClassDeclarations(tree, relPath, namespace);
   const interfaceDecls = parseInterfaceDeclarations(tree, relPath, namespace);
+  const enumDecls = parseEnumDeclarations(tree, relPath, namespace);
 
   return {
-    classes: [...classDecls, ...interfaceDecls],
+    classes: [...classDecls, ...interfaceDecls, ...enumDecls],
   };
 }

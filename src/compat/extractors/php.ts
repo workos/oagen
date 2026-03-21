@@ -140,7 +140,7 @@ const phpHints: LanguageHints = {
     return false;
   },
 
-  modelBaseClasses: [],
+  modelBaseClasses: ['BaseWorkOSResource'],
   exceptionBaseClasses: ['Exception', '\\Exception'],
 };
 
