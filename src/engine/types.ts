@@ -8,9 +8,6 @@ export interface GeneratedFile {
   headerPlacement?: 'prepend' | 'skip';
   /** When false, exclude this file from --target integration. Defaults to true. */
   integrateTarget?: boolean;
-  /** Controls merge behavior: 'full' (default) adds symbols/members/imports;
-   *  'docstring-only' only updates docstrings and ensures the header. */
-  mergeMode?: 'full' | 'docstring-only';
 }
 
 export interface EmitterContext {

@@ -36,6 +36,18 @@ describe('mapFilesForTargetIntegration', () => {
     expect(result).toHaveLength(0);
   });
 
+  it('does not set a restrictive mergeMode (full merge for all files)', () => {
+    const files: GeneratedFile[] = [
+      { path: 'node/src/resources/sso.ts', content: 'export class SSO {}', skipIfExists: true },
+      { path: 'node/src/models/user.ts', content: 'export interface User {}' },
+    ];
+    const result = mapFilesForTargetIntegration(files, 'node');
+    expect(result).toHaveLength(2);
+    for (const f of result) {
+      expect((f as any).mergeMode).toBeUndefined();
+    }
+  });
+
   it('strips language prefix from paths', () => {
     const files: GeneratedFile[] = [
       { path: 'node/src/index.ts', content: 'export {}' },
