@@ -106,15 +106,6 @@ to preserve backwards compatibility:
 3. **Verify:** `oagen verify --spec v2.yml --lang {lang} --output ./sdk --api-surface sdk-{lang}-surface.json`
 4. **Ship** if verify exits 0
 
-**Alternative: incremental generation.** Instead of full `generate`, use
-`diff` in generation mode to only regenerate affected files. This also supports
-`--target` for live SDK integration:
-
-```bash
-oagen diff --old v1.yml --new v2.yml --lang ruby --output ./sdk --target {sdk_path} --api-surface sdk-{lang}-surface.json
-oagen verify --spec v2.yml --lang ruby --output ./sdk --api-surface sdk-{lang}-surface.json
-```
-
 **External consumers** configure emitters and extractors via `oagen.config.ts`
 instead of modifying CLI source — see the Configuration section in the README.
 

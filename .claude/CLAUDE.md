@@ -4,7 +4,7 @@ Framework for building language emitters that transform OpenAPI 3.x specs into i
 
 Pipeline: `OpenAPI spec → Parser → IR → Emitter → GeneratedFile[] → Writer → disk`. Use `oagen init` to scaffold a new emitter project.
 
-Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if preserving an existing SDK, and always smoke test) then ongoing spec updates (`oagen diff` → `oagen generate` → `oagen verify`). For more information, see `docs/architecture/workflows.md`.
+Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if preserving an existing SDK, and always smoke test) then ongoing spec updates (`oagen diff` (review) → `oagen generate` → `oagen verify`). For more information, see `docs/architecture/workflows.md`.
 
 **Plugin system:** External consumers can register custom emitters, extractors, and smoke runners via `oagen.config.ts` in their project root—no need to modify CLI source. See the Configuration section in the README.
 

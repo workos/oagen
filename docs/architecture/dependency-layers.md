@@ -59,10 +59,6 @@ Two type-only exceptions are currently allowed:
 - `differ -> engine/types` for shared generation types such as `EmitterContext` and `GeneratedFile`
 - `engine -> compat/types` because overlay-aware generation threads compat types through `EmitterContext` and generation options without depending on compat implementation modules
 
-One runtime exception is currently allowed:
-
-- `engine -> differ` for incremental generation, which depends on spec diffing and file mapping
-
 If you add a new exception, keep it narrow, make it type-only when possible, and document the reason in both code and docs.
 
 ## Enforcement

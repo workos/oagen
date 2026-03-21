@@ -11,8 +11,8 @@ It includes:
 - IR types
 - parser entrypoints such as `parseSpec`
 - emitter-facing types such as `Emitter`, `EmitterContext`, and `GeneratedFile`
-- generation runtime entrypoints such as `generate`, `generateFiles`, and `generateIncremental`
-- spec diffing APIs such as `diffSpecs` and `mapChangesToFiles`
+- generation runtime entrypoints such as `generate` and `generateFiles`
+- spec diffing APIs such as `diffSpecs`
 - naming utilities used by emitters
 - `planOperation`
 - config typing needed by emitter projects

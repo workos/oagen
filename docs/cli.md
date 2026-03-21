@@ -23,23 +23,18 @@ oagen generate --spec openapi.yml --lang node --output ./sdk --namespace WorkOS
 
 ## `oagen diff`
 
-Review or apply spec changes. Use `--report` to see what changed, or pass `--lang` and `--output` to incrementally regenerate affected files.
+Compare two OpenAPI specs and output a diff report as JSON. Use this to review what changed before regenerating.
 
 ```bash
-oagen diff --old v1.yml --new v2.yml --report           # review changes
-oagen diff --old v1.yml --new v2.yml --lang node --output ./sdk  # regenerate
+oagen diff --old v1.yml --new v2.yml
 ```
 
-| Argument               | Required | Description                                             |
-| ---------------------- | -------- | ------------------------------------------------------- |
-| `--old <path>`         | Yes      | Path to the old/previous spec                           |
-| `--new <path>`         | Yes      | Path to the new/current spec                            |
-| `--lang <language>`    | No       | Target language (required unless `--report`)            |
-| `--output <dir>`       | No       | Output directory for regenerated files                  |
-| `--report`             | No       | Output a diff report as JSON instead of generating code |
-| `--force`              | No       | Allow file deletions without confirmation               |
-| `--api-surface <path>` | No       | Path to baseline API surface JSON for compat overlay    |
-| `--manifest <path>`    | No       | Path to smoke-manifest.json for method overlay          |
+| Argument       | Required | Description                 |
+| -------------- | -------- | --------------------------- |
+| `--old <path>` | Yes      | Path to the old/previous spec |
+| `--new <path>` | Yes      | Path to the new/current spec  |
+
+**Exit codes:** 0 = no changes, 1 = additive or modified changes, 2 = breaking changes.
 
 ## `oagen extract`
 
@@ -58,7 +53,7 @@ oagen extract --sdk-path ./existing-sdk --lang ruby --output my-surface.json
 
 ## `oagen verify`
 
-Verify an already-generated SDK — run smoke tests and optional compat checks. Use after `oagen generate` or `oagen diff`.
+Verify an already-generated SDK — run smoke tests and optional compat checks. Use after `oagen generate`.
 
 ```bash
 oagen verify --lang node --output ./sdk --spec openapi.yml

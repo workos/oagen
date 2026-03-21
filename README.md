@@ -72,9 +72,7 @@ import {
   diffSpecs,
   generate,
   generateFiles,
-  generateIncremental,
   getEmitter,
-  mapChangesToFiles,
   parseSpec,
   planOperation,
   registerEmitter,
@@ -147,7 +145,7 @@ Start with:
 | `oagen parse`    | Parse a spec and print IR JSON                      |
 | `oagen init`     | Scaffold an emitter project                         |
 | `oagen generate` | Run a registered emitter                            |
-| `oagen diff`     | Review spec changes or incrementally regenerate     |
+| `oagen diff`     | Compare two specs and output a diff report          |
 | `oagen extract`  | Advanced: extract an SDK API surface for compat use |
 | `oagen verify`   | Advanced: smoke-test output and run compat checks   |
 

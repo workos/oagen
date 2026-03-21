@@ -47,7 +47,7 @@ When changing pipeline behavior:
 - `src/parser/`: OpenAPI to IR (refs, schemas, operations, pagination, inline models)
 - `src/engine/`: orchestration, writer, merger, registry, shared engine types
 - Language-specific emitters live in the separate `oagen-emitters` project (import from `@workos/oagen`)
-- `src/differ/`: incremental diff engine
+- `src/differ/`: spec diffing and breaking change classification
 - `src/compat/`: compat verification, overlay, staleness detection, extractors
 - `src/cli/`: CLI entry points and config loader
 - `src/utils/`: naming utilities (snake_case, camelCase, PascalCase conversions)
