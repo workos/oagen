@@ -70,8 +70,6 @@ export { generateFiles, buildEmitterContext, generateAllFiles, applyFileHeaders 
 export { integrateGeneratedFiles, mapFilesForTargetIntegration } from './engine/integrate.js';
 export { getEmitter, registerEmitter } from './engine/registry.js';
 export { diffSpecs } from './differ/diff.js';
-export { mapChangesToFiles } from './differ/file-map.js';
-export { generateIncremental } from './engine/incremental.js';
 
 // Utilities
 export {
