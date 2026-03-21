@@ -75,16 +75,9 @@ program
 
 program
   .command('diff')
-  .description('Incrementally generate from spec changes')
+  .description('Compare two OpenAPI specs and output a diff report')
   .requiredOption('--old <path>', 'Path to old spec')
   .requiredOption('--new <path>', 'Path to new spec')
-  .option('--lang <language>', 'Target language (required unless --report)')
-  .option('--output <dir>', 'Output directory')
-  .option('--report', 'Output diff report as JSON')
-  .option('--force', 'Allow file deletions without confirmation')
-  .option('--target <dir>', 'Target directory for live SDK integration (merged output)')
-  .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
-  .option('--manifest <path>', 'Path to smoke-manifest.json for method overlay')
   .action((opts) => {
     diffCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(handleError);
   });

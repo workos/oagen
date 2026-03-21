@@ -3,7 +3,6 @@ import { resolve } from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { generate } from '../../src/engine/orchestrator.js';
-import { generateIncremental } from '../../src/engine/incremental.js';
 import { diffSurfaces, specDerivedNames, filterSurface } from '../../src/compat/differ.js';
 import { nodeHints } from '../../src/compat/language-hints.js';
 import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
@@ -531,60 +530,6 @@ describe('end-to-end pipeline', () => {
       expect(opAdded!.classification).toBe('additive');
     });
 
-    // ── Incremental Generation ──
-
-    it('incremental generation only regenerates affected files', async () => {
-      const result = await generateIncremental(v1, v2, mockEmitter(), {
-        namespace: 'Test',
-        outputDir: '/tmp/pipeline-test',
-        dryRun: true,
-      });
-
-      const paths = result.generated.map((f) => f.path);
-
-      // Widget model was modified → regenerate
-      expect(paths).toContain('models/widget.ts');
-      expect(paths).toContain('types/widget.d.ts');
-
-      // WidgetKind enum was modified → regenerate
-      expect(paths).toContain('enums/widgetkind.ts');
-
-      // New model added → regenerate
-      expect(paths).toContain('models/widgetstats.ts');
-      expect(paths).toContain('types/widgetstats.d.ts');
-
-      // Service referencing Widget should be regenerated (cascade)
-      const hasServiceFile = paths.some((p) => p.startsWith('resources/'));
-      expect(hasServiceFile).toBe(true);
-    });
-
-    it('unaffected models are NOT regenerated', async () => {
-      const result = await generateIncremental(v1, v2, mockEmitter(), {
-        namespace: 'Test',
-        outputDir: '/tmp/pipeline-test',
-        dryRun: true,
-      });
-
-      const paths = result.generated.map((f) => f.path);
-
-      // BaseWidget was not changed
-      expect(paths).not.toContain('models/basewidget.ts');
-      // ComposedModel was not changed
-      expect(paths).not.toContain('models/composedmodel.ts');
-    });
-
-    it('diff report is included in incremental result', async () => {
-      const result = await generateIncremental(v1, v2, mockEmitter(), {
-        namespace: 'Test',
-        outputDir: '/tmp/pipeline-test',
-        dryRun: true,
-      });
-
-      expect(result.diff.oldVersion).toBe('1.0.0');
-      expect(result.diff.newVersion).toBe('2.0.0');
-      expect(result.diff.changes.length).toBeGreaterThan(0);
-    });
-
     // ── Compat Verification ──
 
     it('compat verification catches breaking changes', () => {
@@ -700,14 +645,13 @@ describe('end-to-end pipeline', () => {
       expect(diff.summary.breaking).toBeGreaterThan(0);
       expect(diff.summary.additive).toBeGreaterThan(0);
 
-      // Generate
-      const result = await generateIncremental(v1, v2, mockEmitter(), {
+      // Full generate on the new spec
+      const generated = await generate(v2, mockEmitter(), {
         namespace: 'Test',
-        outputDir: '/tmp/pipeline-yaml-test',
         dryRun: true,
+        outputDir: '/tmp/pipeline-yaml-test',
       });
-      expect(result.generated.length).toBeGreaterThan(0);
-      expect(result.diff.changes.length).toBeGreaterThan(0);
+      expect(generated.length).toBeGreaterThan(0);
 
       // Verify
       const baseline = irToSurface(v1);
@@ -723,19 +667,11 @@ describe('end-to-end pipeline', () => {
       expect(compat.additions.length).toBeGreaterThan(0);
     });
 
-    it('v1 → v1: no changes produces no generation and clean compat', async () => {
+    it('v1 → v1: no changes produces clean diff and clean compat', async () => {
       const v1 = await parseSpec(resolve(FIXTURES, 'v1.yml'));
 
       const diff = diffSpecs(v1, v1);
       expect(diff.changes).toHaveLength(0);
-
-      const result = await generateIncremental(v1, v1, mockEmitter(), {
-        namespace: 'Test',
-        outputDir: '/tmp/pipeline-noop-test',
-        dryRun: true,
-      });
-      expect(result.generated).toHaveLength(0);
-      expect(result.deleted).toHaveLength(0);
 
       const surface = irToSurface(v1);
       const compat = diffSurfaces(surface, surface, nodeHints);

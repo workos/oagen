@@ -134,7 +134,7 @@ function isAllowed(edge: ImportEdge): boolean {
     case 'parser':
       return to === 'ir' || to === 'utils';
     case 'engine':
-      return to === 'ir' || to === 'utils' || to === 'differ' || isEngineCompatTypesException(edge);
+      return to === 'ir' || to === 'utils' || isEngineCompatTypesException(edge);
     case 'differ':
       return to === 'ir' || to === 'utils' || isDifferEngineTypesException(edge);
     case 'compat':
