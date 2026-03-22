@@ -1042,7 +1042,7 @@ export class SSO {
 }
 `;
 
-    const result = await mergeIntoExisting(existing, generated, 'node', header, { docstringOnly: true });
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
     expect(result.content).toContain('@oagen-ignore');
     expect(result.content).toContain('Detailed hand-written docs');
     expect(result.content).not.toContain('Short spec docs');
@@ -1220,7 +1220,7 @@ export interface Unprotected {
     expect(result.content).toContain('addedField');
   });
 
-  it('works in docstring-only mode', async () => {
+  it('respects @oagen-ignore-start/end regions', async () => {
     const existing = `
 // @oagen-ignore-start
 /** Protected docs */
@@ -1248,7 +1248,7 @@ export class Users {
 }
 `;
 
-    const result = await mergeIntoExisting(existing, generated, 'node', header, { docstringOnly: true });
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
     expect(result.content).toContain('Protected docs');
     expect(result.content).not.toContain('Generated docs');
     expect(result.content).toContain('New docs');

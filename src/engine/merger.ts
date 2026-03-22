@@ -162,78 +162,10 @@ export async function mergeIntoExisting(
   generatedContent: string,
   language: string,
   header: string,
-  options?: { docstringOnly?: boolean },
 ): Promise<MergeResult> {
   const adapter = getMergeAdapter(language);
   if (!adapter) {
     throw new Error(`No merge adapter configured for language "${language}"`);
-  }
-
-  // Docstring-only mode: skip all additive merging, only refresh docstrings
-  if (options?.docstringOnly) {
-    let result = existingContent;
-    let docstringUpdates = 0;
-    const parser = await getParser(language);
-    const resultTree = safeParse(parser, result);
-    const generatedTree = safeParse(parser, generatedContent);
-    const resultDocs = adapter.extractDocstrings(resultTree, result);
-    const generatedDocs = adapter.extractDocstrings(generatedTree, generatedContent);
-    const ignoredRegions = findIgnoredRegions(result);
-    const ignoredSymbols = buildIgnoredSymbolNames(resultDocs, ignoredRegions);
-    const headerLine = header.trim();
-    const edits: { start: number; end: number; newText: string }[] = [];
-
-    for (const [symbolName, genInfo] of generatedDocs) {
-      const existInfo = resultDocs.get(symbolName);
-      if (!existInfo) continue;
-      if (ignoredSymbols.has(symbolName)) continue;
-      const genDoc = genInfo.docstring && genInfo.docstring.text.trim() !== headerLine ? genInfo.docstring : null;
-      if (genDoc) {
-        if (existInfo.docstring) {
-          const isPreserved = existInfo.docstring.text.includes('@oagen-ignore');
-          if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
-            edits.push({
-              start: existInfo.docstring.startIndex,
-              end: existInfo.docstring.endIndex,
-              newText: genDoc.text,
-            });
-            docstringUpdates++;
-          }
-        } else {
-          const lineStart = existInfo.declStartIndex - existInfo.declColumn;
-          const indent = ' '.repeat(existInfo.declColumn);
-          edits.push({ start: lineStart, end: lineStart, newText: indent + genDoc.text + '\n' });
-          docstringUpdates++;
-        }
-      }
-      for (const [memberName, genMember] of genInfo.members) {
-        const existMember = existInfo.members.get(memberName);
-        if (!existMember || !genMember.docstring) continue;
-        if (existMember.docstring) {
-          const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
-          if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
-            edits.push({
-              start: existMember.docstring.startIndex,
-              end: existMember.docstring.endIndex,
-              newText: genMember.docstring.text,
-            });
-            docstringUpdates++;
-          }
-        } else {
-          const lineStart = existMember.declStartIndex - existMember.declColumn;
-          const indent = ' '.repeat(existMember.declColumn);
-          edits.push({ start: lineStart, end: lineStart, newText: indent + genMember.docstring.text + '\n' });
-          docstringUpdates++;
-        }
-      }
-    }
-    if (edits.length > 0) {
-      edits.sort((a, b) => b.start - a.start);
-      for (const edit of edits) {
-        result = result.slice(0, edit.start) + edit.newText + result.slice(edit.end);
-      }
-    }
-    return { content: result, added: 0, preserved: 0, changed: docstringUpdates > 0 };
   }
 
   // Parse existing file once — extract both symbols and statements from the same AST pass
