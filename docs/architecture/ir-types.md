@@ -36,7 +36,7 @@ Every type in the IR is a `TypeRef`, discriminated on the `kind` field:
 | `primitive` | `PrimitiveType` | `{ kind: "primitive", type: "string" }`                              |
 | `array`     | `ArrayType`     | `{ kind: "array", items: { kind: "primitive", type: "string" } }`    |
 | `model`     | `ModelRef`      | `{ kind: "model", name: "Organization" }`                            |
-| `enum`      | `EnumRef`       | `{ kind: "enum", name: "Status" }`                                   |
+| `enum`      | `EnumRef`       | `{ kind: "enum", name: "Status", values?: ["active", "inactive"] }`  |
 | `union`     | `UnionType`     | `{ kind: "union", variants: [...], discriminator?: {...} }`          |
 | `nullable`  | `NullableType`  | `{ kind: "nullable", inner: { kind: "primitive", type: "string" } }` |
 | `literal`   | `LiteralType`   | `{ kind: "literal", value: "active" }`                               |
@@ -196,6 +196,7 @@ interface Parameter {
   description?: string;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown;
 }
 ```
 

@@ -53,7 +53,7 @@ When regenerating an SDK for a language that already has a published SDK, verify
 1. Extract the live SDK's API surface (`oagen extract --sdk-path <path> --lang <language> --output <output>/sdk-{language}-surface.json`)
 2. Generate with the overlay (`--api-surface <output>/sdk-{language}-surface.json`) so the emitter preserves existing names
 3. Verify the generated output against the baseline (`oagen verify --api-surface <output>/sdk-{language}-surface.json --lang <language> --output <output>`)
-4. If violations exist, fix the emitter and regenerate — loop mode (`--loop`) automates this cycle
+4. If violations exist, fix the emitter and regenerate — `--max-retries` on `oagen verify` automates the overlay patching cycle
 
 The differ and overlay delegate all language-specific logic to the extractor's `hints: LanguageHints` object. Every extractor must provide hints — use `resolveHints({...})` to override only what differs from Node defaults. See `docs/architecture/extractor-contract.md` for the full hints reference.
 

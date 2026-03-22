@@ -101,7 +101,7 @@ output of Scenario B's initial generation).
 Every spec update uses `--target` to merge into the live SDK and `--api-surface`
 to preserve backwards compatibility:
 
-1. **Review changes:** `oagen diff --old v1.yml --new v2.yml --report`
+1. **Review changes:** `oagen diff --old v1.yml --new v2.yml`
 2. **Regenerate:** `oagen generate --spec v2.yml --lang {lang} --output ./sdk --target {sdk_path} --api-surface sdk-{lang}-surface.json`
 3. **Verify:** `oagen verify --spec v2.yml --lang {lang} --output ./sdk --api-surface sdk-{lang}-surface.json`
 4. **Ship** if verify exits 0
@@ -135,17 +135,18 @@ The verify pipeline returns structured result types that consumers can use progr
 ```typescript
 interface VerifyDiagnostics {
   compatCheck?: {
-    totalBaselineSymbols;
-    preservedSymbols;
-    preservationScore;
-    violationsByCategory;
-    violationsBySeverity;
-    additions;
-    scopedToSpec;
-    scopedSymbolCount?;
+    totalBaselineSymbols: number;
+    preservedSymbols: number;
+    preservationScore: number;
+    violationsByCategory: Record<string, number>;
+    violationsBySeverity: Record<string, number>;
+    additions: number;
+    scopedToSpec: boolean;
+    scopedSymbolCount?: number;
   };
-  smokeCheck?: { passed; findingsCount?; compileErrors?; baselinePath };
-  stalenessCheck?: { violations };
+  stalenessCheck?: { staleSymbolCount: number; staleSymbols: string[] };
+  smokeCheck?: { passed: boolean; findingsCount?: number; compileErrors?: boolean };
+  retryLoop?: { attempts: number; converged: boolean; finalScore: number; patchedPerIteration: number[] };
 }
 
 interface CompatCheckResult {
