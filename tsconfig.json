@@ -13,7 +13,11 @@
     "declarationMap": true,
     "sourceMap": true,
     "resolveJsonModule": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    // Let examples/ resolve @workos/oagen without a workspace link
+    "paths": {
+      "@workos/oagen": ["./src/index.ts"]
+    }
   },
   "include": ["src/**/*", "test/**/*"],
   "exclude": ["node_modules", "dist"]
