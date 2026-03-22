@@ -44,7 +44,9 @@ Read `src/ir/types.ts` from the oagen package. Extract fields dynamically from t
 ### Priority: HIGH (behavioral — affects code correctness)
 
 #### TypeRef Variant Coverage
+
 Every emitter must handle all `TypeRef.kind` variants in its type-mapping logic. Check that the emitter handles each of these:
+
 - `primitive` — basic types (string, integer, number, boolean, unknown)
 - `array` — list/array types
 - `model` — references to model definitions
@@ -57,33 +59,41 @@ Every emitter must handle all `TypeRef.kind` variants in its type-mapping logic.
 A missing kind means an entire category of types won't generate correctly.
 
 #### ApiSpec
+
 - `auth` — Authentication schemes (bearer, apiKey, oauth2). Determines how the client authenticates requests.
 
 #### Operation
+
 - `pagination` — Auto-paging iterator generation (cursor, offset, link-header strategies)
 - `requestBodyEncoding` — Content-type handling: json, form-data, form-urlencoded, binary, text
 - `injectIdempotencyKey` — Whether to inject an idempotency key header
 
 #### UnionType
+
 - `discriminator` — Discriminator property and mapping for tagged unions
 - `compositionKind` — Whether the union came from allOf (inheritance), oneOf (exclusive), or anyOf (open). Emitters use this to decide serialization strategy.
 
 #### PrimitiveType
+
 - `format` — Format hints like `date-time`, `uuid`, `email`, `uri`, `int64`. Determines whether to use language-specific types (e.g., `DateTime` in Ruby, `OffsetDateTime` in Kotlin).
 
 #### ErrorResponse
+
 - `type` — Structured error type for typed exception/error classes
 
 ### Priority: MEDIUM (documentation — affects developer experience)
 
 #### ApiSpec
+
 - `description` — API-level description for the root client class doc comment
 - `servers` — Server entries (url, description)
 
 #### Service
+
 - `description` — Service-level description for resource class doc comment
 
 #### Operation
+
 - `description` — Method-level description
 - `deprecated` — Deprecation marker on methods
 - `async` — Async operation marker
@@ -92,16 +102,19 @@ A missing kind means an entire category of types won't generate correctly.
 - `cookieParams` — Cookie parameter handling
 
 #### Parameter
+
 - `description` — Parameter description content
 - `deprecated` — Deprecated marker on params
 - `default` — Default value annotation
 - `example` — Example value annotation
 
 #### Model
+
 - `description` — Model-level doc comment
 - `typeParams` — Generic type parameters
 
 #### Field
+
 - `description` — Field-level doc comment
 - `readOnly` — Read-only annotation (language-appropriate: `readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, etc.)
 - `writeOnly` — Write-only annotation
@@ -109,6 +122,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `default` — Default value annotation
 
 #### EnumValue
+
 - `description` — Enum value doc comment
 - `deprecated` — Deprecation marker on enum values
 
@@ -182,34 +196,34 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 
 ### HIGH priority suggestions
 
-| IR Field | What to Generate |
-|----------|-----------------|
-| Missing TypeRef kinds | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness |
-| `ApiSpec.auth` | Client constructor auth configuration (API key header, bearer token, OAuth flow) |
-| `Operation.pagination` | Auto-paging iterator/generator that handles cursor, offset, or link-header strategies |
-| `Operation.requestBodyEncoding` | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary |
-| `Operation.injectIdempotencyKey` | Generate and attach `Idempotency-Key` header on applicable requests |
-| `UnionType.discriminator` | Tagged union deserialization using the discriminator property and mapping |
-| `UnionType.compositionKind` | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization |
-| `PrimitiveType.format` | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`) |
-| `ErrorResponse.type` | Typed exception/error classes per status code |
+| IR Field                         | What to Generate                                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Missing TypeRef kinds            | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                     |
+| `ApiSpec.auth`                   | Client constructor auth configuration (API key header, bearer token, OAuth flow)                        |
+| `Operation.pagination`           | Auto-paging iterator/generator that handles cursor, offset, or link-header strategies                   |
+| `Operation.requestBodyEncoding`  | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary             |
+| `Operation.injectIdempotencyKey` | Generate and attach `Idempotency-Key` header on applicable requests                                     |
+| `UnionType.discriminator`        | Tagged union deserialization using the discriminator property and mapping                               |
+| `UnionType.compositionKind`      | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization |
+| `PrimitiveType.format`           | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`) |
+| `ErrorResponse.type`             | Typed exception/error classes per status code                                                           |
 
 ### MEDIUM priority suggestions
 
-| IR Field | What to Generate |
-|----------|-----------------|
-| `ApiSpec.description` | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python) |
-| `ApiSpec.servers` | Server URL constants or configuration |
-| `Operation.async` | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python) |
-| `Operation.successResponses` | Document additional return types for each 2xx response |
-| `Operation.cookieParams` | Document cookie parameters |
-| `Parameter.description` | Document query/header/cookie params in method doc comments |
-| `Parameter.deprecated` | Mark parameter as deprecated in docs |
-| `Parameter.default` | Document default value |
-| `Parameter.example` | Document example value |
-| `Field.readOnly` | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust) |
-| `Field.writeOnly` | Write-only annotation in doc comments |
-| `Field.default` | Document default value |
+| IR Field                     | What to Generate                                                                                                                                |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ApiSpec.description`        | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                     |
+| `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
+| `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
+| `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
+| `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
+| `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
+| `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
+| `Parameter.default`          | Document default value                                                                                                                          |
+| `Parameter.example`          | Document example value                                                                                                                          |
+| `Field.readOnly`             | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust) |
+| `Field.writeOnly`            | Write-only annotation in doc comments                                                                                                           |
+| `Field.default`              | Document default value                                                                                                                          |
 
 Include the specific file and approximate location where each fix should be applied.
 

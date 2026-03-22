@@ -145,8 +145,17 @@ interface VerifyDiagnostics {
     scopedSymbolCount?: number;
   };
   stalenessCheck?: { staleSymbolCount: number; staleSymbols: string[] };
-  smokeCheck?: { passed: boolean; findingsCount?: number; compileErrors?: boolean };
-  retryLoop?: { attempts: number; converged: boolean; finalScore: number; patchedPerIteration: number[] };
+  smokeCheck?: {
+    passed: boolean;
+    findingsCount?: number;
+    compileErrors?: boolean;
+  };
+  retryLoop?: {
+    attempts: number;
+    converged: boolean;
+    finalScore: number;
+    patchedPerIteration: number[];
+  };
 }
 
 interface CompatCheckResult {

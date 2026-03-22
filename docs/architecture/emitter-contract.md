@@ -32,7 +32,7 @@ interface GeneratedFile {
   path: string; // Relative path within output directory
   content: string; // File content (header prepended by orchestrator)
   skipIfExists?: boolean; // Don't overwrite if file already exists on disk (defaults to false)
-  headerPlacement?: 'prepend' | 'skip'; // How to handle the file header (default: 'prepend')
+  headerPlacement?: "prepend" | "skip"; // How to handle the file header (default: 'prepend')
   integrateTarget?: boolean; // When false, exclude from --target integration (default: true)
 }
 ```
@@ -76,15 +76,15 @@ When a user passes `--api-surface` to `oagen generate`, the engine builds an `Ov
 
 **`OverlayLookup` fields:**
 
-| Field               | Type                         | Purpose                                          |
-| ------------------- | ---------------------------- | ------------------------------------------------ |
-| `methodByOperation` | `Map<string, MethodOverlay>` | HTTP key → existing method info (name, params)   |
-| `httpKeyByMethod`   | `Map<string, string>`        | Reverse map: "Class.method" → HTTP key           |
-| `interfaceByName`   | `Map<string, string>`        | IR interface name → existing interface name      |
-| `typeAliasByName`   | `Map<string, string>`        | IR type alias name → existing type alias name    |
-| `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported |
+| Field               | Type                         | Purpose                                                                 |
+| ------------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `methodByOperation` | `Map<string, MethodOverlay>` | HTTP key → existing method info (name, params)                          |
+| `httpKeyByMethod`   | `Map<string, string>`        | Reverse map: "Class.method" → HTTP key                                  |
+| `interfaceByName`   | `Map<string, string>`        | IR interface name → existing interface name                             |
+| `typeAliasByName`   | `Map<string, string>`        | IR type alias name → existing type alias name                           |
+| `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported                        |
 | `modelNameByIR`     | `Map<string, string>`        | IR model name → SDK interface name (auto-inferred from field structure) |
-| `fileBySymbol`      | `Map<string, string>`        | IR symbol name → relative file path in the live SDK |
+| `fileBySymbol`      | `Map<string, string>`        | IR symbol name → relative file path in the live SDK                     |
 
 The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
 
