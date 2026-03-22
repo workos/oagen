@@ -42,12 +42,18 @@ interface ListEnvelopeResult {
   dataPath: string | null;
 }
 
-const KNOWN_DATA_PATHS = new Set([
-  'data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges',
-]);
+const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges']);
 
 const PAGINATION_METADATA_PATTERNS = [
-  'metadata', 'pagination', 'cursor', 'has_more', 'page_info', 'total', 'next_page', 'previous_page', 'offset',
+  'metadata',
+  'pagination',
+  'cursor',
+  'has_more',
+  'page_info',
+  'total',
+  'next_page',
+  'previous_page',
+  'offset',
 ];
 
 function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {

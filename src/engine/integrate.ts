@@ -1,10 +1,7 @@
 import type { GeneratedFile } from './types.js';
 import { writeFiles, type WriteResult } from './writer.js';
 
-export function mapFilesForTargetIntegration(
-  files: GeneratedFile[],
-  language: string,
-): GeneratedFile[] {
+export function mapFilesForTargetIntegration(files: GeneratedFile[], language: string): GeneratedFile[] {
   const langPrefix = `${language}/`;
   return files
     .filter((f) => f.integrateTarget !== false) // integrateTarget: false files are standalone-only

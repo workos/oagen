@@ -19,6 +19,7 @@ oagen generate --spec openapi.yml --lang node --output ./sdk --namespace WorkOS
 | `--dry-run`            | No       | `false`                        | Print the list of file paths that would be generated, without writing anything to disk                                                                                                                                                       |
 | `--api-surface <path>` | No       |                                | Path to baseline API surface JSON for compat overlay                                                                                                                                                                                         |
 | `--manifest <path>`    | No       | `<output>/smoke-manifest.json` | Path to smoke-manifest.json for method overlay (auto-discovered in output dir if present)                                                                                                                                                    |
+| `--target <dir>`       | No       |                                | Target directory for live SDK integration — generated files are merged into this directory instead of `--output`                                                                                                                             |
 | `--no-compat-check`    | No       | `false`                        | Skip compat overlay even if `--api-surface` is provided                                                                                                                                                                                      |
 
 ## `oagen diff`
@@ -29,8 +30,8 @@ Compare two OpenAPI specs and output a diff report as JSON. Use this to review w
 oagen diff --old v1.yml --new v2.yml
 ```
 
-| Argument       | Required | Description                 |
-| -------------- | -------- | --------------------------- |
+| Argument       | Required | Description                   |
+| -------------- | -------- | ----------------------------- |
 | `--old <path>` | Yes      | Path to the old/previous spec |
 | `--new <path>` | Yes      | Path to the new/current spec  |
 

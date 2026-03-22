@@ -98,10 +98,7 @@ export function mergeFieldInlineModels(existingModels: Model[], fieldInlineModel
 
 function hasModelConstDiscriminant(model: Model): boolean {
   return model.fields.some(
-    (f) =>
-      (f.name === 'object' || f.name === 'type') &&
-      f.type.kind === 'literal' &&
-      typeof f.type.value === 'string',
+    (f) => (f.name === 'object' || f.name === 'type') && f.type.kind === 'literal' && typeof f.type.value === 'string',
   );
 }
 

@@ -18,7 +18,7 @@ interface Emitter {
   generateClient(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateErrors(ctx: EmitterContext): GeneratedFile[];
   generateConfig(ctx: EmitterContext): GeneratedFile[];
-  generateTypeSignatures(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
+  generateTypeSignatures?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateManifest?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   fileHeader(): string;
@@ -31,8 +31,9 @@ interface Emitter {
 interface GeneratedFile {
   path: string; // Relative path within output directory
   content: string; // File content (header prepended by orchestrator)
-  header?: string; // Optional override of the default file header
   skipIfExists?: boolean; // Don't overwrite if file already exists on disk (defaults to false)
+  headerPlacement?: "prepend" | "skip"; // How to handle the file header (default: 'prepend')
+  integrateTarget?: boolean; // When false, exclude from --target integration (default: true)
 }
 ```
 
@@ -53,7 +54,7 @@ interface EmitterContext {
 
 ## Overlay Integration
 
-When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engine builds an `OverlayLookup` and passes it to emitters via `ctx.overlayLookup`. Emitters should check the overlay before generating default names to preserve backwards compatibility with an existing SDK.
+When a user passes `--api-surface` to `oagen generate`, the engine builds an `OverlayLookup` and passes it to emitters via `ctx.overlayLookup`. Emitters should check the overlay before generating default names to preserve backwards compatibility with an existing SDK.
 
 **When it's present:** The user has an existing live SDK and wants the generated output to preserve its public API (method names, type names, exports).
 
@@ -75,13 +76,15 @@ When a user passes `--api-surface` to `oagen generate` or `oagen diff`, the engi
 
 **`OverlayLookup` fields:**
 
-| Field               | Type                         | Purpose                                          |
-| ------------------- | ---------------------------- | ------------------------------------------------ |
-| `methodByOperation` | `Map<string, MethodOverlay>` | HTTP key → existing method info (name, params)   |
-| `httpKeyByMethod`   | `Map<string, string>`        | Reverse map: "Class.method" → HTTP key           |
-| `interfaceByName`   | `Map<string, string>`        | IR interface name → existing interface name      |
-| `typeAliasByName`   | `Map<string, string>`        | IR type alias name → existing type alias name    |
-| `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported |
+| Field               | Type                         | Purpose                                                                 |
+| ------------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `methodByOperation` | `Map<string, MethodOverlay>` | HTTP key → existing method info (name, params)                          |
+| `httpKeyByMethod`   | `Map<string, string>`        | Reverse map: "Class.method" → HTTP key                                  |
+| `interfaceByName`   | `Map<string, string>`        | IR interface name → existing interface name                             |
+| `typeAliasByName`   | `Map<string, string>`        | IR type alias name → existing type alias name                           |
+| `requiredExports`   | `Map<string, Set<string>>`   | Barrel file path → symbols that must be exported                        |
+| `modelNameByIR`     | `Map<string, string>`        | IR model name → SDK interface name (auto-inferred from field structure) |
+| `fileBySymbol`      | `Map<string, string>`        | IR symbol name → relative file path in the live SDK                     |
 
 The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
 

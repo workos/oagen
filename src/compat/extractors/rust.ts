@@ -15,7 +15,6 @@ import { walkRustFiles, parseRustFile } from './rust-parser.js';
 import { buildSurface } from './rust-surface.js';
 import type { RustStruct, RustEnum, RustFunc, RustTrait, RustTypeAlias } from './rust-parser.js';
 
-
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------

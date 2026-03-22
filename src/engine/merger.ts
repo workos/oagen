@@ -43,10 +43,7 @@ function findIgnoredRegions(source: string): IgnoredRegion[] {
   return regions;
 }
 
-function buildIgnoredSymbolNames(
-  docstrings: Map<string, SymbolDocstrings>,
-  regions: IgnoredRegion[],
-): Set<string> {
+function buildIgnoredSymbolNames(docstrings: Map<string, SymbolDocstrings>, regions: IgnoredRegion[]): Set<string> {
   if (regions.length === 0) return new Set();
   const ignored = new Set<string>();
   for (const [name, info] of docstrings) {

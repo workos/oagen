@@ -21,7 +21,7 @@ Top-level entrypoints (`src/index.ts`, `src/errors.ts`) are exempt from these di
 | `src/ir/`     | (nothing in `src/`)                                                    | everything                          |
 | `src/utils/`  | `src/ir/`, `src/errors.ts`                                             | parser, engine, differ, compat...   |
 | `src/parser/` | `src/ir/`, `src/utils/`, `src/errors.ts`                               | engine, differ, compat, verify, cli |
-| `src/engine/` | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`                | parser, verify, cli                 |
+| `src/engine/` | `src/ir/`, `src/utils/`, `src/errors.ts`                               | parser, differ, verify, cli         |
 | `src/differ/` | `src/ir/`, `src/utils/`, `src/errors.ts`                               | parser, compat, verify, cli         |
 | `src/compat/` | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/differ/`                | parser, verify, cli                 |
 | `src/verify/` | `src/ir/`, `src/utils/`, `src/errors.ts`, `src/engine/`, `src/compat/` | parser, cli                         |

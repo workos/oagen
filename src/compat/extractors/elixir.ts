@@ -18,7 +18,6 @@ import { walkElixirFiles, parseElixirFile } from './elixir-parser.js';
 import { buildSurface } from './elixir-surface.js';
 import type { ElixirStruct, ElixirFunction, ElixirEnumModule, ElixirTypeSpec } from './elixir-parser.js';
 
-
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------

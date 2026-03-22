@@ -107,4 +107,4 @@ export default {
 
 ## Diff Engine (`src/differ/`)
 
-Compares two parsed specs (old vs new) and determines which files need regeneration. Classifies changes as additive, breaking, or mixed.
+Compares two parsed specs (old vs new) and produces a `DiffReport` classifying changes as additive, breaking, or mixed. Used by the `oagen diff` CLI command for review before regenerating.

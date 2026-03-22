@@ -12,11 +12,15 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
-import { NAMED_TYPE_RE, typeExistsInSurface, namedTypeWordsOverlap, defaultIsNullableOnlyDifference } from '../language-hints.js';
+import {
+  NAMED_TYPE_RE,
+  typeExistsInSurface,
+  namedTypeWordsOverlap,
+  defaultIsNullableOnlyDifference,
+} from '../language-hints.js';
 import { walkCSharpFiles, parseCSharpFile } from './dotnet-parser.js';
 import { buildSurface } from './dotnet-surface.js';
 import type { CSharpClass, CSharpEnum } from './dotnet-parser.js';
-
 
 // ---------------------------------------------------------------------------
 // Language hints

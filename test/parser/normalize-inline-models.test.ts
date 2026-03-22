@@ -7,9 +7,7 @@ describe('collapseJsonSuffixModels', () => {
     const models: Model[] = [
       {
         name: 'Widget',
-        fields: [
-          { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
-        ],
+        fields: [{ name: 'name', type: { kind: 'primitive', type: 'string' }, required: true }],
       },
       {
         name: 'WidgetJson',
@@ -147,9 +145,7 @@ describe('collapseJsonSuffixModels', () => {
     const models: Model[] = [
       {
         name: 'Alpha',
-        fields: [
-          { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
-        ],
+        fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
       },
       {
         name: 'AlphaJson',
@@ -160,9 +156,7 @@ describe('collapseJsonSuffixModels', () => {
       },
       {
         name: 'Beta',
-        fields: [
-          { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
-        ],
+        fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
       },
       {
         name: 'BetaJson',

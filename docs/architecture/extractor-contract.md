@@ -35,16 +35,16 @@ interface ApiSurface {
 
 Each sub-type captures a different kind of public symbol:
 
-| Type           | Fields                                               | What it captures                                 |
-| -------------- | ---------------------------------------------------- | ------------------------------------------------ |
-| `ApiClass`     | `name`, `methods`, `properties`, `constructorParams` | Public classes with their methods and properties |
-| `ApiMethod`    | `name`, `params`, `returnType`, `async`              | Method signatures                                |
-| `ApiParam`     | `name`, `type`, `optional`                           | Method and constructor parameters                |
-| `ApiProperty`  | `name`, `type`, `readonly`                           | Class properties                                 |
-| `ApiInterface` | `name`, `fields`, `extends`                          | Interface declarations                           |
-| `ApiField`     | `name`, `type`, `optional`                           | Interface fields                                 |
-| `ApiTypeAlias` | `name`, `value`                                      | Type alias declarations                          |
-| `ApiEnum`      | `name`, `members`                                    | Enum declarations with member values             |
+| Type           | Fields                                                              | What it captures                                                                  |
+| -------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `ApiClass`     | `name`, `sourceFile?`, `methods`, `properties`, `constructorParams` | Public classes with their methods and properties                                  |
+| `ApiMethod`    | `name`, `params`, `returnType`, `async`                             | Method signatures (methods is `Record<string, ApiMethod[]>` to support overloads) |
+| `ApiParam`     | `name`, `type`, `optional`                                          | Method and constructor parameters                                                 |
+| `ApiProperty`  | `name`, `type`, `readonly`                                          | Class properties                                                                  |
+| `ApiInterface` | `name`, `sourceFile?`, `fields`, `extends`                          | Interface declarations                                                            |
+| `ApiField`     | `name`, `type`, `optional`                                          | Interface fields                                                                  |
+| `ApiTypeAlias` | `name`, `sourceFile?`, `value`                                      | Type alias declarations                                                           |
+| `ApiEnum`      | `name`, `sourceFile?`, `members`                                    | Enum declarations with member values                                              |
 
 The `exports` field maps file paths to their exported symbol names, capturing the barrel export structure.
 
@@ -62,18 +62,23 @@ The `exports` field maps file paths to their exported symbol names, capturing th
 
 Every extractor must provide a `hints: LanguageHints` object that tells the differ and overlay how to interpret language-specific type strings. The `LanguageHints` interface includes:
 
-| Method/Property                     | Purpose                                       | Node example                                     | Go example                           |
-| ----------------------------------- | --------------------------------------------- | ------------------------------------------------ | ------------------------------------ |
-| `stripNullable(type)`               | Strip nullable wrapper                        | `"string \| null"` → `"string"`                  | `"*Organization"` → `"Organization"` |
-| `isNullableOnlyDifference(a, b)`    | True if a and b differ only by nullability    | `"string"` vs `"string \| null"` → true          |                                      |
-| `isUnionReorder(a, b)`              | True if same union members in different order | `"a" \| "b"` vs `"b" \| "a"` → true              | Always false (Go has no unions)      |
-| `isGenericTypeParam(type)`          | True if type is an unresolvable generic param | `"T"`, `"TCustomAttributes"` → true              |                                      |
-| `isExtractionArtifact(type)`        | True if type is an extraction artifact        | `"any"` → true                                   | `"interface{}"` → true               |
-| `tolerateCategoryMismatch`          | Allow type alias ↔ interface/class mismatch   | `true` (TS allows both forms)                    | `false`                              |
-| `extractReturnTypeName(returnType)` | Extract innermost type from return type       | `"Promise<Organization>"` → `"Organization"`     |                                      |
-| `extractParamTypeName(paramType)`   | Extract type from param (null for primitives) | `"string"` → null                                |                                      |
-| `propertyMatchesClass(prop, class)` | True if property maps to class name           | camelCase: `"organizations"` → `"Organizations"` |                                      |
-| `derivedModelNames(modelName)`      | Additional names a model produces             | `["FooResponse", "SerializedFoo"]`               | `["FooResponse"]`                    |
+| Method/Property                     | Purpose                                                          | Node example                                     | Go example                           |
+| ----------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------ |
+| `stripNullable(type)`               | Strip nullable wrapper                                           | `"string \| null"` → `"string"`                  | `"*Organization"` → `"Organization"` |
+| `isNullableOnlyDifference(a, b)`    | True if a and b differ only by nullability                       | `"string"` vs `"string \| null"` → true          |                                      |
+| `isUnionReorder(a, b)`              | True if same union members in different order                    | `"a" \| "b"` vs `"b" \| "a"` → true              | Always false (Go has no unions)      |
+| `isGenericTypeParam(type)`          | True if type is an unresolvable generic param                    | `"T"`, `"TCustomAttributes"` → true              |                                      |
+| `isExtractionArtifact(type)`        | True if type is an extraction artifact                           | `"any"` → true                                   | `"interface{}"` → true               |
+| `tolerateCategoryMismatch`          | Allow type alias ↔ interface/class mismatch                      | `true` (TS allows both forms)                    | `false`                              |
+| `extractReturnTypeName(returnType)` | Extract innermost type from return type                          | `"Promise<Organization>"` → `"Organization"`     |                                      |
+| `extractParamTypeName(paramType)`   | Extract type from param (null for primitives)                    | `"string"` → null                                |                                      |
+| `propertyMatchesClass(prop, class)` | True if property maps to class name                              | camelCase: `"organizations"` → `"Organizations"` |                                      |
+| `derivedModelNames(modelName)`      | Additional names a model produces                                | `["FooResponse", "SerializedFoo"]`               | `["FooResponse"]`                    |
+| `isTypeEquivalent?(a, b, surface)`  | True if types are semantically equivalent                        | Named enum vs inline union of literals           |                                      |
+| `isSignatureEquivalent?(a, b, s)`   | True if signatures are equivalent despite structural differences | Unpacked params vs dict payload                  |                                      |
+| `modelBaseClasses?`                 | Base class names indicating a data model                         | `["BaseModel"]` (Python/Pydantic)                | —                                    |
+| `exceptionBaseClasses?`             | Base class names indicating an exception                         | `["Exception"]`                                  | —                                    |
+| `listResourcePatterns?`             | Type names for list/paginated wrappers                           | `["ListResource"]`                               | —                                    |
 
 Use `resolveHints({...overrides})` to start from Node defaults and override only the methods that differ for your language:
 
@@ -225,3 +230,6 @@ Use `/generate-extractor <language>` for a guided workflow.
 | Rust     | `rust.ts`, `rust-parser.ts`, `rust-surface.ts`       |
 | PHP      | `php.ts`, `php-parser.ts`, `php-surface.ts`          |
 | Python   | `python.ts`, `python-parser.ts`, `python-surface.ts` |
+| Kotlin   | `kotlin.ts`, `kotlin-parser.ts`, `kotlin-surface.ts` |
+| .NET     | `dotnet.ts`, `dotnet-parser.ts`, `dotnet-surface.ts` |
+| Elixir   | `elixir.ts`, `elixir-parser.ts`, `elixir-surface.ts` |
