@@ -305,6 +305,46 @@ export interface Bar { name: string; }
     expect(result.content).not.toContain("import { Baz } from './baz.js'");
   });
 
+  it('deduplicates imports by identifier when module paths differ', async () => {
+    // Existing file imports Organization from a barrel (../interfaces)
+    const existing = `
+import { Organization, OrganizationResponse } from '../interfaces';
+
+export class Organizations {
+  constructor(private readonly workos: any) {}
+}
+`;
+    // Generated file imports the same identifiers from a specific file path
+    // AND adds a new method that triggers deep merge
+    const generated = `
+${header}
+
+import type { Organization, OrganizationResponse } from '../interfaces/organization.interface';
+import { deserializeOrganization } from './serializers/organization.serializer';
+
+export class Organizations {
+  constructor(private readonly workos: any) {}
+
+  async getOrganization(id: string): Promise<Organization> {
+    const { data } = await this.workos.get(id);
+    return deserializeOrganization(data);
+  }
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.changed).toBe(true);
+    // The new method should be added
+    expect(result.content).toContain('getOrganization');
+    // The deserializeOrganization import is genuinely new — should be added
+    expect(result.content).toContain('deserializeOrganization');
+    // Organization and OrganizationResponse are already imported from the barrel —
+    // should NOT be duplicated from the specific file path
+    expect(result.content).not.toContain("from '../interfaces/organization.interface'");
+    // The original barrel import is preserved
+    expect(result.content).toContain("import { Organization, OrganizationResponse } from '../interfaces'");
+  });
+
   it('handles barrel export lines', async () => {
     const existing = `
 export * from './organizations/interfaces/index.js';
