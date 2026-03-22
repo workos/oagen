@@ -16,7 +16,6 @@ import { walkKotlinFiles, parseKotlinFile } from './kotlin-parser.js';
 import { buildSurface } from './kotlin-surface.js';
 import type { KotlinDataClass, KotlinClass, KotlinEnum, KotlinTypeAlias } from './kotlin-parser.js';
 
-
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------

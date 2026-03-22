@@ -63,9 +63,8 @@ export function buildSurface(
         // Parse the type definition to find this field's type
         const fieldPrefix = field + ':';
         const prefixIdx = typeSpec.definition.indexOf(fieldPrefix);
-        const fieldTypeMatch = prefixIdx >= 0
-          ? typeSpec.definition.slice(prefixIdx + fieldPrefix.length).match(/^\s*([^,}]+)/)
-          : null;
+        const fieldTypeMatch =
+          prefixIdx >= 0 ? typeSpec.definition.slice(prefixIdx + fieldPrefix.length).match(/^\s*([^,}]+)/) : null;
         if (fieldTypeMatch) {
           fieldType = fieldTypeMatch[1].trim();
           // Check if nullable (contains | nil)

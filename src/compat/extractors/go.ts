@@ -17,7 +17,6 @@ import { walkGoFiles, parseGoFile } from './go-parser.js';
 import { buildSurface } from './go-surface.js';
 import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
 
-
 // ---------------------------------------------------------------------------
 // Language hints
 // ---------------------------------------------------------------------------
@@ -27,8 +26,29 @@ import type { GoStruct, GoTypeDecl, GoFunc, GoConst } from './go-parser.js';
  * e.g., hand-written uses "Json" / "Uri" while generated uses "JSON" / "URI".
  */
 const GO_ACRONYMS = [
-  'ID', 'URL', 'API', 'HTTP', 'HTTPS', 'JSON', 'XML', 'SQL', 'HTML', 'CSS',
-  'URI', 'SSO', 'IP', 'TLS', 'SSL', 'DNS', 'TCP', 'UDP', 'SSH', 'JWT', 'MFA', 'SAML', 'SCIM',
+  'ID',
+  'URL',
+  'API',
+  'HTTP',
+  'HTTPS',
+  'JSON',
+  'XML',
+  'SQL',
+  'HTML',
+  'CSS',
+  'URI',
+  'SSO',
+  'IP',
+  'TLS',
+  'SSL',
+  'DNS',
+  'TCP',
+  'UDP',
+  'SSH',
+  'JWT',
+  'MFA',
+  'SAML',
+  'SCIM',
 ];
 
 // Precompiled regex matching all acronym forms (uppercase + title-case) in a single pass.

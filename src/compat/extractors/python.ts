@@ -12,11 +12,15 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
-import { NAMED_TYPE_RE, typeExistsInSurface, namedTypeWordsOverlap, defaultIsNullableOnlyDifference } from '../language-hints.js';
+import {
+  NAMED_TYPE_RE,
+  typeExistsInSurface,
+  namedTypeWordsOverlap,
+  defaultIsNullableOnlyDifference,
+} from '../language-hints.js';
 import { walkPythonFiles, findPythonSourceRoot, parsePythonFile } from './python-parser.js';
 import { buildSurface } from './python-surface.js';
 import type { ParsedPythonFile } from './python-parser.js';
-
 
 // ---------------------------------------------------------------------------
 // Language hints
