@@ -307,6 +307,7 @@ export async function mergeIntoExisting(
   // Deep merge pass: add new members to existing symbols
   // Runs after import/symbol merge so line numbers are based on the updated content
   let deepAdded = 0;
+  const insertions: { line: number; text: string }[] = [];
   if (adapter.extractMembers) {
     const parser = await getParser(language);
     const resultTree = safeParse(parser, result);
@@ -319,9 +320,6 @@ export async function mergeIntoExisting(
     const existingDocs = adapter.extractDocstrings(existingTree, existingContent);
     const deepIgnoredRegions = findIgnoredRegions(existingContent);
     const deepIgnoredSymbols = buildIgnoredSymbolNames(existingDocs, deepIgnoredRegions);
-
-    // Collect insertions: {line, text} for new members
-    const insertions: { line: number; text: string }[] = [];
 
     for (const [symbolName, genSymbol] of generatedSymbols) {
       if (deepIgnoredSymbols.has(symbolName)) continue;
@@ -351,14 +349,40 @@ export async function mergeIntoExisting(
 
   // Insert new imports only when new symbols or members were actually added.
   // This prevents orphaned imports for generated code that wasn't merged in.
+  // Additionally, filter imports to only include identifiers actually used in the
+  // appended/inserted code — prevents orphaned imports for generated code that
+  // referenced types used in other (non-appended) generated functions.
   if (newImports.length > 0 && (toAppend.length > 0 || deepAdded > 0)) {
-    const renderedImports = adapter.renderImports
-      ? adapter.renderImports(newImports)
-      : newImports.map((entry) => entry.text);
-    const lines = result.split('\n');
-    const insertIdx = lastImportEndIndex + 1;
-    lines.splice(insertIdx, 0, ...renderedImports);
-    result = lines.join('\n');
+    // Build text of all new code that was actually added (appended + deep-merged members)
+    const addedParts: string[] = [...toAppend];
+    if (insertions) {
+      for (const ins of insertions) {
+        addedParts.push(ins.text);
+      }
+    }
+    const addedCodeText = addedParts.join('\n');
+
+    // Filter imports to only those whose identifiers appear in the added code
+    const filteredImports = newImports.filter((imp) => {
+      const braceMatch = imp.text.match(/\{([^}]+)\}/);
+      if (!braceMatch) return true; // Keep non-destructured imports (e.g., default imports)
+      const names = braceMatch[1]
+        .split(',')
+        .map((n) => n.replace(/\btype\b/, '').trim())
+        .filter(Boolean);
+      // Keep the import if any of its identifiers appear in the added code
+      return names.some((name) => addedCodeText.includes(name));
+    });
+
+    if (filteredImports.length > 0) {
+      const renderedImports = adapter.renderImports
+        ? adapter.renderImports(filteredImports)
+        : filteredImports.map((entry) => entry.text);
+      const lines = result.split('\n');
+      const insertIdx = lastImportEndIndex + 1;
+      lines.splice(insertIdx, 0, ...renderedImports);
+      result = lines.join('\n');
+    }
   }
 
   // Docstring refresh pass: update existing docstrings to match generated content
