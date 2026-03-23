@@ -235,13 +235,15 @@ export async function mergeIntoExisting(
         .split(',')
         .map((n) => n.replace(/\btype\b/, '').trim())
         .filter(Boolean);
-      if (names.length > 0 && names.every((n) => existingImportedNames.has(n))) {
+      // Check against both existing imports AND existing top-level declarations
+      const isAlreadyDefined = (n: string) => existingImportedNames.has(n) || existingKeys.has(n);
+      if (names.length > 0 && names.every(isAlreadyDefined)) {
         preserved++;
         continue;
       }
-      // If only SOME identifiers are already imported, strip them out and keep only new ones
-      if (names.some((n) => existingImportedNames.has(n))) {
-        const newNames = names.filter((n) => !existingImportedNames.has(n));
+      // If only SOME identifiers are already defined, strip them out and keep only new ones
+      if (names.some(isAlreadyDefined)) {
+        const newNames = names.filter((n) => !isAlreadyDefined(n));
         if (newNames.length === 0) {
           preserved++;
           continue;
@@ -330,6 +332,13 @@ export async function mergeIntoExisting(
       const newMembers = genSymbol.members.filter((m) => !existingMemberKeys.has(m.key));
 
       if (newMembers.length > 0) {
+        // Skip deep merge if new members reference `this.workos` but the existing
+        // class doesn't have a `workos` property (e.g., Webhooks which uses CryptoProvider)
+        const newMemberText = newMembers.map((m) => m.text).join('\n');
+        if (newMemberText.includes('this.workos') && !existingMemberKeys.has('workos')) {
+          continue;
+        }
+
         const insertText = newMembers.map((m) => '  ' + m.text).join('\n');
         insertions.push({ line: existSymbol.bodyEndLine, text: insertText });
         deepAdded += newMembers.length;

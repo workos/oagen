@@ -74,6 +74,18 @@ export async function writeFiles(
       continue;
     }
 
+    // Don't merge test files into existing test files — generated tests are designed
+    // for the standalone generated SDK and will have wrong signatures/fixtures when
+    // merged into hand-written tests.
+    if (
+      file.path.match(/\.(spec|test)\.[jt]sx?$/) ||
+      file.path.endsWith('_test.go') ||
+      file.path.endsWith('_test.rb')
+    ) {
+      result.skipped.push(file.path);
+      continue;
+    }
+
     // Identical content → no-op
     if (existingContent === file.content) {
       result.identical.push(file.path);
