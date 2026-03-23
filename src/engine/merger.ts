@@ -225,7 +225,7 @@ export async function mergeIntoExisting(
       preserved++;
       continue;
     }
-    // Also skip if every imported identifier is already imported from another path.
+    // Strip out identifiers that are already imported from another path.
     // This prevents duplicates when the generated file uses a specific path
     // (e.g., '../interfaces/organization.interface') while the existing file
     // imports the same names from a barrel (e.g., '../interfaces').
@@ -238,6 +238,23 @@ export async function mergeIntoExisting(
       if (names.length > 0 && names.every((n) => existingImportedNames.has(n))) {
         preserved++;
         continue;
+      }
+      // If only SOME identifiers are already imported, strip them out and keep only new ones
+      if (names.some((n) => existingImportedNames.has(n))) {
+        const newNames = names.filter((n) => !existingImportedNames.has(n));
+        if (newNames.length === 0) {
+          preserved++;
+          continue;
+        }
+        // Rebuild the import with only new identifiers
+        const isTypeImport = imp.text.trimStart().startsWith('import type');
+        const prefix = isTypeImport ? 'import type' : 'import';
+        const sourceMatch = imp.text.match(/from\s+(['"][^'"]+['"]);?/);
+        if (sourceMatch) {
+          const newText = `${prefix} { ${newNames.join(', ')} } from ${sourceMatch[1]};`;
+          newImports.push({ key: imp.key, text: newText });
+          continue;
+        }
       }
     }
     newImports.push(imp);
