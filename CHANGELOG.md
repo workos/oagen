@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.1](https://github.com/workos/oagen/compare/v0.1.0...v0.1.1) (2026-03-23)
+
+
+### Bug Fixes
+
+* deduplicate imports by identifier name, not just module path ([#3](https://github.com/workos/oagen/issues/3)) ([6f7d1c8](https://github.com/workos/oagen/commit/6f7d1c80ece31907ba2bbe226fd98ad11d55cf0f))
+* move dotenv from devDependencies to dependencies ([#5](https://github.com/workos/oagen/issues/5)) ([cc4cf14](https://github.com/workos/oagen/commit/cc4cf142da1be91a9f600b6893d24261cdc6ed29))
+* update workflow to use proper token ([ab516ad](https://github.com/workos/oagen/commit/ab516ad2fb051356df3d5a79b6d180b32d8349ce))
+
 ## [0.1.0](https://github.com/workos/oagen/compare/v0.0.1...v0.1.0) (2026-03-22)
 
 
