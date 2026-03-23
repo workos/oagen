@@ -225,6 +225,21 @@ export async function mergeIntoExisting(
       preserved++;
       continue;
     }
+    // Also skip if every imported identifier is already imported from another path.
+    // This prevents duplicates when the generated file uses a specific path
+    // (e.g., '../interfaces/organization.interface') while the existing file
+    // imports the same names from a barrel (e.g., '../interfaces').
+    const braceMatch = imp.text.match(/\{([^}]+)\}/);
+    if (braceMatch) {
+      const names = braceMatch[1]
+        .split(',')
+        .map((n) => n.replace(/\btype\b/, '').trim())
+        .filter(Boolean);
+      if (names.length > 0 && names.every((n) => existingImportedNames.has(n))) {
+        preserved++;
+        continue;
+      }
+    }
     newImports.push(imp);
   }
 
