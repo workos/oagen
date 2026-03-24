@@ -1678,4 +1678,53 @@ export class UserService {
     const createUserLine = lines.find((l) => l.includes('createUser'));
     expect(createUserLine).toMatch(/^    /); // 4 spaces
   });
+
+  it('adds supplemental import for new identifiers from an existing module path', async () => {
+    const existing = `
+import { ApiKey, SerializedApiKey } from '../interfaces/api-key.interface';
+
+export function deserializeApiKey(apiKey: SerializedApiKey): ApiKey {
+  return { id: apiKey.id };
+}
+`;
+    const generated = `
+${header}
+
+import type { ApiKey, ApiKeyResponse } from '../interfaces/api-key.interface';
+
+export const deserializeApiKey = (response: ApiKeyResponse): ApiKey => ({
+  id: response.id,
+});
+
+export const serializeApiKey = (model: ApiKey): ApiKeyResponse => ({
+  id: model.id,
+});
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.changed).toBe(true);
+    // serializeApiKey should be appended
+    expect(result.content).toContain('serializeApiKey');
+    // ApiKeyResponse should be added via supplemental import (used in appended code)
+    expect(result.content).toContain('ApiKeyResponse');
+  });
+
+  it('filters out supplemental imports whose identifiers are not used in appended code', async () => {
+    const existing = `
+import { Foo } from './types';
+
+export const useFoo = (x: Foo) => x;
+`;
+    const generated = `
+${header}
+
+import { Foo, Bar } from './types';
+
+export const useFoo = (x: Foo) => x;
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    // No new symbols appended, so Bar should NOT be imported
+    expect(result.content).not.toContain('Bar');
+  });
 });

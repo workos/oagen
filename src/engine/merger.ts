@@ -222,6 +222,30 @@ export async function mergeIntoExisting(
   for (const imp of generatedStatements.imports) {
     if (imp.text.trim() === headerLine) continue;
     if (existingImportKeys.has(imp.key)) {
+      // The existing file already imports from this module path.
+      // Check if the generated import adds identifiers not present in
+      // the existing import — if so, create a supplemental import with
+      // only the new identifiers.  The supplemental participates in the
+      // usage-based filter (below) so unused identifiers are dropped.
+      const braceMatch = imp.text.match(/\{([^}]+)\}/);
+      if (braceMatch) {
+        const names = braceMatch[1]
+          .split(',')
+          .map((n) => n.replace(/\btype\b/, '').trim())
+          .filter(Boolean);
+        const newNames = names.filter((n) => !existingImportedNames.has(n) && !existingKeys.has(n));
+        if (newNames.length > 0) {
+          const isTypeImport = imp.text.trimStart().startsWith('import type');
+          const prefix = isTypeImport ? 'import type' : 'import';
+          const sourceMatch = imp.text.match(/from\s+(['"][^'"]+['"]);?/);
+          if (sourceMatch) {
+            newImports.push({
+              key: imp.key + '#supplemental',
+              text: `${prefix} { ${newNames.join(', ')} } from ${sourceMatch[1]};`,
+            });
+          }
+        }
+      }
       preserved++;
       continue;
     }
