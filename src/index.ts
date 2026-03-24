@@ -26,7 +26,16 @@ export type {
   ErrorResponse,
 } from './ir/types.js';
 
-export { assertNever, walkTypeRef, mapTypeRef } from './ir/types.js';
+export {
+  assertNever,
+  walkTypeRef,
+  mapTypeRef,
+  collectModelRefs,
+  collectEnumRefs,
+  collectFieldDependencies,
+  assignModelsToServices,
+  collectRequestBodyModels,
+} from './ir/types.js';
 
 // Errors
 export {
