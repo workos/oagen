@@ -98,6 +98,7 @@ function collectPrecedingGoComments(
 export const goMergeAdapter: MergeAdapter = {
   language: 'go',
   grammarModule: 'tree-sitter-go',
+  testFilePatterns: [/_test\.go$/],
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];

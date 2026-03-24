@@ -326,6 +326,52 @@ describe('writeFiles', () => {
     }
   });
 
+  it('skips test files for all supported languages', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const testPaths = [
+        'src/foo.test.ts', // node
+        'src/foo.spec.tsx', // node
+        'foo_test.go', // go
+        'foo_test.rb', // ruby
+        'foo_spec.rb', // ruby
+        'test_foo.py', // python
+        'foo_test.py', // python
+        'FooTest.php', // php
+        'foo_test.rs', // rust
+        'tests/integration.rs', // rust
+      ];
+      for (const p of testPaths) {
+        const fullPath = path.join(tmpDir, p);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.writeFile(fullPath, 'existing content');
+      }
+
+      const files = testPaths.map((p) => ({ path: p, content: 'new content' }));
+      // Use each language to test its adapter's testFilePatterns
+      const languages = ['node', 'go', 'ruby', 'python', 'php', 'rust'] as const;
+      for (const lang of languages) {
+        const result = await writeFiles(files, tmpDir, { language: lang });
+        const langTestFiles = testPaths.filter((p) => {
+          const langPatterns: Record<string, RegExp[]> = {
+            node: [/\.(spec|test)\.[jt]sx?$/],
+            go: [/_test\.go$/],
+            ruby: [/_test\.rb$/, /_spec\.rb$/],
+            python: [/(?:^|\/)test_.*\.py$/, /_test\.py$/],
+            php: [/Test\.php$/],
+            rust: [/_test\.rs$/, /(?:^|\/)tests\/.*\.rs$/],
+          };
+          return langPatterns[lang]!.some((re) => re.test(p));
+        });
+        for (const tf of langTestFiles) {
+          expect(result.skipped, `${lang} should skip ${tf}`).toContain(tf);
+        }
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
   it('warns on console when AST merge throws', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});

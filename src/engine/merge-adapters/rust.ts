@@ -51,6 +51,7 @@ function collectPrecedingRustDocComments(
 export const rustMergeAdapter: MergeAdapter = {
   language: 'rust',
   grammarModule: 'tree-sitter-rust',
+  testFilePatterns: [/_test\.rs$/, /(?:^|\/)tests\/.*\.rs$/],
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];

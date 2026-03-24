@@ -45,6 +45,7 @@ function collectPrecedingRubyComments(
 export const rubyMergeAdapter: MergeAdapter = {
   language: 'ruby',
   grammarModule: 'tree-sitter-ruby',
+  testFilePatterns: [/_test\.rb$/, /_spec\.rb$/],
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];

@@ -39,6 +39,7 @@ function findPhpDocstring(children: Parser.SyntaxNode[], index: number, source: 
 export const phpMergeAdapter: MergeAdapter = {
   language: 'php',
   grammarModule: 'tree-sitter-php',
+  testFilePatterns: [/Test\.php$/],
   resolveGrammar: (mod) => {
     if (typeof mod === 'object' && mod !== null && 'php' in mod) return (mod as { php: unknown }).php;
     return mod;

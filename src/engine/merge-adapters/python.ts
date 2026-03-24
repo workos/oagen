@@ -63,6 +63,7 @@ function collectPrecedingPythonComments(
 export const pythonMergeAdapter: MergeAdapter = {
   language: 'python',
   grammarModule: 'tree-sitter-python',
+  testFilePatterns: [/(?:^|\/)test_.*\.py$/, /_test\.py$/],
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
