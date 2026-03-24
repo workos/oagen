@@ -152,6 +152,7 @@ export interface Field {
   writeOnly?: boolean;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown;
 }
 
 /** Enum definition */
