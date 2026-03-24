@@ -55,7 +55,13 @@ function extractClassMembers(classBody: Parser.SyntaxNode, source: string): Merg
     } else if (child.type === 'public_field_definition') {
       const nameNode = child.childForFieldName('name');
       if (nameNode) {
-        members.push({ key: nameNode.text, text: source.slice(child.startIndex, child.endIndex) });
+        // tree-sitter may exclude the trailing semicolon from
+        // public_field_definition nodes — include it if present
+        let endIdx = child.endIndex;
+        if (source[endIdx] === ';') {
+          endIdx += 1;
+        }
+        members.push({ key: nameNode.text, text: source.slice(child.startIndex, endIdx) });
       }
     }
   }
