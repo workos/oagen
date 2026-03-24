@@ -148,6 +148,19 @@ export const nodeMergeAdapter: MergeAdapter = {
   language: 'node',
   grammarModule: 'tree-sitter-typescript/bindings/node/typescript.js',
   normalizeReexport: normalizeJsExtension,
+  testFilePatterns: [/\.(spec|test)\.[jt]sx?$/],
+  shouldSkipDeepMerge(_symbolName, existingMemberKeys, newMembers) {
+    // If new members reference instance properties (this.X) that don't exist
+    // in the target class, the merged code would be broken.
+    const newText = newMembers.map((m) => m.text).join('\n');
+    for (const match of newText.matchAll(/this\.(\w+)/g)) {
+      const propName = match[1];
+      if (propName && !existingMemberKeys.has(propName)) {
+        return true;
+      }
+    }
+    return false;
+  },
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -196,17 +209,23 @@ export const nodeMergeAdapter: MergeAdapter = {
         const body = decl.childForFieldName('body');
         if (!body) continue;
         const members = extractClassMembers(body, source);
-        result.set(symbolName, { members, bodyEndLine: body.endPosition.row });
+        const firstMember = body.firstNamedChild;
+        const memberIndent = firstMember ? ' '.repeat(firstMember.startPosition.column) : undefined;
+        result.set(symbolName, { members, bodyEndLine: body.endPosition.row, memberIndent });
       } else if (decl.type === 'interface_declaration') {
         const body = decl.childForFieldName('body');
         if (!body) continue;
         const members = extractInterfaceMembers(body, source);
-        result.set(symbolName, { members, bodyEndLine: body.endPosition.row });
+        const firstMember = body.firstNamedChild;
+        const memberIndent = firstMember ? ' '.repeat(firstMember.startPosition.column) : undefined;
+        result.set(symbolName, { members, bodyEndLine: body.endPosition.row, memberIndent });
       } else if (decl.type === 'enum_declaration') {
         const body = decl.childForFieldName('body');
         if (!body) continue;
         const members = extractEnumMembers(body, source);
-        result.set(symbolName, { members, bodyEndLine: body.endPosition.row });
+        const firstMember = body.firstNamedChild;
+        const memberIndent = firstMember ? ' '.repeat(firstMember.startPosition.column) : undefined;
+        result.set(symbolName, { members, bodyEndLine: body.endPosition.row, memberIndent });
       }
     }
 

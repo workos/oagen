@@ -332,14 +332,14 @@ export async function mergeIntoExisting(
       const newMembers = genSymbol.members.filter((m) => !existingMemberKeys.has(m.key));
 
       if (newMembers.length > 0) {
-        // Skip deep merge if new members reference `this.workos` but the existing
-        // class doesn't have a `workos` property (e.g., Webhooks which uses CryptoProvider)
-        const newMemberText = newMembers.map((m) => m.text).join('\n');
-        if (newMemberText.includes('this.workos') && !existingMemberKeys.has('workos')) {
+        // Let the adapter decide whether to skip deep merge (e.g., when new members
+        // reference dependencies the existing symbol doesn't provide)
+        if (adapter.shouldSkipDeepMerge?.(symbolName, existingMemberKeys, newMembers)) {
           continue;
         }
 
-        const insertText = newMembers.map((m) => '  ' + m.text).join('\n');
+        const indent = existSymbol.memberIndent ?? '  ';
+        const insertText = newMembers.map((m) => indent + m.text).join('\n');
         insertions.push({ line: existSymbol.bodyEndLine, text: insertText });
         deepAdded += newMembers.length;
       }
