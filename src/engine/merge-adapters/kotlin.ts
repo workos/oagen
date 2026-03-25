@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
 import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const KOTLIN_URL_FINGERPRINT_CONFIG = {
@@ -103,10 +110,7 @@ export const kotlinMergeAdapter: MergeAdapter = {
       if (!name) continue;
 
       const docstring = findPrecedingKdoc(rootChildren, i, source);
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       // Extract member docstrings for classes
       if (child.type === 'class_declaration') {

@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
 import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const PHP_URL_FINGERPRINT_CONFIG = {
@@ -97,10 +104,7 @@ export const phpMergeAdapter: MergeAdapter = {
       if (!name || name.startsWith('__namespace:')) continue;
 
       const docstring = findPhpDocstring(rootChildren, i, source);
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       const body = child.childForFieldName('body');
       if (body) {

@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
 import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const DOTNET_URL_FINGERPRINT_CONFIG = {
@@ -143,10 +150,7 @@ export const dotnetMergeAdapter: MergeAdapter = {
         if (!name || name.startsWith('__namespace:')) continue;
 
         const docstring = collectPrecedingXmlDocComments(children, i, source);
-        const members = new Map<
-          string,
-          { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-        >();
+        const members = new Map<string, MemberDocstrings>();
 
         // Extract member docstrings
         const body = child.children.find((c) => c.type === 'declaration_list');

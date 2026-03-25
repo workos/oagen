@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
 import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const PYTHON_URL_FINGERPRINT_CONFIG = {
@@ -122,10 +129,7 @@ export const pythonMergeAdapter: MergeAdapter = {
         docstring = collectPrecedingPythonComments(rootChildren, i, source);
       }
 
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       // Extract method docstrings for classes
       if (child.type === 'class_definition' && body) {

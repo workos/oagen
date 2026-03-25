@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
 import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const RUBY_URL_FINGERPRINT_CONFIG = {
@@ -94,10 +101,7 @@ export const rubyMergeAdapter: MergeAdapter = {
       if (!name) continue;
 
       const docstring = collectPrecedingRubyComments(rootChildren, i, source);
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       // Ruby class/module bodies: comments may appear in class children
       // (before body_statement) or in body_statement children (between methods)

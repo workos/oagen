@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
 import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const ELIXIR_URL_FINGERPRINT_CONFIG = {
@@ -105,10 +112,7 @@ export const elixirMergeAdapter: MergeAdapter = {
       // Look for @moduledoc inside the do_block
       let docstring: DocstringInfo | null = null;
       const doBlock = getDoBlock(child);
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       if (doBlock) {
         const bodyChildren = doBlock.children;

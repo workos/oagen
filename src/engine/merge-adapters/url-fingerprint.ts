@@ -74,6 +74,12 @@ function resolveFingerprint(
 
 /** Check if a node is a call to one of the format functions (e.g., fmt.Sprintf, format!). */
 function isFormatCall(node: Parser.SyntaxNode, formatFns: Set<string>): boolean {
+  // Rust macro: format!(...) — tree-sitter may parse as macro_invocation
+  if (node.type === 'macro_invocation') {
+    const macroName = node.childForFieldName('macro')?.text;
+    return !!(macroName && formatFns.has(macroName.replace(/!$/, '')));
+  }
+
   if (node.type !== 'call_expression') return false;
   const fnNode = node.childForFieldName('function');
   if (!fnNode) return false;
@@ -86,13 +92,6 @@ function isFormatCall(node: Parser.SyntaxNode, formatFns: Set<string>): boolean 
     const prop = fnNode.childForFieldName('field') ?? fnNode.childForFieldName('property');
     if (prop && formatFns.has(prop.text)) return true;
   }
-
-  // Rust macro: format!(...) — tree-sitter may parse as macro_invocation
-  if (node.type === 'macro_invocation') {
-    const macroName = node.childForFieldName('macro')?.text;
-    if (macroName && formatFns.has(macroName.replace(/!$/, ''))) return true;
-  }
-
   return false;
 }
 
