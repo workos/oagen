@@ -1,4 +1,4 @@
-import { defineConfig } from 'tsup';
+import { defineConfig } from 'tsdown';
 
 export default defineConfig([
   {
@@ -17,10 +17,8 @@ export default defineConfig([
     format: ['esm'],
     clean: false,
     target: 'node20',
-    external: ['dotenv/config'],
-    banner: {
-      js: '#!/usr/bin/env tsx',
-    },
+    deps: { neverBundle: ['dotenv/config'] },
+    banner: '#!/usr/bin/env tsx',
   },
   {
     entry: { smoke: 'scripts/smoke/shared.ts' },
@@ -28,7 +26,7 @@ export default defineConfig([
     dts: true,
     clean: false,
     target: 'node20',
-    external: ['node:fs', 'node:path', 'node:url', 'dotenv/config'],
+    deps: { neverBundle: ['node:fs', 'node:path', 'node:url', 'dotenv/config'] },
   },
   {
     entry: {
@@ -38,6 +36,8 @@ export default defineConfig([
     format: ['esm'],
     clean: false,
     target: 'node20',
-    external: ['node:fs', 'node:path', 'node:url', 'node:util', 'dotenv/config'],
+    deps: {
+      neverBundle: ['node:fs', 'node:path', 'node:url', 'node:util', 'dotenv/config'],
+    },
   },
 ]);
