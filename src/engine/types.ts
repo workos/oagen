@@ -8,6 +8,8 @@ export interface GeneratedFile {
   headerPlacement?: 'prepend' | 'skip';
   /** When false, exclude this file from --target integration. Defaults to true. */
   integrateTarget?: boolean;
+  /** When true, always overwrite existing file instead of merging. Defaults to false. */
+  overwriteExisting?: boolean;
 }
 
 export interface EmitterContext {

@@ -93,6 +93,13 @@ export async function writeFiles(
       continue;
     }
 
+    // Force overwrite — skip merge logic entirely
+    if (file.overwriteExisting) {
+      await fs.writeFile(fullPath, file.content, 'utf-8');
+      result.written.push(file.path);
+      continue;
+    }
+
     // JSON files → deep merge preserving existing keys
     if (file.path.endsWith('.json')) {
       try {
