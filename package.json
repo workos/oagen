@@ -5,8 +5,8 @@
   "author": "WorkOS",
   "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
   "engines": {
     "node": ">=24.10.0"
   },
@@ -27,24 +27,24 @@
   ],
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
     },
     "./compat": {
-      "types": "./dist/compat/index.d.ts",
-      "import": "./dist/compat/index.js"
+      "types": "./dist/compat/index.d.mts",
+      "import": "./dist/compat/index.mjs"
     },
     "./verify": {
-      "types": "./dist/verify/index.d.ts",
-      "import": "./dist/verify/index.js"
+      "types": "./dist/verify/index.d.mts",
+      "import": "./dist/verify/index.mjs"
     },
     "./smoke": {
-      "types": "./dist/smoke.d.ts",
-      "import": "./dist/smoke.js"
+      "types": "./dist/smoke.d.mts",
+      "import": "./dist/smoke.mjs"
     }
   },
   "bin": {
-    "oagen": "dist/cli/index.js"
+    "oagen": "dist/cli/index.mjs"
   },
   "files": [
     "dist",
@@ -54,7 +54,7 @@
     "examples"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsdown",
     "dev": "tsx src/cli/index.ts",
     "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix",
@@ -89,7 +89,7 @@
     "tree-sitter-typescript": "^0.23.2",
     "dotenv": "^17.3.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^6.0.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.5.0",
@@ -100,7 +100,7 @@
     "oxfmt": "^0.36.0",
     "oxlint": "^1.51.0",
     "prettier": "^3.8.1",
-    "tsup": "^8.4.0",
+    "tsdown": "^0.21.5",
     "vitest": "^3.0.0"
   }
 }
