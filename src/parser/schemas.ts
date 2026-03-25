@@ -23,6 +23,7 @@ export interface SchemaObject {
   patternProperties?: Record<string, SchemaObject>;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown;
   [key: string]: unknown;
 }
 
@@ -251,6 +252,7 @@ export function buildFieldFromSchema(
     writeOnly: fieldSchema.writeOnly || undefined,
     deprecated: fieldSchema.deprecated || undefined,
     default: fieldSchema.default,
+    example: fieldSchema.example,
   };
 }
 

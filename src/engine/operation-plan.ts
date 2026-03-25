@@ -9,6 +9,9 @@ export interface OperationPlan {
   pathParamsInOptions: boolean;
   isPaginated: boolean;
   responseModelName: string | null;
+  /** For paginated operations, the model name of individual list items
+   *  (unwrapped from the list wrapper). Null for non-paginated. */
+  paginatedItemModelName: string | null;
   isModelResponse: boolean;
   hasQueryParams: boolean;
   isAsync: boolean;
@@ -22,6 +25,8 @@ export function planOperation(op: Operation): OperationPlan {
   const pathParamsInOptions = op.pathParams.length > 1 || (op.pathParams.length > 0 && (hasBody || hasQueryParams));
   const isPaginated = op.pagination !== undefined;
   const responseModelName = resolveResponseModelName(op);
+  const paginatedItemModelName =
+    isPaginated && op.pagination?.itemType.kind === 'model' ? op.pagination.itemType.name : null;
   const isModelResponse = responseModelName !== null;
   const isAsync = op.async ?? true;
 
@@ -33,6 +38,7 @@ export function planOperation(op: Operation): OperationPlan {
     pathParamsInOptions,
     isPaginated,
     responseModelName,
+    paginatedItemModelName,
     isModelResponse,
     hasQueryParams,
     isAsync,

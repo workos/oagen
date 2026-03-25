@@ -222,10 +222,34 @@ export async function mergeIntoExisting(
   for (const imp of generatedStatements.imports) {
     if (imp.text.trim() === headerLine) continue;
     if (existingImportKeys.has(imp.key)) {
+      // The existing file already imports from this module path.
+      // Check if the generated import adds identifiers not present in
+      // the existing import — if so, create a supplemental import with
+      // only the new identifiers.  The supplemental participates in the
+      // usage-based filter (below) so unused identifiers are dropped.
+      const braceMatch = imp.text.match(/\{([^}]+)\}/);
+      if (braceMatch) {
+        const names = braceMatch[1]
+          .split(',')
+          .map((n) => n.replace(/\btype\b/, '').trim())
+          .filter(Boolean);
+        const newNames = names.filter((n) => !existingImportedNames.has(n) && !existingKeys.has(n));
+        if (newNames.length > 0) {
+          const isTypeImport = imp.text.trimStart().startsWith('import type');
+          const prefix = isTypeImport ? 'import type' : 'import';
+          const sourceMatch = imp.text.match(/from\s+(['"][^'"]+['"]);?/);
+          if (sourceMatch) {
+            newImports.push({
+              key: imp.key + '#supplemental',
+              text: `${prefix} { ${newNames.join(', ')} } from ${sourceMatch[1]};`,
+            });
+          }
+        }
+      }
       preserved++;
       continue;
     }
-    // Also skip if every imported identifier is already imported from another path.
+    // Strip out identifiers that are already imported from another path.
     // This prevents duplicates when the generated file uses a specific path
     // (e.g., '../interfaces/organization.interface') while the existing file
     // imports the same names from a barrel (e.g., '../interfaces').
@@ -235,9 +259,28 @@ export async function mergeIntoExisting(
         .split(',')
         .map((n) => n.replace(/\btype\b/, '').trim())
         .filter(Boolean);
-      if (names.length > 0 && names.every((n) => existingImportedNames.has(n))) {
+      // Check against both existing imports AND existing top-level declarations
+      const isAlreadyDefined = (n: string) => existingImportedNames.has(n) || existingKeys.has(n);
+      if (names.length > 0 && names.every(isAlreadyDefined)) {
         preserved++;
         continue;
+      }
+      // If only SOME identifiers are already defined, strip them out and keep only new ones
+      if (names.some(isAlreadyDefined)) {
+        const newNames = names.filter((n) => !isAlreadyDefined(n));
+        if (newNames.length === 0) {
+          preserved++;
+          continue;
+        }
+        // Rebuild the import with only new identifiers
+        const isTypeImport = imp.text.trimStart().startsWith('import type');
+        const prefix = isTypeImport ? 'import type' : 'import';
+        const sourceMatch = imp.text.match(/from\s+(['"][^'"]+['"]);?/);
+        if (sourceMatch) {
+          const newText = `${prefix} { ${newNames.join(', ')} } from ${sourceMatch[1]};`;
+          newImports.push({ key: imp.key, text: newText });
+          continue;
+        }
       }
     }
     newImports.push(imp);
@@ -290,6 +333,7 @@ export async function mergeIntoExisting(
   // Deep merge pass: add new members to existing symbols
   // Runs after import/symbol merge so line numbers are based on the updated content
   let deepAdded = 0;
+  const insertions: { line: number; text: string }[] = [];
   if (adapter.extractMembers) {
     const parser = await getParser(language);
     const resultTree = safeParse(parser, result);
@@ -303,9 +347,6 @@ export async function mergeIntoExisting(
     const deepIgnoredRegions = findIgnoredRegions(existingContent);
     const deepIgnoredSymbols = buildIgnoredSymbolNames(existingDocs, deepIgnoredRegions);
 
-    // Collect insertions: {line, text} for new members
-    const insertions: { line: number; text: string }[] = [];
-
     for (const [symbolName, genSymbol] of generatedSymbols) {
       if (deepIgnoredSymbols.has(symbolName)) continue;
       const existSymbol = resultSymbols.get(symbolName);
@@ -315,7 +356,14 @@ export async function mergeIntoExisting(
       const newMembers = genSymbol.members.filter((m) => !existingMemberKeys.has(m.key));
 
       if (newMembers.length > 0) {
-        const insertText = newMembers.map((m) => '  ' + m.text).join('\n');
+        // Let the adapter decide whether to skip deep merge (e.g., when new members
+        // reference dependencies the existing symbol doesn't provide)
+        if (adapter.shouldSkipDeepMerge?.(symbolName, existingMemberKeys, newMembers)) {
+          continue;
+        }
+
+        const indent = existSymbol.memberIndent ?? '  ';
+        const insertText = newMembers.map((m) => indent + m.text).join('\n');
         insertions.push({ line: existSymbol.bodyEndLine, text: insertText });
         deepAdded += newMembers.length;
       }
@@ -334,14 +382,40 @@ export async function mergeIntoExisting(
 
   // Insert new imports only when new symbols or members were actually added.
   // This prevents orphaned imports for generated code that wasn't merged in.
+  // Additionally, filter imports to only include identifiers actually used in the
+  // appended/inserted code — prevents orphaned imports for generated code that
+  // referenced types used in other (non-appended) generated functions.
   if (newImports.length > 0 && (toAppend.length > 0 || deepAdded > 0)) {
-    const renderedImports = adapter.renderImports
-      ? adapter.renderImports(newImports)
-      : newImports.map((entry) => entry.text);
-    const lines = result.split('\n');
-    const insertIdx = lastImportEndIndex + 1;
-    lines.splice(insertIdx, 0, ...renderedImports);
-    result = lines.join('\n');
+    // Build text of all new code that was actually added (appended + deep-merged members)
+    const addedParts: string[] = [...toAppend];
+    if (insertions) {
+      for (const ins of insertions) {
+        addedParts.push(ins.text);
+      }
+    }
+    const addedCodeText = addedParts.join('\n');
+
+    // Filter imports to only those whose identifiers appear in the added code
+    const filteredImports = newImports.filter((imp) => {
+      const braceMatch = imp.text.match(/\{([^}]+)\}/);
+      if (!braceMatch) return true; // Keep non-destructured imports (e.g., default imports)
+      const names = braceMatch[1]
+        .split(',')
+        .map((n) => n.replace(/\btype\b/, '').trim())
+        .filter(Boolean);
+      // Keep the import if any of its identifiers appear in the added code
+      return names.some((name) => addedCodeText.includes(name));
+    });
+
+    if (filteredImports.length > 0) {
+      const renderedImports = adapter.renderImports
+        ? adapter.renderImports(filteredImports)
+        : filteredImports.map((entry) => entry.text);
+      const lines = result.split('\n');
+      const insertIdx = lastImportEndIndex + 1;
+      lines.splice(insertIdx, 0, ...renderedImports);
+      result = lines.join('\n');
+    }
   }
 
   // Docstring refresh pass: update existing docstrings to match generated content
@@ -389,10 +463,12 @@ export async function mergeIntoExisting(
         }
       }
 
-      // Member-level docstrings
+      // Member-level docstrings — first pass: match by name
+      const matchedExistMembers = new Set<string>();
       for (const [memberName, genMember] of genInfo.members) {
         const existMember = existInfo.members.get(memberName);
         if (!existMember || !genMember.docstring) continue;
+        matchedExistMembers.add(memberName);
 
         if (existMember.docstring) {
           const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
@@ -413,6 +489,42 @@ export async function mergeIntoExisting(
             newText: indent + genMember.docstring.text + '\n',
           });
           docstringUpdates++;
+        }
+      }
+
+      // Member-level docstrings — second pass: URL fingerprint fallback
+      // Match generated members to existing members by URL pattern when
+      // name-based matching fails (e.g., generated "find" vs existing "getOrganization"
+      // both call this.workos.get('/organizations/${id}')).
+      for (const [_genName, genMember] of genInfo.members) {
+        if (!genMember.docstring || !genMember.urlFingerprint) continue;
+        // Find unmatched existing member with the same URL fingerprint
+        for (const [existName, existMember] of existInfo.members) {
+          if (matchedExistMembers.has(existName)) continue;
+          if (!existMember.urlFingerprint || existMember.urlFingerprint !== genMember.urlFingerprint) continue;
+          if (existMember.docstring) {
+            const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
+            if (isPreserved) continue;
+            if (existMember.docstring.text !== genMember.docstring.text) {
+              edits.push({
+                start: existMember.docstring.startIndex,
+                end: existMember.docstring.endIndex,
+                newText: genMember.docstring.text,
+              });
+              docstringUpdates++;
+            }
+          } else {
+            const lineStart = existMember.declStartIndex - existMember.declColumn;
+            const indent = ' '.repeat(existMember.declColumn);
+            edits.push({
+              start: lineStart,
+              end: lineStart,
+              newText: indent + genMember.docstring.text + '\n',
+            });
+            docstringUpdates++;
+          }
+          matchedExistMembers.add(existName);
+          break; // Only match one existing member per generated member
         }
       }
     }

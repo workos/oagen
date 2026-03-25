@@ -11,7 +11,15 @@ import type {
   Model,
   Enum,
 } from '../../src/ir/types.js';
-import { walkTypeRef, mapTypeRef } from '../../src/ir/types.js';
+import {
+  walkTypeRef,
+  mapTypeRef,
+  collectModelRefs,
+  collectEnumRefs,
+  collectFieldDependencies,
+  assignModelsToServices,
+  collectRequestBodyModels,
+} from '../../src/ir/types.js';
 
 describe('IR types', () => {
   it('constructs a valid PrimitiveType', () => {
@@ -264,5 +272,139 @@ describe('walkTypeRef on MapType with keyType', () => {
       },
     );
     expect(visited).toEqual(['integer']);
+  });
+});
+
+describe('collectModelRefs', () => {
+  it('collects model names from nested TypeRef', () => {
+    const ref: TypeRef = {
+      kind: 'array',
+      items: { kind: 'nullable', inner: { kind: 'model', name: 'User' } },
+    };
+    expect(collectModelRefs(ref)).toEqual(['User']);
+  });
+
+  it('collects multiple models from a union', () => {
+    const ref: TypeRef = {
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'Dog' },
+        { kind: 'model', name: 'Cat' },
+      ],
+    };
+    expect(collectModelRefs(ref)).toEqual(['Dog', 'Cat']);
+  });
+
+  it('returns empty for primitives', () => {
+    expect(collectModelRefs({ kind: 'primitive', type: 'string' })).toEqual([]);
+  });
+});
+
+describe('collectEnumRefs', () => {
+  it('collects enum names from nested TypeRef', () => {
+    const ref: TypeRef = { kind: 'nullable', inner: { kind: 'enum', name: 'Status' } };
+    expect(collectEnumRefs(ref)).toEqual(['Status']);
+  });
+});
+
+describe('collectFieldDependencies', () => {
+  it('collects model and enum deps excluding self-references', () => {
+    const model: Model = {
+      name: 'Organization',
+      fields: [
+        { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+        { name: 'owner', type: { kind: 'model', name: 'User' }, required: true },
+        { name: 'status', type: { kind: 'enum', name: 'Status' }, required: true },
+        { name: 'parent', type: { kind: 'nullable', inner: { kind: 'model', name: 'Organization' } }, required: false },
+      ],
+    };
+    const deps = collectFieldDependencies(model);
+    expect(deps.models).toEqual(new Set(['User']));
+    expect(deps.enums).toEqual(new Set(['Status']));
+  });
+});
+
+describe('assignModelsToServices', () => {
+  it('assigns models to the first service that references them', () => {
+    const models: Model[] = [
+      { name: 'User', fields: [] },
+      { name: 'Org', fields: [] },
+      { name: 'Orphan', fields: [] },
+    ];
+    const services = [
+      {
+        name: 'Users',
+        operations: [
+          {
+            name: 'getUser',
+            httpMethod: 'get' as const,
+            path: '/users/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+      {
+        name: 'Orgs',
+        operations: [
+          {
+            name: 'getOrg',
+            httpMethod: 'get' as const,
+            path: '/orgs/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'Org' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services);
+    expect(map.get('User')).toBe('Users');
+    expect(map.get('Org')).toBe('Orgs');
+    expect(map.has('Orphan')).toBe(false);
+  });
+});
+
+describe('collectRequestBodyModels', () => {
+  it('collects model names from request bodies', () => {
+    const services = [
+      {
+        name: 'Users',
+        operations: [
+          {
+            name: 'createUser',
+            httpMethod: 'post' as const,
+            path: '/users',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            requestBody: { kind: 'model' as const, name: 'CreateUserRequest' },
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+          {
+            name: 'getUser',
+            httpMethod: 'get' as const,
+            path: '/users/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const result = collectRequestBodyModels(services);
+    expect(result).toEqual(new Set(['CreateUserRequest']));
   });
 });

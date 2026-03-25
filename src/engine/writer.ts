@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { GeneratedFile } from './types.js';
 import { mergeIntoExisting, hasGrammar } from './merger.js';
 import { deepMergeJson } from './json-merge.js';
+import { getMergeAdapter } from './merge-adapters/index.js';
 
 export interface WriteOptions {
   /** The emitter language (e.g., "node", "ruby"). Used to select the
@@ -74,9 +75,28 @@ export async function writeFiles(
       continue;
     }
 
+    // Don't merge test files into existing test files — generated tests are designed
+    // for the standalone generated SDK and will have wrong signatures/fixtures when
+    // merged into hand-written tests.
+    const adapter = language ? getMergeAdapter(language) : undefined;
+    const isTestFile = adapter?.testFilePatterns
+      ? adapter.testFilePatterns.some((p) => p.test(file.path))
+      : isDefaultTestFile(file.path);
+    if (isTestFile) {
+      result.skipped.push(file.path);
+      continue;
+    }
+
     // Identical content → no-op
     if (existingContent === file.content) {
       result.identical.push(file.path);
+      continue;
+    }
+
+    // Force overwrite — skip merge logic entirely
+    if (file.overwriteExisting) {
+      await fs.writeFile(fullPath, file.content, 'utf-8');
+      result.written.push(file.path);
       continue;
     }
 
@@ -136,4 +156,19 @@ export async function writeFiles(
   }
 
   return result;
+}
+
+/** Comprehensive fallback when no adapter is available. */
+function isDefaultTestFile(filePath: string): boolean {
+  return (
+    /\.(spec|test)\.[jt]sx?$/.test(filePath) ||
+    filePath.endsWith('_test.go') ||
+    filePath.endsWith('_test.rb') ||
+    filePath.endsWith('_spec.rb') ||
+    /(?:^|\/)test_.*\.py$/.test(filePath) ||
+    filePath.endsWith('_test.py') ||
+    filePath.endsWith('Test.php') ||
+    filePath.endsWith('_test.rs') ||
+    /(?:^|\/)tests\/.*\.rs$/.test(filePath)
+  );
 }

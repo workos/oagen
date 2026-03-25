@@ -1,5 +1,19 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const RUBY_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string'],
+  contentNodeTypes: ['string_content'],
+  interpolationNodeTypes: ['interpolation'],
+};
 
 function isRequireCall(node: Parser.SyntaxNode): boolean {
   if (node.type !== 'call') return false;
@@ -45,6 +59,8 @@ function collectPrecedingRubyComments(
 export const rubyMergeAdapter: MergeAdapter = {
   language: 'ruby',
   grammarModule: 'tree-sitter-ruby',
+  testFilePatterns: [/_test\.rb$/, /_spec\.rb$/],
+  urlFingerprintConfig: RUBY_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -85,10 +101,7 @@ export const rubyMergeAdapter: MergeAdapter = {
       if (!name) continue;
 
       const docstring = collectPrecedingRubyComments(rootChildren, i, source);
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       // Ruby class/module bodies: comments may appear in class children
       // (before body_statement) or in body_statement children (between methods)
@@ -128,6 +141,7 @@ export const rubyMergeAdapter: MergeAdapter = {
               docstring: memberDoc,
               declStartIndex: member.startIndex,
               declColumn: member.startPosition.column,
+              urlFingerprint: extractUrlFingerprint(member, RUBY_URL_FINGERPRINT_CONFIG),
             });
           }
         }

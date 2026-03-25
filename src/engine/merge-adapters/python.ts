@@ -1,5 +1,19 @@
 import type Parser from 'tree-sitter';
-import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import type {
+  MergeAdapter,
+  MergeStatement,
+  MergeImport,
+  DocstringInfo,
+  SymbolDocstrings,
+  MemberDocstrings,
+} from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const PYTHON_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string'],
+  contentNodeTypes: ['string_content'],
+  interpolationNodeTypes: ['interpolation'],
+};
 
 function extractPythonDeclarationName(node: Parser.SyntaxNode): string | null {
   if (node.type === 'class_definition' || node.type === 'function_definition') {
@@ -63,6 +77,8 @@ function collectPrecedingPythonComments(
 export const pythonMergeAdapter: MergeAdapter = {
   language: 'python',
   grammarModule: 'tree-sitter-python',
+  testFilePatterns: [/(?:^|\/)test_.*\.py$/, /_test\.py$/],
+  urlFingerprintConfig: PYTHON_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -113,10 +129,7 @@ export const pythonMergeAdapter: MergeAdapter = {
         docstring = collectPrecedingPythonComments(rootChildren, i, source);
       }
 
-      const members = new Map<
-        string,
-        { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }
-      >();
+      const members = new Map<string, MemberDocstrings>();
 
       // Extract method docstrings for classes
       if (child.type === 'class_definition' && body) {
@@ -135,6 +148,7 @@ export const pythonMergeAdapter: MergeAdapter = {
             docstring: memberDoc,
             declStartIndex: member.startIndex,
             declColumn: member.startPosition.column,
+            urlFingerprint: extractUrlFingerprint(member, PYTHON_URL_FINGERPRINT_CONFIG),
           });
         }
       }

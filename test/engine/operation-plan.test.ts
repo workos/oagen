@@ -43,6 +43,7 @@ describe('planOperation', () => {
             "type": "string",
           },
         },
+        "paginatedItemModelName": null,
         "pathParamsInOptions": false,
         "responseModelName": null,
       }
@@ -74,6 +75,7 @@ describe('planOperation', () => {
             "name": "Organization",
           },
         },
+        "paginatedItemModelName": null,
         "pathParamsInOptions": false,
         "responseModelName": "Organization",
       }
@@ -116,6 +118,7 @@ describe('planOperation', () => {
             "name": "Organization",
           },
         },
+        "paginatedItemModelName": null,
         "pathParamsInOptions": false,
         "responseModelName": "Organization",
       }
@@ -172,11 +175,34 @@ describe('planOperation', () => {
           dataPath: 'data',
           itemType: { kind: 'model', name: 'Organization' },
         },
-        response: { kind: 'model', name: 'Organization' },
+        response: { kind: 'model', name: 'OrganizationList' },
       }),
     );
     expect(plan.isPaginated).toBe(true);
-    expect(plan.responseModelName).toBe('Organization');
+    expect(plan.responseModelName).toBe('OrganizationList');
+    expect(plan.paginatedItemModelName).toBe('Organization');
+  });
+
+  it('paginated operation with non-model itemType → null paginatedItemModelName', () => {
+    const plan = planOperation(
+      makeOp({
+        pagination: {
+          strategy: 'cursor',
+          param: 'after',
+          dataPath: 'data',
+          itemType: { kind: 'primitive', type: 'string' },
+        },
+        response: { kind: 'model', name: 'StringList' },
+      }),
+    );
+    expect(plan.isPaginated).toBe(true);
+    expect(plan.paginatedItemModelName).toBeNull();
+  });
+
+  it('non-paginated operation → null paginatedItemModelName', () => {
+    const plan = planOperation(makeOp({ response: { kind: 'model', name: 'Organization' } }));
+    expect(plan.isPaginated).toBe(false);
+    expect(plan.paginatedItemModelName).toBeNull();
   });
 
   it('array response extracts inner model name', () => {
