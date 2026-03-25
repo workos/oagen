@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/workos/oagen/compare/v0.1.1...v0.2.0) (2026-03-25)
+
+
+### Features
+
+* generalize tree-sitter merging and improve overlay matching ([#6](https://github.com/workos/oagen/issues/6)) ([a65a225](https://github.com/workos/oagen/commit/a65a225a50bd977a34aa24abb84fc02bbf9bb4ae))
+
 ## [0.1.1](https://github.com/workos/oagen/compare/v0.1.0...v0.1.1) (2026-03-23)
 
 
