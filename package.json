@@ -1,6 +1,6 @@
 {
   "name": "@workos/oagen",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Framework for building OpenAPI SDK emitters",
   "author": "WorkOS",
   "license": "MIT",
@@ -87,7 +87,6 @@
     "tree-sitter-ruby": "^0.21.0",
     "tree-sitter-rust": "^0.21.0",
     "tree-sitter-typescript": "^0.23.2",
-    "dotenv": "^17.3.1",
     "tsx": "^4.19.0",
     "typescript": "^6.0.0"
   },
