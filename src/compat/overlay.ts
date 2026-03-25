@@ -131,6 +131,17 @@ export function buildOverlayLookup(
                 resolvedMethodName = best[0];
               }
             }
+
+            // HTTP verb disambiguation: when path disambiguation fails, use the
+            // HTTP method to prefer method names that match the verb semantics.
+            // E.g., GET → list/get, POST → create, PUT → set/update, DELETE → delete/remove.
+            if (!methods) {
+              const verbMatch = disambiguateByHttpVerb(candidates, entry.httpMethod);
+              if (verbMatch) {
+                methods = verbMatch[1];
+                resolvedMethodName = verbMatch[0];
+              }
+            }
           }
         }
 
@@ -158,7 +169,7 @@ export function buildOverlayLookup(
         // inserted into the manifest method name. For example:
         //   "disableFlag" → "disableFeatureFlag" (["disable","Flag"] ⊂ ["disable","Feature","Flag"])
         //   "getByExternalId" → "getOrganizationByExternalId"
-        // Only accept when exactly one candidate matches.
+        // Only accept when exactly one candidate matches, or use HTTP verb disambiguation.
         if (!methods) {
           const manifestWords = splitCamelCase(resolvedMethodName);
           if (manifestWords.length >= 2) {
@@ -174,6 +185,12 @@ export function buildOverlayLookup(
             if (candidates.length === 1) {
               methods = candidates[0][1];
               resolvedMethodName = candidates[0][0];
+            } else if (candidates.length > 1) {
+              const verbMatch = disambiguateByHttpVerb(candidates, entry.httpMethod);
+              if (verbMatch) {
+                methods = verbMatch[1];
+                resolvedMethodName = verbMatch[0];
+              }
             }
           }
         }
@@ -194,6 +211,12 @@ export function buildOverlayLookup(
           if (candidates.length === 1) {
             methods = candidates[0][1];
             resolvedMethodName = candidates[0][0];
+          } else if (candidates.length > 1) {
+            const verbMatch = disambiguateByHttpVerb(candidates, entry.httpMethod);
+            if (verbMatch) {
+              methods = verbMatch[1];
+              resolvedMethodName = verbMatch[0];
+            }
           }
         }
 
@@ -248,6 +271,36 @@ export function buildOverlayLookup(
   }
 
   return lookup;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP verb disambiguation
+// ---------------------------------------------------------------------------
+
+/** Map HTTP methods to preferred method name prefixes for disambiguation. */
+const HTTP_VERB_PREFIXES: Record<string, string[]> = {
+  GET: ['list', 'get', 'fetch', 'retrieve', 'find'],
+  POST: ['create', 'add', 'insert', 'send'],
+  PUT: ['set', 'update', 'replace', 'put'],
+  PATCH: ['update', 'patch', 'modify'],
+  DELETE: ['delete', 'remove', 'revoke'],
+};
+
+/**
+ * Disambiguate multiple method candidates using HTTP verb semantics.
+ * Returns the best match or undefined if no unique match is found.
+ */
+function disambiguateByHttpVerb<T>(candidates: [string, T][], httpMethod: string): [string, T] | undefined {
+  const prefixes = HTTP_VERB_PREFIXES[httpMethod.toUpperCase()];
+  if (!prefixes) return undefined;
+
+  const verbCandidates = candidates.filter(([name]) => {
+    const lower = name.toLowerCase();
+    return prefixes.some((p) => lower.startsWith(p));
+  });
+
+  if (verbCandidates.length === 1) return verbCandidates[0];
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
