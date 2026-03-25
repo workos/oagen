@@ -4,6 +4,7 @@ import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { writeFiles } from './writer.js';
 import { generateFiles } from './generate-files.js';
 import { integrateGeneratedFiles } from './integrate.js';
+import { formatTargetFiles } from './formatter.js';
 
 export async function generate(
   spec: ApiSpec,
@@ -58,6 +59,12 @@ export async function generate(
     }
     if (targetResult.skipped.length > 0) {
       console.log(`Target: skipped ${targetResult.skipped.length} files (excluded or no grammar)`);
+    }
+
+    // Run the emitter's formatter on all written/merged files
+    const allTargetFiles = [...targetResult.written, ...targetResult.merged];
+    if (allTargetFiles.length > 0) {
+      await formatTargetFiles(emitter, options.target, allTargetFiles);
     }
   }
 

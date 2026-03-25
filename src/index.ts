@@ -51,7 +51,7 @@ export {
 } from './errors.js';
 
 // Generation
-export type { GeneratedFile, EmitterContext, Emitter } from './engine/types.js';
+export type { GeneratedFile, EmitterContext, Emitter, FormatCommand } from './engine/types.js';
 
 export type {
   DiffReport,

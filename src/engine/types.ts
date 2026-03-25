@@ -21,6 +21,15 @@ export interface EmitterContext {
   overlayLookup?: OverlayLookup;
 }
 
+export interface FormatCommand {
+  /** The executable to run (e.g., "npx", "gofmt", "bundle"). */
+  cmd: string;
+  /** Arguments before the file list (e.g., ["prettier", "--write"]). */
+  args: string[];
+  /** Max files per invocation (to avoid OS arg-length limits). Defaults to 100. */
+  batchSize?: number;
+}
+
 export interface Emitter {
   language: string;
 
@@ -44,4 +53,12 @@ export interface Emitter {
   generateManifest?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
 
   fileHeader(): string;
+
+  /**
+   * Optional: return a format command to run on generated files after target
+   * integration.  The emitter can inspect the target directory to detect the
+   * project's formatter (e.g., prettier config, .editorconfig, Gemfile).
+   * Return null to skip formatting.
+   */
+  formatCommand?(targetDir: string): FormatCommand | null;
 }
