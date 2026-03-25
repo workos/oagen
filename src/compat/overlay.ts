@@ -108,6 +108,29 @@ export function buildOverlayLookup(
           if (candidates.length === 1) {
             methods = candidates[0][1];
             resolvedMethodName = candidates[0][0];
+          } else if (candidates.length > 1) {
+            // Disambiguate: prefer the candidate whose name is <prefix><pathSegment>
+            // derived from the FIRST segment of the operation path. This avoids
+            // mismatching when a class combines operations from multiple path groups
+            // (e.g., /organizations and /organization_domains both in Organizations).
+            const firstSegment =
+              entry.path
+                .split('/')
+                .filter(Boolean)[0]
+                ?.replace(/[{}_-]/g, '') ?? '';
+            if (firstSegment) {
+              const segLower = firstSegment.toLowerCase();
+              // Try the path segment as-is and as singular
+              const segSingular = segLower.endsWith('s') ? segLower.slice(0, -1) : segLower;
+              const best = candidates.find(([name]) => {
+                const lower = name.toLowerCase();
+                return lower === prefix + segLower || lower === prefix + segSingular;
+              });
+              if (best) {
+                methods = best[1];
+                resolvedMethodName = best[0];
+              }
+            }
           }
         }
 
@@ -122,6 +145,49 @@ export function buildOverlayLookup(
           const candidates: [string, ApiMethod[]][] = [];
           for (const [name, overloads] of Object.entries(classMethods)) {
             if (name.toLowerCase().endsWith(suffix) && name !== resolvedMethodName) {
+              candidates.push([name, overloads]);
+            }
+          }
+          if (candidates.length === 1) {
+            methods = candidates[0][1];
+            resolvedMethodName = candidates[0][0];
+          }
+        }
+
+        // Word-part subsequence match: the surface method may have extra words
+        // inserted into the manifest method name. For example:
+        //   "disableFlag" → "disableFeatureFlag" (["disable","Flag"] ⊂ ["disable","Feature","Flag"])
+        //   "getByExternalId" → "getOrganizationByExternalId"
+        // Only accept when exactly one candidate matches.
+        if (!methods) {
+          const manifestWords = splitCamelCase(resolvedMethodName);
+          if (manifestWords.length >= 2) {
+            const classMethods = surface.classes[className]?.methods ?? {};
+            const candidates: [string, ApiMethod[]][] = [];
+            for (const [name, overloads] of Object.entries(classMethods)) {
+              if (name === resolvedMethodName) continue;
+              const surfaceWords = splitCamelCase(name);
+              if (surfaceWords.length > manifestWords.length && isSubsequence(manifestWords, surfaceWords)) {
+                candidates.push([name, overloads]);
+              }
+            }
+            if (candidates.length === 1) {
+              methods = candidates[0][1];
+              resolvedMethodName = candidates[0][0];
+            }
+          }
+        }
+
+        // Reverse prefix match: the manifest name may be LONGER than the surface
+        // name (e.g., "createResources" → "createResource", "removeRoleByCriteria" → "removeRole").
+        // Check if the manifest name starts with a surface name. Only accept unique matches.
+        if (!methods) {
+          const classMethods = surface.classes[className]?.methods ?? {};
+          const manifestLower = resolvedMethodName.toLowerCase();
+          const candidates: [string, ApiMethod[]][] = [];
+          for (const [name, overloads] of Object.entries(classMethods)) {
+            if (name === resolvedMethodName) continue;
+            if (manifestLower.startsWith(name.toLowerCase()) && name.length >= 3) {
               candidates.push([name, overloads]);
             }
           }
@@ -182,6 +248,33 @@ export function buildOverlayLookup(
   }
 
   return lookup;
+}
+
+// ---------------------------------------------------------------------------
+// Word-part matching helpers
+// ---------------------------------------------------------------------------
+
+/** Split a camelCase identifier into its word parts (e.g., "getByExternalId" → ["get","By","External","Id"]). */
+function splitCamelCase(name: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  for (let i = 1; i < name.length; i++) {
+    if (name[i] >= 'A' && name[i] <= 'Z') {
+      parts.push(name.slice(start, i));
+      start = i;
+    }
+  }
+  parts.push(name.slice(start));
+  return parts;
+}
+
+/** Check if `needle` words form a subsequence of `haystack` words (case-insensitive). */
+function isSubsequence(needle: string[], haystack: string[]): boolean {
+  let ni = 0;
+  for (let hi = 0; hi < haystack.length && ni < needle.length; hi++) {
+    if (needle[ni].toLowerCase() === haystack[hi].toLowerCase()) ni++;
+  }
+  return ni === needle.length;
 }
 
 // ---------------------------------------------------------------------------
