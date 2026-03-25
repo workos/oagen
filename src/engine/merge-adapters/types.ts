@@ -37,18 +37,34 @@ export interface DocstringInfo {
   endIndex: number;
 }
 
+export interface MemberDocstrings {
+  docstring: DocstringInfo | null;
+  declStartIndex: number;
+  declColumn: number;
+  /** URL path fingerprint extracted from the method body (e.g., "/organizations/{}"). Used as a fallback matching key when method names differ. */
+  urlFingerprint?: string;
+}
+
 export interface SymbolDocstrings {
   docstring: DocstringInfo | null;
   declStartIndex: number;
   declColumn: number;
-  members: Map<
-    string,
-    {
-      docstring: DocstringInfo | null;
-      declStartIndex: number;
-      declColumn: number;
-    }
-  >;
+  members: Map<string, MemberDocstrings>;
+}
+
+/**
+ * Configuration for generic tree-sitter-based URL fingerprint extraction.
+ * Each language adapter provides the AST node type names specific to its grammar.
+ */
+export interface UrlFingerprintConfig {
+  /** AST node types representing string literals or interpolated strings (e.g., ['string', 'template_string']). */
+  stringNodeTypes: string[];
+  /** AST node types for the literal text fragments inside strings (e.g., ['string_fragment', 'string_content']). */
+  contentNodeTypes: string[];
+  /** AST node types for interpolation expressions within strings (e.g., ['template_substitution']). Normalized to '{}'. */
+  interpolationNodeTypes: string[];
+  /** For languages where URLs are built via formatting functions (Go's fmt.Sprintf, Rust's format!). */
+  formatFunctionNames?: string[];
 }
 
 export interface MergeAdapter {
@@ -67,4 +83,6 @@ export interface MergeAdapter {
    * Use this when new members reference dependencies the existing symbol doesn't provide.
    */
   shouldSkipDeepMerge?(symbolName: string, existingMemberKeys: Set<string>, newMembers: MergeMember[]): boolean;
+  /** Configuration for generic URL fingerprint extraction from method bodies. */
+  urlFingerprintConfig?: UrlFingerprintConfig;
 }

@@ -1,6 +1,13 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
 
+const GO_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['interpreted_string_literal'],
+  contentNodeTypes: ['interpreted_string_literal_content'],
+  interpolationNodeTypes: [],
+  formatFunctionNames: ['Sprintf'],
+};
+
 function lastIdentifier(text: string): string | null {
   const matches = [...text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)];
   return matches.length > 0 ? matches[matches.length - 1]![0] : null;
@@ -99,6 +106,7 @@ export const goMergeAdapter: MergeAdapter = {
   language: 'go',
   grammarModule: 'tree-sitter-go',
   testFilePatterns: [/_test\.go$/],
+  urlFingerprintConfig: GO_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];

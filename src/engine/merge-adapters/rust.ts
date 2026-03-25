@@ -1,6 +1,12 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
 
+const RUST_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string_literal'],
+  contentNodeTypes: ['string_content'],
+  interpolationNodeTypes: [],
+};
+
 function declarationKey(node: Parser.SyntaxNode): string | null {
   switch (node.type) {
     case 'struct_item':
@@ -52,6 +58,7 @@ export const rustMergeAdapter: MergeAdapter = {
   language: 'rust',
   grammarModule: 'tree-sitter-rust',
   testFilePatterns: [/_test\.rs$/, /(?:^|\/)tests\/.*\.rs$/],
+  urlFingerprintConfig: RUST_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];

@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const KOTLIN_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string_literal'],
+  contentNodeTypes: ['string_content'],
+  interpolationNodeTypes: ['interpolated_expression'],
+};
 
 function extractDeclarationName(node: Parser.SyntaxNode): string | null {
   if (node.type === 'class_declaration') {
@@ -49,6 +56,7 @@ export const kotlinMergeAdapter: MergeAdapter = {
   language: 'kotlin',
   grammarModule: 'tree-sitter-kotlin',
   testFilePatterns: [/Test\.kt$/],
+  urlFingerprintConfig: KOTLIN_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -114,6 +122,7 @@ export const kotlinMergeAdapter: MergeAdapter = {
               docstring: memberDoc,
               declStartIndex: member.startIndex,
               declColumn: member.startPosition.column,
+              urlFingerprint: extractUrlFingerprint(member, KOTLIN_URL_FINGERPRINT_CONFIG),
             });
           }
         }

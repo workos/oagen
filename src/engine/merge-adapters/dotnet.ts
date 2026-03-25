@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const DOTNET_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string_literal', 'interpolated_string_expression'],
+  contentNodeTypes: ['string_content', 'string_literal_content'],
+  interpolationNodeTypes: ['interpolation'],
+};
 
 const DECLARATION_TYPES = new Set([
   'class_declaration',
@@ -99,6 +106,7 @@ export const dotnetMergeAdapter: MergeAdapter = {
   language: 'dotnet',
   grammarModule: 'tree-sitter-c-sharp',
   testFilePatterns: [/Tests?\.cs$/],
+  urlFingerprintConfig: DOTNET_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -161,6 +169,7 @@ export const dotnetMergeAdapter: MergeAdapter = {
               docstring: memberDoc,
               declStartIndex: member.startIndex,
               declColumn: member.startPosition.column,
+              urlFingerprint: extractUrlFingerprint(member, DOTNET_URL_FINGERPRINT_CONFIG),
             });
           }
         }

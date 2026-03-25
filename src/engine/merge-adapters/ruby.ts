@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const RUBY_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string'],
+  contentNodeTypes: ['string_content'],
+  interpolationNodeTypes: ['interpolation'],
+};
 
 function isRequireCall(node: Parser.SyntaxNode): boolean {
   if (node.type !== 'call') return false;
@@ -46,6 +53,7 @@ export const rubyMergeAdapter: MergeAdapter = {
   language: 'ruby',
   grammarModule: 'tree-sitter-ruby',
   testFilePatterns: [/_test\.rb$/, /_spec\.rb$/],
+  urlFingerprintConfig: RUBY_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -129,6 +137,7 @@ export const rubyMergeAdapter: MergeAdapter = {
               docstring: memberDoc,
               declStartIndex: member.startIndex,
               declColumn: member.startPosition.column,
+              urlFingerprint: extractUrlFingerprint(member, RUBY_URL_FINGERPRINT_CONFIG),
             });
           }
         }

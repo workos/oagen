@@ -463,10 +463,12 @@ export async function mergeIntoExisting(
         }
       }
 
-      // Member-level docstrings
+      // Member-level docstrings — first pass: match by name
+      const matchedExistMembers = new Set<string>();
       for (const [memberName, genMember] of genInfo.members) {
         const existMember = existInfo.members.get(memberName);
         if (!existMember || !genMember.docstring) continue;
+        matchedExistMembers.add(memberName);
 
         if (existMember.docstring) {
           const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
@@ -487,6 +489,42 @@ export async function mergeIntoExisting(
             newText: indent + genMember.docstring.text + '\n',
           });
           docstringUpdates++;
+        }
+      }
+
+      // Member-level docstrings — second pass: URL fingerprint fallback
+      // Match generated members to existing members by URL pattern when
+      // name-based matching fails (e.g., generated "find" vs existing "getOrganization"
+      // both call this.workos.get('/organizations/${id}')).
+      for (const [_genName, genMember] of genInfo.members) {
+        if (!genMember.docstring || !genMember.urlFingerprint) continue;
+        // Find unmatched existing member with the same URL fingerprint
+        for (const [existName, existMember] of existInfo.members) {
+          if (matchedExistMembers.has(existName)) continue;
+          if (!existMember.urlFingerprint || existMember.urlFingerprint !== genMember.urlFingerprint) continue;
+          if (existMember.docstring) {
+            const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
+            if (isPreserved) continue;
+            if (existMember.docstring.text !== genMember.docstring.text) {
+              edits.push({
+                start: existMember.docstring.startIndex,
+                end: existMember.docstring.endIndex,
+                newText: genMember.docstring.text,
+              });
+              docstringUpdates++;
+            }
+          } else {
+            const lineStart = existMember.declStartIndex - existMember.declColumn;
+            const indent = ' '.repeat(existMember.declColumn);
+            edits.push({
+              start: lineStart,
+              end: lineStart,
+              newText: indent + genMember.docstring.text + '\n',
+            });
+            docstringUpdates++;
+          }
+          matchedExistMembers.add(existName);
+          break; // Only match one existing member per generated member
         }
       }
     }

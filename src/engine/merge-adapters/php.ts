@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const PHP_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['encapsed_string', 'string'],
+  contentNodeTypes: ['string_content'],
+  interpolationNodeTypes: ['variable_name'],
+};
 
 function extractPhpDeclarationName(node: Parser.SyntaxNode): string | null {
   switch (node.type) {
@@ -40,6 +47,7 @@ export const phpMergeAdapter: MergeAdapter = {
   language: 'php',
   grammarModule: 'tree-sitter-php',
   testFilePatterns: [/Test\.php$/],
+  urlFingerprintConfig: PHP_URL_FINGERPRINT_CONFIG,
   resolveGrammar: (mod) => {
     if (typeof mod === 'object' && mod !== null && 'php' in mod) return (mod as { php: unknown }).php;
     return mod;
@@ -107,6 +115,7 @@ export const phpMergeAdapter: MergeAdapter = {
             docstring: memberDoc,
             declStartIndex: member.startIndex,
             declColumn: member.startPosition.column,
+            urlFingerprint: extractUrlFingerprint(member, PHP_URL_FINGERPRINT_CONFIG),
           });
         }
       }

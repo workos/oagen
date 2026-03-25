@@ -1,5 +1,12 @@
 import type Parser from 'tree-sitter';
 import type { MergeAdapter, MergeStatement, MergeImport, DocstringInfo, SymbolDocstrings } from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
+
+const ELIXIR_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string'],
+  contentNodeTypes: ['quoted_content'],
+  interpolationNodeTypes: ['interpolation'],
+};
 
 function isDefmodule(node: Parser.SyntaxNode): boolean {
   return node.type === 'call' && node.children[0]?.text === 'defmodule';
@@ -56,6 +63,7 @@ export const elixirMergeAdapter: MergeAdapter = {
   language: 'elixir',
   grammarModule: 'tree-sitter-elixir',
   testFilePatterns: [/_test\.exs$/],
+  urlFingerprintConfig: ELIXIR_URL_FINGERPRINT_CONFIG,
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];
     const importAnchors: string[] = [];
@@ -143,6 +151,7 @@ export const elixirMergeAdapter: MergeAdapter = {
             docstring: memberDoc,
             declStartIndex: bodyChild.startIndex,
             declColumn: bodyChild.startPosition.column,
+            urlFingerprint: extractUrlFingerprint(bodyChild, ELIXIR_URL_FINGERPRINT_CONFIG),
           });
         }
       }

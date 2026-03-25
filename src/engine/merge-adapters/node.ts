@@ -9,6 +9,7 @@ import type {
   DocstringInfo,
   SymbolDocstrings,
 } from './types.js';
+import { extractUrlFingerprint } from './url-fingerprint.js';
 
 const REEXPORT_PREFIX = '__export:';
 
@@ -122,12 +123,24 @@ const CLASS_MEMBER_TYPES = new Set(['method_definition', 'public_field_definitio
 const INTERFACE_MEMBER_TYPES = new Set(['property_signature', 'method_signature']);
 const ENUM_MEMBER_TYPES = new Set(['enum_assignment', 'property_identifier']);
 
+const NODE_URL_FINGERPRINT_CONFIG = {
+  stringNodeTypes: ['string', 'template_string'],
+  contentNodeTypes: ['string_fragment'],
+  interpolationNodeTypes: ['template_substitution'],
+};
+
 function extractBodyMemberDocstrings(
   body: Parser.SyntaxNode,
   source: string,
   memberTypes: Set<string>,
-): Map<string, { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }> {
-  const result = new Map<string, { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number }>();
+): Map<
+  string,
+  { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number; urlFingerprint?: string }
+> {
+  const result = new Map<
+    string,
+    { docstring: DocstringInfo | null; declStartIndex: number; declColumn: number; urlFingerprint?: string }
+  >();
   const allChildren = body.children;
   for (let i = 0; i < allChildren.length; i++) {
     const child = allChildren[i];
@@ -141,10 +154,12 @@ function extractBodyMemberDocstrings(
     }
     if (!memberName || memberName === 'constructor') continue;
     const docstring = findPrecedingDocstring(allChildren, i, source);
+    const fp = extractUrlFingerprint(child, NODE_URL_FINGERPRINT_CONFIG);
     result.set(memberName, {
       docstring,
       declStartIndex: child.startIndex,
       declColumn: child.startPosition.column,
+      urlFingerprint: fp,
     });
   }
   return result;
@@ -155,6 +170,7 @@ export const nodeMergeAdapter: MergeAdapter = {
   grammarModule: 'tree-sitter-typescript/bindings/node/typescript.js',
   normalizeReexport: normalizeJsExtension,
   testFilePatterns: [/\.(spec|test)\.[jt]sx?$/],
+  urlFingerprintConfig: NODE_URL_FINGERPRINT_CONFIG,
   shouldSkipDeepMerge(_symbolName, existingMemberKeys, newMembers) {
     // If new members reference instance properties (this.X) that don't exist
     // in the target class, the merged code would be broken.
