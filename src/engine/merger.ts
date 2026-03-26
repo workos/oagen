@@ -128,7 +128,7 @@ export async function extractTopLevelNames(source: string, language: string): Pr
  * Extract top-level statements from generated source with their names
  * and exact text span.
  */
-async function extractStatements(source: string, language: string): Promise<ParsedMergeFile> {
+export async function extractStatements(source: string, language: string): Promise<ParsedMergeFile> {
   const parser = await getParser(language);
   const adapter = getMergeAdapter(language);
   if (!adapter) {
