@@ -47,6 +47,10 @@ describe('toPascalCase', () => {
     expect(toPascalCase('FGA')).toBe('FGA');
     expect(toPascalCase('mfa_factor')).toBe('MfaFactor');
   });
+  it('preserves M2M as a compound acronym', () => {
+    expect(toPascalCase('CreateM2MApplication')).toBe('CreateM2MApplication');
+    expect(toPascalCase('create_m2m_application')).toBe('CreateM2MApplication');
+  });
 });
 
 describe('toCamelCase', () => {
@@ -80,7 +84,7 @@ describe('toSnakeCase', () => {
     expect(toSnakeCase('HTTPClient')).toBe('http_client');
   });
   it('handles numbers', () => {
-    expect(toSnakeCase('OAuth2Token')).toBe('o_auth_2_token');
+    expect(toSnakeCase('OAuth2Token')).toBe('oauth_2_token');
   });
   it('handles already snake_case', () => {
     expect(toSnakeCase('already_snake_case')).toBe('already_snake_case');
@@ -96,6 +100,12 @@ describe('toKebabCase', () => {
   });
   it('converts snake_case', () => {
     expect(toKebabCase('user_profile')).toBe('user-profile');
+  });
+  it('keeps OAuth as a single token', () => {
+    expect(toKebabCase('CreateOAuthApplication')).toBe('create-oauth-application');
+  });
+  it('keeps M2M as a single token', () => {
+    expect(toKebabCase('CreateM2MApplication')).toBe('create-m2m-application');
   });
 });
 

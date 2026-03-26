@@ -128,7 +128,7 @@ export async function extractTopLevelNames(source: string, language: string): Pr
  * Extract top-level statements from generated source with their names
  * and exact text span.
  */
-async function extractStatements(source: string, language: string): Promise<ParsedMergeFile> {
+export async function extractStatements(source: string, language: string): Promise<ParsedMergeFile> {
   const parser = await getParser(language);
   const adapter = getMergeAdapter(language);
   if (!adapter) {
@@ -395,17 +395,44 @@ export async function mergeIntoExisting(
     }
     const addedCodeText = addedParts.join('\n');
 
-    // Filter imports to only those whose identifiers appear in the added code
-    const filteredImports = newImports.filter((imp) => {
+    // Filter imports to only identifiers that appear in the added code.
+    // Strip individual unused identifiers from each import rather than
+    // keeping/dropping the entire import — prevents orphaned imports when
+    // a generated import line contains both used and unused identifiers
+    // (e.g., `import { deserializeFoo, serializeFoo }` where only
+    // serializeFoo is used in the appended code).
+    const filteredImports: MergeImport[] = [];
+    for (const imp of newImports) {
       const braceMatch = imp.text.match(/\{([^}]+)\}/);
-      if (!braceMatch) return true; // Keep non-destructured imports (e.g., default imports)
+      if (!braceMatch) {
+        // Non-destructured import (e.g., default import) — keep as-is
+        filteredImports.push(imp);
+        continue;
+      }
       const names = braceMatch[1]
         .split(',')
         .map((n) => n.replace(/\btype\b/, '').trim())
         .filter(Boolean);
-      // Keep the import if any of its identifiers appear in the added code
-      return names.some((name) => addedCodeText.includes(name));
-    });
+      const usedNames = names.filter((name) => addedCodeText.includes(name));
+      if (usedNames.length === 0) continue; // Drop entirely
+      if (usedNames.length === names.length) {
+        // All identifiers used — keep original import
+        filteredImports.push(imp);
+      } else {
+        // Rebuild import with only used identifiers
+        const isTypeImport = imp.text.trimStart().startsWith('import type');
+        const prefix = isTypeImport ? 'import type' : 'import';
+        const sourceMatch = imp.text.match(/from\s+(['"][^'"]+['"]);?/);
+        if (sourceMatch) {
+          filteredImports.push({
+            key: imp.key,
+            text: `${prefix} { ${usedNames.join(', ')} } from ${sourceMatch[1]};`,
+          });
+        } else {
+          filteredImports.push(imp);
+        }
+      }
+    }
 
     if (filteredImports.length > 0) {
       const renderedImports = adapter.renderImports

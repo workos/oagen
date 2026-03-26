@@ -1,14 +1,52 @@
 /**
+ * Known compound tokens that the regex-based splitter over-splits.
+ * Each entry is [lowercase-word-sequence, canonical-form].
+ * Sorted longest-first so greedy matching works correctly.
+ */
+const COMPOUND_WORDS: [string[], string][] = [
+  [['m', '2', 'm'], 'M2M'],
+  [['o', 'auth'], 'OAuth'],
+];
+
+/**
+ * Recombine adjacent words that form a known compound token.
+ */
+function recombineCompounds(words: string[]): string[] {
+  const result: string[] = [];
+  let i = 0;
+  while (i < words.length) {
+    let matched = false;
+    for (const [pattern, canonical] of COMPOUND_WORDS) {
+      if (i + pattern.length <= words.length) {
+        const matches = pattern.every((p, j) => words[i + j].toLowerCase() === p);
+        if (matches) {
+          result.push(canonical);
+          i += pattern.length;
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (!matched) {
+      result.push(words[i]);
+      i++;
+    }
+  }
+  return result;
+}
+
+/**
  * Split a string into words, handling:
  * - camelCase / PascalCase boundaries
  * - snake_case / kebab-case separators
  * - Consecutive capitals (e.g., "HTTPClient" → ["HTTP", "Client"])
  * - Numbers as word boundaries (e.g., "OAuth2Token" → ["OAuth", "2", "Token"])
+ * - Known compounds are recombined (e.g., "M2M" stays as one word)
  */
 export function splitWords(s: string): string[] {
   if (!s) return [];
 
-  return s
+  const words = s
     .replace(/[^a-zA-Z0-9_\-\s.]/g, '_') // replace non-alphanumeric chars with separator
     .replace(/([a-z])([A-Z])/g, '$1\0$2') // camelCase boundary
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1\0$2') // consecutive caps boundary
@@ -16,9 +54,11 @@ export function splitWords(s: string): string[] {
     .replace(/(\d)([a-zA-Z])/g, '$1\0$2') // number to letter
     .split(/[\0_\-\s.]+/)
     .filter((w) => w.length > 0);
+
+  return recombineCompounds(words);
 }
 
-export const ACRONYM_SET = new Set(['SSO', 'FGA', 'SAML', 'SCIM', 'JWT', 'HMAC']);
+export const ACRONYM_SET = new Set(['SSO', 'FGA', 'SAML', 'SCIM', 'JWT', 'HMAC', 'M2M']);
 
 export function toPascalCase(s: string, acronyms?: Set<string>): string {
   const merged = acronyms ? new Set([...ACRONYM_SET, ...acronyms]) : ACRONYM_SET;

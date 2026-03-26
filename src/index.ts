@@ -51,7 +51,7 @@ export {
 } from './errors.js';
 
 // Generation
-export type { GeneratedFile, EmitterContext, Emitter } from './engine/types.js';
+export type { GeneratedFile, EmitterContext, Emitter, FormatCommand } from './engine/types.js';
 
 export type {
   DiffReport,
@@ -75,8 +75,14 @@ export type {
 // Core parse + generate
 export { parseSpec } from './parser/parse.js';
 export { generate } from './engine/orchestrator.js';
-export { generateFiles, buildEmitterContext, generateAllFiles, applyFileHeaders } from './engine/generate-files.js';
-export { integrateGeneratedFiles, mapFilesForTargetIntegration } from './engine/integrate.js';
+export {
+  generateFiles,
+  buildEmitterContext,
+  generateAllFiles,
+  applyFileHeaders,
+  collectReferencedNames,
+} from './engine/generate-files.js';
+export { integrateGeneratedFiles, mapFilesForTargetIntegration, treeShakeFiles } from './engine/integrate.js';
 export { getEmitter, registerEmitter } from './engine/registry.js';
 export { diffSpecs } from './differ/diff.js';
 
