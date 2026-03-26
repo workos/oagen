@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/workos/oagen/compare/v0.2.0...v0.3.0) (2026-03-26)
+
+
+### Features
+
+* build modernization, tree-shaking, and emitter formatting ([#9](https://github.com/workos/oagen/issues/9)) ([6b8e442](https://github.com/workos/oagen/commit/6b8e442f297025c5764944312b313b7b56ddbee4))
+
 ## [0.2.0](https://github.com/workos/oagen/compare/v0.1.1...v0.2.0) (2026-03-25)
 
 
