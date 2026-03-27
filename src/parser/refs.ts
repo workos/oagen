@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { makeDocumentFromString, bundleDocument, createConfig, BaseResolver } from '@redocly/openapi-core';
+import { makeDocumentFromString, bundleDocument, createConfig, BaseResolver, Oas3_1Types } from '@redocly/openapi-core';
 import { SpecParseError } from '../errors.js';
 
 export interface BundledSpec {
@@ -19,7 +19,8 @@ export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> 
 
   const result = await bundleDocument({
     document,
-    config: config.styleguide,
+    config,
+    types: Oas3_1Types,
     externalRefResolver: resolver,
     dereference: false,
   });

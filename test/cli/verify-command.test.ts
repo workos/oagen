@@ -85,6 +85,7 @@ describe('verifyCommand', () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     tmpDir = resolve(os.tmpdir(), `oagen-verify-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
