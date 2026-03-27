@@ -30,7 +30,7 @@ describe('diffCommand', () => {
     ).rejects.toThrow();
 
     // Find the call that contains valid JSON (the diff report)
-    const jsonCall = consoleSpy.mock.calls.find((call) => {
+    const jsonCall = consoleSpy.mock.calls.find((call: unknown[]) => {
       try {
         JSON.parse(call[0] as string);
         return true;
@@ -53,7 +53,7 @@ describe('diffCommand', () => {
       }),
     ).rejects.toThrow();
 
-    const jsonCall = consoleSpy.mock.calls.find((call) => {
+    const jsonCall = consoleSpy.mock.calls.find((call: unknown[]) => {
       try {
         JSON.parse(call[0] as string);
         return true;
