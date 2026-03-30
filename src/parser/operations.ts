@@ -91,6 +91,7 @@ export function extractOperations(
         op,
         pathLevelParams,
         operationIdTransform,
+        serviceName,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
@@ -313,15 +314,21 @@ function buildOperation(
   op: OperationObject,
   pathLevelParams: ParameterObject[],
   operationIdTransform?: (id: string) => string,
+  serviceName?: string,
 ): { operation: Operation; inlineModels: Model[] } {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 
-  const pathParams = extractParams(allParams, 'path');
-  const queryParams = extractParams(allParams, 'query');
-  const headerParams = extractParams(allParams, 'header').filter((p) => p.name.toLowerCase() !== 'idempotency-key');
-  const cookieParams = extractParams(allParams, 'cookie');
+  // Use the service name as context so inline parameter enums get qualified
+  // names. e.g., service "SSO" + param "provider" → "SSOProvider".
+  const opContext = serviceName;
+  const pathParams = extractParams(allParams, 'path', opContext);
+  const queryParams = extractParams(allParams, 'query', opContext);
+  const headerParams = extractParams(allParams, 'header', opContext).filter(
+    (p) => p.name.toLowerCase() !== 'idempotency-key',
+  );
+  const cookieParams = extractParams(allParams, 'cookie', opContext);
 
   const reqBodyModels: Model[] = [];
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
@@ -383,12 +390,18 @@ function buildDescription(summary: string | undefined, description: string | und
   return description ?? summary;
 }
 
-function extractParams(params: ParameterObject[], location: 'path' | 'query' | 'header' | 'cookie'): Parameter[] {
+function extractParams(
+  params: ParameterObject[],
+  location: 'path' | 'query' | 'header' | 'cookie',
+  operationContext?: string,
+): Parameter[] {
   return params
     .filter((p) => p.in === location)
     .map((p) => ({
       name: p.name,
-      type: p.schema ? schemaToTypeRef(p.schema, p.name) : ({ kind: 'primitive', type: 'string' } as TypeRef),
+      type: p.schema
+        ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+        : ({ kind: 'primitive', type: 'string' } as TypeRef),
       required: p.required ?? false,
       description: p.description,
       deprecated: p.deprecated || p.schema?.deprecated || undefined,

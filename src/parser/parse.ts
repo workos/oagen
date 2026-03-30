@@ -8,7 +8,7 @@ import {
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
 } from './normalize-inline-models.js';
-import { collectInlineEnumsFromModels } from './collect-inline-enums.js';
+import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 
 export interface ParseOptions {
@@ -59,6 +59,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   collectInlineEnumsFromModels(finalModels, enums);
+  collectInlineEnumsFromOperations(services, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
