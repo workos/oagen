@@ -99,6 +99,33 @@ export function extractOperations(
     }
   }
 
+  // Split services when a single tag groups operations from multiple path prefixes.
+  // Example: /organizations and /organization_domains both tagged "organizations"
+  // should become separate services based on their first path segment.
+  for (const [serviceName, operations] of serviceMap) {
+    const pathGroups = new Map<string, Operation[]>();
+    for (const op of operations) {
+      const firstSeg = op.path.split('/').filter(Boolean)[0] ?? '';
+      const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
+      const group = pathGroups.get(groupKey) ?? [];
+      group.push(op);
+      pathGroups.set(groupKey, group);
+    }
+    // Only split if there are multiple distinct path-prefix groups AND
+    // at least one group name differs from the current service name
+    if (pathGroups.size > 1) {
+      const needsSplit = [...pathGroups.keys()].some((k) => k !== serviceName);
+      if (needsSplit) {
+        serviceMap.delete(serviceName);
+        for (const [groupName, groupOps] of pathGroups) {
+          const existing = serviceMap.get(groupName) ?? [];
+          existing.push(...groupOps);
+          serviceMap.set(groupName, existing);
+        }
+      }
+    }
+  }
+
   // Disambiguate operation names within each service.
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
