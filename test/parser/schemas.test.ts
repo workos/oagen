@@ -1,15 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { extractSchemas, schemaToTypeRef } from '../../src/parser/schemas.js';
 
-describe('extractSchemas – backend suffix stripping', () => {
-  it('strips Dto suffix from schema names', () => {
+describe('extractSchemas – backend suffix handling', () => {
+  it('preserves Dto suffix in schema names', () => {
     const { models } = extractSchemas({
       CreateOrganizationDto: {
         type: 'object',
         properties: { name: { type: 'string' } },
       },
     });
-    expect(models[0].name).toBe('CreateOrganization');
+    expect(models[0].name).toBe('CreateOrganizationDto');
   });
 
   it('strips Controller suffix and singularizes schema names', () => {
@@ -33,8 +33,8 @@ describe('extractSchemas – backend suffix stripping', () => {
   });
 });
 
-describe('extractSchemas – name collision dedup', () => {
-  it('keeps the model with more fields when Dto suffix cleaning causes a name collision', () => {
+describe('extractSchemas – no Dto collision since Dto is preserved', () => {
+  it('keeps both models when Dto suffix is preserved (no name collision)', () => {
     const { models } = extractSchemas({
       RedirectUriDto: {
         type: 'object',
@@ -55,6 +55,9 @@ describe('extractSchemas – name collision dedup', () => {
         },
       },
     });
+    const redirectUriDto = models.filter((m) => m.name === 'RedirectUriDto');
+    expect(redirectUriDto).toHaveLength(1);
+    expect(redirectUriDto[0].fields).toHaveLength(2);
     const redirectUri = models.filter((m) => m.name === 'RedirectUri');
     expect(redirectUri).toHaveLength(1);
     expect(redirectUri[0].fields).toHaveLength(6);
@@ -272,9 +275,9 @@ describe('schemaToTypeRef', () => {
     expect(ref).toEqual({ kind: 'enum', name: 'Status', values: ['a', 'b'] });
   });
 
-  it('resolves $ref to named ModelRef', () => {
+  it('resolves $ref to named ModelRef preserving Dto', () => {
     const ref = schemaToTypeRef({ $ref: '#/components/schemas/ValidateApiKeyDto' });
-    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKey' });
+    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKeyDto' });
   });
 
   it('resolves $ref with PascalCase name preserved', () => {
@@ -293,12 +296,12 @@ describe('schemaToTypeRef', () => {
       type: 'object',
       properties: { id: { type: 'string' } },
     });
-    expect(ref).toEqual({ kind: 'model', name: 'User' });
+    expect(ref).toEqual({ kind: 'model', name: 'UserDto' });
   });
 
-  it('strips DTO suffix from $ref targets', () => {
+  it('preserves DTO suffix in $ref targets (normalized to Dto by PascalCase)', () => {
     const ref = schemaToTypeRef({ $ref: '#/components/schemas/ValidateApiKeyDTO' });
-    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKey' });
+    expect(ref).toEqual({ kind: 'model', name: 'ValidateApiKeyDto' });
   });
 
   it('falls through on malformed $ref with no segments', () => {

@@ -110,11 +110,11 @@ describe('toKebabCase', () => {
 });
 
 describe('stripBackendSuffixes', () => {
-  it('strips Dto suffix', () => {
-    expect(stripBackendSuffixes('CreateOrganizationDto')).toBe('CreateOrganization');
+  it('preserves Dto suffix', () => {
+    expect(stripBackendSuffixes('CreateOrganizationDto')).toBe('CreateOrganizationDto');
   });
-  it('strips DTO suffix', () => {
-    expect(stripBackendSuffixes('ValidateApiKeyDTO')).toBe('ValidateApiKey');
+  it('preserves DTO suffix', () => {
+    expect(stripBackendSuffixes('ValidateApiKeyDTO')).toBe('ValidateApiKeyDTO');
   });
   it('strips Controller suffix', () => {
     expect(stripBackendSuffixes('OrganizationsController')).toBe('Organizations');
@@ -181,15 +181,15 @@ describe('cleanSchemaName', () => {
   it('applies all transforms: prefix + suffix + markers + singularize', () => {
     expect(cleanSchemaName('DirectoriesControllerListItemState')).toBe('DirectoryState');
   });
-  it('strips Dto and singularizes', () => {
-    expect(cleanSchemaName('OrganizationsDto')).toBe('Organization');
+  it('preserves Dto and singularizes', () => {
+    expect(cleanSchemaName('OrganizationsDto')).toBe('OrganizationDto');
   });
   it('is idempotent', () => {
     const first = cleanSchemaName('DirectoriesControllerListItemState');
     expect(cleanSchemaName(first)).toBe(first);
   });
-  it('preserves safe-listed words', () => {
-    expect(cleanSchemaName('StatusDto')).toBe('Status');
+  it('preserves safe-listed words with Dto', () => {
+    expect(cleanSchemaName('StatusDto')).toBe('StatusDto');
   });
   it('handles already clean names', () => {
     expect(cleanSchemaName('Organization')).toBe('Organization');
