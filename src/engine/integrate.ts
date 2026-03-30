@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import type { GeneratedFile } from './types.js';
 import { writeFiles, type WriteResult } from './writer.js';
@@ -124,6 +125,65 @@ export function mapFilesForTargetIntegration(files: GeneratedFile[], language: s
     });
 }
 
+/**
+ * Resolve file-to-directory conflicts in the target.
+ *
+ * When a generated file creates a package directory (e.g., `api_keys/__init__.py`)
+ * that would shadow an existing module file (e.g., `api_keys.py`), move the
+ * module file's content into `_compat.py` inside the package and add a
+ * re-export from `__init__.py`.  This preserves backward-compatible imports
+ * (e.g., `from workos.api_keys import ApiKeysModule`) while the package directory
+ * provides the generated models and resource classes.
+ */
+async function resolveFileToDirectoryConflicts(
+  files: GeneratedFile[],
+  targetDir: string,
+): Promise<{ files: GeneratedFile[]; removals: string[] }> {
+  const result = [...files];
+  const removals: string[] = [];
+
+  for (let i = 0; i < result.length; i++) {
+    const file = result[i];
+    // Match package init files: e.g., src/workos/api_keys/__init__.py
+    const match = file.path.match(/^(.+)\/__init__\.py$/);
+    if (!match) continue;
+
+    const dirPath = match[1]; // e.g., src/workos/api_keys
+    const moduleFilePath = `${dirPath}.py`; // e.g., src/workos/api_keys.py
+    const fullModulePath = path.join(targetDir, moduleFilePath);
+
+    let moduleContent: string;
+    try {
+      moduleContent = await fs.readFile(fullModulePath, 'utf-8');
+    } catch {
+      continue; // Module file doesn't exist — no conflict
+    }
+
+    // Create a compat shim inside the package with the old module's content
+    const compatPath = `${dirPath}/_compat.py`;
+    result.push({
+      path: compatPath,
+      content: moduleContent,
+      overwriteExisting: true,
+    });
+
+    // Append re-export from _compat to __init__.py so existing imports work.
+    // Compat must come AFTER generated models so hand-written types take
+    // precedence over generated types with the same name.
+    const compatImport = 'from ._compat import *  # noqa: F401,F403  # pyright: ignore[reportUnusedImport]';
+    const existingContent = file.content.endsWith('\n') ? file.content : file.content + '\n';
+    result[i] = {
+      ...file,
+      content: existingContent + compatImport + '\n',
+    };
+
+    // Schedule the shadowed module file for removal
+    removals.push(fullModulePath);
+  }
+
+  return { files: result, removals };
+}
+
 export async function integrateGeneratedFiles(opts: {
   files: GeneratedFile[];
   language: string;
@@ -132,8 +192,23 @@ export async function integrateGeneratedFiles(opts: {
 }): Promise<WriteResult> {
   const mapped = mapFilesForTargetIntegration(opts.files, opts.language);
   const shaken = await treeShakeFiles(mapped, opts.language);
-  return writeFiles(shaken, opts.targetDir, {
+
+  // Handle file-to-directory conflicts before writing
+  const { files: resolved, removals } = await resolveFileToDirectoryConflicts(shaken, opts.targetDir);
+
+  const result = await writeFiles(resolved, opts.targetDir, {
     language: opts.language,
     header: opts.header,
   });
+
+  // Remove shadowed module files after integration
+  for (const filePath of removals) {
+    try {
+      await fs.unlink(filePath);
+    } catch {
+      // File may already be gone
+    }
+  }
+
+  return result;
 }
