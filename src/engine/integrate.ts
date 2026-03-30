@@ -87,10 +87,34 @@ export async function treeShakeFiles(files: GeneratedFile[], language: string): 
     deps.set(file.path, fileDeps);
   }
 
+  // Determine which file extensions are source code for this language
+  const codeExtensions = new Set([
+    '.ts',
+    '.js',
+    '.tsx',
+    '.jsx',
+    '.py',
+    '.rb',
+    '.go',
+    '.rs',
+    '.kt',
+    '.cs',
+    '.ex',
+    '.exs',
+    '.php',
+  ]);
+
   // BFS from roots
   const reachable = new Set<string>();
   const queue: string[] = [];
   for (const file of files) {
+    const ext = file.path.slice(file.path.lastIndexOf('.'));
+    // Non-code files (JSON, etc.) are always reachable — they can't participate
+    // in the import graph and are loaded at runtime (e.g. test fixtures).
+    if (!codeExtensions.has(ext)) {
+      reachable.add(file.path);
+      continue;
+    }
     if (isRootFile(file.path)) {
       reachable.add(file.path);
       queue.push(file.path);
