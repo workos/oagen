@@ -32,6 +32,12 @@ export interface Service {
 }
 
 /** A single API operation (maps to an SDK method) */
+/** Per-operation security requirement: scheme name → scope list. */
+export interface SecurityRequirement {
+  schemeName: string;
+  scopes: string[];
+}
+
 export interface Operation {
   name: string;
   description?: string;
@@ -50,6 +56,8 @@ export interface Operation {
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
   async?: boolean;
+  /** Per-operation security overrides. When present, overrides the global spec-level security. */
+  security?: SecurityRequirement[];
 }
 
 /** Structured pagination metadata for auto-paging iterator generation */

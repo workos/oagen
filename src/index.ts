@@ -5,6 +5,7 @@ export type {
   ServerEntry,
   Service,
   Operation,
+  SecurityRequirement,
   SuccessResponse,
   PaginationMeta,
   HttpMethod,
