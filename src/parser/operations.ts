@@ -631,6 +631,9 @@ function extractResponses(
         }
       }
       allSuccessResponses.push({ statusCode: code, type: extractedType });
+    } else if (code >= 300 && code < 400) {
+      // 3xx redirects — include so emitter can detect redirect endpoints
+      allSuccessResponses.push({ statusCode: code, type: { kind: 'primitive', type: 'unknown' } });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
