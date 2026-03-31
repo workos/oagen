@@ -99,9 +99,12 @@ export async function writeFiles(
       continue;
     }
 
-    // Force overwrite — skip merge logic entirely
+    // Force overwrite — but preserve any @oagen-ignore regions from existing content
     if (file.overwriteExisting) {
-      await fs.writeFile(fullPath, file.content, 'utf-8');
+      const content = existingContent.includes('@oagen-ignore-start')
+        ? overwriteWithPreservedRegions(existingContent, file.content)
+        : file.content;
+      await fs.writeFile(fullPath, content, 'utf-8');
       result.written.push(file.path);
       continue;
     }
@@ -177,4 +180,195 @@ function isDefaultTestFile(filePath: string): boolean {
     filePath.endsWith('_test.rs') ||
     /(?:^|\/)tests\/.*\.rs$/.test(filePath)
   );
+}
+
+// --- @oagen-ignore region preservation for overwriteExisting ---
+
+/**
+ * Overwrite a file with generated content while preserving
+ * `@oagen-ignore-start` / `@oagen-ignore-end` regions (and their
+ * required imports) from the existing file.
+ */
+export function overwriteWithPreservedRegions(existingContent: string, generatedContent: string): string {
+  const existingLines = existingContent.split('\n');
+  const generatedLines = generatedContent.split('\n');
+
+  // 1. Extract ignore blocks and their containing class
+  const blocks: { containingClass: string; lines: string[] }[] = [];
+  for (let i = 0; i < existingLines.length; i++) {
+    if (!existingLines[i].includes('@oagen-ignore-start')) continue;
+    const startIdx = i;
+    while (i < existingLines.length && !existingLines[i].includes('@oagen-ignore-end')) i++;
+    blocks.push({
+      containingClass: findContainingClass(existingLines, startIdx),
+      lines: existingLines.slice(startIdx, i + 1),
+    });
+  }
+  if (blocks.length === 0) return generatedContent;
+
+  // 2. Splice extra imports from existing into generated
+  const result = [...generatedLines];
+  spliceExtraImports(existingLines, result);
+
+  // 3. Insert ignore blocks at end of their containing class
+  const blocksByClass = new Map<string, string[][]>();
+  for (const b of blocks) {
+    if (!blocksByClass.has(b.containingClass)) blocksByClass.set(b.containingClass, []);
+    blocksByClass.get(b.containingClass)!.push(b.lines);
+  }
+
+  const insertions: { line: number; content: string[] }[] = [];
+  for (const [className, classBlocks] of blocksByClass) {
+    const insertLine = className ? findClassBodyEnd(result, className) : result.length;
+    if (insertLine === -1) continue;
+    const content: string[] = [];
+    for (const block of classBlocks) {
+      content.push('');
+      content.push(...block);
+    }
+    insertions.push({ line: insertLine, content });
+  }
+
+  // Apply bottom-up to preserve line indices
+  insertions.sort((a, b) => b.line - a.line);
+  for (const ins of insertions) {
+    result.splice(ins.line, 0, ...ins.content);
+  }
+
+  return result.join('\n');
+}
+
+/** Scan backwards from `lineIdx` to find the nearest class declaration name. */
+function findContainingClass(lines: string[], lineIdx: number): string {
+  for (let j = lineIdx - 1; j >= 0; j--) {
+    const m = lines[j].match(/^(?:export\s+)?class\s+(\w+)/);
+    if (m) return m[1];
+  }
+  return '';
+}
+
+/**
+ * Find the line index at which to insert preserved content at the end of
+ * a class body.  Works for both indentation-delimited (Python) and
+ * brace-delimited (JS/TS/Go/etc.) classes.
+ */
+function findClassBodyEnd(lines: string[], className: string): number {
+  const pattern = new RegExp(`^(?:export\\s+)?class\\s+${className}\\b`);
+  let classLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (pattern.test(lines[i])) {
+      classLine = i;
+      break;
+    }
+  }
+  if (classLine === -1) return -1;
+
+  for (let i = classLine + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '') continue;
+    if (/^\S/.test(line)) {
+      if (line.trim() === '}') {
+        // Brace-delimited class — insert before closing brace
+        return i;
+      }
+      // Indentation-delimited — insert after the last indented content line
+      for (let j = i - 1; j > classLine; j--) {
+        if (lines[j].trim() !== '') return j + 1;
+      }
+      return classLine + 1;
+    }
+  }
+
+  // Class extends to end of file
+  for (let j = lines.length - 1; j > classLine; j--) {
+    if (lines[j].trim() !== '') return j + 1;
+  }
+  return lines.length;
+}
+
+/**
+ * Collect `from X import Y, Z` identifiers grouped by module, handling
+ * both single-line and multiline (parenthesized) forms.
+ */
+function collectFromImports(lines: string[]): Map<string, Set<string>> {
+  const byModule = new Map<string, Set<string>>();
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^from\s+/.test(lines[i])) continue;
+
+    let fullText = lines[i];
+    if (fullText.includes('(') && !fullText.includes(')')) {
+      while (i + 1 < lines.length) {
+        i++;
+        fullText += ' ' + lines[i].trim();
+        if (lines[i].includes(')')) break;
+      }
+    }
+
+    const normalized = fullText.replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
+    const match = normalized.match(/^from\s+(\S+)\s+import\s+(.+)$/);
+    if (!match) continue;
+
+    const mod = match[1];
+    if (!byModule.has(mod)) byModule.set(mod, new Set());
+    for (const id of match[2]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)) {
+      byModule.get(mod)!.add(id);
+    }
+  }
+  return byModule;
+}
+
+/**
+ * Add imports from the existing file that are absent from the generated
+ * result. Handles both `import X` and `from X import Y` forms.
+ * Mutates `resultLines` in place.
+ */
+function spliceExtraImports(existingLines: string[], resultLines: string[]): void {
+  const isSimpleImport = (l: string) => /^import\s+\w/.test(l);
+
+  // Simple imports (import hashlib, import json, …)
+  const existingSimple = new Set(existingLines.filter(isSimpleImport).map((l) => l.trim()));
+  const generatedSimple = new Set(resultLines.filter(isSimpleImport).map((l) => l.trim()));
+  const extraSimple = [...existingSimple].filter((l) => !generatedSimple.has(l));
+
+  // From-imports — compare by module and find extra identifiers
+  const existingFrom = collectFromImports(existingLines);
+  const generatedFrom = collectFromImports(resultLines);
+
+  const extraFromLines: string[] = [];
+  for (const [mod, existIds] of existingFrom) {
+    const genIds = generatedFrom.get(mod);
+    if (!genIds) {
+      extraFromLines.push(`from ${mod} import ${[...existIds].join(', ')}`);
+    } else {
+      const extra = [...existIds].filter((id) => !genIds.has(id));
+      if (extra.length > 0) {
+        extraFromLines.push(`from ${mod} import ${extra.join(', ')}`);
+      }
+    }
+  }
+
+  const allExtra = [...extraSimple, ...extraFromLines];
+  if (allExtra.length === 0) return;
+
+  // Find last import line in resultLines (accounting for multiline imports)
+  let lastImportIdx = -1;
+  for (let i = 0; i < resultLines.length; i++) {
+    if (isSimpleImport(resultLines[i]) || /^from\s+/.test(resultLines[i])) {
+      lastImportIdx = i;
+      if (resultLines[i].includes('(') && !resultLines[i].includes(')')) {
+        while (i + 1 < resultLines.length) {
+          i++;
+          lastImportIdx = i;
+          if (resultLines[i].includes(')')) break;
+        }
+      }
+    }
+  }
+
+  if (lastImportIdx >= 0) {
+    resultLines.splice(lastImportIdx + 1, 0, ...allExtra);
+  }
 }
