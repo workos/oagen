@@ -172,6 +172,14 @@ export async function extractClassEndLines(
     if (child.type === 'class_definition' || child.type === 'class_declaration') {
       processClassNode(child);
     }
+    // Python: `@decorator class Foo:` wraps the class in a decorated_definition
+    if (child.type === 'decorated_definition') {
+      for (const inner of child.namedChildren) {
+        if (inner.type === 'class_definition') {
+          processClassNode(inner);
+        }
+      }
+    }
     // JS/TS: `export class Foo {}` wraps the class in an export_statement
     if (child.type === 'export_statement') {
       for (const inner of child.namedChildren) {

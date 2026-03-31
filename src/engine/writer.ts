@@ -231,9 +231,48 @@ export async function overwriteWithPreservedRegions(
     blocksByClass.get(b.containingClass)!.push(b.lines);
   }
 
+  // 4a. Handle replacement blocks: ignore blocks that redefine their
+  //     containing class replace the generated class entirely.
+  const replacedClasses = new Set<string>();
+  const replacements: { startLine: number; endLine: number; content: string[] }[] = [];
+  for (const [className, classBlocks] of blocksByClass) {
+    if (!className) continue;
+    const isReplacement = classBlocks.some((blockLines) =>
+      blockLines.some((l) => {
+        const m = l.match(/^(?:export\s+)?class\s+(\w+)/);
+        return m?.[1] === className;
+      }),
+    );
+    if (!isReplacement) continue;
+    const info = classEndLines.get(className);
+    if (!info) continue;
+    const startLine = findClassDeclarationStart(result, className, info.bodyEndLine);
+    if (startLine < 0) continue;
+    const content: string[] = [];
+    for (const block of classBlocks) {
+      content.push('');
+      content.push(...block);
+    }
+    replacements.push({ startLine, endLine: info.bodyEndLine, content });
+    replacedClasses.add(className);
+  }
+  // Apply replacements bottom-up to preserve line indices
+  replacements.sort((a, b) => b.startLine - a.startLine);
+  for (const rep of replacements) {
+    result.splice(rep.startLine, rep.endLine - rep.startLine, ...rep.content);
+  }
+
+  // 4b. Standard insertions for non-replacement blocks
+  // Rebuild class end lines if replacements shifted line numbers.
+  let effectiveClassEndLines = classEndLines;
+  if (replacedClasses.size > 0) {
+    effectiveClassEndLines = await extractClassEndLines(result.join('\n'), language);
+  }
+
   const insertions: { line: number; content: string[] }[] = [];
   for (const [className, classBlocks] of blocksByClass) {
-    const info = className ? classEndLines.get(className) : undefined;
+    if (replacedClasses.has(className)) continue;
+    const info = className ? effectiveClassEndLines.get(className) : undefined;
     const insertLine = info ? info.bodyEndLine : result.length;
     const content: string[] = [];
     for (const block of classBlocks) {
@@ -259,6 +298,24 @@ function findContainingClass(lines: string[], lineIdx: number): string {
     if (m) return m[1];
   }
   return '';
+}
+
+/**
+ * Find the start line of a class declaration (including decorators above it)
+ * by scanning backwards from `beforeLine`.
+ */
+function findClassDeclarationStart(lines: string[], className: string, beforeLine: number): number {
+  const classPattern = new RegExp(`^(?:export\\s+)?class\\s+${className}\\b`);
+  for (let i = beforeLine - 1; i >= 0; i--) {
+    if (!classPattern.test(lines[i])) continue;
+    // Scan backward past decorators
+    let start = i;
+    while (start > 0 && /^\s*@\w+/.test(lines[start - 1])) {
+      start--;
+    }
+    return start;
+  }
+  return -1;
 }
 
 /**
