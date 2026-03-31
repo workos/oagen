@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { GeneratedFile } from './types.js';
-import { mergeIntoExisting, hasGrammar } from './merger.js';
+import { mergeIntoExisting, hasGrammar, extractClassEndLines } from './merger.js';
 import { deepMergeJson } from './json-merge.js';
 import { getMergeAdapter } from './merge-adapters/index.js';
 
@@ -101,9 +101,10 @@ export async function writeFiles(
 
     // Force overwrite — but preserve any @oagen-ignore regions from existing content
     if (file.overwriteExisting) {
-      const content = existingContent.includes('@oagen-ignore-start')
-        ? overwriteWithPreservedRegions(existingContent, file.content)
-        : file.content;
+      const content =
+        existingContent.includes('@oagen-ignore-start') && language && hasGrammar(language)
+          ? await overwriteWithPreservedRegions(existingContent, file.content, language)
+          : file.content;
       await fs.writeFile(fullPath, content, 'utf-8');
       result.written.push(file.path);
       continue;
@@ -188,12 +189,20 @@ function isDefaultTestFile(filePath: string): boolean {
  * Overwrite a file with generated content while preserving
  * `@oagen-ignore-start` / `@oagen-ignore-end` regions (and their
  * required imports) from the existing file.
+ *
+ * Uses tree-sitter via `extractClassEndLines` to find accurate class
+ * boundaries so ignore blocks are inserted at the correct position even
+ * when docstrings contain unindented text.
  */
-export function overwriteWithPreservedRegions(existingContent: string, generatedContent: string): string {
+export async function overwriteWithPreservedRegions(
+  existingContent: string,
+  generatedContent: string,
+  language: string,
+): Promise<string> {
   const existingLines = existingContent.split('\n');
   const generatedLines = generatedContent.split('\n');
 
-  // 1. Extract ignore blocks and their containing class
+  // 1. Extract ignore blocks and their containing class from existing content.
   const blocks: { containingClass: string; lines: string[] }[] = [];
   for (let i = 0; i < existingLines.length; i++) {
     if (!existingLines[i].includes('@oagen-ignore-start')) continue;
@@ -210,7 +219,12 @@ export function overwriteWithPreservedRegions(existingContent: string, generated
   const result = [...generatedLines];
   spliceExtraImports(existingLines, result);
 
-  // 3. Insert ignore blocks at end of their containing class
+  // 3. Build class-end map from the generated content (after import splicing)
+  //    via tree-sitter for accurate boundary detection.
+  const genSource = result.join('\n');
+  const classEndLines = await extractClassEndLines(genSource, language);
+
+  // 4. Group ignore blocks by class and determine insertion points
   const blocksByClass = new Map<string, string[][]>();
   for (const b of blocks) {
     if (!blocksByClass.has(b.containingClass)) blocksByClass.set(b.containingClass, []);
@@ -219,8 +233,8 @@ export function overwriteWithPreservedRegions(existingContent: string, generated
 
   const insertions: { line: number; content: string[] }[] = [];
   for (const [className, classBlocks] of blocksByClass) {
-    const insertLine = className ? findClassBodyEnd(result, className) : result.length;
-    if (insertLine === -1) continue;
+    const info = className ? classEndLines.get(className) : undefined;
+    const insertLine = info ? info.bodyEndLine : result.length;
     const content: string[] = [];
     for (const block of classBlocks) {
       content.push('');
@@ -245,45 +259,6 @@ function findContainingClass(lines: string[], lineIdx: number): string {
     if (m) return m[1];
   }
   return '';
-}
-
-/**
- * Find the line index at which to insert preserved content at the end of
- * a class body.  Works for both indentation-delimited (Python) and
- * brace-delimited (JS/TS/Go/etc.) classes.
- */
-function findClassBodyEnd(lines: string[], className: string): number {
-  const pattern = new RegExp(`^(?:export\\s+)?class\\s+${className}\\b`);
-  let classLine = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (pattern.test(lines[i])) {
-      classLine = i;
-      break;
-    }
-  }
-  if (classLine === -1) return -1;
-
-  for (let i = classLine + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === '') continue;
-    if (/^\S/.test(line)) {
-      if (line.trim() === '}') {
-        // Brace-delimited class — insert before closing brace
-        return i;
-      }
-      // Indentation-delimited — insert after the last indented content line
-      for (let j = i - 1; j > classLine; j--) {
-        if (lines[j].trim() !== '') return j + 1;
-      }
-      return classLine + 1;
-    }
-  }
-
-  // Class extends to end of file
-  for (let j = lines.length - 1; j > classLine; j--) {
-    if (lines[j].trim() !== '') return j + 1;
-  }
-  return lines.length;
 }
 
 /**
