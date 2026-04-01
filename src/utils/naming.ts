@@ -146,6 +146,8 @@ const SINGULAR_SAFE_LIST = new Set([
   'Alias',
   'Basis',
   'Bus',
+  'Species',
+  'Series',
 ]);
 
 /**
