@@ -233,20 +233,40 @@ export async function overwriteWithPreservedRegions(
 
   // 4a. Handle replacement blocks: ignore blocks that redefine their
   //     containing class replace the generated class entirely.
+  //     Also handles top-level blocks (no containing class) that define
+  //     a class matching one in the generated content.
   const replacedClasses = new Set<string>();
+  const handledBlockKeys = new Set<string>();
   const replacements: { startLine: number; endLine: number; content: string[] }[] = [];
   for (const [className, classBlocks] of blocksByClass) {
-    if (!className) continue;
+    // Determine the target class for replacement.  When the block has a
+    // containing class, we check if the block redefines that class.  When
+    // there is no containing class (top-level ignore block), we look for a
+    // class definition inside the block that matches a generated class.
+    let targetClass = className;
+    if (!targetClass) {
+      for (const blockLines of classBlocks) {
+        for (const l of blockLines) {
+          const m = l.match(/^(?:export\s+)?class\s+(\w+)/);
+          if (m && classEndLines.has(m[1])) {
+            targetClass = m[1];
+            break;
+          }
+        }
+        if (targetClass) break;
+      }
+    }
+    if (!targetClass) continue;
     const isReplacement = classBlocks.some((blockLines) =>
       blockLines.some((l) => {
         const m = l.match(/^(?:export\s+)?class\s+(\w+)/);
-        return m?.[1] === className;
+        return m?.[1] === targetClass;
       }),
     );
     if (!isReplacement) continue;
-    const info = classEndLines.get(className);
+    const info = classEndLines.get(targetClass);
     if (!info) continue;
-    const startLine = findClassDeclarationStart(result, className, info.bodyEndLine);
+    const startLine = findClassDeclarationStart(result, targetClass, info.bodyEndLine);
     if (startLine < 0) continue;
     const content: string[] = [];
     for (const block of classBlocks) {
@@ -254,7 +274,8 @@ export async function overwriteWithPreservedRegions(
       content.push(...block);
     }
     replacements.push({ startLine, endLine: info.bodyEndLine, content });
-    replacedClasses.add(className);
+    replacedClasses.add(targetClass);
+    handledBlockKeys.add(className);
   }
   // Apply replacements bottom-up to preserve line indices
   replacements.sort((a, b) => b.startLine - a.startLine);
@@ -271,7 +292,7 @@ export async function overwriteWithPreservedRegions(
 
   const insertions: { line: number; content: string[] }[] = [];
   for (const [className, classBlocks] of blocksByClass) {
-    if (replacedClasses.has(className)) continue;
+    if (handledBlockKeys.has(className) || replacedClasses.has(className)) continue;
     const info = className ? effectiveClassEndLines.get(className) : undefined;
     const insertLine = info ? info.bodyEndLine : result.length;
     const content: string[] = [];
