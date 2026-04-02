@@ -1,3 +1,5 @@
+import type { SdkBehavior } from './sdk-behavior.js';
+
 /** Authentication scheme extracted from OpenAPI securitySchemes */
 export type AuthScheme =
   | { kind: 'bearer' }
@@ -22,6 +24,8 @@ export interface ApiSpec {
   models: Model[];
   enums: Enum[];
   auth?: AuthScheme[];
+  /** Language-agnostic runtime policies (retry, errors, telemetry, etc.). */
+  sdk: SdkBehavior;
 }
 
 /** A service groups related operations (maps to an SDK resource class) */

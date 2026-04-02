@@ -3,6 +3,7 @@ import { diffSurfaces, specDerivedNames, filterSurface } from '../../src/compat/
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 import { nodeHints } from '../../src/compat/language-hints.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -527,6 +528,7 @@ describe('specDerivedNames', () => {
           fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const names = specDerivedNames(spec, nodeHints);
@@ -543,6 +545,7 @@ describe('specDerivedNames', () => {
       services: [],
       enums: [{ name: 'Status', values: [{ name: 'ACTIVE', value: 'active' }] }],
       models: [],
+      sdk: defaultSdkBehavior(),
     };
 
     const names = specDerivedNames(spec, nodeHints);
@@ -574,6 +577,7 @@ describe('specDerivedNames', () => {
       ],
       enums: [],
       models: [],
+      sdk: defaultSdkBehavior(),
     };
 
     const names = specDerivedNames(spec, nodeHints);

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { generate } from '../../src/engine/orchestrator.js';
 import type { Emitter, EmitterContext } from '../../src/engine/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function mockEmitter(): Emitter {
   return {
@@ -28,6 +29,7 @@ const minimalSpec: ApiSpec = {
   services: [],
   models: [],
   enums: [],
+  sdk: defaultSdkBehavior(),
 };
 
 describe('generate', () => {

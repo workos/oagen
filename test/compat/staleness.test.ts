@@ -3,6 +3,7 @@ import { detectStaleSymbols } from '../../src/compat/staleness.js';
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 import { nodeHints } from '../../src/compat/language-hints.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -26,6 +27,7 @@ function emptySpec(overrides?: Partial<ApiSpec>): ApiSpec {
     models: [],
     enums: [],
     services: [],
+    sdk: defaultSdkBehavior(),
     ...overrides,
   };
 }

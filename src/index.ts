@@ -38,6 +38,26 @@ export {
   collectRequestBodyModels,
 } from './ir/types.js';
 
+// SDK Behavior IR
+export type {
+  SdkBehavior,
+  RetryPolicy,
+  BackoffStrategy,
+  ErrorPolicy,
+  TelemetryPolicy,
+  PaginationPolicy,
+  IdempotencyPolicy,
+  LoggingPolicy,
+  LogEvent,
+  UserAgentPolicy,
+  AiAgentEnvVar,
+  RequestGuardPolicy,
+  TimeoutPolicy,
+  DeepPartial,
+} from './ir/sdk-behavior.js';
+
+export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
+
 // Errors
 export {
   OagenError,

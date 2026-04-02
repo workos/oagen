@@ -1,6 +1,6 @@
 # IR Type System Reference
 
-Source: `src/ir/types.ts`
+Source: `src/ir/types.ts`, `src/ir/sdk-behavior.ts`
 
 The intermediate representation (IR) is the contract between the parser and all language emitters. It uses plain TypeScript interfaces (no classes) with a discriminated union type system.
 
@@ -22,10 +22,33 @@ interface ApiSpec {
   models: Model[]; // Schema objects
   enums: Enum[]; // String enums
   auth?: AuthScheme[]; // Authentication schemes
+  sdk: SdkBehavior; // Runtime policies (retry, errors, telemetry, etc.)
 }
 ```
 
 The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
+
+### SdkBehavior
+
+Source: `src/ir/sdk-behavior.ts`
+
+Language-agnostic runtime policies consumed by emitters via `ctx.spec.sdk`. Always populated by the parser with `defaultSdkBehavior()`. Override per-SDK via `oagen.config.ts`.
+
+```typescript
+interface SdkBehavior {
+  retry: RetryPolicy;          // Retry status codes, max attempts, backoff strategy
+  errors: ErrorPolicy;         // Status code → exception kind mapping, doc URL template
+  telemetry: TelemetryPolicy;  // Request metrics header, request ID header
+  pagination: PaginationPolicy; // Auto-page delay
+  idempotency: IdempotencyPolicy; // Idempotency header name, auto-generate for POST
+  logging: LoggingPolicy;      // Log events and levels
+  userAgent: UserAgentPolicy;  // SDK identifier template, AI agent detection
+  requestGuard: RequestGuardPolicy; // Misplaced-options key detection
+  timeout: TimeoutPolicy;      // Default timeout, env var override
+}
+```
+
+Use `defaultSdkBehavior()` for canonical defaults. Use `mergeSdkBehavior(overrides)` for partial overrides (arrays replace, objects merge recursively).
 
 ## TypeRef (discriminated union)
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { generate } from '../../src/engine/orchestrator.js';
 import type { Emitter } from '../../src/engine/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -28,6 +29,7 @@ const minimalSpec: ApiSpec = {
   services: [],
   models: [],
   enums: [],
+  sdk: defaultSdkBehavior(),
 };
 
 describe('generate — non-dry-run', () => {

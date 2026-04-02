@@ -41,6 +41,8 @@ export interface ApiInterface {
   sourceFile?: string;
   fields: Record<string, ApiField>;
   extends: string[];
+  /** True if the resource class defines its own constructFromResponse (not inherited). */
+  hasCustomConstructor?: boolean;
 }
 
 export interface ApiField {

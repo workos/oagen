@@ -11,6 +11,7 @@ Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if
 ## Critical Rules
 
 - **Dependency layers are one-way:** `ir → utils → parser → engine/differ/compat → cli`. Never import rightward into leftward layers. Emitters live in a separate project directory and import from `@workos/oagen`.
+- **SdkBehavior lives in `ir/sdk-behavior.ts`** (layer 0). Must not import from other layers. Contains all SDK runtime policy types, `defaultSdkBehavior()`, and `mergeSdkBehavior()`. Emitters read policy from `ctx.spec.sdk`.
 - **Emitters are pure:** receive IR, return `GeneratedFile[]`. No I/O, no side effects.
 - **Never remove or edit existing tests.** Test coverage can be improved, but not weakend.
 - **Tests:** prefer `toMatchInlineSnapshot()` for complex output; most tests use standard assertions. `test/` mirrors `src/` structure.
@@ -33,7 +34,7 @@ Start here when working on a specific area:
 - [Pipeline](docs/architecture/pipeline.md) — three-stage parse/emit/write flow with orchestrator details
 - [Dependency Layers](docs/architecture/dependency-layers.md) — full import matrix and enforcement via structural linter
 - [Emitter Contract](docs/architecture/emitter-contract.md) — `Emitter` interface, `GeneratedFile` shape, and per-language file structure
-- [IR Types](docs/architecture/ir-types.md) — `ApiSpec`, `TypeRef` discriminated union, `Model`, `Enum`, `Service`, `Operation`
+- [IR Types](docs/architecture/ir-types.md) — `ApiSpec`, `TypeRef` discriminated union, `Model`, `Enum`, `Service`, `Operation`, `SdkBehavior`
 - [Extractor Contract](docs/architecture/extractor-contract.md) — `Extractor` interface, `ApiSurface` type, and guide for new language extractors
 - SDK design docs: live in the emitter project (e.g. `docs/sdk-architecture/{language}.md` in `oagen-emitters`)
 

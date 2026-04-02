@@ -1,4 +1,5 @@
 import type { ApiSpec, AuthScheme, ServerEntry } from '../ir/types.js';
+import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
 import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
@@ -77,6 +78,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     models: finalModels,
     enums,
     auth,
+    sdk: defaultSdkBehavior(),
   };
 
   validateModelRefs(result);

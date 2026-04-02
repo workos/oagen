@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { expandDocUrls } from '../../src/utils/expand-doc-urls.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function minimalSpec(overrides: Partial<ApiSpec> = {}): ApiSpec {
   return {
@@ -10,6 +11,7 @@ function minimalSpec(overrides: Partial<ApiSpec> = {}): ApiSpec {
     services: [],
     models: [],
     enums: [],
+    sdk: defaultSdkBehavior(),
     ...overrides,
   };
 }

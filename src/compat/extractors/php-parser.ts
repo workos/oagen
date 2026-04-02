@@ -47,6 +47,8 @@ export interface PhpClass {
   properties: PhpProperty[];
   constants: PhpConstant[];
   resourceAttributes: string[];
+  /** True if the class defines its own constructFromResponse method (not inherited). */
+  hasCustomConstructor: boolean;
   sourceFile: string;
 }
 
@@ -410,6 +412,8 @@ function parseClassDeclarations(tree: Parser.Tree, sourceFile: string, namespace
     const constants = parseConstants(bodyNode);
     const resourceAttributes = parseResourceAttributes(bodyNode);
 
+    const hasCustomConstructor = methods.some((m) => m.name === 'constructFromResponse' && m.isStatic);
+
     classes.push({
       name: nameNode.text,
       namespace,
@@ -419,6 +423,7 @@ function parseClassDeclarations(tree: Parser.Tree, sourceFile: string, namespace
       properties,
       constants,
       resourceAttributes,
+      hasCustomConstructor,
       sourceFile,
     });
   }
@@ -447,6 +452,7 @@ function parseInterfaceDeclarations(tree: Parser.Tree, sourceFile: string, names
       properties: [],
       constants: [],
       resourceAttributes: [],
+      hasCustomConstructor: false,
       sourceFile,
     });
   }
@@ -499,6 +505,7 @@ function parseEnumDeclarations(tree: Parser.Tree, sourceFile: string, namespace:
       properties: [],
       constants,
       resourceAttributes: [],
+      hasCustomConstructor: false,
       sourceFile,
     });
   }

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { typescriptEmitter } from '../../../examples/reference-emitter/src/index.js';
 import type { EmitterContext } from '../../../src/engine/types.js';
 import type { ApiSpec, Model, Enum, Service } from '../../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../../src/ir/sdk-behavior.js';
 
 const minimalCtx: EmitterContext = {
   namespace: 'git_hub',
@@ -13,6 +14,7 @@ const minimalCtx: EmitterContext = {
     services: [],
     models: [],
     enums: [],
+    sdk: defaultSdkBehavior(),
   },
 };
 
