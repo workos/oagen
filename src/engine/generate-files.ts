@@ -1,5 +1,7 @@
 import type { ApiSpec, Model, TypeRef, Service } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
+import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { toSnakeCase } from '../utils/naming.js';
@@ -11,6 +13,8 @@ export function buildEmitterContext(
     outputDir: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
+    operationHints?: Record<string, OperationHint>;
+    mountRules?: Record<string, string>;
   },
 ): EmitterContext {
   return {
@@ -20,6 +24,7 @@ export function buildEmitterContext(
     outputDir: options.outputDir,
     apiSurface: options.apiSurface,
     overlayLookup: options.overlayLookup,
+    resolvedOperations: resolveOperations(spec, options.operationHints, options.mountRules),
   };
 }
 
@@ -122,6 +127,8 @@ export function generateFiles(
     outputDir: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
+    operationHints?: Record<string, OperationHint>;
+    mountRules?: Record<string, string>;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string } {
   const ctx = buildEmitterContext(spec, options);

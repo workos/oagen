@@ -23,6 +23,8 @@ function handleError(err: unknown): never {
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
 let configDocUrl: string | undefined;
+let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
+let configMountRules: Record<string, string> | undefined;
 try {
   const config = await loadConfig();
   if (config) {
@@ -30,6 +32,8 @@ try {
     configSmokeRunners = config.smokeRunners;
     configOperationIdTransform = config.operationIdTransform;
     configDocUrl = config.docUrl;
+    configOperationHints = config.operationHints;
+    configMountRules = config.mountRules;
   }
 } catch (err) {
   handleError(err);
@@ -68,9 +72,13 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(
-      handleError,
-    );
+    generateCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      docUrl: configDocUrl,
+      operationHints: configOperationHints,
+      mountRules: configMountRules,
+    }).catch(handleError);
   });
 
 program

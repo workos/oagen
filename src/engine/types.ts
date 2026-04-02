@@ -1,4 +1,5 @@
 import type { ApiSpec, Model, Enum, Service } from '../ir/types.js';
+import type { ResolvedOperation } from '../ir/operation-hints.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 
 export interface GeneratedFile {
@@ -19,6 +20,8 @@ export interface EmitterContext {
   outputDir?: string;
   apiSurface?: ApiSurface;
   overlayLookup?: OverlayLookup;
+  /** Resolved operations from the hint-aware resolver. Populated by buildEmitterContext(). */
+  resolvedOperations?: ResolvedOperation[];
 }
 
 export interface FormatCommand {

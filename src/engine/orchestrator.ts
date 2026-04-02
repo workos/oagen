@@ -1,4 +1,5 @@
 import type { ApiSpec } from '../ir/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 import type { Emitter, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { writeFiles } from './writer.js';
@@ -16,6 +17,8 @@ export async function generate(
     target?: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
+    operationHints?: Record<string, OperationHint>;
+    mountRules?: Record<string, string>;
   },
 ): Promise<GeneratedFile[]> {
   const { files: withHeaders, header } = generateFiles(spec, emitter, options);
