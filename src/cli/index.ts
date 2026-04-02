@@ -6,6 +6,7 @@ import { diffCommand } from './diff.js';
 import { extractCommand } from './extract.js';
 import { verifyCommand } from './verify.js';
 import { initCommand } from './init.js';
+import { resolveCommand } from './resolve.js';
 import { loadConfig } from './config-loader.js';
 import { applyConfig } from './plugin-loader.js';
 import { CommandError } from '../errors.js';
@@ -129,6 +130,26 @@ program
       ...opts,
       maxRetries: parseInt(opts.maxRetries, 10),
       operationIdTransform: configOperationIdTransform,
+    }).catch(handleError);
+  });
+
+program
+  .command('resolve')
+  .description('Resolve operation names from spec and output a review table')
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
+  .option('--format <format>', 'Output format: table or json', 'table')
+  .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
+    if (!opts.spec) {
+      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
+      process.exit(1);
+    }
+    resolveCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      docUrl: configDocUrl,
+      operationHints: configOperationHints,
+      mountRules: configMountRules,
     }).catch(handleError);
   });
 

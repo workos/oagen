@@ -172,6 +172,40 @@ export default {
 
 See [`src/ir/sdk-behavior.ts`](src/ir/sdk-behavior.ts) for all interfaces and default values.
 
+## Operation Resolution
+
+`resolveOperations(spec, hints?, mountRules?)` derives method names and mount targets for every operation in the spec. The algorithm produces a snake_case name from the HTTP method and path, then applies optional overrides from a hint map.
+
+Emitters consume `ctx.resolvedOperations` instead of computing names independently, ensuring all SDKs use the same method names (converted to each language's convention).
+
+Configure hints and mount rules in `oagen.config.ts`:
+
+```ts
+export default {
+  operationHints: {
+    'GET /sso/authorize': { name: 'get_authorization_url' },
+    'POST /user_management/authenticate': {
+      split: [
+        { name: 'authenticate_with_password', targetVariant: 'PasswordRequest', ... },
+      ],
+    },
+  },
+  mountRules: {
+    Connections: 'SSO',           // All Connections ops mount on SSO
+    DirectoryGroups: 'DirectorySync',
+  },
+};
+```
+
+Review resolved names with `oagen resolve`:
+
+```bash
+oagen resolve --spec openapi.yml --format table   # Markdown review table
+oagen resolve --spec openapi.yml --format json     # JSON for programmatic use
+```
+
+See [`src/ir/operation-hints.ts`](src/ir/operation-hints.ts) for types and [`docs/architecture/ir-types.md`](docs/architecture/ir-types.md) for the full reference.
+
 ## Commands
 
 | Command          | Purpose                                             |
@@ -179,6 +213,7 @@ See [`src/ir/sdk-behavior.ts`](src/ir/sdk-behavior.ts) for all interfaces and de
 | `oagen parse`    | Parse a spec and print IR JSON                      |
 | `oagen init`     | Scaffold an emitter project                         |
 | `oagen generate` | Run a registered emitter                            |
+| `oagen resolve`  | Review resolved operation names (table or JSON)     |
 | `oagen diff`     | Compare two specs and output a diff report          |
 | `oagen extract`  | Advanced: extract an SDK API surface for compat use |
 | `oagen verify`   | Advanced: smoke-test output and run compat checks   |

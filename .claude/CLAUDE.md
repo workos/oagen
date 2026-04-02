@@ -12,6 +12,7 @@ Two phases: one-time setup (`/generate-sdk`—scaffold emitter, verify compat if
 
 - **Dependency layers are one-way:** `ir → utils → parser → engine/differ/compat → cli`. Never import rightward into leftward layers. Emitters live in a separate project directory and import from `@workos/oagen`.
 - **SdkBehavior lives in `ir/sdk-behavior.ts`** (layer 0). Must not import from other layers. Contains all SDK runtime policy types, `defaultSdkBehavior()`, and `mergeSdkBehavior()`. Emitters read policy from `ctx.spec.sdk`.
+- **Operation resolution lives in `ir/operation-hints.ts`** (layer 0). Derives method names from HTTP method + path, applies consumer-provided hints and mount rules. Produces `ResolvedOperation[]` on `ctx.resolvedOperations`.
 - **Emitters are pure:** receive IR, return `GeneratedFile[]`. No I/O, no side effects.
 - **Never remove or edit existing tests.** Test coverage can be improved, but not weakend.
 - **Tests:** prefer `toMatchInlineSnapshot()` for complex output; most tests use standard assertions. `test/` mirrors `src/` structure.
@@ -50,3 +51,4 @@ oagen ships as a Claude Code plugin. Skills are in `skills/` at the repo root. U
 - `/oagen:integrate <language>` — merge generated code into a live SDK via `--target`
 - `/oagen:verify-smoke-test <language>` — run generate-verify loop to iteratively fix an emitter until smoke tests pass
 - `/oagen:check-emitter-parity <language>` — audit an emitter's coverage of IR fields and produce a gap analysis
+- `/oagen:review-operations` — review resolved operation names from the spec, flag unhinted operations
