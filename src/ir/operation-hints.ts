@@ -186,12 +186,27 @@ export function deriveMethodName(op: Operation, _service: Service): string {
     verb = 'get';
   }
 
-  // Build resource name from static segments
-  // Use the last 1-2 meaningful segments for context
-  const resource = toSnake(terminal);
+  // Build resource name from static segments.
+  // When path params separate static segments, include the penultimate static
+  // segment (singularized) as a parent-context prefix to disambiguate nested paths.
+  // e.g. /authorization/organizations/{id}/roles → "organization_roles"
+  let resource = toSnake(terminal);
+  if (staticSegments.length >= 2) {
+    const penultimate = staticSegments[staticSegments.length - 2];
+    // Check if a path param appears between the penultimate and terminal segments
+    // in the original path by finding both positions and looking for {…} between them.
+    const penIdx = segments.lastIndexOf(penultimate);
+    const termIdx = segments.lastIndexOf(staticSegments[staticSegments.length - 1]);
+    const hasParamBetween = segments.slice(penIdx + 1, termIdx).some((s) => s.startsWith('{'));
+    if (hasParamBetween) {
+      const prefix = toSnake(singularize(penultimate));
+      resource = `${prefix}_${resource}`;
+    }
+  }
 
-  // Singularize for single-resource operations (trailing param or non-collection POST)
-  const isSingleResource = trailingParam || op.httpMethod !== 'get';
+  // Singularize only when there is a trailing path param (single-resource operation).
+  // POST/PUT/DELETE to collection endpoints keep plural nouns.
+  const isSingleResource = trailingParam;
   const noun = isSingleResource ? singularize(resource) : resource;
 
   // For "list" verb, keep plural

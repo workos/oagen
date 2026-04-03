@@ -57,8 +57,8 @@ describe('deriveMethodName', () => {
       expect(deriveMethodName(op('get', '/users/{id}'), service)).toBe('get_user');
     });
 
-    it('POST on collection → create_<singular>', () => {
-      expect(deriveMethodName(op('post', '/users'), service)).toBe('create_user');
+    it('POST on collection → create_<plural>', () => {
+      expect(deriveMethodName(op('post', '/users'), service)).toBe('create_users');
     });
 
     it('PUT on resource → update_<singular>', () => {
@@ -137,12 +137,12 @@ describe('deriveMethodName', () => {
   });
 
   describe('singularization', () => {
-    it('strips trailing s', () => {
-      expect(deriveMethodName(op('post', '/organizations'), service)).toBe('create_organization');
+    it('keeps plural for collection POST', () => {
+      expect(deriveMethodName(op('post', '/organizations'), service)).toBe('create_organizations');
     });
 
-    it('handles -ies → -y', () => {
-      expect(deriveMethodName(op('post', '/directories'), service)).toBe('create_directory');
+    it('singularizes with trailing param', () => {
+      expect(deriveMethodName(op('get', '/directories/{id}'), service)).toBe('get_directory');
     });
 
     it('preserves -ss words', () => {
@@ -200,7 +200,7 @@ describe('resolveOperations', () => {
     expect(resolved).toHaveLength(3);
     expect(resolved[0].methodName).toBe('list_users');
     expect(resolved[1].methodName).toBe('get_user');
-    expect(resolved[2].methodName).toBe('create_user');
+    expect(resolved[2].methodName).toBe('create_users');
     // No mount override — stays on original service
     expect(resolved[0].mountOn).toBe('Users');
   });
