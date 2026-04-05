@@ -118,8 +118,16 @@ export function extractSchemas(
     collectInlineEnums(model.fields, enums);
   }
 
-  activeSchemaNameTransform = null;
+  // NOTE: activeSchemaNameTransform is intentionally NOT cleared here.
+  // extractOperations() calls schemaToTypeRef() for $ref resolution and
+  // needs the same transform active. parseSpec() calls clearSchemaNameTransform()
+  // after all extraction is complete.
   return { models, enums };
+}
+
+/** Clear the module-level schemaNameTransform. Called by parseSpec() after all extraction phases. */
+export function clearSchemaNameTransform(): void {
+  activeSchemaNameTransform = null;
 }
 
 /**

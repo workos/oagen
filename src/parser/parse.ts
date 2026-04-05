@@ -2,7 +2,7 @@ import type { ApiSpec, AuthScheme, ServerEntry } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
-import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
+import { extractSchemas, extractInlineModelsFromSchemas, clearSchemaNameTransform } from './schemas.js';
 import { extractOperations } from './operations.js';
 import {
   mergeInlineResponseModels,
@@ -52,6 +52,11 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
   );
+
+  // schemaNameTransform is kept active through extractOperations so that
+  // $ref-based TypeRefs in operations resolve to the same transformed names.
+  // Now that all extraction is done, clear it.
+  clearSchemaNameTransform();
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
 
