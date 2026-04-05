@@ -14,6 +14,7 @@ import { validateModelRefs } from './normalize-model-refs.js';
 
 export interface ParseOptions {
   operationIdTransform?: (id: string) => string;
+  schemaNameTransform?: (name: string) => string;
 }
 
 export async function parseSpec(specPath: string, options?: ParseOptions): Promise<ApiSpec> {
@@ -44,6 +45,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
 
   const { models, enums } = extractSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    { schemaNameTransform: options?.schemaNameTransform },
   );
 
   const { services, inlineModels } = extractOperations(

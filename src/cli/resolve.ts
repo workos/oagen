@@ -7,11 +7,15 @@ export async function resolveCommand(opts: {
   spec: string;
   format?: 'table' | 'json';
   operationIdTransform?: (id: string) => string;
+  schemaNameTransform?: (name: string) => string;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
 }): Promise<void> {
-  let ir = await parseSpec(opts.spec, { operationIdTransform: opts.operationIdTransform });
+  let ir = await parseSpec(opts.spec, {
+    operationIdTransform: opts.operationIdTransform,
+    schemaNameTransform: opts.schemaNameTransform,
+  });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);
   }

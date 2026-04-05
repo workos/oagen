@@ -23,6 +23,7 @@ function handleError(err: unknown): never {
 // we use top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
+let configSchemaNameTransform: ((name: string) => string) | undefined;
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
@@ -32,6 +33,7 @@ try {
     applyConfig(config);
     configSmokeRunners = config.smokeRunners;
     configOperationIdTransform = config.operationIdTransform;
+    configSchemaNameTransform = config.schemaNameTransform;
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
@@ -76,6 +78,7 @@ program
     generateCommand({
       ...opts,
       operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
@@ -88,7 +91,12 @@ program
   .requiredOption('--old <path>', 'Path to old spec')
   .requiredOption('--new <path>', 'Path to new spec')
   .action((opts) => {
-    diffCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(handleError);
+    diffCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
+      docUrl: configDocUrl,
+    }).catch(handleError);
   });
 
 program
@@ -130,6 +138,7 @@ program
       ...opts,
       maxRetries: parseInt(opts.maxRetries, 10),
       operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
     }).catch(handleError);
   });
 
@@ -147,6 +156,7 @@ program
     resolveCommand({
       ...opts,
       operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,

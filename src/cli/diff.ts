@@ -7,9 +7,13 @@ export async function diffCommand(opts: {
   old: string;
   new: string;
   operationIdTransform?: (id: string) => string;
+  schemaNameTransform?: (name: string) => string;
   docUrl?: string;
 }): Promise<void> {
-  const parseOptions = { operationIdTransform: opts.operationIdTransform };
+  const parseOptions = {
+    operationIdTransform: opts.operationIdTransform,
+    schemaNameTransform: opts.schemaNameTransform,
+  };
   let [oldSpec, newSpec] = await Promise.all([parseSpec(opts.old, parseOptions), parseSpec(opts.new, parseOptions)]);
   if (opts.docUrl) {
     oldSpec = expandDocUrls(oldSpec, opts.docUrl);
