@@ -52,20 +52,21 @@ Print a markdown table with all operations, grouped by category:
 ## Operations needing review (N)
 
 | Service | Method | Path | Current Name | Suggested Action |
-|---|---|---|---|---|
+| ------- | ------ | ---- | ------------ | ---------------- |
 
 ## Algorithm-derived operations (N)
 
 | Service | Method | Path | Derived Name | Mount On |
-|---|---|---|---|---|
+| ------- | ------ | ---- | ------------ | -------- |
 
 ## Hinted operations (N)
 
 | Service | Method | Path | Hint Name | Mount On |
-|---|---|---|---|---|
+| ------- | ------ | ---- | --------- | -------- |
 ```
 
 For "needs review" operations, suggest a concrete action:
+
 - `add name hint: <suggested_name>` for semantic renames
 - `add mountOn hint: <target>` for service remounting
 - `singularize: <name>` for plural-to-singular fixes
@@ -73,6 +74,7 @@ For "needs review" operations, suggest a concrete action:
 ## Step 5: Summary
 
 Print a summary:
+
 - Total operations
 - Hinted (with name or mount overrides)
 - Algorithm-derived (no action needed)

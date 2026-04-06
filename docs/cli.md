@@ -134,10 +134,10 @@ oagen resolve --spec openapi.yml
 oagen resolve --spec openapi.yml --format json
 ```
 
-| Argument           | Required | Default                 | Description                                      |
-| ------------------ | -------- | ----------------------- | ------------------------------------------------ |
-| `--spec <path>`    | No       | `OPENAPI_SPEC_PATH` env | Path to an OpenAPI 3.x spec file (YAML or JSON). |
-| `--format <format>`| No       | `table`                 | Output format: `table` (markdown) or `json`.     |
+| Argument            | Required | Default                 | Description                                      |
+| ------------------- | -------- | ----------------------- | ------------------------------------------------ |
+| `--spec <path>`     | No       | `OPENAPI_SPEC_PATH` env | Path to an OpenAPI 3.x spec file (YAML or JSON). |
+| `--format <format>` | No       | `table`                 | Output format: `table` (markdown) or `json`.     |
 
 When `oagen.config.ts` defines `operationHints` and/or `mountRules`, they are applied automatically. The table format flags operations that have no hint and are resolved purely by algorithm.
 
@@ -161,13 +161,13 @@ export default config;
 
 ### Options
 
-| Key                    | Type                     | Description                                                                                                                                                                                                                       |
-| ---------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `emitters`             | `Emitter[]`              | Language emitters to register. Each emitter implements the `Emitter` interface and generates SDK files for one target language.                                                                                                   |
-| `extractors`           | `Extractor[]`            | API surface extractors to register. Each extractor parses a live SDK and produces an `ApiSurface` JSON used for compat verification.                                                                                              |
-| `emitterProject`       | `string`                 | Path to the emitter project directory. Used by skills to scaffold new emitters, tests, and smoke runners in the correct location.                                                                                                 |
-| `smokeRunners`         | `Record<string, string>` | Map from language key to custom smoke runner script path. Overrides the built-in `sdk-test.ts` for `oagen verify`. Can also be set per-invocation with `--smoke-runner`.                                                          |
-| `operationIdTransform` | `(id: string) => string` | Custom transform for operation IDs. Receives the raw `operationId` from the spec; return the desired operation name. No additional casing conversion is applied. When omitted, `operationId` values are converted to `camelCase`. |
-| `docUrl`               | `string`                 | Base URL for documentation links. When set, relative markdown paths in descriptions (e.g. `[User](/reference/authkit/user)`) are expanded to full URLs (e.g. `[User](https://workos.com/docs/reference/authkit/user)`).           |
+| Key                    | Type                            | Description                                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `emitters`             | `Emitter[]`                     | Language emitters to register. Each emitter implements the `Emitter` interface and generates SDK files for one target language.                                                                                                                  |
+| `extractors`           | `Extractor[]`                   | API surface extractors to register. Each extractor parses a live SDK and produces an `ApiSurface` JSON used for compat verification.                                                                                                             |
+| `emitterProject`       | `string`                        | Path to the emitter project directory. Used by skills to scaffold new emitters, tests, and smoke runners in the correct location.                                                                                                                |
+| `smokeRunners`         | `Record<string, string>`        | Map from language key to custom smoke runner script path. Overrides the built-in `sdk-test.ts` for `oagen verify`. Can also be set per-invocation with `--smoke-runner`.                                                                         |
+| `operationIdTransform` | `(id: string) => string`        | Custom transform for operation IDs. Receives the raw `operationId` from the spec; return the desired operation name. No additional casing conversion is applied. When omitted, `operationId` values are converted to `camelCase`.                |
+| `docUrl`               | `string`                        | Base URL for documentation links. When set, relative markdown paths in descriptions (e.g. `[User](/reference/authkit/user)`) are expanded to full URLs (e.g. `[User](https://workos.com/docs/reference/authkit/user)`).                          |
 | `operationHints`       | `Record<string, OperationHint>` | Per-operation overrides keyed by `"METHOD /path"`. Override derived method names, remount to a different service, or split union-body operations into typed wrappers. See [Operation Resolution](architecture/ir-types.md#operation-resolution). |
-| `mountRules`           | `Record<string, string>` | Service-level remounting. Maps IR service name to target service/namespace (PascalCase). All operations in the source service are mounted on the target unless overridden per-operation in `operationHints`.                      |
+| `mountRules`           | `Record<string, string>`        | Service-level remounting. Maps IR service name to target service/namespace (PascalCase). All operations in the source service are mounted on the target unless overridden per-operation in `operationHints`.                                     |

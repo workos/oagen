@@ -36,15 +36,15 @@ Language-agnostic runtime policies consumed by emitters via `ctx.spec.sdk`. Alwa
 
 ```typescript
 interface SdkBehavior {
-  retry: RetryPolicy;          // Retry status codes, max attempts, backoff strategy
-  errors: ErrorPolicy;         // Status code → exception kind mapping, doc URL template
-  telemetry: TelemetryPolicy;  // Request metrics header, request ID header
+  retry: RetryPolicy; // Retry status codes, max attempts, backoff strategy
+  errors: ErrorPolicy; // Status code → exception kind mapping, doc URL template
+  telemetry: TelemetryPolicy; // Request metrics header, request ID header
   pagination: PaginationPolicy; // Auto-page delay
   idempotency: IdempotencyPolicy; // Idempotency header name, auto-generate for POST
-  logging: LoggingPolicy;      // Log events and levels
-  userAgent: UserAgentPolicy;  // SDK identifier template, AI agent detection
+  logging: LoggingPolicy; // Log events and levels
+  userAgent: UserAgentPolicy; // SDK identifier template, AI agent detection
   requestGuard: RequestGuardPolicy; // Misplaced-options key detection
-  timeout: TimeoutPolicy;      // Default timeout, env var override
+  timeout: TimeoutPolicy; // Default timeout, env var override
 }
 ```
 
@@ -311,8 +311,8 @@ Consumer-provided overrides keyed by `"METHOD /path"`:
 
 ```typescript
 interface OperationHint {
-  name?: string;       // Override derived method name
-  mountOn?: string;    // Remount to different service/namespace
+  name?: string; // Override derived method name
+  mountOn?: string; // Remount to different service/namespace
   split?: SplitHint[]; // Split union body into N typed wrappers
   defaults?: Record<string, string | number | boolean>;
   inferFromClient?: string[];
@@ -323,10 +323,10 @@ interface OperationHint {
 
 ```typescript
 interface ResolvedOperation {
-  operation: Operation;    // Original IR
-  service: Service;        // Original owning service
-  methodName: string;      // Resolved snake_case name
-  mountOn: string;         // Resolved target service (PascalCase)
+  operation: Operation; // Original IR
+  service: Service; // Original owning service
+  methodName: string; // Resolved snake_case name
+  mountOn: string; // Resolved target service (PascalCase)
   wrappers?: ResolvedWrapper[];
 }
 ```
