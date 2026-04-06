@@ -67,6 +67,16 @@ export function collectReferencedNames(
     }
   }
 
+  // Preserve discriminated models as public SDK types even when no operation
+  // returns them directly. This matters for event/webhook unions where the base
+  // operation references a generic envelope but the variant structs are still
+  // useful public surface.
+  for (const model of models) {
+    if (isDiscriminatedModel(model)) {
+      referencedModels.add(model.name);
+    }
+  }
+
   // Chase: transitively resolve model field references until stable
   const modelsByName = new Map(models.map((m) => [m.name, m]));
   const visited = new Set<string>();
@@ -87,6 +97,13 @@ export function collectReferencedNames(
   }
 
   return { models: referencedModels, enums: referencedEnums };
+}
+
+function isDiscriminatedModel(model: Model): boolean {
+  return model.fields.some(
+    (field) =>
+      (field.name === 'event' || field.name === 'type' || field.name === 'object') && field.type.kind === 'literal',
+  );
 }
 
 /** Collect all generated files from an emitter (no headers, no path prefixes). */

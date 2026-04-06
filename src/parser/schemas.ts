@@ -1,6 +1,23 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
-import { toPascalCase, toUpperSnakeCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import { toPascalCase, toUpperSnakeCase, cleanSchemaName, singularize, stripListItemMarkers } from '../utils/naming.js';
+
+/**
+ * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
+ * to apply the same name transform to $ref model/enum references.
+ */
+let activeSchemaNameTransform: ((name: string) => string) | null = null;
+
+/** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
+function resolveSchemaName(rawName: string): string {
+  let name = cleanSchemaName(toPascalCase(rawName));
+  if (activeSchemaNameTransform) name = activeSchemaNameTransform(name);
+  return name;
+}
+
+export interface SchemaExtractionOptions {
+  schemaNameTransform?: (name: string) => string;
+}
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -96,6 +113,17 @@ export function extractSchemas(
         }
       } else {
         modelsByCleanName.set(pascalName, model);
+      }
+
+      for (const inlineModel of extractDiscriminatedAllOfVariantModels(schema, pascalName)) {
+        const existingInline = modelsByCleanName.get(inlineModel.name);
+        if (existingInline) {
+          if (inlineModel.fields.length > existingInline.fields.length) {
+            modelsByCleanName.set(inlineModel.name, inlineModel);
+          }
+        } else {
+          modelsByCleanName.set(inlineModel.name, inlineModel);
+        }
       }
     }
   }
@@ -395,6 +423,114 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
   }
 
   return { name, description: schema.description, fields };
+}
+
+function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackName: string): Model[] {
+  const models: Model[] = [];
+  const seenNames = new Set<string>();
+
+  for (const subSchema of schema.allOf ?? []) {
+    for (const variant of subSchema.oneOf ?? []) {
+      if (!variant.properties || (variant.type !== undefined && variant.type !== 'object')) continue;
+
+      const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
+      for (const model of extractInlineModelDeep(variantName, variant)) {
+        if (seenNames.has(model.name)) continue;
+        seenNames.add(model.name);
+        models.push(model);
+      }
+    }
+  }
+
+  return models;
+}
+
+function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: string): string {
+  if (!schema.properties) return fallbackName;
+
+  const preferred = ['event', 'type', 'object'];
+  for (const name of preferred) {
+    const field = schema.properties[name];
+    if (!field) continue;
+    if (typeof field.const === 'string') {
+      return toPascalCase(field.const);
+    }
+    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
+      return toPascalCase(field.enum[0]);
+    }
+  }
+
+  for (const field of Object.values(schema.properties)) {
+    if (!field) continue;
+    if (typeof field.const === 'string') {
+      return toPascalCase(field.const);
+    }
+    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
+      return toPascalCase(field.enum[0]);
+    }
+  }
+
+  return fallbackName;
+}
+
+function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
+  const requiredSet = new Set(schema.required ?? []);
+  const fields: Field[] = [];
+  const properties = schema.properties ?? {};
+  const nestedModels: Model[] = [];
+
+  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+    if (!fieldSchema) continue;
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+
+    if (fieldSchema.type === 'object' && fieldSchema.properties) {
+      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema));
+    }
+
+    if (fieldSchema.type === 'array' && fieldSchema.items?.properties) {
+      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema.items));
+    }
+
+    if (fieldSchema.allOf) {
+      const mergedProperties: Record<string, SchemaObject | undefined> = {};
+      const mergedRequired: string[] = [];
+      for (const sub of fieldSchema.allOf) {
+        if (sub.properties) Object.assign(mergedProperties, sub.properties);
+        if (sub.required) mergedRequired.push(...sub.required);
+      }
+      if (Object.keys(mergedProperties).length > 0) {
+        nestedModels.push(
+          ...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), {
+            type: 'object',
+            properties: mergedProperties,
+            required: mergedRequired,
+          }),
+        );
+      }
+    }
+
+    if (fieldSchema.oneOf) {
+      const objectVariant = fieldSchema.oneOf.find((v) => v.properties && (v.type === 'object' || !v.type));
+      if (objectVariant) {
+        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), objectVariant));
+      }
+    }
+  }
+
+  return [{ name, description: schema.description, fields }, ...nestedModels];
+}
+
+function qualifyNestedInlineName(parentName: string, fieldName: string): string {
+  const pascalField = toPascalCase(fieldName);
+  if (pascalField.startsWith(parentName)) return pascalField;
+
+  const cleanParent = stripListItemMarkers(parentName);
+  const qualified = `${cleanParent}${pascalField}`;
+  const match = qualified.match(/^(.+?)([A-Z][a-z]+s?)$/);
+  if (match && match[2]) {
+    return match[1] + singularize(match[2]);
+  }
+  return qualified;
 }
 
 export function schemaToTypeRef(schema: SchemaObject, contextName?: string, parentModelName?: string): TypeRef {

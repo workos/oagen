@@ -145,6 +145,56 @@ describe('extractSchemas', () => {
     expect(models[0].fields[1].required).toBe(true);
   });
 
+  it('extracts discriminated allOf oneOf variants as additional models', () => {
+    const schemas = {
+      EventSchema: {
+        allOf: [
+          {
+            type: 'object' as const,
+            required: ['id', 'event', 'data'],
+            properties: {
+              id: { type: 'string' },
+              event: { type: 'string' },
+              data: { type: 'object', additionalProperties: {} },
+            },
+          },
+          {
+            oneOf: [
+              {
+                type: 'object' as const,
+                required: ['id', 'event', 'data'],
+                properties: {
+                  id: { type: 'string' },
+                  event: { type: 'string', const: 'session.created' },
+                  data: {
+                    type: 'object' as const,
+                    required: ['object', 'id'],
+                    properties: {
+                      object: { type: 'string', const: 'session' },
+                      id: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const { models } = extractSchemas(schemas);
+    expect(models.map((m) => m.name)).toContain('EventSchema');
+    expect(models.map((m) => m.name)).toContain('SessionCreated');
+    expect(models.map((m) => m.name)).toContain('SessionCreatedData');
+
+    const variant = models.find((m) => m.name === 'SessionCreated');
+    expect(variant).toBeDefined();
+    expect(variant!.fields.find((f) => f.name === 'data')?.type).toEqual({
+      kind: 'model',
+      name: 'SessionCreatedData',
+    });
+  });
+
   it('returns empty for undefined schemas', () => {
     const { models, enums } = extractSchemas(undefined);
     expect(models).toHaveLength(0);
