@@ -64,8 +64,8 @@ export async function generate(
       console.log(`Target: skipped ${targetResult.skipped.length} files (excluded or no grammar)`);
     }
 
-    // Run the emitter's formatter on all written/merged files
-    const allTargetFiles = [...targetResult.written, ...targetResult.merged];
+    // Run the emitter's formatter on all written/merged/identical files
+    const allTargetFiles = [...targetResult.written, ...targetResult.merged, ...targetResult.identical];
     if (allTargetFiles.length > 0) {
       await formatTargetFiles(emitter, options.target, allTargetFiles);
     }
