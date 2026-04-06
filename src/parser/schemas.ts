@@ -19,23 +19,6 @@ export interface SchemaExtractionOptions {
   schemaNameTransform?: (name: string) => string;
 }
 
-/**
- * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
- * to apply the same name transform to $ref model/enum references.
- */
-let activeSchemaNameTransform: ((name: string) => string) | null = null;
-
-/** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
-function resolveSchemaName(rawName: string): string {
-  let name = cleanSchemaName(toPascalCase(rawName));
-  if (activeSchemaNameTransform) name = activeSchemaNameTransform(name);
-  return name;
-}
-
-export interface SchemaExtractionOptions {
-  schemaNameTransform?: (name: string) => string;
-}
-
 export interface SchemaObject {
   type?: string | string[];
   format?: string;
