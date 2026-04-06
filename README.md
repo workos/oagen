@@ -151,8 +151,8 @@ Emitters read policy from `ctx.spec.sdk` instead of hardcoding values:
 function generateHttpClient(ctx: EmitterContext) {
   const sdk = ctx.spec.sdk;
   const retryCodes = sdk.retry.retryableStatusCodes; // [429, 500, 502, 503, 504]
-  const maxRetries = sdk.retry.maxRetries;            // 3
-  const backoff = sdk.retry.backoff;                  // { initialDelay: 1, multiplier: 2, maxDelay: 30, jitterFactor: 0.5 }
+  const maxRetries = sdk.retry.maxRetries; // 3
+  const backoff = sdk.retry.backoff; // { initialDelay: 1, multiplier: 2, maxDelay: 30, jitterFactor: 0.5 }
   // ...generate code using these values
 }
 ```
@@ -164,7 +164,10 @@ Override defaults per-SDK via `oagen.config.ts`:
 export default {
   sdkBehavior: {
     retry: { backoff: { initialDelay: 0.5, maxDelay: 8.0 } },
-    timeout: { defaultTimeoutSeconds: 30, timeoutEnvVar: 'WORKOS_REQUEST_TIMEOUT' },
+    timeout: {
+      defaultTimeoutSeconds: 30,
+      timeoutEnvVar: "WORKOS_REQUEST_TIMEOUT",
+    },
     pagination: { autoPageDelayMs: 0 },
   },
 };

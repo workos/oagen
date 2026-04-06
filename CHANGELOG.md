@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/workos/oagen/compare/v0.3.0...v0.4.0) (2026-04-06)
+
+
+### Features
+
+* add SDK behavior and operation resolution support for PHP/Python generation ([#13](https://github.com/workos/oagen/issues/13)) ([5cf39d6](https://github.com/workos/oagen/commit/5cf39d6dd6337b1fc8faaf489da32645254e7693))
+
 ## [0.3.0](https://github.com/workos/oagen/compare/v0.2.0...v0.3.0) (2026-03-26)
 
 
