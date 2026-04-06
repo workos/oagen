@@ -5,6 +5,7 @@ export type {
   ServerEntry,
   Service,
   Operation,
+  SecurityRequirement,
   SuccessResponse,
   PaginationMeta,
   HttpMethod,
@@ -36,6 +37,31 @@ export {
   assignModelsToServices,
   collectRequestBodyModels,
 } from './ir/types.js';
+
+// Operation resolution
+export type { OperationHint, SplitHint, ResolvedOperation, ResolvedWrapper } from './ir/operation-hints.js';
+
+export { resolveOperations, deriveMethodName } from './ir/operation-hints.js';
+
+// SDK Behavior IR
+export type {
+  SdkBehavior,
+  RetryPolicy,
+  BackoffStrategy,
+  ErrorPolicy,
+  TelemetryPolicy,
+  PaginationPolicy,
+  IdempotencyPolicy,
+  LoggingPolicy,
+  LogEvent,
+  UserAgentPolicy,
+  AiAgentEnvVar,
+  RequestGuardPolicy,
+  TimeoutPolicy,
+  DeepPartial,
+} from './ir/sdk-behavior.js';
+
+export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 
 // Errors
 export {

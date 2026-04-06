@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function resolveScript(scriptRelPath: string): { bin: string; script: string } {
-  const distScript = path.resolve(__dirname, '..', '..', 'dist', 'scripts', scriptRelPath.replace(/\.ts$/, '.js'));
+  const distScript = path.resolve(__dirname, '..', '..', 'dist', 'scripts', scriptRelPath.replace(/\.ts$/, '.mjs'));
   if (existsSync(distScript)) {
     return { bin: 'node', script: distScript };
   }

@@ -20,6 +20,7 @@ import {
   assignModelsToServices,
   collectRequestBodyModels,
 } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 describe('IR types', () => {
   it('constructs a valid PrimitiveType', () => {
@@ -170,6 +171,7 @@ describe('IR types', () => {
         },
       ],
       enums: [],
+      sdk: defaultSdkBehavior(),
     };
     expect(spec.services).toHaveLength(1);
     expect(spec.services[0].operations[0].pagination).toBeDefined();

@@ -69,6 +69,8 @@ The default `@workos/oagen` entrypoint is intentionally focused on the framework
 
 ```ts
 import {
+  defaultSdkBehavior,
+  mergeSdkBehavior,
   diffSpecs,
   generate,
   generateFiles,
@@ -82,6 +84,7 @@ import {
 } from "@workos/oagen";
 import type {
   ApiSpec,
+  SdkBehavior,
   Emitter,
   EmitterContext,
   GeneratedFile,
@@ -138,6 +141,71 @@ Start with:
 - [Emitter Contract](docs/architecture/emitter-contract.md)
 - [IR Type System Reference](docs/architecture/ir-types.md)
 
+## SDK Behavior
+
+`ApiSpec.sdk` contains language-agnostic runtime policies — retry logic, error mapping, telemetry, pagination delays, User-Agent construction, and more. It is always populated (via `defaultSdkBehavior()` during parsing).
+
+Emitters read policy from `ctx.spec.sdk` instead of hardcoding values:
+
+```ts
+function generateHttpClient(ctx: EmitterContext) {
+  const sdk = ctx.spec.sdk;
+  const retryCodes = sdk.retry.retryableStatusCodes; // [429, 500, 502, 503, 504]
+  const maxRetries = sdk.retry.maxRetries;            // 3
+  const backoff = sdk.retry.backoff;                  // { initialDelay: 1, multiplier: 2, maxDelay: 30, jitterFactor: 0.5 }
+  // ...generate code using these values
+}
+```
+
+Override defaults per-SDK via `oagen.config.ts`:
+
+```ts
+// oagen.config.ts — Python SDK overrides
+export default {
+  sdkBehavior: {
+    retry: { backoff: { initialDelay: 0.5, maxDelay: 8.0 } },
+    timeout: { defaultTimeoutSeconds: 30, timeoutEnvVar: 'WORKOS_REQUEST_TIMEOUT' },
+    pagination: { autoPageDelayMs: 0 },
+  },
+};
+```
+
+See [`src/ir/sdk-behavior.ts`](src/ir/sdk-behavior.ts) for all interfaces and default values.
+
+## Operation Resolution
+
+`resolveOperations(spec, hints?, mountRules?)` derives method names and mount targets for every operation in the spec. The algorithm produces a snake_case name from the HTTP method and path, then applies optional overrides from a hint map.
+
+Emitters consume `ctx.resolvedOperations` instead of computing names independently, ensuring all SDKs use the same method names (converted to each language's convention).
+
+Configure hints and mount rules in `oagen.config.ts`:
+
+```ts
+export default {
+  operationHints: {
+    'GET /sso/authorize': { name: 'get_authorization_url' },
+    'POST /user_management/authenticate': {
+      split: [
+        { name: 'authenticate_with_password', targetVariant: 'PasswordRequest', ... },
+      ],
+    },
+  },
+  mountRules: {
+    Connections: 'SSO',           // All Connections ops mount on SSO
+    DirectoryGroups: 'DirectorySync',
+  },
+};
+```
+
+Review resolved names with `oagen resolve`:
+
+```bash
+oagen resolve --spec openapi.yml --format table   # Markdown review table
+oagen resolve --spec openapi.yml --format json     # JSON for programmatic use
+```
+
+See [`src/ir/operation-hints.ts`](src/ir/operation-hints.ts) for types and [`docs/architecture/ir-types.md`](docs/architecture/ir-types.md) for the full reference.
+
 ## Commands
 
 | Command          | Purpose                                             |
@@ -145,6 +213,7 @@ Start with:
 | `oagen parse`    | Parse a spec and print IR JSON                      |
 | `oagen init`     | Scaffold an emitter project                         |
 | `oagen generate` | Run a registered emitter                            |
+| `oagen resolve`  | Review resolved operation names (table or JSON)     |
 | `oagen diff`     | Compare two specs and output a diff report          |
 | `oagen extract`  | Advanced: extract an SDK API surface for compat use |
 | `oagen verify`   | Advanced: smoke-test output and run compat checks   |

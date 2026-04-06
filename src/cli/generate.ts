@@ -3,6 +3,7 @@ import { generate } from '../engine/orchestrator.js';
 import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 
 export async function generateCommand(opts: {
   spec: string;
@@ -15,9 +16,15 @@ export async function generateCommand(opts: {
   manifest?: string;
   compatCheck?: boolean;
   operationIdTransform?: (id: string) => string;
+  schemaNameTransform?: (name: string) => string;
   docUrl?: string;
+  operationHints?: Record<string, OperationHint>;
+  mountRules?: Record<string, string>;
 }): Promise<void> {
-  let ir = await parseSpec(opts.spec, { operationIdTransform: opts.operationIdTransform });
+  let ir = await parseSpec(opts.spec, {
+    operationIdTransform: opts.operationIdTransform,
+    schemaNameTransform: opts.schemaNameTransform,
+  });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);
   }
@@ -46,6 +53,8 @@ export async function generateCommand(opts: {
     target: opts.target,
     apiSurface,
     overlayLookup,
+    operationHints: opts.operationHints,
+    mountRules: opts.mountRules,
   });
 
   if (opts.dryRun) {

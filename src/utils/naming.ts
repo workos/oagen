@@ -106,7 +106,7 @@ export function toUpperSnakeCase(s: string): string {
     .join('_');
 }
 
-const BACKEND_SUFFIXES = ['Dto', 'DTO', 'Controller'];
+const BACKEND_SUFFIXES = ['Controller'];
 
 export function stripBackendSuffixes(name: string): string {
   for (const suffix of BACKEND_SUFFIXES) {
@@ -146,6 +146,8 @@ const SINGULAR_SAFE_LIST = new Set([
   'Alias',
   'Basis',
   'Bus',
+  'Species',
+  'Series',
 ]);
 
 /**

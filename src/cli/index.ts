@@ -6,6 +6,7 @@ import { diffCommand } from './diff.js';
 import { extractCommand } from './extract.js';
 import { verifyCommand } from './verify.js';
 import { initCommand } from './init.js';
+import { resolveCommand } from './resolve.js';
 import { loadConfig } from './config-loader.js';
 import { applyConfig } from './plugin-loader.js';
 import { CommandError } from '../errors.js';
@@ -22,14 +23,20 @@ function handleError(err: unknown): never {
 // we use top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
+let configSchemaNameTransform: ((name: string) => string) | undefined;
 let configDocUrl: string | undefined;
+let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
+let configMountRules: Record<string, string> | undefined;
 try {
   const config = await loadConfig();
   if (config) {
     applyConfig(config);
     configSmokeRunners = config.smokeRunners;
     configOperationIdTransform = config.operationIdTransform;
+    configSchemaNameTransform = config.schemaNameTransform;
     configDocUrl = config.docUrl;
+    configOperationHints = config.operationHints;
+    configMountRules = config.mountRules;
   }
 } catch (err) {
   handleError(err);
@@ -68,9 +75,14 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    generateCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(
-      handleError,
-    );
+    generateCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
+      docUrl: configDocUrl,
+      operationHints: configOperationHints,
+      mountRules: configMountRules,
+    }).catch(handleError);
   });
 
 program
@@ -79,7 +91,12 @@ program
   .requiredOption('--old <path>', 'Path to old spec')
   .requiredOption('--new <path>', 'Path to new spec')
   .action((opts) => {
-    diffCommand({ ...opts, operationIdTransform: configOperationIdTransform, docUrl: configDocUrl }).catch(handleError);
+    diffCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
+      docUrl: configDocUrl,
+    }).catch(handleError);
   });
 
 program
@@ -121,6 +138,28 @@ program
       ...opts,
       maxRetries: parseInt(opts.maxRetries, 10),
       operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
+    }).catch(handleError);
+  });
+
+program
+  .command('resolve')
+  .description('Resolve operation names from spec and output a review table')
+  .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
+  .option('--format <format>', 'Output format: table or json', 'table')
+  .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
+    if (!opts.spec) {
+      console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
+      process.exit(1);
+    }
+    resolveCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
+      docUrl: configDocUrl,
+      operationHints: configOperationHints,
+      mountRules: configMountRules,
     }).catch(handleError);
   });
 

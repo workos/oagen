@@ -1,5 +1,7 @@
 import type { ApiSpec, Model, TypeRef, Service } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
+import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { toSnakeCase } from '../utils/naming.js';
@@ -11,6 +13,8 @@ export function buildEmitterContext(
     outputDir: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
+    operationHints?: Record<string, OperationHint>;
+    mountRules?: Record<string, string>;
   },
 ): EmitterContext {
   return {
@@ -20,6 +24,7 @@ export function buildEmitterContext(
     outputDir: options.outputDir,
     apiSurface: options.apiSurface,
     overlayLookup: options.overlayLookup,
+    resolvedOperations: resolveOperations(spec, options.operationHints, options.mountRules),
   };
 }
 
@@ -62,6 +67,16 @@ export function collectReferencedNames(
     }
   }
 
+  // Preserve discriminated models as public SDK types even when no operation
+  // returns them directly. This matters for event/webhook unions where the base
+  // operation references a generic envelope but the variant structs are still
+  // useful public surface.
+  for (const model of models) {
+    if (isDiscriminatedModel(model)) {
+      referencedModels.add(model.name);
+    }
+  }
+
   // Chase: transitively resolve model field references until stable
   const modelsByName = new Map(models.map((m) => [m.name, m]));
   const visited = new Set<string>();
@@ -82,6 +97,13 @@ export function collectReferencedNames(
   }
 
   return { models: referencedModels, enums: referencedEnums };
+}
+
+function isDiscriminatedModel(model: Model): boolean {
+  return model.fields.some(
+    (field) =>
+      (field.name === 'event' || field.name === 'type' || field.name === 'object') && field.type.kind === 'literal',
+  );
 }
 
 /** Collect all generated files from an emitter (no headers, no path prefixes). */
@@ -122,6 +144,8 @@ export function generateFiles(
     outputDir: string;
     apiSurface?: ApiSurface;
     overlayLookup?: OverlayLookup;
+    operationHints?: Record<string, OperationHint>;
+    mountRules?: Record<string, string>;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string } {
   const ctx = buildEmitterContext(spec, options);

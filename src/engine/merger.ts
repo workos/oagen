@@ -138,6 +138,61 @@ export async function extractStatements(source: string, language: string): Promi
   return adapter.parseStatements(tree, source);
 }
 
+/**
+ * Return a map of top-level class name → { bodyEndLine, bodyEndCol } using
+ * tree-sitter.  `bodyEndLine` is 0-based.  For brace-delimited classes the
+ * end points at the closing brace line; for indentation-delimited classes
+ * it points one past the last line of the class body.
+ */
+export async function extractClassEndLines(
+  source: string,
+  language: string,
+): Promise<Map<string, { bodyEndLine: number }>> {
+  const parser = await getParser(language);
+  const tree = safeParse(parser, source);
+  const map = new Map<string, { bodyEndLine: number }>();
+
+  function processClassNode(node: Parser.SyntaxNode): void {
+    const nameNode = node.childForFieldName('name');
+    if (!nameNode) return;
+    const name = nameNode.text;
+
+    const body = node.childForFieldName('body');
+    const endRow = body ? body.endPosition.row : node.endPosition.row;
+    const lastChar = source[body ? body.endIndex - 1 : node.endIndex - 1];
+
+    if (lastChar === '}') {
+      map.set(name, { bodyEndLine: endRow });
+    } else {
+      map.set(name, { bodyEndLine: endRow + 1 });
+    }
+  }
+
+  for (const child of tree.rootNode.children) {
+    if (child.type === 'class_definition' || child.type === 'class_declaration') {
+      processClassNode(child);
+    }
+    // Python: `@decorator class Foo:` wraps the class in a decorated_definition
+    if (child.type === 'decorated_definition') {
+      for (const inner of child.namedChildren) {
+        if (inner.type === 'class_definition') {
+          processClassNode(inner);
+        }
+      }
+    }
+    // JS/TS: `export class Foo {}` wraps the class in an export_statement
+    if (child.type === 'export_statement') {
+      for (const inner of child.namedChildren) {
+        if (inner.type === 'class_declaration') {
+          processClassNode(inner);
+        }
+      }
+    }
+  }
+
+  return map;
+}
+
 export interface MergeResult {
   content: string;
   added: number;

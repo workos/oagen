@@ -1,18 +1,20 @@
 import type { ApiSpec, AuthScheme, ServerEntry } from '../ir/types.js';
+import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
-import { extractSchemas, extractInlineModelsFromSchemas } from './schemas.js';
+import { extractSchemas, extractInlineModelsFromSchemas, clearSchemaNameTransform } from './schemas.js';
 import { extractOperations } from './operations.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
 } from './normalize-inline-models.js';
-import { collectInlineEnumsFromModels } from './collect-inline-enums.js';
+import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 
 export interface ParseOptions {
   operationIdTransform?: (id: string) => string;
+  schemaNameTransform?: (name: string) => string;
 }
 
 export async function parseSpec(specPath: string, options?: ParseOptions): Promise<ApiSpec> {
@@ -43,12 +45,18 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
 
   const { models, enums } = extractSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    { schemaNameTransform: options?.schemaNameTransform },
   );
 
   const { services, inlineModels } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
   );
+
+  // schemaNameTransform is kept active through extractOperations so that
+  // $ref-based TypeRefs in operations resolve to the same transformed names.
+  // Now that all extraction is done, clear it.
+  clearSchemaNameTransform();
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
 
@@ -59,6 +67,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   collectInlineEnumsFromModels(finalModels, enums);
+  collectInlineEnumsFromOperations(services, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
@@ -76,6 +85,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     models: finalModels,
     enums,
     auth,
+    sdk: defaultSdkBehavior(),
   };
 
   validateModelRefs(result);

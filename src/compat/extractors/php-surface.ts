@@ -96,6 +96,7 @@ export function buildSurface(
       collector.add(cls.sourceFile, cls.name);
     } else if (isResourceClass(cls, resourceBases)) {
       // Resource class → ApiInterface with fields from RESOURCE_ATTRIBUTES
+      // Preserve the original field order (don't sort) — it determines toArray() output order
       const fields: Record<string, ApiField> = {};
       for (const attr of cls.resourceAttributes) {
         fields[attr] = {
@@ -107,8 +108,9 @@ export function buildSurface(
       interfaces[cls.name] = {
         name: cls.name,
         sourceFile: cls.sourceFile,
-        fields: sortRecord(fields),
+        fields, // Intentionally NOT sorted — order matches RESOURCE_ATTRIBUTES
         extends: cls.extends ? [cls.extends] : [],
+        ...(cls.hasCustomConstructor ? { hasCustomConstructor: true } : {}),
       };
       collector.add(cls.sourceFile, cls.name);
     } else if (isEnumClass(cls)) {

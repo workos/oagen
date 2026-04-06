@@ -3,6 +3,7 @@ import { buildOverlayLookup } from '../../src/compat/overlay.js';
 import type { ManifestEntry } from '../../src/compat/overlay.js';
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -97,6 +98,7 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
         },
       ],
       enums: [],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, manifest, spec);
@@ -180,6 +182,7 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
         },
       ],
       enums: [],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, manifest, spec);

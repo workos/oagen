@@ -6,6 +6,7 @@ import type {
   TypeRef,
   ErrorResponse,
   SuccessResponse,
+  SecurityRequirement,
   Model,
   Field,
   PaginationMeta,
@@ -38,6 +39,7 @@ interface OperationObject {
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
+  security?: Array<Record<string, string[]>>;
 }
 
 interface ParameterObject {
@@ -91,11 +93,39 @@ export function extractOperations(
         op,
         pathLevelParams,
         operationIdTransform,
+        serviceName,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
+    }
+  }
+
+  // Split services when a single tag groups operations from multiple path prefixes.
+  // Example: /organizations and /organization_domains both tagged "organizations"
+  // should become separate services based on their first path segment.
+  for (const [serviceName, operations] of serviceMap) {
+    const pathGroups = new Map<string, Operation[]>();
+    for (const op of operations) {
+      const firstSeg = op.path.split('/').filter(Boolean)[0] ?? '';
+      const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
+      const group = pathGroups.get(groupKey) ?? [];
+      group.push(op);
+      pathGroups.set(groupKey, group);
+    }
+    // Only split if there are multiple distinct path-prefix groups AND
+    // at least one group name differs from the current service name
+    if (pathGroups.size > 1) {
+      const needsSplit = [...pathGroups.keys()].some((k) => k !== serviceName);
+      if (needsSplit) {
+        serviceMap.delete(serviceName);
+        for (const [groupName, groupOps] of pathGroups) {
+          const existing = serviceMap.get(groupName) ?? [];
+          existing.push(...groupOps);
+          serviceMap.set(groupName, existing);
+        }
+      }
     }
   }
 
@@ -286,15 +316,21 @@ function buildOperation(
   op: OperationObject,
   pathLevelParams: ParameterObject[],
   operationIdTransform?: (id: string) => string,
+  serviceName?: string,
 ): { operation: Operation; inlineModels: Model[] } {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 
-  const pathParams = extractParams(allParams, 'path');
-  const queryParams = extractParams(allParams, 'query');
-  const headerParams = extractParams(allParams, 'header').filter((p) => p.name.toLowerCase() !== 'idempotency-key');
-  const cookieParams = extractParams(allParams, 'cookie');
+  // Use the service name as context so inline parameter enums get qualified
+  // names. e.g., service "SSO" + param "provider" → "SSOProvider".
+  const opContext = serviceName;
+  const pathParams = extractParams(allParams, 'path', opContext);
+  const queryParams = extractParams(allParams, 'query', opContext);
+  const headerParams = extractParams(allParams, 'header', opContext).filter(
+    (p) => p.name.toLowerCase() !== 'idempotency-key',
+  );
+  const cookieParams = extractParams(allParams, 'cookie', opContext);
 
   const reqBodyModels: Model[] = [];
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
@@ -325,6 +361,9 @@ function buildOperation(
     pagination = paginationFromParams;
   }
 
+  // Extract per-operation security overrides
+  const security = extractOperationSecurity(op.security);
+
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
@@ -344,9 +383,30 @@ function buildOperation(
       injectIdempotencyKey: hasIdempotencyHeader,
       deprecated: op.deprecated || undefined,
       async: op['x-oagen-async'],
+      security,
     },
     inlineModels,
   };
+}
+
+/**
+ * Extract per-operation security requirements from an OpenAPI security directive.
+ * Returns undefined when the operation uses the spec-level default security.
+ *
+ * OpenAPI security format: `security: [{ schemeName: [scope1, scope2] }]`
+ */
+function extractOperationSecurity(
+  security: Array<Record<string, string[]>> | undefined,
+): SecurityRequirement[] | undefined {
+  if (!security || security.length === 0) return undefined;
+
+  const requirements: SecurityRequirement[] = [];
+  for (const entry of security) {
+    for (const [schemeName, scopes] of Object.entries(entry)) {
+      requirements.push({ schemeName, scopes: scopes ?? [] });
+    }
+  }
+  return requirements.length > 0 ? requirements : undefined;
 }
 
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
@@ -356,12 +416,18 @@ function buildDescription(summary: string | undefined, description: string | und
   return description ?? summary;
 }
 
-function extractParams(params: ParameterObject[], location: 'path' | 'query' | 'header' | 'cookie'): Parameter[] {
+function extractParams(
+  params: ParameterObject[],
+  location: 'path' | 'query' | 'header' | 'cookie',
+  operationContext?: string,
+): Parameter[] {
   return params
     .filter((p) => p.in === location)
     .map((p) => ({
       name: p.name,
-      type: p.schema ? schemaToTypeRef(p.schema, p.name) : ({ kind: 'primitive', type: 'string' } as TypeRef),
+      type: p.schema
+        ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+        : ({ kind: 'primitive', type: 'string' } as TypeRef),
       required: p.required ?? false,
       description: p.description,
       deprecated: p.deprecated || p.schema?.deprecated || undefined,
@@ -565,6 +631,9 @@ function extractResponses(
         }
       }
       allSuccessResponses.push({ statusCode: code, type: extractedType });
+    } else if (code >= 300 && code < 400) {
+      // 3xx redirects — include so emitter can detect redirect endpoints
+      allSuccessResponses.push({ statusCode: code, type: { kind: 'primitive', type: 'unknown' } });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;

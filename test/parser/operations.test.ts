@@ -232,7 +232,7 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     const op = services[0].operations[0];
-    expect(op.response).toEqual({ kind: 'model', name: 'User' });
+    expect(op.response).toEqual({ kind: 'model', name: 'UserDto' });
   });
 
   it('uses operationId for inline request body name', () => {
@@ -278,7 +278,7 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths);
     const op = services[0].operations[0];
-    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUser' });
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserDto' });
   });
 
   it('sets requestBodyEncoding to form-data for multipart/form-data content type', () => {

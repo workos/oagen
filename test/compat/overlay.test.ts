@@ -3,6 +3,7 @@ import { buildOverlayLookup, patchOverlay } from '../../src/compat/overlay.js';
 import type { ManifestEntry } from '../../src/compat/overlay.js';
 import type { ApiSurface, Violation } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -237,6 +238,7 @@ describe('buildOverlayLookup', () => {
           fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, manifest, spec);
@@ -390,6 +392,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -428,6 +431,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -504,6 +508,7 @@ describe('buildOverlayLookup', () => {
           fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, manifest, spec);
@@ -550,6 +555,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -582,6 +588,7 @@ describe('buildOverlayLookup', () => {
           fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -617,6 +624,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -652,6 +660,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -692,6 +701,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);
@@ -731,6 +741,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     // Without strict: would match via Jaccard
@@ -781,6 +792,7 @@ describe('buildOverlayLookup', () => {
           ],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     const lookup = buildOverlayLookup(surface, undefined, spec);

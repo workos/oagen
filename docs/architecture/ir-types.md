@@ -1,6 +1,6 @@
 # IR Type System Reference
 
-Source: `src/ir/types.ts`
+Source: `src/ir/types.ts`, `src/ir/sdk-behavior.ts`
 
 The intermediate representation (IR) is the contract between the parser and all language emitters. It uses plain TypeScript interfaces (no classes) with a discriminated union type system.
 
@@ -22,10 +22,33 @@ interface ApiSpec {
   models: Model[]; // Schema objects
   enums: Enum[]; // String enums
   auth?: AuthScheme[]; // Authentication schemes
+  sdk: SdkBehavior; // Runtime policies (retry, errors, telemetry, etc.)
 }
 ```
 
 The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
+
+### SdkBehavior
+
+Source: `src/ir/sdk-behavior.ts`
+
+Language-agnostic runtime policies consumed by emitters via `ctx.spec.sdk`. Always populated by the parser with `defaultSdkBehavior()`. Override per-SDK via `oagen.config.ts`.
+
+```typescript
+interface SdkBehavior {
+  retry: RetryPolicy;          // Retry status codes, max attempts, backoff strategy
+  errors: ErrorPolicy;         // Status code → exception kind mapping, doc URL template
+  telemetry: TelemetryPolicy;  // Request metrics header, request ID header
+  pagination: PaginationPolicy; // Auto-page delay
+  idempotency: IdempotencyPolicy; // Idempotency header name, auto-generate for POST
+  logging: LoggingPolicy;      // Log events and levels
+  userAgent: UserAgentPolicy;  // SDK identifier template, AI agent detection
+  requestGuard: RequestGuardPolicy; // Misplaced-options key detection
+  timeout: TimeoutPolicy;      // Default timeout, env var override
+}
+```
+
+Use `defaultSdkBehavior()` for canonical defaults. Use `mergeSdkBehavior(overrides)` for partial overrides (arrays replace, objects merge recursively).
 
 ## TypeRef (discriminated union)
 
@@ -266,6 +289,55 @@ interface ErrorResponse {
   type?: TypeRef; // Response body type, if any
 }
 ```
+
+## Operation Resolution
+
+Source: `src/ir/operation-hints.ts`
+
+The operation resolver derives method names, mount targets, and wrapper metadata for all operations in the spec. It runs in `buildEmitterContext()` and produces `ResolvedOperation[]` on `ctx.resolvedOperations`.
+
+### Algorithm
+
+`deriveMethodName(op, service)` derives a snake_case name from the HTTP method and path:
+
+1. Strip path-param segments (`{id}`, `{slug}`, etc.)
+2. If the terminal segment is an action verb (`verify`, `enroll`, `confirm`, `revoke`, etc.), use it as the verb with the preceding resource as the noun: `verify_challenge`
+3. Otherwise, use a CRUD verb from the HTTP method: GET → `list`/`get`, POST → `create`, PUT/PATCH → `update`, DELETE → `delete`
+4. Singularize the resource noun for single-resource operations
+
+### Hint types
+
+Consumer-provided overrides keyed by `"METHOD /path"`:
+
+```typescript
+interface OperationHint {
+  name?: string;       // Override derived method name
+  mountOn?: string;    // Remount to different service/namespace
+  split?: SplitHint[]; // Split union body into N typed wrappers
+  defaults?: Record<string, string | number | boolean>;
+  inferFromClient?: string[];
+}
+```
+
+### Resolved output
+
+```typescript
+interface ResolvedOperation {
+  operation: Operation;    // Original IR
+  service: Service;        // Original owning service
+  methodName: string;      // Resolved snake_case name
+  mountOn: string;         // Resolved target service (PascalCase)
+  wrappers?: ResolvedWrapper[];
+}
+```
+
+### Mount rules
+
+Service-level remounting maps an IR service name to a target namespace. All operations in the source service are mounted on the target unless overridden per-operation. Per-operation `mountOn` hints take precedence over service-level rules.
+
+### CLI
+
+`oagen resolve --spec <path> --format table|json` outputs the full resolution table for review. Use `--format json` for programmatic consumption.
 
 ## Versioning
 

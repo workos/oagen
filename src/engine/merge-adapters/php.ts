@@ -56,8 +56,11 @@ export const phpMergeAdapter: MergeAdapter = {
   testFilePatterns: [/Test\.php$/],
   urlFingerprintConfig: PHP_URL_FINGERPRINT_CONFIG,
   resolveGrammar: (mod) => {
-    if (typeof mod === 'object' && mod !== null && 'php' in mod) return (mod as { php: unknown }).php;
-    return mod;
+    // ESM import wraps in { default: { php, php_only } }
+    const m = (mod as Record<string, unknown>)?.default ?? mod;
+    if (typeof m === 'object' && m !== null && 'php' in (m as Record<string, unknown>))
+      return (m as { php: unknown }).php;
+    return m;
   },
   parseStatements(tree, source) {
     const imports: MergeImport[] = [];

@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { Emitter } from '../engine/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 import type { Extractor } from '../compat/types.js';
 import { ConfigLoadError } from '../errors.js';
 
@@ -19,9 +20,29 @@ export interface OagenConfig {
    *
    */
   operationIdTransform?: (id: string) => string;
+  /**
+   * Custom transform for schema (model/enum) names. Applied after the built-in
+   * cleanSchemaName normalization. Receives the cleaned PascalCase name; return
+   * the desired name. Collisions are detected automatically -- if a transform
+   * would produce a duplicate name, the original is kept.
+   */
+  schemaNameTransform?: (name: string) => string;
   /** Base URL for documentation links. When set, relative paths in descriptions
    *  (e.g. `/reference/authkit/user`) are expanded to full URLs. */
   docUrl?: string;
+  /**
+   * Per-operation overrides keyed by "METHOD /path" (e.g. "POST /sso/token").
+   * Used by the operation resolver to override derived method names, mount
+   * targets, and to split union-body operations into typed wrappers.
+   */
+  operationHints?: Record<string, OperationHint>;
+  /**
+   * Service-level mount rules: maps an IR service name to a target
+   * service/namespace (PascalCase). All operations in the source service
+   * are mounted on the target. Per-operation mountOn in operationHints
+   * takes priority.
+   */
+  mountRules?: Record<string, string>;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];

@@ -45,6 +45,7 @@ interface ListEnvelopeResult {
 const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges']);
 
 const PAGINATION_METADATA_PATTERNS = [
+  'meta',
   'metadata',
   'pagination',
   'cursor',
@@ -90,18 +91,21 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   }
 
   // List envelope heuristic: exactly one array property + at least one non-array companion
+  // that looks like pagination metadata.  A `data` array alone (e.g. with only an
+  // `object` discriminant companion) is NOT sufficient — the companion must indicate
+  // actual pagination (cursor, metadata, total, etc.).
   if (arrayProps.length === 1 && nonArrayKeys.length >= 1) {
     const arrayPropName = arrayProps[0];
 
-    // The array property must be a known data path...
-    if (KNOWN_DATA_PATHS.has(arrayPropName)) {
-      return { isEnvelope: true, dataPath: arrayPropName };
-    }
-
-    // ...OR a companion property must look like pagination metadata
     const hasPaginationCompanion = nonArrayKeys.some((key) =>
       PAGINATION_METADATA_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern)),
     );
+
+    if (KNOWN_DATA_PATHS.has(arrayPropName) && hasPaginationCompanion) {
+      return { isEnvelope: true, dataPath: arrayPropName };
+    }
+
+    // Non-standard array property name — still treat as envelope if pagination companion exists
     if (hasPaginationCompanion) {
       return { isEnvelope: true, dataPath: arrayPropName };
     }

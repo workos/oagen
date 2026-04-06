@@ -3,6 +3,7 @@ import { nodeHints, resolveHints, namedTypeWordsOverlap } from '../../src/compat
 import { diffSurfaces, specDerivedNames } from '../../src/compat/differ.js';
 import type { ApiSurface } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   return {
@@ -229,6 +230,7 @@ describe('derivedModelNames customization', () => {
           fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
         },
       ],
+      sdk: defaultSdkBehavior(),
     };
 
     // Node hints produce Response + Serialized variants

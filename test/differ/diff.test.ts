@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { diffSpecs } from '../../src/differ/diff.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 const v1: ApiSpec = {
   name: 'Test API',
@@ -49,6 +50,7 @@ const v1: ApiSpec = {
       ],
     },
   ],
+  sdk: defaultSdkBehavior(),
 };
 
 describe('diffSpecs', () => {
@@ -218,6 +220,7 @@ describe('diffSpecs', () => {
       models: [],
       enums: [],
       services: [],
+      sdk: defaultSdkBehavior(),
     };
     const diff = diffSpecs(empty, empty);
     expect(diff.changes).toHaveLength(0);
