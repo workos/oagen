@@ -83,6 +83,8 @@ export interface Parameter {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
+  style?: 'form' | 'simple' | 'label' | 'matrix';
+  explode?: boolean;
 }
 
 /** Type reference — the core type system of the IR */

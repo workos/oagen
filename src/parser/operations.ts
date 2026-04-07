@@ -50,6 +50,8 @@ interface ParameterObject {
   schema?: SchemaObject;
   deprecated?: boolean;
   example?: unknown;
+  style?: string;
+  explode?: boolean;
 }
 
 interface RequestBodyObject {
@@ -433,6 +435,8 @@ function extractParams(
       deprecated: p.deprecated || p.schema?.deprecated || undefined,
       default: p.schema?.default,
       example: p.example ?? p.schema?.example,
+      style: p.style as Parameter['style'],
+      explode: p.explode,
     }));
 }
 
