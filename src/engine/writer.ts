@@ -390,13 +390,26 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   const existingFrom = collectFromImports(existingLines);
   const generatedFrom = collectFromImports(resultLines);
 
+  // Build a set of all identifiers imported by the generated file (across all modules)
+  // so we can detect when an existing barrel import's identifiers are covered by
+  // more-specific generated imports (e.g., `from x.y import Z` covers `from x import Z`).
+  const allGeneratedIds = new Set<string>();
+  for (const ids of generatedFrom.values()) {
+    for (const id of ids) allGeneratedIds.add(id);
+  }
+
   const extraFromLines: string[] = [];
   for (const [mod, existIds] of existingFrom) {
     const genIds = generatedFrom.get(mod);
     if (!genIds) {
-      extraFromLines.push(`from ${mod} import ${[...existIds].join(', ')}`);
+      // The exact module isn't in the generated file — but check whether every
+      // identifier is already imported from a different (e.g., more-specific) module.
+      const extra = [...existIds].filter((id) => !allGeneratedIds.has(id));
+      if (extra.length > 0) {
+        extraFromLines.push(`from ${mod} import ${extra.join(', ')}`);
+      }
     } else {
-      const extra = [...existIds].filter((id) => !genIds.has(id));
+      const extra = [...existIds].filter((id) => !genIds.has(id) && !allGeneratedIds.has(id));
       if (extra.length > 0) {
         extraFromLines.push(`from ${mod} import ${extra.join(', ')}`);
       }

@@ -257,12 +257,27 @@ export async function mergeIntoExisting(
     lastImportEndIndex = linesBefore + stmtLines - 1;
   }
 
+  // Track all names exported by existing statements (both direct exports and
+  // re-export aliases like `export { X as Y }`).  Used to prevent the merger
+  // from appending a re-export that introduces a duplicate exported name.
+  const existingExportedNames = new Set<string>();
+
   for (const stmt of existingStatements.statements) {
     if (stmt.kind === 'reexport') {
       existingReexports.add(adapter.normalizeReexport ? adapter.normalizeReexport(stmt.text.trim()) : stmt.text.trim());
+      // Collect aliased export names from re-exports
+      const braceMatch = stmt.text.match(/\{([^}]+)\}/);
+      if (braceMatch) {
+        for (const part of braceMatch[1].split(',')) {
+          const segments = part.trim().split(/\s+as\s+/);
+          const exportedName = (segments[1] ?? segments[0]).trim();
+          if (exportedName) existingExportedNames.add(exportedName);
+        }
+      }
     }
     if (stmt.key) {
       existingKeys.add(stmt.key);
+      existingExportedNames.add(stmt.key);
     } else {
       existingUnnamedTexts.add(stmt.text.trim());
     }
@@ -353,6 +368,24 @@ export async function mergeIntoExisting(
       if (existingReexports.has(normalizedText) || (stmt.key !== null && existingKeys.has(stmt.key))) {
         preserved++;
         continue;
+      }
+      // Also skip re-exports whose aliased names are already defined as
+      // top-level exports in the existing file (e.g., generated file has
+      // `export { X as deserializeFoo } from '...'` but existing file
+      // already has `export const deserializeFoo = ...`).
+      const braceMatch = stmt.text.match(/\{([^}]+)\}/);
+      if (braceMatch) {
+        const exportedNames = braceMatch[1]
+          .split(',')
+          .map((n) => {
+            const parts = n.trim().split(/\s+as\s+/);
+            return (parts[1] ?? parts[0]).trim();
+          })
+          .filter(Boolean);
+        if (exportedNames.length > 0 && exportedNames.every((n) => existingExportedNames.has(n))) {
+          preserved++;
+          continue;
+        }
       }
     }
 
@@ -549,8 +582,9 @@ export async function mergeIntoExisting(
       const matchedExistMembers = new Set<string>();
       for (const [memberName, genMember] of genInfo.members) {
         const existMember = existInfo.members.get(memberName);
-        if (!existMember || !genMember.docstring) continue;
+        if (!existMember) continue;
         matchedExistMembers.add(memberName);
+        if (!genMember.docstring) continue;
 
         if (existMember.docstring) {
           const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
