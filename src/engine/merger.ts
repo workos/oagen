@@ -27,19 +27,34 @@ import { safeParse } from '../utils/tree-sitter.js';
  * silently dropped during docstring refresh.
  */
 function preserveDeprecatedTags(existingDoc: string, generatedDoc: string): string {
-  // Extract @deprecated lines from existing docstring
-  const deprecatedLines = existingDoc.split('\n').filter((line) => /^\s*\*?\s*@deprecated\b/.test(line));
-  if (deprecatedLines.length === 0) return generatedDoc;
+  // Check if the existing docstring contains @deprecated anywhere
+  if (!existingDoc.includes('@deprecated')) return generatedDoc;
 
   // If generated doc already has @deprecated, no need to merge
   if (generatedDoc.includes('@deprecated')) return generatedDoc;
+
+  // Extract the @deprecated content from the existing doc.
+  // Handle both multi-line (`* @deprecated ...`) and one-liner (`/** @deprecated ... */`) formats.
+  const deprecatedParts: string[] = [];
+  for (const line of existingDoc.split('\n')) {
+    if (/@deprecated\b/.test(line)) {
+      // Normalize to JSDoc member format: `   * @deprecated ...`
+      const match = line.match(/@deprecated\b.*/);
+      if (match) {
+        // Strip trailing */ and whitespace (from one-liner JSDoc like `/** @deprecated ... */`)
+        const cleaned = match[0].replace(/\s*\*\/\s*$/, '');
+        deprecatedParts.push(`   * ${cleaned}`);
+      }
+    }
+  }
+  if (deprecatedParts.length === 0) return generatedDoc;
 
   // Insert @deprecated lines before the closing */ of the generated doc
   const closingIdx = generatedDoc.lastIndexOf('*/');
   if (closingIdx === -1) return generatedDoc;
   const before = generatedDoc.slice(0, closingIdx);
   const after = generatedDoc.slice(closingIdx);
-  return before + deprecatedLines.join('\n') + '\n ' + after;
+  return before + deprecatedParts.join('\n') + '\n ' + after;
 }
 
 // --- @oagen-ignore region helpers ---
