@@ -15,7 +15,6 @@ function mockEmitter(): Emitter {
     generateResources: () => [{ path: 'resources/users.rb', content: 'class Users; end' }],
     generateClient: () => [{ path: 'client.rb', content: 'class Client; end' }],
     generateErrors: () => [{ path: 'errors.rb', content: 'class APIError; end' }],
-    generateConfig: () => [{ path: 'config.rb', content: 'module Config; end' }],
     generateTypeSignatures: () => [{ path: 'sig/user.rbs', content: 'class User; end' }],
     generateTests: () => [{ path: 'test/test_users.rb', content: 'class TestUsers; end' }],
     fileHeader: () => '# Auto-generated',
@@ -40,14 +39,13 @@ describe('generate', () => {
       outputDir: '/tmp/test',
     });
 
-    expect(files).toHaveLength(8);
+    expect(files).toHaveLength(7);
     const paths = files.map((f) => f.path);
     expect(paths).toContain('models/user.rb');
     expect(paths).toContain('models/status.rb');
     expect(paths).toContain('resources/users.rb');
     expect(paths).toContain('client.rb');
     expect(paths).toContain('errors.rb');
-    expect(paths).toContain('config.rb');
     expect(paths).toContain('sig/user.rbs');
     expect(paths).toContain('test/test_users.rb');
   });
@@ -162,7 +160,7 @@ describe('generate', () => {
         outputDir,
       });
 
-      expect(files).toHaveLength(8);
+      expect(files).toHaveLength(7);
       // Only output dir should have files
       const outputFile = await fs.readFile(path.join(outputDir, 'client.rb'), 'utf-8');
       expect(outputFile).toMatch(/^# Auto-generated/);

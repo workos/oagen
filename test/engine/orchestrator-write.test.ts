@@ -15,7 +15,6 @@ function mockEmitter(): Emitter {
     generateResources: () => [],
     generateClient: () => [{ path: 'client.rb', content: 'class Client; end' }],
     generateErrors: () => [],
-    generateConfig: () => [],
     generateTypeSignatures: () => [],
     generateTests: () => [],
     fileHeader: () => '# Auto-generated',

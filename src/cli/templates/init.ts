@@ -144,10 +144,6 @@ export const ${varName}: Emitter = {
     return [];
   },
 
-  generateConfig(_ctx: EmitterContext): GeneratedFile[] {
-    return [];
-  },
-
   generateTypeSignatures(_spec: ApiSpec, _ctx: EmitterContext): GeneratedFile[] {
     return [];
   },
