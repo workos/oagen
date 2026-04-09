@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/workos/oagen/compare/v0.4.0...v0.5.0) (2026-04-09)
+
+
+### Features
+
+* oagen updates to handle Golang ([#17](https://github.com/workos/oagen/issues/17)) ([babbf23](https://github.com/workos/oagen/commit/babbf23e59fc016885abb5aeb75676e5a825db57))
+
 ## [0.4.0](https://github.com/workos/oagen/compare/v0.3.0...v0.4.0) (2026-04-06)
 
 
