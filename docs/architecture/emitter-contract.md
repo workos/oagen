@@ -17,7 +17,6 @@ interface Emitter {
   generateResources(services: Service[], ctx: EmitterContext): GeneratedFile[];
   generateClient(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateErrors(ctx: EmitterContext): GeneratedFile[];
-  generateConfig(ctx: EmitterContext): GeneratedFile[];
   generateTypeSignatures?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateManifest?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
@@ -100,7 +99,7 @@ The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-mani
 
 5. **Inapplicable methods return `[]`** — If a language doesn't need type signature files, `generateTypeSignatures` returns `[]`. Optional methods like `generateManifest` can simply be omitted.
 
-6. **Composable generators** — Interface methods can compose multiple internal generators. Example: Node's `generateConfig` returns config files plus shared utility files.
+6. **Composable generators** — Interface methods can compose multiple internal generators when a language needs them.
 
 ## New IR Variants for Emitters
 

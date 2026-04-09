@@ -9,7 +9,6 @@ A minimal but working TypeScript emitter for oagen, demonstrating the Emitter in
 - `generateResources` — resource classes using `planOperation`
 - `generateClient` — top-level client with resource accessors
 - `generateErrors` — error class hierarchy
-- `generateConfig` — config types and base resource class
 - Type mapping via `mapTypeRef`
 
 ## What it does NOT cover

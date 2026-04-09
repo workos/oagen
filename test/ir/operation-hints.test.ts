@@ -332,4 +332,27 @@ describe('resolveOperations', () => {
     expect(resolved[0].methodName).toBe('get_jwks');
     expect(resolved[0].mountOn).toBe('UserManagement');
   });
+
+  it('propagates operation-level defaults and inferFromClient', () => {
+    const s = spec([svc('SSO', [op('get', '/sso/authorize')])]);
+    const hints: Record<string, OperationHint> = {
+      'GET /sso/authorize': {
+        name: 'get_authorization_url',
+        defaults: { response_type: 'code' },
+        inferFromClient: ['client_id'],
+      },
+    };
+
+    const resolved = resolveOperations(s, hints);
+    expect(resolved[0].defaults).toEqual({ response_type: 'code' });
+    expect(resolved[0].inferFromClient).toEqual(['client_id']);
+  });
+
+  it('defaults to empty defaults and inferFromClient when no hint', () => {
+    const s = spec([svc('Users', [op('get', '/users')])]);
+
+    const resolved = resolveOperations(s);
+    expect(resolved[0].defaults).toEqual({});
+    expect(resolved[0].inferFromClient).toEqual([]);
+  });
 });

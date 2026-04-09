@@ -12,7 +12,6 @@ export default {
         { path: `${ctx.namespace}/client.ts`, content: '// client' },
       ],
       generateErrors: () => [],
-      generateConfig: () => [],
       generateTypeSignatures: () => [],
       generateTests: () => [],
       fileHeader: () => '// auto-generated',

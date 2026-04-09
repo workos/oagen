@@ -46,8 +46,6 @@ export interface Emitter {
 
   generateErrors(ctx: EmitterContext): GeneratedFile[];
 
-  generateConfig(ctx: EmitterContext): GeneratedFile[];
-
   generateTypeSignatures?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
 
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];

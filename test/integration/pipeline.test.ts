@@ -174,7 +174,6 @@ function mockEmitter(): Emitter {
       })),
     generateClient: () => [{ path: 'client.ts', content: 'export class Client {}' }],
     generateErrors: () => [{ path: 'errors.ts', content: 'export class ApiError {}' }],
-    generateConfig: () => [{ path: 'config.ts', content: 'export const config = {};' }],
     generateTypeSignatures: (spec) => [
       ...spec.models.map((m) => ({ path: `types/${m.name.toLowerCase()}.d.ts`, content: '' })),
       ...spec.services.map((s) => ({ path: `types/${s.name.toLowerCase()}.d.ts`, content: '' })),

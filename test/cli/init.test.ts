@@ -64,7 +64,7 @@ describe('initCommand', () => {
     expect(pkg.scripts['sdk:extract:go']).toContain('--lang go');
   });
 
-  it('stub emitter has all Emitter methods and no contractVersion', async () => {
+  it('stub emitter has required Emitter methods and no contractVersion', async () => {
     await initCommand({ lang: 'ruby', project: tmpDir });
 
     const content = readFileSync(resolve(tmpDir, 'src/ruby/index.ts'), 'utf-8');
@@ -75,7 +75,7 @@ describe('initCommand', () => {
     expect(content).toContain('generateResources');
     expect(content).toContain('generateClient');
     expect(content).toContain('generateErrors');
-    expect(content).toContain('generateConfig');
+    expect(content).not.toContain('generateConfig');
     expect(content).toContain('generateTests');
     expect(content).toContain('fileHeader');
     expect(content).toContain('rubyEmitter');

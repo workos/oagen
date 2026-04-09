@@ -18,6 +18,45 @@ const parserCache = new Map<string, Parser>();
 
 import { safeParse } from '../utils/tree-sitter.js';
 
+// --- @deprecated preservation ---
+
+/**
+ * When replacing an existing docstring with a generated one, carry over any
+ * `@deprecated` lines from the existing doc that aren't present in the
+ * generated doc.  This prevents hand-written deprecation notices from being
+ * silently dropped during docstring refresh.
+ */
+function preserveDeprecatedTags(existingDoc: string, generatedDoc: string): string {
+  // Check if the existing docstring contains @deprecated anywhere
+  if (!existingDoc.includes('@deprecated')) return generatedDoc;
+
+  // If generated doc already has @deprecated, no need to merge
+  if (generatedDoc.includes('@deprecated')) return generatedDoc;
+
+  // Extract the @deprecated content from the existing doc.
+  // Handle both multi-line (`* @deprecated ...`) and one-liner (`/** @deprecated ... */`) formats.
+  const deprecatedParts: string[] = [];
+  for (const line of existingDoc.split('\n')) {
+    if (/@deprecated\b/.test(line)) {
+      // Normalize to JSDoc member format: `   * @deprecated ...`
+      const match = line.match(/@deprecated\b.*/);
+      if (match) {
+        // Strip trailing */ and whitespace (from one-liner JSDoc like `/** @deprecated ... */`)
+        const cleaned = match[0].replace(/\s*\*\/\s*$/, '');
+        deprecatedParts.push(`   * ${cleaned}`);
+      }
+    }
+  }
+  if (deprecatedParts.length === 0) return generatedDoc;
+
+  // Insert @deprecated lines before the closing */ of the generated doc
+  const closingIdx = generatedDoc.lastIndexOf('*/');
+  if (closingIdx === -1) return generatedDoc;
+  const before = generatedDoc.slice(0, closingIdx);
+  const after = generatedDoc.slice(closingIdx);
+  return before + deprecatedParts.join('\n') + '\n ' + after;
+}
+
 // --- @oagen-ignore region helpers ---
 
 interface IgnoredRegion {
@@ -257,12 +296,27 @@ export async function mergeIntoExisting(
     lastImportEndIndex = linesBefore + stmtLines - 1;
   }
 
+  // Track all names exported by existing statements (both direct exports and
+  // re-export aliases like `export { X as Y }`).  Used to prevent the merger
+  // from appending a re-export that introduces a duplicate exported name.
+  const existingExportedNames = new Set<string>();
+
   for (const stmt of existingStatements.statements) {
     if (stmt.kind === 'reexport') {
       existingReexports.add(adapter.normalizeReexport ? adapter.normalizeReexport(stmt.text.trim()) : stmt.text.trim());
+      // Collect aliased export names from re-exports
+      const braceMatch = stmt.text.match(/\{([^}]+)\}/);
+      if (braceMatch) {
+        for (const part of braceMatch[1].split(',')) {
+          const segments = part.trim().split(/\s+as\s+/);
+          const exportedName = (segments[1] ?? segments[0]).trim();
+          if (exportedName) existingExportedNames.add(exportedName);
+        }
+      }
     }
     if (stmt.key) {
       existingKeys.add(stmt.key);
+      existingExportedNames.add(stmt.key);
     } else {
       existingUnnamedTexts.add(stmt.text.trim());
     }
@@ -353,6 +407,24 @@ export async function mergeIntoExisting(
       if (existingReexports.has(normalizedText) || (stmt.key !== null && existingKeys.has(stmt.key))) {
         preserved++;
         continue;
+      }
+      // Also skip re-exports whose aliased names are already defined as
+      // top-level exports in the existing file (e.g., generated file has
+      // `export { X as deserializeFoo } from '...'` but existing file
+      // already has `export const deserializeFoo = ...`).
+      const braceMatch = stmt.text.match(/\{([^}]+)\}/);
+      if (braceMatch) {
+        const exportedNames = braceMatch[1]
+          .split(',')
+          .map((n) => {
+            const parts = n.trim().split(/\s+as\s+/);
+            return (parts[1] ?? parts[0]).trim();
+          })
+          .filter(Boolean);
+        if (exportedNames.length > 0 && exportedNames.every((n) => existingExportedNames.has(n))) {
+          preserved++;
+          continue;
+        }
       }
     }
 
@@ -526,10 +598,11 @@ export async function mergeIntoExisting(
         if (existInfo.docstring) {
           const isPreserved = existInfo.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
+            const newText = preserveDeprecatedTags(existInfo.docstring.text, genDoc.text);
             edits.push({
               start: existInfo.docstring.startIndex,
               end: existInfo.docstring.endIndex,
-              newText: genDoc.text,
+              newText,
             });
             docstringUpdates++;
           }
@@ -549,16 +622,18 @@ export async function mergeIntoExisting(
       const matchedExistMembers = new Set<string>();
       for (const [memberName, genMember] of genInfo.members) {
         const existMember = existInfo.members.get(memberName);
-        if (!existMember || !genMember.docstring) continue;
+        if (!existMember) continue;
         matchedExistMembers.add(memberName);
+        if (!genMember.docstring) continue;
 
         if (existMember.docstring) {
           const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
+            const newText = preserveDeprecatedTags(existMember.docstring.text, genMember.docstring.text);
             edits.push({
               start: existMember.docstring.startIndex,
               end: existMember.docstring.endIndex,
-              newText: genMember.docstring.text,
+              newText,
             });
             docstringUpdates++;
           }
@@ -578,36 +653,68 @@ export async function mergeIntoExisting(
       // Match generated members to existing members by URL pattern when
       // name-based matching fails (e.g., generated "find" vs existing "getOrganization"
       // both call this.workos.get('/organizations/${id}')).
-      for (const [_genName, genMember] of genInfo.members) {
+      //
+      // Safety: only attempt fingerprint matching when there is exactly ONE
+      // unmatched generated member and ONE unmatched existing member for a
+      // given fingerprint.  When multiple members share the same URL path
+      // (e.g., POST and GET on /authorization/roles), fingerprint matching
+      // is ambiguous and would swap docstrings between methods.
+      const unmatchedGenByFp = new Map<
+        string,
+        { name: string; member: typeof genInfo.members extends Map<string, infer V> ? V : never }[]
+      >();
+      for (const [genName, genMember] of genInfo.members) {
+        if (matchedExistMembers.has(genName)) continue; // name-matched in pass 1 (as an exist member) — skip
         if (!genMember.docstring || !genMember.urlFingerprint) continue;
-        // Find unmatched existing member with the same URL fingerprint
-        for (const [existName, existMember] of existInfo.members) {
-          if (matchedExistMembers.has(existName)) continue;
-          if (!existMember.urlFingerprint || existMember.urlFingerprint !== genMember.urlFingerprint) continue;
-          if (existMember.docstring) {
-            const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
-            if (isPreserved) continue;
-            if (existMember.docstring.text !== genMember.docstring.text) {
-              edits.push({
-                start: existMember.docstring.startIndex,
-                end: existMember.docstring.endIndex,
-                newText: genMember.docstring.text,
-              });
-              docstringUpdates++;
-            }
-          } else {
-            const lineStart = existMember.declStartIndex - existMember.declColumn;
-            const indent = ' '.repeat(existMember.declColumn);
+        // Skip if this generated member was already name-matched
+        if (existInfo.members.has(genName)) continue;
+        const bucket = unmatchedGenByFp.get(genMember.urlFingerprint) ?? [];
+        bucket.push({ name: genName, member: genMember });
+        unmatchedGenByFp.set(genMember.urlFingerprint, bucket);
+      }
+      const unmatchedExistByFp = new Map<
+        string,
+        { name: string; member: typeof existInfo.members extends Map<string, infer V> ? V : never }[]
+      >();
+      for (const [existName, existMember] of existInfo.members) {
+        if (matchedExistMembers.has(existName)) continue;
+        if (!existMember.urlFingerprint) continue;
+        const bucket = unmatchedExistByFp.get(existMember.urlFingerprint) ?? [];
+        bucket.push({ name: existName, member: existMember });
+        unmatchedExistByFp.set(existMember.urlFingerprint, bucket);
+      }
+      for (const [fp, genBucket] of unmatchedGenByFp) {
+        if (genBucket.length !== 1) continue; // ambiguous — skip
+        const existBucket = unmatchedExistByFp.get(fp);
+        if (!existBucket || existBucket.length !== 1) continue; // ambiguous — skip
+        const genMember = genBucket[0].member;
+        const existEntry = existBucket[0];
+        const existMember = existEntry.member;
+        if (!genMember.docstring) continue;
+
+        if (existMember.docstring) {
+          const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
+          if (isPreserved) continue;
+          if (existMember.docstring.text !== genMember.docstring.text) {
+            const newText = preserveDeprecatedTags(existMember.docstring.text, genMember.docstring.text);
             edits.push({
-              start: lineStart,
-              end: lineStart,
-              newText: indent + genMember.docstring.text + '\n',
+              start: existMember.docstring.startIndex,
+              end: existMember.docstring.endIndex,
+              newText,
             });
             docstringUpdates++;
           }
-          matchedExistMembers.add(existName);
-          break; // Only match one existing member per generated member
+        } else {
+          const lineStart = existMember.declStartIndex - existMember.declColumn;
+          const indent = ' '.repeat(existMember.declColumn);
+          edits.push({
+            start: lineStart,
+            end: lineStart,
+            newText: indent + genMember.docstring.text + '\n',
+          });
+          docstringUpdates++;
         }
+        matchedExistMembers.add(existEntry.name);
       }
     }
 

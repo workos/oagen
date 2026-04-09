@@ -61,7 +61,6 @@ describe('applyConfig', () => {
       generateResources: () => [],
       generateClient: () => [],
       generateErrors: () => [],
-      generateConfig: () => [],
       generateTypeSignatures: () => [],
       generateTests: () => [],
       fileHeader: () => '',

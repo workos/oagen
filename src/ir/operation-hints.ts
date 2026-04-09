@@ -54,6 +54,10 @@ export interface ResolvedOperation {
   mountOn: string;
   /** For split operations: one wrapper per union variant. */
   wrappers?: ResolvedWrapper[];
+  /** Constant defaults injected into query/body at runtime (from operation-level hint). */
+  defaults: Record<string, string | number | boolean>;
+  /** Fields the SDK reads from client config at runtime (from operation-level hint). */
+  inferFromClient: string[];
 }
 
 export interface ResolvedWrapper {
@@ -263,6 +267,8 @@ export function resolveOperations(
         methodName,
         mountOn,
         wrappers,
+        defaults: hint?.defaults ?? {},
+        inferFromClient: hint?.inferFromClient ?? [],
       });
     }
   }

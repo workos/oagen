@@ -4,7 +4,6 @@ import { generateEnums } from './generators/enums.js';
 import { generateResources } from './generators/resources.js';
 import { generateClient } from './generators/client.js';
 import { generateErrors } from './generators/errors.js';
-import { generateConfig } from './generators/config.js';
 import { generateTests } from './generators/tests.js';
 
 /**
@@ -36,10 +35,6 @@ export const typescriptEmitter: Emitter = {
 
   generateErrors(ctx: EmitterContext): GeneratedFile[] {
     return generateErrors(ctx);
-  },
-
-  generateConfig(ctx: EmitterContext): GeneratedFile[] {
-    return generateConfig(ctx);
   },
 
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {

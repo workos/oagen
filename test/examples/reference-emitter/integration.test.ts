@@ -22,8 +22,6 @@ describe('reference emitter integration', () => {
     expect(paths).toContain('enums.ts');
     expect(paths).toContain('client.ts');
     expect(paths).toContain('errors.ts');
-    expect(paths).toContain('config.ts');
-
     // Resource files per service
     expect(paths.some((p) => p.startsWith('resources/'))).toBe(true);
   });

@@ -119,7 +119,6 @@ export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterCo
     ...emitter.generateResources(spec.services, ctx),
     ...emitter.generateClient(spec, ctx),
     ...emitter.generateErrors(ctx),
-    ...emitter.generateConfig(ctx),
     ...(emitter.generateTypeSignatures?.(reachableSpec, ctx) ?? []),
     ...emitter.generateTests(reachableSpec, ctx),
     ...(emitter.generateManifest?.(spec, ctx) ?? []),
