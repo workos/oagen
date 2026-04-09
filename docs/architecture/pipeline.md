@@ -61,7 +61,6 @@ generateEnums(enums, ctx); // Enum types
 generateResources(services, ctx); // API resource classes
 generateClient(spec, ctx); // HTTP client
 generateErrors(ctx); // Error hierarchy
-generateConfig(ctx); // Configuration
 generateTypeSignatures(spec, ctx); // Type annotations (optional)
 generateTests(spec, ctx); // Tests + fixtures
 generateManifest?.(spec, ctx); // Smoke-test manifest (optional)

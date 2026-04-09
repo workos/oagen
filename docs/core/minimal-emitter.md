@@ -71,10 +71,6 @@ export const demoEmitter: Emitter = {
     return [];
   },
 
-  generateConfig(): GeneratedFile[] {
-    return [];
-  },
-
   generateTypeSignatures(): GeneratedFile[] {
     return [];
   },
