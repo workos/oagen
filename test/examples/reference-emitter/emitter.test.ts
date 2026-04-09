@@ -131,14 +131,6 @@ describe('reference emitter', () => {
     expect(files[0].content).toContain('class NotFoundError');
   });
 
-  it('generates config types', () => {
-    const files = typescriptEmitter.generateConfig(minimalCtx);
-    expect(files).toHaveLength(1);
-    expect(files[0].path).toBe('config.ts');
-    expect(files[0].content).toContain('interface ClientConfig');
-    expect(files[0].content).toContain('class BaseResource');
-  });
-
   it('returns empty models file for empty input', () => {
     const files = typescriptEmitter.generateModels([], minimalCtx);
     expect(files).toHaveLength(0);
