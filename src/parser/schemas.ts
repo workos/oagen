@@ -318,6 +318,104 @@ export function buildFieldFromSchema(
   };
 }
 
+/**
+ * If every non-null oneOf/anyOf variant is a string-valued const, return the
+ * list of those const values so the union can collapse into a single enum.
+ * Returns null when any variant isn't a pure string-const (model ref,
+ * number const, nullable, etc.).
+ */
+function collectLiteralStringConsts(variants: SchemaObject[]): string[] | null {
+  if (variants.length === 0) return null;
+  const values: string[] = [];
+  for (const v of variants) {
+    // A single-element enum is semantically identical to const.
+    if (typeof v.const === 'string') {
+      values.push(v.const);
+      continue;
+    }
+    if (Array.isArray(v.enum) && v.enum.length === 1 && typeof v.enum[0] === 'string') {
+      values.push(v.enum[0]);
+      continue;
+    }
+    return null;
+  }
+  return values;
+}
+
+/** Build an EnumRef the same way the regular enum path does for naming. */
+function buildSyntheticEnumRef(
+  values: string[],
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): TypeRef {
+  const baseName = toPascalCase(contextName ?? 'UnknownEnum');
+  const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
+  const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
+  return { kind: 'enum', name: qualifiedName, values };
+}
+
+/**
+ * Detect an implicit discriminator on an oneOf where every variant is an
+ * object schema that pins the same property to a const value. Returns
+ * { property, mapping } so the IR can represent the union as discriminated
+ * without needing an explicit `discriminator:` key in the spec.
+ *
+ * Both shapes are supported:
+ *   { properties: { event: { const: "x" } }, required: ["event"] }
+ *   { properties: { event: { type: "string", enum: ["x"] } } }
+ *
+ * Returns null when any variant doesn't fit the pattern or when variants
+ * disagree on which property carries the discriminator.
+ */
+function detectConstPropertyDiscriminator(
+  variants: SchemaObject[],
+): { property: string; mapping: Record<string, string> } | null {
+  if (variants.length < 2) return null;
+
+  // Find properties whose const value is present on every variant.
+  let candidateProperty: string | null = null;
+  const candidates = Object.keys(variants[0]?.properties ?? {});
+  for (const propName of candidates) {
+    if (variants.every((v) => getConstPropertyValue(v, propName) !== null)) {
+      candidateProperty = propName;
+      break;
+    }
+  }
+
+  if (!candidateProperty) return null;
+
+  const mapping: Record<string, string> = {};
+  for (const v of variants) {
+    const value = getConstPropertyValue(v, candidateProperty);
+    if (value === null) return null;
+    // Require a $ref or title so we have a concrete model name to map to.
+    const variantName = resolveVariantModelName(v);
+    if (!variantName) return null;
+    mapping[value] = variantName;
+  }
+
+  return { property: candidateProperty, mapping };
+}
+
+function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
+  const prop = schema.properties?.[property];
+  if (!prop) return null;
+  if (typeof prop.const === 'string') return prop.const;
+  if (Array.isArray(prop.enum) && prop.enum.length === 1 && typeof prop.enum[0] === 'string') {
+    return prop.enum[0];
+  }
+  return null;
+}
+
+function resolveVariantModelName(schema: SchemaObject): string | null {
+  if (schema.$ref) {
+    return resolveSchemaName(schema.$ref.replace(/^#\/components\/schemas\//, ''));
+  }
+  const title = typeof schema['title'] === 'string' ? (schema['title'] as string) : null;
+  if (title) return resolveSchemaName(title);
+  return null;
+}
+
 function extractEnum(name: string, schema: SchemaObject): Enum {
   const values: EnumValue[] = (schema.enum ?? []).map((v) => ({
     name: toUpperSnakeCase(String(v)),
@@ -609,6 +707,24 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       };
     }
 
+    // Collapse an oneOf/anyOf whose non-null variants are all string-const
+    // schemas into a single enum. This turns patterns like
+    //   provider: { oneOf: [{ const: "AppleOAuth" }, { const: "GitHubOAuth" }, ...] }
+    // into a proper enum type with one member per variant instead of a
+    // structurally-opaque union of literal refs.
+    const literalStrings = collectLiteralStringConsts(nonNullVariants);
+    if (literalStrings !== null && literalStrings.length >= 2) {
+      const enumRef = buildSyntheticEnumRef(literalStrings, contextName, parentModelName);
+      return nullVariant ? { kind: 'nullable', inner: enumRef } : enumRef;
+    }
+
+    // Synthesize a discriminator when all non-null variants are objects that
+    // share a property whose schema carries a `const` value. Covers the
+    // EventSchema-style pattern where each oneOf variant pins `event:
+    // const: "..."` instead of the spec using an explicit `discriminator:`.
+    const syntheticDiscriminator =
+      !schema.discriminator && compositionKind === 'oneOf' ? detectConstPropertyDiscriminator(nonNullVariants) : null;
+
     // General union
     const variants = rawVariants
       .filter((v: SchemaObject) => v.type !== 'null')
@@ -630,7 +746,9 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
               ),
             },
           }
-        : {}),
+        : syntheticDiscriminator
+          ? { discriminator: syntheticDiscriminator }
+          : {}),
     };
     return hasNull ? { kind: 'nullable', inner: union } : union;
   }
