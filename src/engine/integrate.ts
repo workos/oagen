@@ -208,12 +208,17 @@ async function resolveFileToDirectoryConflicts(
   return { files: result, removals };
 }
 
+export interface IntegrateResult extends WriteResult {
+  /** Final set of paths this run claims ownership of in the target (post tree-shake + conflict resolution). */
+  emittedPaths: string[];
+}
+
 export async function integrateGeneratedFiles(opts: {
   files: GeneratedFile[];
   language: string;
   targetDir: string;
   header: string;
-}): Promise<WriteResult> {
+}): Promise<IntegrateResult> {
   const mapped = mapFilesForTargetIntegration(opts.files, opts.language);
   const shaken = await treeShakeFiles(mapped, opts.language);
 
@@ -234,5 +239,5 @@ export async function integrateGeneratedFiles(opts: {
     }
   }
 
-  return result;
+  return { ...result, emittedPaths: resolved.map((f) => f.path) };
 }

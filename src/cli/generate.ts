@@ -15,6 +15,8 @@ export async function generateCommand(opts: {
   apiSurface?: string;
   manifest?: string;
   compatCheck?: boolean;
+  /** From `--no-prune`. When false, manifest-driven stale-file pruning is skipped. */
+  prune?: boolean;
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
   docUrl?: string;
@@ -55,6 +57,7 @@ export async function generateCommand(opts: {
     overlayLookup,
     operationHints: opts.operationHints,
     mountRules: opts.mountRules,
+    noPrune: opts.prune === false,
   });
 
   if (opts.dryRun) {
