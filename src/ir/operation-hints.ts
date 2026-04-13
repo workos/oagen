@@ -223,9 +223,11 @@ export function deriveMethodName(op: Operation, _service: Service): string {
     }
   }
 
-  // Singularize only when there is a trailing path param (single-resource operation).
-  // POST/PUT/DELETE to collection endpoints keep plural nouns.
-  const isSingleResource = trailingParam;
+  // Singularize when:
+  //   * there's a trailing path param (single-resource read/update/delete), or
+  //   * the verb itself implies a single-resource operation (e.g. POST → create
+  //     always creates one item even when posted to a collection endpoint).
+  const isSingleResource = trailingParam || verb === 'create';
   const noun = isSingleResource ? singularize(resource) : resource;
 
   // For "list" verb, keep plural
