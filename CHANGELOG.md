@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/workos/oagen/compare/v0.5.0...v0.6.0) (2026-04-14)
+
+
+### Features
+
+* engine, IR, and compat enhancements for dotnet + kotlin emitter support ([#19](https://github.com/workos/oagen/issues/19)) ([9240fb2](https://github.com/workos/oagen/commit/9240fb2d17a28a0a9717d942929ddbf1184efad1))
+
 ## [0.5.0](https://github.com/workos/oagen/compare/v0.4.0...v0.5.0) (2026-04-09)
 
 
