@@ -24,7 +24,17 @@ export async function generate(
     noPrune?: boolean;
   },
 ): Promise<GeneratedFile[]> {
-  const { files: withHeaders, header } = generateFiles(spec, emitter, options);
+  // Read the target's previous manifest up front so emitters can mark files
+  // the prior run wrote as safe-to-overwrite (vs files a human hand-maintains).
+  // Skipped when --no-prune is set so users opting out of lifecycle tracking
+  // also opt out of overwrite-on-regen behavior.
+  const targetManifestForCtx = options.target && !options.noPrune ? await readManifest(options.target) : null;
+  const priorTargetManifestPaths = targetManifestForCtx ? new Set(targetManifestForCtx.files) : undefined;
+
+  const { files: withHeaders, header } = generateFiles(spec, emitter, {
+    ...options,
+    priorTargetManifestPaths,
+  });
 
   if (options.dryRun) {
     if (options.target) {
@@ -64,7 +74,9 @@ export async function generate(
 
   // Target integration pass
   if (options.target) {
-    const targetPrevManifest = options.noPrune ? null : await readManifest(options.target);
+    // Reuse the manifest we already read to build the emitter context.  This
+    // is correct because nothing between the two reads writes the manifest.
+    const targetPrevManifest = targetManifestForCtx;
 
     const targetResult = await integrateGeneratedFiles({
       files: withHeaders,

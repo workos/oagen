@@ -15,6 +15,8 @@ export function buildEmitterContext(
     overlayLookup?: OverlayLookup;
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
+    target?: string;
+    priorTargetManifestPaths?: Set<string>;
   },
 ): EmitterContext {
   return {
@@ -25,6 +27,8 @@ export function buildEmitterContext(
     apiSurface: options.apiSurface,
     overlayLookup: options.overlayLookup,
     resolvedOperations: resolveOperations(spec, options.operationHints, options.mountRules),
+    targetDir: options.target,
+    priorTargetManifestPaths: options.priorTargetManifestPaths,
   };
 }
 
@@ -145,6 +149,8 @@ export function generateFiles(
     overlayLookup?: OverlayLookup;
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
+    target?: string;
+    priorTargetManifestPaths?: Set<string>;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string } {
   const ctx = buildEmitterContext(spec, options);

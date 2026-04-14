@@ -22,6 +22,16 @@ export interface EmitterContext {
   overlayLookup?: OverlayLookup;
   /** Resolved operations from the hint-aware resolver. Populated by buildEmitterContext(). */
   resolvedOperations?: ResolvedOperation[];
+  /** Absolute path to the integration target directory (when --target is used). */
+  targetDir?: string;
+  /**
+   * Paths (relative to the target dir) that the previous run wrote into
+   * `--target`, loaded from that directory's `.oagen-manifest.json`.  Emitters
+   * can use this to distinguish "file exists because oagen wrote it last time"
+   * from "file exists because a human wrote it" — the former is safe to
+   * overwrite, the latter should be merged.
+   */
+  priorTargetManifestPaths?: Set<string>;
 }
 
 export interface FormatCommand {
