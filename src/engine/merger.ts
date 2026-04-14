@@ -490,8 +490,9 @@ export async function mergeIntoExisting(
         }
 
         const indent = existSymbol.memberIndent ?? '  ';
-        const insertText = newMembers.map((m) => indent + m.text).join('\n');
-        insertions.push({ line: existSymbol.bodyEndLine, text: insertText });
+        const insertText = newMembers.map((m) => indent + m.text).join('\n\n');
+        // Leading blank line separates inserted members from existing ones.
+        insertions.push({ line: existSymbol.bodyEndLine, text: '\n' + insertText });
         deepAdded += newMembers.length;
       }
     }
