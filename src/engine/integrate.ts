@@ -40,8 +40,9 @@ function resolveImportPath(
 function isRootFile(filePath: string): boolean {
   // Fixtures are never roots (and should be filtered by integrateTarget already)
   if (filePath.includes('/fixtures/')) return false;
-  // Test files
-  if (filePath.endsWith('.spec.ts') || filePath.endsWith('.test.ts')) return false;
+  // Test files are roots — they are standalone entry points that belong in the
+  // target repo even though nothing imports them.
+  if (filePath.endsWith('.spec.ts') || filePath.endsWith('.test.ts')) return true;
   // Serializer files
   if (filePath.includes('/serializers/')) return false;
   // Standalone interface files (not barrel/index)
