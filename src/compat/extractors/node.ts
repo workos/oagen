@@ -210,12 +210,31 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
   const methods: Record<string, ApiMethod[]> = {};
   const properties: Record<string, ApiProperty> = {};
   const constructorParams: ApiParam[] = [];
+  let deprecationMessage: string | undefined;
 
   // Extract constructor params
   const declarations = sym.getDeclarations();
   if (declarations) {
     for (const decl of declarations) {
       if (ts.isClassDeclaration(decl)) {
+        // Look for `@deprecated` in the class's JSDoc.  JSDoc nodes are
+        // attached to the declaration's parent range; TS exposes them via
+        // ts.getJSDocDeprecatedTag.
+        const deprecatedTag = ts.getJSDocDeprecatedTag(decl);
+        if (deprecatedTag) {
+          const comment = deprecatedTag.comment;
+          if (typeof comment === 'string') {
+            deprecationMessage = comment.trim() || '';
+          } else if (Array.isArray(comment)) {
+            deprecationMessage =
+              comment
+                .map((c) => c.text)
+                .join('')
+                .trim() || '';
+          } else {
+            deprecationMessage = '';
+          }
+        }
         for (const member of decl.members) {
           if (ts.isConstructorDeclaration(member)) {
             for (const param of member.parameters) {
@@ -280,6 +299,7 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
     methods: sortRecord(methods),
     properties: sortRecord(properties),
     constructorParams,
+    ...(deprecationMessage !== undefined && { deprecationMessage }),
   };
 }
 

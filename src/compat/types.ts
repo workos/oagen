@@ -15,6 +15,11 @@ export interface ApiClass {
   methods: Record<string, ApiMethod[]>;
   properties: Record<string, ApiProperty>;
   constructorParams: ApiParam[];
+  /** Present when the class JSDoc carries `@deprecated`.  Emitters use this
+   *  to propagate deprecation to the service property on the client class
+   *  so IDEs surface the strikethrough at the access site, not just when
+   *  users instantiate the class directly. */
+  deprecationMessage?: string;
 }
 
 export interface ApiMethod {

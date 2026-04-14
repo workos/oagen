@@ -57,8 +57,8 @@ describe('deriveMethodName', () => {
       expect(deriveMethodName(op('get', '/users/{id}'), service)).toBe('get_user');
     });
 
-    it('POST on collection → create_<plural>', () => {
-      expect(deriveMethodName(op('post', '/users'), service)).toBe('create_users');
+    it('POST on collection → create_<singular> (creating one item)', () => {
+      expect(deriveMethodName(op('post', '/users'), service)).toBe('create_user');
     });
 
     it('PUT on resource → update_<singular>', () => {
@@ -137,8 +137,8 @@ describe('deriveMethodName', () => {
   });
 
   describe('singularization', () => {
-    it('keeps plural for collection POST', () => {
-      expect(deriveMethodName(op('post', '/organizations'), service)).toBe('create_organizations');
+    it('singularizes collection POST (a create operation makes one item)', () => {
+      expect(deriveMethodName(op('post', '/organizations'), service)).toBe('create_organization');
     });
 
     it('singularizes with trailing param', () => {
@@ -200,7 +200,7 @@ describe('resolveOperations', () => {
     expect(resolved).toHaveLength(3);
     expect(resolved[0].methodName).toBe('list_users');
     expect(resolved[1].methodName).toBe('get_user');
-    expect(resolved[2].methodName).toBe('create_users');
+    expect(resolved[2].methodName).toBe('create_user');
     // No mount override — stays on original service
     expect(resolved[0].mountOn).toBe('Users');
   });

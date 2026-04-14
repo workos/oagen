@@ -24,6 +24,13 @@ export interface OperationHint {
   defaults?: Record<string, string | number | boolean>;
   /** Fields the SDK reads from client config at runtime (e.g. ['client_id']). */
   inferFromClient?: string[];
+  /**
+   * Marks this operation as a URL builder rather than a real HTTP call. Emitters
+   * should generate a method that returns the constructed URL (typically as a
+   * string) without performing any I/O. Used for OAuth-style redirect endpoints
+   * such as /sso/authorize and /user_management/sessions/logout.
+   */
+  urlBuilder?: boolean;
 }
 
 export interface SplitHint {
@@ -37,6 +44,12 @@ export interface SplitHint {
   inferFromClient?: string[];
   /** Only these body fields are exposed as method params. If omitted, all non-default/non-inferred fields are exposed. */
   exposedParams?: string[];
+  /**
+   * Subset of exposedParams that should be emitted as optional even when the
+   * variant model would otherwise mark them required (or when the variant has
+   * no addressable model, as happens for inline oneOf branches).
+   */
+  optionalParams?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +71,8 @@ export interface ResolvedOperation {
   defaults: Record<string, string | number | boolean>;
   /** Fields the SDK reads from client config at runtime (from operation-level hint). */
   inferFromClient: string[];
+  /** Marks this operation as a URL builder; emitters should not generate an HTTP call. */
+  urlBuilder: boolean;
 }
 
 export interface ResolvedWrapper {
@@ -208,9 +223,11 @@ export function deriveMethodName(op: Operation, _service: Service): string {
     }
   }
 
-  // Singularize only when there is a trailing path param (single-resource operation).
-  // POST/PUT/DELETE to collection endpoints keep plural nouns.
-  const isSingleResource = trailingParam;
+  // Singularize when:
+  //   * there's a trailing path param (single-resource read/update/delete), or
+  //   * the verb itself implies a single-resource operation (e.g. POST → create
+  //     always creates one item even when posted to a collection endpoint).
+  const isSingleResource = trailingParam || verb === 'create';
   const noun = isSingleResource ? singularize(resource) : resource;
 
   // For "list" verb, keep plural
@@ -256,7 +273,7 @@ export function resolveOperations(
           defaults: sh.defaults ?? {},
           inferFromClient: sh.inferFromClient ?? [],
           exposedParams: sh.exposedParams ?? [],
-          optionalParams: [],
+          optionalParams: sh.optionalParams ?? [],
           responseModelName: resolveResponseModelName(op),
         }));
       }
@@ -269,6 +286,7 @@ export function resolveOperations(
         wrappers,
         defaults: hint?.defaults ?? {},
         inferFromClient: hint?.inferFromClient ?? [],
+        urlBuilder: hint?.urlBuilder ?? false,
       });
     }
   }

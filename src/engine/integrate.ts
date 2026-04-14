@@ -40,8 +40,9 @@ function resolveImportPath(
 function isRootFile(filePath: string): boolean {
   // Fixtures are never roots (and should be filtered by integrateTarget already)
   if (filePath.includes('/fixtures/')) return false;
-  // Test files
-  if (filePath.endsWith('.spec.ts') || filePath.endsWith('.test.ts')) return false;
+  // Test files are roots — they are standalone entry points that belong in the
+  // target repo even though nothing imports them.
+  if (filePath.endsWith('.spec.ts') || filePath.endsWith('.test.ts')) return true;
   // Serializer files
   if (filePath.includes('/serializers/')) return false;
   // Standalone interface files (not barrel/index)
@@ -208,12 +209,17 @@ async function resolveFileToDirectoryConflicts(
   return { files: result, removals };
 }
 
+export interface IntegrateResult extends WriteResult {
+  /** Final set of paths this run claims ownership of in the target (post tree-shake + conflict resolution). */
+  emittedPaths: string[];
+}
+
 export async function integrateGeneratedFiles(opts: {
   files: GeneratedFile[];
   language: string;
   targetDir: string;
   header: string;
-}): Promise<WriteResult> {
+}): Promise<IntegrateResult> {
   const mapped = mapFilesForTargetIntegration(opts.files, opts.language);
   const shaken = await treeShakeFiles(mapped, opts.language);
 
@@ -234,5 +240,5 @@ export async function integrateGeneratedFiles(opts: {
     }
   }
 
-  return result;
+  return { ...result, emittedPaths: resolved.map((f) => f.path) };
 }
