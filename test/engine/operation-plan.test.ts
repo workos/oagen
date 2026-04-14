@@ -24,6 +24,7 @@ describe('planOperation', () => {
       {
         "hasBody": false,
         "hasQueryParams": false,
+        "isArrayResponse": false,
         "isAsync": true,
         "isDelete": true,
         "isIdempotentPost": false,
@@ -56,6 +57,7 @@ describe('planOperation', () => {
       {
         "hasBody": false,
         "hasQueryParams": false,
+        "isArrayResponse": false,
         "isAsync": true,
         "isDelete": false,
         "isIdempotentPost": false,
@@ -95,6 +97,7 @@ describe('planOperation', () => {
       {
         "hasBody": true,
         "hasQueryParams": false,
+        "isArrayResponse": false,
         "isAsync": true,
         "isDelete": false,
         "isIdempotentPost": true,
@@ -213,6 +216,48 @@ describe('planOperation', () => {
     );
     expect(plan.responseModelName).toBe('User');
     expect(plan.isModelResponse).toBe(true);
+    expect(plan.isArrayResponse).toBe(true);
+  });
+
+  it('unpaginated array-of-model response → isArrayResponse true', () => {
+    const plan = planOperation(
+      makeOp({
+        response: { kind: 'array', items: { kind: 'model', name: 'Secret' } },
+      }),
+    );
+    expect(plan.isArrayResponse).toBe(true);
+    expect(plan.isPaginated).toBe(false);
+  });
+
+  it('paginated operation with array response → isArrayResponse false', () => {
+    const plan = planOperation(
+      makeOp({
+        pagination: {
+          strategy: 'cursor',
+          param: 'after',
+          dataPath: 'data',
+          itemType: { kind: 'model', name: 'Organization' },
+        },
+        response: { kind: 'array', items: { kind: 'model', name: 'Organization' } },
+      }),
+    );
+    expect(plan.isPaginated).toBe(true);
+    // Paginated responses use the pagination wrapper, not raw arrays.
+    expect(plan.isArrayResponse).toBe(false);
+  });
+
+  it('single-model response → isArrayResponse false', () => {
+    const plan = planOperation(makeOp({ response: { kind: 'model', name: 'Organization' } }));
+    expect(plan.isArrayResponse).toBe(false);
+  });
+
+  it('array of primitives → isArrayResponse false (no model to deserialize)', () => {
+    const plan = planOperation(
+      makeOp({
+        response: { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+      }),
+    );
+    expect(plan.isArrayResponse).toBe(false);
   });
 
   it('nullable response extracts inner model name', () => {

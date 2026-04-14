@@ -13,6 +13,10 @@ export interface OperationPlan {
    *  (unwrapped from the list wrapper). Null for non-paginated. */
   paginatedItemModelName: string | null;
   isModelResponse: boolean;
+  /** True when the response is an unpaginated `type: array` of models.
+   *  Emitters should use this to return `Model[]` (or the language's list
+   *  equivalent) and map the deserializer over each element. */
+  isArrayResponse: boolean;
   hasQueryParams: boolean;
   isAsync: boolean;
 }
@@ -28,6 +32,9 @@ export function planOperation(op: Operation): OperationPlan {
   const paginatedItemModelName =
     isPaginated && op.pagination?.itemType.kind === 'model' ? op.pagination.itemType.name : null;
   const isModelResponse = responseModelName !== null;
+  // Unpaginated `type: array` of models — needs `Model[]` return + elementwise
+  // deserialization.  Paginated operations use the pagination wrapper instead.
+  const isArrayResponse = !isPaginated && op.response.kind === 'array' && op.response.items.kind === 'model';
   const isAsync = op.async ?? true;
 
   return {
@@ -40,6 +47,7 @@ export function planOperation(op: Operation): OperationPlan {
     responseModelName,
     paginatedItemModelName,
     isModelResponse,
+    isArrayResponse,
     hasQueryParams,
     isAsync,
   };
