@@ -215,8 +215,12 @@ export async function overwriteWithPreservedRegions(
   }
   if (blocks.length === 0) return generatedContent;
 
-  // 2. Splice extra imports from existing into generated
-  const result = [...generatedLines];
+  // 2. Splice extra imports from existing into generated.
+  // First strip any `@oagen-ignore-start`..`@oagen-ignore-end` regions the
+  // generator itself emitted: we are about to re-insert the on-disk versions,
+  // and if we left the generator's seed blocks in place we'd end up with two
+  // copies of every ignore block per regeneration (monotonically growing).
+  const result = stripIgnoreRegions(generatedLines);
   spliceExtraImports(existingLines, result);
 
   // 3. Build class-end map from the generated content (after import splicing)
@@ -312,10 +316,38 @@ export async function overwriteWithPreservedRegions(
   return result.join('\n');
 }
 
+/**
+ * Remove every `@oagen-ignore-start`..`@oagen-ignore-end` region from the
+ * supplied lines, collapsing stretches of blank lines that get left behind.
+ * Used to drop generator-emitted seed blocks before splicing the on-disk
+ * versions back in — otherwise every regen doubles up.
+ */
+function stripIgnoreRegions(lines: string[]): string[] {
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (!skipping && line.includes('@oagen-ignore-start')) {
+      skipping = true;
+      // Drop a preceding blank line if we have one queued up — otherwise
+      // regen leaves a stray blank line above the spliced-in block.
+      while (out.length > 0 && out[out.length - 1].trim() === '') out.pop();
+      continue;
+    }
+    if (skipping) {
+      if (line.includes('@oagen-ignore-end')) skipping = false;
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 /** Scan backwards from `lineIdx` to find the nearest class declaration name. */
 function findContainingClass(lines: string[], lineIdx: number): string {
+  // Allow leading whitespace so indented declarations (e.g. Ruby classes
+  // nested inside `module Foo`, Python nested classes) are recognized.
   for (let j = lineIdx - 1; j >= 0; j--) {
-    const m = lines[j].match(/^(?:export\s+)?class\s+(\w+)/);
+    const m = lines[j].match(/^\s*(?:export\s+)?class\s+(\w+)/);
     if (m) return m[1];
   }
   return '';
@@ -326,7 +358,8 @@ function findContainingClass(lines: string[], lineIdx: number): string {
  * by scanning backwards from `beforeLine`.
  */
 function findClassDeclarationStart(lines: string[], className: string, beforeLine: number): number {
-  const classPattern = new RegExp(`^(?:export\\s+)?class\\s+${className}\\b`);
+  // Match optional indentation so Ruby/Python nested classes are found.
+  const classPattern = new RegExp(`^\\s*(?:export\\s+)?class\\s+${className}\\b`);
   for (let i = beforeLine - 1; i >= 0; i--) {
     if (!classPattern.test(lines[i])) continue;
     // Scan backward past decorators
