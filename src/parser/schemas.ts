@@ -226,7 +226,7 @@ function findSchemaByName(pascalName: string, schemas: Record<string, SchemaObje
   return null;
 }
 
-/** Walk into a schema to find a field's sub-schema, resolving allOf. */
+/** Walk into a schema to find a field's sub-schema, resolving allOf and oneOf/anyOf. */
 function findNestedFieldSchema(
   fieldName: string,
   parentSchema: SchemaObject,
@@ -246,6 +246,19 @@ function findNestedFieldSchema(
       if (resolved.properties?.[fieldName]) {
         return resolved.properties[fieldName]!;
       }
+    }
+  }
+  // Also check inside oneOf/anyOf variants (pure oneOf schemas flatten variant
+  // properties into the model, so the field may live inside a variant).
+  for (const variant of [...(parentSchema.oneOf ?? []), ...(parentSchema.anyOf ?? [])]) {
+    let resolved = variant;
+    if (variant.$ref) {
+      const segments = variant.$ref.split('/');
+      const refName = segments[segments.length - 1];
+      if (refName && schemas[refName]) resolved = schemas[refName];
+    }
+    if (resolved.properties?.[fieldName]) {
+      return resolved.properties[fieldName]!;
     }
   }
   return null;
