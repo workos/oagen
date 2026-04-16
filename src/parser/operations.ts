@@ -3,6 +3,7 @@ import type {
   Operation,
   HttpMethod,
   Parameter,
+  ParameterGroup,
   TypeRef,
   ErrorResponse,
   SuccessResponse,
@@ -29,6 +30,11 @@ interface PathItem {
   parameters?: ParameterObject[];
 }
 
+interface ParameterGroupExtension {
+  optional: boolean;
+  variants: Record<string, string[]>;
+}
+
 interface OperationObject {
   operationId?: string;
   summary?: string;
@@ -40,6 +46,7 @@ interface OperationObject {
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
   security?: Array<Record<string, string[]>>;
+  'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
 }
 
 interface ParameterObject {
@@ -312,6 +319,79 @@ function inferDeeperContext(path: string): string | null {
   return null;
 }
 
+/**
+ * Extract mutually-exclusive parameter groups from the `x-mutually-exclusive-parameter-groups`
+ * operation extension. Cross-references grouped parameter names against the already-extracted
+ * IR parameter arrays so emitters get object-identity references.
+ */
+function extractParameterGroups(
+  op: OperationObject,
+  allIRParams: Parameter[],
+  operationContext: string,
+): ParameterGroup[] | undefined {
+  const raw = op['x-mutually-exclusive-parameter-groups'];
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  const paramByName = new Map<string, Parameter>();
+  for (const p of allIRParams) {
+    paramByName.set(p.name, p);
+  }
+
+  const groups: ParameterGroup[] = [];
+
+  for (const [groupName, groupDef] of Object.entries(raw)) {
+    if (!groupDef || typeof groupDef !== 'object') {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName} in ${operationContext}: expected an object with "optional" and "variants".`,
+      );
+    }
+
+    if (typeof groupDef.optional !== 'boolean') {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName}.optional in ${operationContext}: expected a boolean.`,
+      );
+    }
+
+    if (!groupDef.variants || typeof groupDef.variants !== 'object') {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName}.variants in ${operationContext}: expected an object mapping variant names to parameter name arrays.`,
+      );
+    }
+
+    if (Object.keys(groupDef.variants).length === 0) {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName} in ${operationContext}: group has zero variants.`,
+      );
+    }
+
+    const variants = Object.entries(groupDef.variants).map(([variantName, paramNames]) => {
+      if (!Array.isArray(paramNames) || paramNames.length === 0) {
+        throw new Error(
+          `Malformed x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName} in ${operationContext}: expected a non-empty array of parameter names.`,
+        );
+      }
+      const parameters: Parameter[] = paramNames.map((pName) => {
+        const irParam = paramByName.get(pName);
+        if (!irParam) {
+          throw new Error(
+            `x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName} references parameter "${pName}" which does not exist in the operation's parameters[] (${operationContext}).`,
+          );
+        }
+        return irParam;
+      });
+      return { name: variantName, parameters };
+    });
+
+    groups.push({
+      name: groupName,
+      optional: groupDef.optional,
+      variants,
+    });
+  }
+
+  return groups.length > 0 ? groups : undefined;
+}
+
 function buildOperation(
   method: HttpMethod,
   path: string,
@@ -366,6 +446,11 @@ function buildOperation(
   // Extract per-operation security overrides
   const security = extractOperationSecurity(op.security);
 
+  // Extract mutually-exclusive parameter groups
+  const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
+  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  const parameterGroups = extractParameterGroups(op, allIRParams, opLabel);
+
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
@@ -386,6 +471,7 @@ function buildOperation(
       deprecated: op.deprecated || undefined,
       async: op['x-oagen-async'],
       security,
+      parameterGroups,
     },
     inlineModels,
   };

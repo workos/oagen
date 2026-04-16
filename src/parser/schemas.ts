@@ -438,6 +438,23 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
   }
 
+  // Pure oneOf/anyOf schemas (no allOf, no properties): merge variant fields
+  // as optional. This handles schemas like UpdateOrganizationMembership which
+  // is a oneOf with mutually exclusive field groups (role_slug vs role_slugs).
+  if (fields.length === 0 && (schema.oneOf || schema.anyOf)) {
+    const variants = schema.oneOf ?? schema.anyOf ?? [];
+    const emptyRequired = new Set<string>();
+    const seenFieldNames = new Set<string>();
+    for (const variant of variants) {
+      if (!variant.properties) continue;
+      for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+        if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
+        seenFieldNames.add(fieldName);
+        fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+      }
+    }
+  }
+
   // When additionalProperties is an object schema alongside properties,
   // surface it as a catch-all map field so emitters can generate Map<string, T>.
   if (schema.additionalProperties && typeof schema.additionalProperties === 'object' && schema.properties) {
@@ -478,6 +495,24 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
         fields.push({ ...f, required: false }); // will be re-set below
         if (f.required) requiredSet.add(f.name);
       }
+    } else if (resolved.oneOf || resolved.anyOf) {
+      // Flatten oneOf/anyOf variant fields into the parent model as optional
+      // fields. This handles the common allOf + oneOf pattern where the spec
+      // uses mutually exclusive variant groups (e.g. password vs password_hash).
+      const variants = resolved.oneOf ?? resolved.anyOf ?? [];
+      const emptyRequired = new Set<string>();
+      const seenFieldNames = new Set(fields.map((f) => f.name));
+      for (const variant of variants) {
+        if (!variant.properties) continue;
+        for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+          if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
+          seenFieldNames.add(fieldName);
+          fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+        }
+      }
+      // Do NOT add variant-level required to the requiredSet — these fields
+      // are optional at the parent level because they come from mutually
+      // exclusive branches.
     } else {
       if (resolved.required) {
         for (const r of resolved.required) requiredSet.add(r);
