@@ -1170,6 +1170,92 @@ export class Service {
     expect(result.content).toContain('/** Fetch a user by ID */');
   });
 
+  it('inserts member docstrings at method declarations (not inside method bodies)', async () => {
+    const existing = `
+export class UserManagement {
+  async getUser(userId: string): Promise<User> {
+    const { data } = await this.workos.get<UserResponse>(
+      \`/user_management/users/\${userId}\`,
+    );
+    return deserializeUser(data);
+  }
+
+  async listUsers(
+    options?: ListUsersOptions,
+  ): Promise<AutoPaginatable<User, SerializedListUsersOptions>> {
+    return new AutoPaginatable(
+      await fetchAndDeserialize<UserResponse, User>(
+        this.workos,
+        '/user_management/users',
+        deserializeUser,
+        options ? serializeListUsersOptions(options) : undefined,
+      ),
+      (params) =>
+        fetchAndDeserialize<UserResponse, User>(
+          this.workos,
+          '/user_management/users',
+          deserializeUser,
+          params,
+        ),
+      options ? serializeListUsersOptions(options) : undefined,
+    );
+  }
+}
+`;
+    const generated = `
+${header}
+
+export class UserManagement {
+  /**
+   * Get a user
+   *
+   * Get the details of an existing user.
+   */
+  async getUser(userId: string): Promise<User> {
+    const { data } = await this.workos.get<UserResponse>(
+      \`/user_management/users/\${userId}\`,
+    );
+    return deserializeUser(data);
+  }
+
+  /**
+   * List users
+   *
+   * Get a list of all users.
+   */
+  async listUsers(
+    options?: ListUsersOptions,
+  ): Promise<AutoPaginatable<User, SerializedListUsersOptions>> {
+    return new AutoPaginatable(
+      await fetchAndDeserialize<UserResponse, User>(
+        this.workos,
+        '/user_management/users',
+        deserializeUser,
+        options ? serializeListUsersOptions(options) : undefined,
+      ),
+      (params) =>
+        fetchAndDeserialize<UserResponse, User>(
+          this.workos,
+          '/user_management/users',
+          deserializeUser,
+          params,
+        ),
+      options ? serializeListUsersOptions(options) : undefined,
+    );
+  }
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain('/**\n   * Get a user');
+    expect(result.content).toContain('/**\n   * List users');
+    expect(result.content).toContain('/**\n   * Get a user\n');
+    expect(result.content).toContain('/**\n   * List users\n');
+    expect(result.content).not.toContain('await this.workos.get<UserResponse>(\n      /**');
+    expect(result.content).not.toContain('options?: ListUsersOptions,\n    /**');
+  });
+
   it('does not change when docstrings match', async () => {
     const existing = `
 /** Same docs */
