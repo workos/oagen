@@ -11,7 +11,12 @@ describe('nodeExtractor', () => {
 
     const client = surface.classes.SampleClient;
     expect(client.name).toBe('SampleClient');
-    expect(Object.keys(client.methods)).toEqual(['deleteOrganization', 'getOrganization', 'listOrganizations']);
+    expect(Object.keys(client.methods)).toEqual([
+      'deleteOrganization',
+      'getOrganization',
+      'listOrganizations',
+      'updateOrganization',
+    ]);
   });
 
   it('extracts method params and return types', async () => {
@@ -28,6 +33,17 @@ describe('nodeExtractor', () => {
     const listOrgs = surface.classes.SampleClient.methods.listOrganizations[0];
     expect(listOrgs.params).toHaveLength(1);
     expect(listOrgs.params[0]).toMatchObject({ name: 'limit', optional: true });
+  });
+
+  it('normalizes destructured parameter names', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const updateOrg = surface.classes.SampleClient.methods.updateOrganization[0];
+    expect(updateOrg.params).toHaveLength(1);
+    expect(updateOrg.params[0]).toMatchObject({
+      name: 'options',
+      type: '{ id: string; name?: string | undefined; }',
+      optional: false,
+    });
   });
 
   it('extracts readonly properties', async () => {
