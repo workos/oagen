@@ -664,4 +664,194 @@ describe('extractOperations', () => {
     expect(services[0].name).toBe('Widgets');
     expect(services[0].operations).toHaveLength(2);
   });
+
+  describe('x-mutually-exclusive-parameter-groups', () => {
+    it('parses a required group with two variants', () => {
+      const paths = {
+        '/resources': {
+          get: {
+            operationId: 'listResources',
+            parameters: [
+              { name: 'parent_resource_id', in: 'query' as const, required: false, schema: { type: 'string' } },
+              { name: 'parent_resource_type_slug', in: 'query' as const, required: false, schema: { type: 'string' } },
+              {
+                name: 'parent_resource_external_id',
+                in: 'query' as const,
+                required: false,
+                schema: { type: 'string' },
+              },
+            ],
+            responses: { '200': { description: 'ok' } },
+            'x-mutually-exclusive-parameter-groups': {
+              parent_resource: {
+                optional: false,
+                variants: {
+                  by_id: ['parent_resource_id'],
+                  by_external_id: ['parent_resource_type_slug', 'parent_resource_external_id'],
+                },
+              },
+            },
+          } as Record<string, unknown>,
+        },
+      };
+
+      const { services } = extractOperations(paths as never);
+      const op = services[0].operations[0];
+
+      expect(op.parameterGroups).toBeDefined();
+      expect(op.parameterGroups).toHaveLength(1);
+
+      const group = op.parameterGroups![0];
+      expect(group.name).toBe('parent_resource');
+      expect(group.optional).toBe(false);
+      expect(group.variants).toHaveLength(2);
+
+      expect(group.variants[0].name).toBe('by_id');
+      expect(group.variants[0].parameters).toHaveLength(1);
+      expect(group.variants[0].parameters[0].name).toBe('parent_resource_id');
+
+      expect(group.variants[1].name).toBe('by_external_id');
+      expect(group.variants[1].parameters).toHaveLength(2);
+      expect(group.variants[1].parameters[0].name).toBe('parent_resource_type_slug');
+      expect(group.variants[1].parameters[1].name).toBe('parent_resource_external_id');
+
+      // Verify object identity: grouped params are the same objects as in queryParams
+      expect(group.variants[0].parameters[0]).toBe(op.queryParams.find((p) => p.name === 'parent_resource_id'));
+      expect(group.variants[1].parameters[0]).toBe(op.queryParams.find((p) => p.name === 'parent_resource_type_slug'));
+    });
+
+    it('parses an optional group', () => {
+      const paths = {
+        '/resources': {
+          get: {
+            operationId: 'listResources',
+            parameters: [
+              { name: 'filter_a', in: 'query' as const, required: false, schema: { type: 'string' } },
+              { name: 'filter_b', in: 'query' as const, required: false, schema: { type: 'string' } },
+            ],
+            responses: { '200': { description: 'ok' } },
+            'x-mutually-exclusive-parameter-groups': {
+              filter: {
+                optional: true,
+                variants: {
+                  by_a: ['filter_a'],
+                  by_b: ['filter_b'],
+                },
+              },
+            },
+          } as Record<string, unknown>,
+        },
+      };
+
+      const { services } = extractOperations(paths as never);
+      const group = services[0].operations[0].parameterGroups![0];
+      expect(group.optional).toBe(true);
+    });
+
+    it('omits parameterGroups when extension is absent', () => {
+      const paths = {
+        '/users': {
+          get: {
+            operationId: 'listUsers',
+            parameters: [{ name: 'status', in: 'query' as const, schema: { type: 'string' } }],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      };
+
+      const { services } = extractOperations(paths);
+      expect(services[0].operations[0].parameterGroups).toBeUndefined();
+    });
+
+    it('throws on unknown parameter name in variant', () => {
+      const paths = {
+        '/resources': {
+          get: {
+            operationId: 'listResources',
+            parameters: [{ name: 'real_param', in: 'query' as const, schema: { type: 'string' } }],
+            responses: { '200': { description: 'ok' } },
+            'x-mutually-exclusive-parameter-groups': {
+              group: {
+                optional: false,
+                variants: {
+                  v1: ['real_param'],
+                  v2: ['nonexistent_param'],
+                },
+              },
+            },
+          } as Record<string, unknown>,
+        },
+      };
+
+      expect(() => extractOperations(paths as never)).toThrow(/nonexistent_param/);
+    });
+
+    it('throws on group with zero variants', () => {
+      const paths = {
+        '/resources': {
+          get: {
+            operationId: 'listResources',
+            parameters: [],
+            responses: { '200': { description: 'ok' } },
+            'x-mutually-exclusive-parameter-groups': {
+              empty: {
+                optional: false,
+                variants: {},
+              },
+            },
+          } as Record<string, unknown>,
+        },
+      };
+
+      expect(() => extractOperations(paths as never)).toThrow(/zero variants/);
+    });
+
+    it('throws when optional is not a boolean', () => {
+      const paths = {
+        '/resources': {
+          get: {
+            operationId: 'listResources',
+            parameters: [{ name: 'a', in: 'query' as const, schema: { type: 'string' } }],
+            responses: { '200': { description: 'ok' } },
+            'x-mutually-exclusive-parameter-groups': {
+              group: {
+                optional: 'yes',
+                variants: { v1: ['a'] },
+              },
+            },
+          } as Record<string, unknown>,
+        },
+      };
+
+      expect(() => extractOperations(paths as never)).toThrow(/expected a boolean/);
+    });
+
+    it('grouped params remain in queryParams for wire compatibility', () => {
+      const paths = {
+        '/resources': {
+          get: {
+            operationId: 'listResources',
+            parameters: [
+              { name: 'parent_id', in: 'query' as const, required: false, schema: { type: 'string' } },
+              { name: 'filter', in: 'query' as const, required: false, schema: { type: 'string' } },
+            ],
+            responses: { '200': { description: 'ok' } },
+            'x-mutually-exclusive-parameter-groups': {
+              parent: {
+                optional: false,
+                variants: { by_id: ['parent_id'] },
+              },
+            },
+          } as Record<string, unknown>,
+        },
+      };
+
+      const { services } = extractOperations(paths as never);
+      const op = services[0].operations[0];
+      // parent_id should still be in queryParams
+      expect(op.queryParams.some((p) => p.name === 'parent_id')).toBe(true);
+      // non-grouped params should also remain
+      expect(op.queryParams.some((p) => p.name === 'filter')).toBe(true);
+    });
+  });
 });

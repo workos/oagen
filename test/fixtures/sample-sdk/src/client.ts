@@ -17,6 +17,10 @@ export class SampleClient {
     return { data: [], hasMore: false };
   }
 
+  async updateOrganization({ id, name }: { id: string; name?: string }): Promise<Organization> {
+    return { id, name: name ?? '', createdAt: '' };
+  }
+
   async deleteOrganization(id: string): Promise<void> {
     // no-op
   }

@@ -27,6 +27,10 @@ export async function formatTargetFiles(emitter: Emitter, targetDir: string, fil
   const absolutePaths = filePaths.map((f) => path.resolve(targetDir, f));
   const batchSize = formatCmd.batchSize ?? 100;
 
+  process.stderr.write(
+    `[oagen] formatting ${absolutePaths.length} file(s) with ${formatCmd.cmd} (batch ${batchSize})\n`,
+  );
+
   for (let i = 0; i < absolutePaths.length; i += batchSize) {
     const batch = absolutePaths.slice(i, i + batchSize);
     try {
@@ -35,8 +39,12 @@ export async function formatTargetFiles(emitter: Emitter, targetDir: string, fil
         maxBuffer: 10 * 1024 * 1024,
         timeout: 120_000,
       });
-    } catch {
-      // Formatter failed on this batch — continue with remaining batches
+    } catch (err) {
+      // Formatter failed on this batch — continue with remaining batches.
+      // Surface the failure on stderr so misconfigured commands don't silently
+      // leave generated code unformatted every regen.
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[oagen] formatter batch failed: ${msg}\n`);
     }
   }
 }

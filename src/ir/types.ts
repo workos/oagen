@@ -62,6 +62,41 @@ export interface Operation {
   async?: boolean;
   /** Per-operation security overrides. When present, overrides the global spec-level security. */
   security?: SecurityRequirement[];
+  /**
+   * Mutually-exclusive parameter groups parsed from `x-mutually-exclusive-parameter-groups`.
+   * Each group represents a logical choice the caller must (or may) make between
+   * several subsets of query/path/header parameters. The grouped parameters remain
+   * in their original arrays (queryParams, pathParams, etc.) for wire-format purposes;
+   * this field adds the grouping metadata so emitters can render sum types.
+   */
+  parameterGroups?: ParameterGroup[];
+}
+
+/**
+ * A mutually-exclusive parameter group. The caller must supply exactly one
+ * variant (when `optional` is false) or may omit the group entirely (when true).
+ */
+export interface ParameterGroup {
+  /** Group name from the extension (e.g. "parent_resource"). */
+  name: string;
+  /** True when the whole group may be omitted. */
+  optional: boolean;
+  /** Ordered variants (insertion order matches the spec). */
+  variants: ParameterGroupVariant[];
+}
+
+/**
+ * One variant within a mutually-exclusive parameter group.
+ */
+export interface ParameterGroupVariant {
+  /** Variant name from the extension (e.g. "by_id", "by_external_id"). */
+  name: string;
+  /**
+   * References to the actual parameter IR nodes. These are the same
+   * objects that live in operation.queryParams / .pathParams / .headerParams --
+   * shared by identity, not duplicated.
+   */
+  parameters: Parameter[];
 }
 
 /** Structured pagination metadata for auto-paging iterator generation */

@@ -238,7 +238,7 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
         for (const member of decl.members) {
           if (ts.isConstructorDeclaration(member)) {
             for (const param of member.parameters) {
-              const paramName = param.name.getText();
+              const paramName = extractParameterName(param, param.name.getText());
               const paramType = param.type ? checker.typeToString(checker.getTypeFromTypeNode(param.type)) : 'any';
               constructorParams.push({
                 name: paramName,
@@ -308,10 +308,24 @@ function extractParam(sym: ts.Symbol, checker: ts.TypeChecker): ApiParam {
   const isOptional = decl && ts.isParameter(decl) ? !!decl.questionToken || !!decl.initializer : false;
   const type = checker.getTypeOfSymbolAtLocation(sym, decl!);
   return {
-    name: sym.name,
+    name: extractParameterName(decl, sym.name),
     type: checker.typeToString(type),
     optional: isOptional,
   };
+}
+
+function extractParameterName(decl: ts.Declaration | undefined, fallback: string): string {
+  if (!decl || !ts.isParameter(decl)) return fallback;
+  if (ts.isIdentifier(decl.name)) return decl.name.text;
+
+  const parentWithParameters = decl.parent as ts.Node & { parameters?: ts.NodeArray<ts.ParameterDeclaration> };
+  const index = parentWithParameters.parameters?.indexOf(decl) ?? -1;
+  const suffix = index > 0 ? String(index) : '';
+
+  if (ts.isObjectBindingPattern(decl.name)) return `options${suffix}`;
+  if (ts.isArrayBindingPattern(decl.name)) return `args${suffix}`;
+
+  return fallback;
 }
 
 function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface {

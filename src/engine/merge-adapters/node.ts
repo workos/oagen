@@ -174,9 +174,12 @@ export const nodeMergeAdapter: MergeAdapter = {
   shouldSkipDeepMerge(_symbolName, existingMemberKeys, newMembers) {
     // If new members reference instance properties (this.X) that don't exist
     // in the target class, the merged code would be broken.
+    // Exception: `this.workos` is always valid — it's the constructor-injected
+    // WorkOS client instance that every generated resource class uses.
     const newText = newMembers.map((m) => m.text).join('\n');
     for (const match of newText.matchAll(/this\.(\w+)/g)) {
       const propName = match[1];
+      if (propName === 'workos') continue;
       if (propName && !existingMemberKeys.has(propName)) {
         return true;
       }

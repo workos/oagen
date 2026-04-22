@@ -10,6 +10,8 @@ export type {
   PaginationMeta,
   HttpMethod,
   Parameter,
+  ParameterGroup,
+  ParameterGroupVariant,
   TypeRef,
   PrimitiveType,
   ArrayType,

@@ -3,6 +3,7 @@ import type {
   Operation,
   HttpMethod,
   Parameter,
+  ParameterGroup,
   TypeRef,
   ErrorResponse,
   SuccessResponse,
@@ -29,6 +30,11 @@ interface PathItem {
   parameters?: ParameterObject[];
 }
 
+interface ParameterGroupExtension {
+  optional: boolean;
+  variants: Record<string, string[]>;
+}
+
 interface OperationObject {
   operationId?: string;
   summary?: string;
@@ -40,6 +46,8 @@ interface OperationObject {
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
   security?: Array<Record<string, string[]>>;
+  'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
+  'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
 }
 
 interface ParameterObject {
@@ -312,6 +320,157 @@ function inferDeeperContext(path: string): string | null {
   return null;
 }
 
+/**
+ * Extract mutually-exclusive parameter groups from the `x-mutually-exclusive-parameter-groups`
+ * operation extension. Cross-references grouped parameter names against the already-extracted
+ * IR parameter arrays so emitters get object-identity references.
+ */
+function extractParameterGroups(
+  op: OperationObject,
+  allIRParams: Parameter[],
+  operationContext: string,
+): ParameterGroup[] | undefined {
+  const raw = op['x-mutually-exclusive-parameter-groups'];
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  const paramByName = new Map<string, Parameter>();
+  for (const p of allIRParams) {
+    paramByName.set(p.name, p);
+  }
+
+  const groups: ParameterGroup[] = [];
+
+  for (const [groupName, groupDef] of Object.entries(raw)) {
+    if (!groupDef || typeof groupDef !== 'object') {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName} in ${operationContext}: expected an object with "optional" and "variants".`,
+      );
+    }
+
+    if (typeof groupDef.optional !== 'boolean') {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName}.optional in ${operationContext}: expected a boolean.`,
+      );
+    }
+
+    if (!groupDef.variants || typeof groupDef.variants !== 'object') {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName}.variants in ${operationContext}: expected an object mapping variant names to parameter name arrays.`,
+      );
+    }
+
+    if (Object.keys(groupDef.variants).length === 0) {
+      throw new Error(
+        `Malformed x-mutually-exclusive-parameter-groups.${groupName} in ${operationContext}: group has zero variants.`,
+      );
+    }
+
+    const variants = Object.entries(groupDef.variants).map(([variantName, paramNames]) => {
+      if (!Array.isArray(paramNames) || paramNames.length === 0) {
+        throw new Error(
+          `Malformed x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName} in ${operationContext}: expected a non-empty array of parameter names.`,
+        );
+      }
+      const parameters: Parameter[] = paramNames.map((pName) => {
+        const irParam = paramByName.get(pName);
+        if (!irParam) {
+          throw new Error(
+            `x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName} references parameter "${pName}" which does not exist in the operation's parameters[] (${operationContext}).`,
+          );
+        }
+        return irParam;
+      });
+      return { name: variantName, parameters };
+    });
+
+    groups.push({
+      name: groupName,
+      optional: groupDef.optional,
+      variants,
+    });
+  }
+
+  return groups.length > 0 ? groups : undefined;
+}
+
+/**
+ * Extract mutually-exclusive body parameter groups from the
+ * `x-mutually-exclusive-body-groups` operation extension. Unlike query
+ * parameter groups (whose parameters live in operation.queryParams), body
+ * group parameters are synthetic — built from the oneOf variant schemas in
+ * the request body. Emitters use the group's presence to generate sum-type
+ * interfaces and custom JSON marshalling instead of flat optional fields.
+ */
+function extractBodyParameterGroups(op: OperationObject, operationContext: string): ParameterGroup[] | undefined {
+  const raw = op['x-mutually-exclusive-body-groups'];
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  // Collect the body schema's oneOf variant fields so we can resolve types.
+  // The body schema has been structurally rewritten to allOf: [base, { oneOf: [...] }]
+  // by the spec generator; the variant properties live inside oneOf branches.
+  const bodySchema = op.requestBody?.content?.['application/json']?.schema;
+  const variantFieldSchemas = new Map<string, SchemaObject>();
+
+  if (bodySchema) {
+    // Walk allOf → oneOf → variant.properties to find all variant fields
+    for (const sub of bodySchema.allOf ?? []) {
+      for (const variant of sub.oneOf ?? []) {
+        if (variant.properties) {
+          for (const [name, fieldSchema] of Object.entries(variant.properties)) {
+            if (fieldSchema) variantFieldSchemas.set(name, fieldSchema);
+          }
+        }
+      }
+    }
+    // Also check top-level oneOf (for inline schemas that aren't wrapped in allOf)
+    for (const variant of bodySchema.oneOf ?? []) {
+      if (variant.properties) {
+        for (const [name, fieldSchema] of Object.entries(variant.properties)) {
+          if (fieldSchema) variantFieldSchemas.set(name, fieldSchema);
+        }
+      }
+    }
+  }
+
+  const groups: ParameterGroup[] = [];
+
+  for (const [groupName, groupDef] of Object.entries(raw)) {
+    if (!groupDef || typeof groupDef !== 'object') continue;
+    if (typeof groupDef.optional !== 'boolean') continue;
+    if (!groupDef.variants || typeof groupDef.variants !== 'object') continue;
+    if (Object.keys(groupDef.variants).length === 0) continue;
+
+    const variants = Object.entries(groupDef.variants).map(([variantName, paramNames]) => {
+      if (!Array.isArray(paramNames) || paramNames.length === 0) {
+        throw new Error(
+          `Malformed x-mutually-exclusive-body-groups.${groupName}.variants.${variantName} in ${operationContext}: expected a non-empty array of parameter names.`,
+        );
+      }
+      const parameters: Parameter[] = paramNames.map((pName) => {
+        const fieldSchema = variantFieldSchemas.get(pName);
+        const fieldType: TypeRef = fieldSchema
+          ? schemaToTypeRef(fieldSchema, toPascalCase(pName))
+          : { kind: 'primitive', type: 'string' };
+        return {
+          name: pName,
+          type: fieldType,
+          required: false, // group variant fields are always optional at the struct level
+          description: fieldSchema?.description,
+        };
+      });
+      return { name: variantName, parameters };
+    });
+
+    groups.push({
+      name: groupName,
+      optional: groupDef.optional,
+      variants,
+    });
+  }
+
+  return groups.length > 0 ? groups : undefined;
+}
+
 function buildOperation(
   method: HttpMethod,
   path: string,
@@ -366,6 +525,18 @@ function buildOperation(
   // Extract per-operation security overrides
   const security = extractOperationSecurity(op.security);
 
+  // Extract mutually-exclusive parameter groups (query/path/header/cookie)
+  const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
+  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel);
+
+  // Extract mutually-exclusive body parameter groups
+  const bodyParamGroups = extractBodyParameterGroups(op, opLabel);
+
+  // Merge both sources into a single parameterGroups array
+  const parameterGroups =
+    queryParamGroups || bodyParamGroups ? [...(queryParamGroups ?? []), ...(bodyParamGroups ?? [])] : undefined;
+
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
@@ -386,6 +557,7 @@ function buildOperation(
       deprecated: op.deprecated || undefined,
       async: op['x-oagen-async'],
       security,
+      parameterGroups,
     },
     inlineModels,
   };

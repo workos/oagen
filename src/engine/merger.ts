@@ -93,6 +93,45 @@ function buildIgnoredSymbolNames(docstrings: Map<string, SymbolDocstrings>, regi
   return ignored;
 }
 
+function clampIndex(value: number, contentLength: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > contentLength) return contentLength;
+  return value;
+}
+
+/**
+ * Resolve the declaration line start for insertion using the current content,
+ * instead of relying on parser column arithmetic. This avoids misplaced inserts
+ * when parser columns/offsets drift.
+ */
+function declarationLineStart(content: string, declStartIndex: number): number {
+  const idx = clampIndex(declStartIndex, content.length);
+  const prevNewline = content.lastIndexOf('\n', Math.max(0, idx - 1));
+  return prevNewline === -1 ? 0 : prevNewline + 1;
+}
+
+/**
+ * Resolve a docstring range by searching for the nearest matching text before
+ * the declaration start. Falls back to parser-provided offsets when search fails.
+ */
+function resolveDocRange(
+  content: string,
+  docText: string,
+  declStartIndex: number,
+  fallbackStart: number,
+  fallbackEnd: number,
+): { start: number; end: number } {
+  const safeDecl = clampIndex(declStartIndex, content.length);
+  const safeFallbackStart = clampIndex(fallbackStart, content.length);
+  const safeFallbackEnd = clampIndex(fallbackEnd, content.length);
+  const found = content.lastIndexOf(docText, safeDecl);
+  if (found !== -1) {
+    return { start: found, end: found + docText.length };
+  }
+  return { start: safeFallbackStart, end: safeFallbackEnd };
+}
+
 /**
  * Check if a tree-sitter grammar is configured for the given language.
  */
@@ -207,26 +246,27 @@ export async function extractClassEndLines(
     }
   }
 
+  // Walk the tree recursively. Ruby (and Python) often nest target classes
+  // inside `module Foo` / `class Outer:` containers, so a flat iteration over
+  // root children would miss them.
+  function walk(node: Parser.SyntaxNode): void {
+    if (node.type === 'class' || node.type === 'class_definition' || node.type === 'class_declaration') {
+      processClassNode(node);
+    }
+    if (node.type === 'decorated_definition') {
+      for (const inner of node.namedChildren) {
+        if (inner.type === 'class_definition') processClassNode(inner);
+      }
+    }
+    if (node.type === 'export_statement') {
+      for (const inner of node.namedChildren) {
+        if (inner.type === 'class_declaration') processClassNode(inner);
+      }
+    }
+    for (const child of node.namedChildren) walk(child);
+  }
   for (const child of tree.rootNode.children) {
-    if (child.type === 'class_definition' || child.type === 'class_declaration') {
-      processClassNode(child);
-    }
-    // Python: `@decorator class Foo:` wraps the class in a decorated_definition
-    if (child.type === 'decorated_definition') {
-      for (const inner of child.namedChildren) {
-        if (inner.type === 'class_definition') {
-          processClassNode(inner);
-        }
-      }
-    }
-    // JS/TS: `export class Foo {}` wraps the class in an export_statement
-    if (child.type === 'export_statement') {
-      for (const inner of child.namedChildren) {
-        if (inner.type === 'class_declaration') {
-          processClassNode(inner);
-        }
-      }
-    }
+    walk(child);
   }
 
   return map;
@@ -600,15 +640,22 @@ export async function mergeIntoExisting(
           const isPreserved = existInfo.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existInfo.docstring.text !== genDoc.text) {
             const newText = preserveDeprecatedTags(existInfo.docstring.text, genDoc.text);
+            const range = resolveDocRange(
+              result,
+              existInfo.docstring.text,
+              existInfo.declStartIndex,
+              existInfo.docstring.startIndex,
+              existInfo.docstring.endIndex,
+            );
             edits.push({
-              start: existInfo.docstring.startIndex,
-              end: existInfo.docstring.endIndex,
+              start: range.start,
+              end: range.end,
               newText,
             });
             docstringUpdates++;
           }
         } else {
-          const lineStart = existInfo.declStartIndex - existInfo.declColumn;
+          const lineStart = declarationLineStart(result, existInfo.declStartIndex);
           const indent = ' '.repeat(existInfo.declColumn);
           edits.push({
             start: lineStart,
@@ -631,15 +678,22 @@ export async function mergeIntoExisting(
           const isPreserved = existMember.docstring.text.includes('@oagen-ignore');
           if (!isPreserved && existMember.docstring.text !== genMember.docstring.text) {
             const newText = preserveDeprecatedTags(existMember.docstring.text, genMember.docstring.text);
+            const range = resolveDocRange(
+              result,
+              existMember.docstring.text,
+              existMember.declStartIndex,
+              existMember.docstring.startIndex,
+              existMember.docstring.endIndex,
+            );
             edits.push({
-              start: existMember.docstring.startIndex,
-              end: existMember.docstring.endIndex,
+              start: range.start,
+              end: range.end,
               newText,
             });
             docstringUpdates++;
           }
         } else {
-          const lineStart = existMember.declStartIndex - existMember.declColumn;
+          const lineStart = declarationLineStart(result, existMember.declStartIndex);
           const indent = ' '.repeat(existMember.declColumn);
           edits.push({
             start: lineStart,
@@ -698,15 +752,22 @@ export async function mergeIntoExisting(
           if (isPreserved) continue;
           if (existMember.docstring.text !== genMember.docstring.text) {
             const newText = preserveDeprecatedTags(existMember.docstring.text, genMember.docstring.text);
+            const range = resolveDocRange(
+              result,
+              existMember.docstring.text,
+              existMember.declStartIndex,
+              existMember.docstring.startIndex,
+              existMember.docstring.endIndex,
+            );
             edits.push({
-              start: existMember.docstring.startIndex,
-              end: existMember.docstring.endIndex,
+              start: range.start,
+              end: range.end,
               newText,
             });
             docstringUpdates++;
           }
         } else {
-          const lineStart = existMember.declStartIndex - existMember.declColumn;
+          const lineStart = declarationLineStart(result, existMember.declStartIndex);
           const indent = ' '.repeat(existMember.declColumn);
           edits.push({
             start: lineStart,

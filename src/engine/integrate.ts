@@ -240,5 +240,8 @@ export async function integrateGeneratedFiles(opts: {
     }
   }
 
-  return { ...result, emittedPaths: resolved.map((f) => f.path) };
+  // The manifest tracks ALL files oagen owns, including tree-shaken ones.
+  // Tree-shaking decides what to write, but shaken files are still oagen-managed
+  // and must not be pruned from the target on subsequent runs.
+  return { ...result, emittedPaths: mapped.map((f) => f.path) };
 }
