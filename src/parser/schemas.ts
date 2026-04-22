@@ -841,16 +841,16 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       compositionKind,
       ...(schema.discriminator
         ? {
-            discriminator: {
-              property: schema.discriminator.propertyName,
-              mapping: Object.fromEntries(
-                Object.entries(schema.discriminator.mapping ?? {}).map(([k, v]) => [
-                  k,
-                  v.replace(/^#\/components\/schemas\//, ''),
-                ]),
-              ),
-            },
-          }
+          discriminator: {
+            property: schema.discriminator.propertyName,
+            mapping: Object.fromEntries(
+              Object.entries(schema.discriminator.mapping ?? {}).map(([k, v]) => [
+                k,
+                v.replace(/^#\/components\/schemas\//, ''),
+              ]),
+            ),
+          },
+        }
         : syntheticDiscriminator
           ? { discriminator: syntheticDiscriminator }
           : {}),
