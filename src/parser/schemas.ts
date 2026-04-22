@@ -489,6 +489,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
 function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   const fields: Field[] = [];
   const requiredSet = new Set<string>();
+  let resultDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
 
   for (const subSchema of schema.allOf ?? []) {
     // Resolve $ref sub-schemas by looking up the referenced component schema
@@ -509,23 +510,32 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
         if (f.required) requiredSet.add(f.name);
       }
     } else if (resolved.oneOf || resolved.anyOf) {
-      // Flatten oneOf/anyOf variant fields into the parent model as optional
-      // fields. This handles the common allOf + oneOf pattern where the spec
-      // uses mutually exclusive variant groups (e.g. password vs password_hash).
       const variants = resolved.oneOf ?? resolved.anyOf ?? [];
-      const emptyRequired = new Set<string>();
-      const seenFieldNames = new Set(fields.map((f) => f.name));
-      for (const variant of variants) {
-        if (!variant.properties) continue;
-        for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
-          if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
-          seenFieldNames.add(fieldName);
-          fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+      // Detect discriminated union: every variant pins the same property to a
+      // distinct const value (e.g. EventSchema where each variant has event: const).
+      // When detected, store the discriminator instead of flattening variant fields —
+      // the base allOf schema already captures the common fields.
+      const discriminatorInfo = detectAllOfVariantDiscriminator(variants, name);
+      if (discriminatorInfo) {
+        resultDiscriminator = discriminatorInfo;
+      } else {
+        // Flatten oneOf/anyOf variant fields into the parent model as optional
+        // fields. This handles the common allOf + oneOf pattern where the spec
+        // uses mutually exclusive variant groups (e.g. password vs password_hash).
+        const emptyRequired = new Set<string>();
+        const seenFieldNames = new Set(fields.map((f) => f.name));
+        for (const variant of variants) {
+          if (!variant.properties) continue;
+          for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+            if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
+            seenFieldNames.add(fieldName);
+            fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+          }
         }
+        // Do NOT add variant-level required to the requiredSet — these fields
+        // are optional at the parent level because they come from mutually
+        // exclusive branches.
       }
-      // Do NOT add variant-level required to the requiredSet — these fields
-      // are optional at the parent level because they come from mutually
-      // exclusive branches.
     } else {
       if (resolved.required) {
         for (const r of resolved.required) requiredSet.add(r);
@@ -551,7 +561,54 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     f.required = requiredSet.has(f.name);
   }
 
-  return { name, description: schema.description, fields };
+  return {
+    name,
+    description: schema.description,
+    fields,
+    ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
+  };
+}
+
+/**
+ * Detect an implicit discriminator on an allOf+oneOf where every variant is an
+ * object that pins the same property to a distinct const value. Unlike
+ * detectConstPropertyDiscriminator (which requires $ref or title for variant
+ * model names), this version derives model names from the const value itself
+ * using deriveDiscriminatedVariantName — matching how extractDiscriminatedAllOfVariantModels
+ * names those models.
+ *
+ * Returns null when no discriminator can be reliably detected.
+ */
+function detectAllOfVariantDiscriminator(
+  variants: SchemaObject[],
+  fallbackName: string,
+): { property: string; mapping: Record<string, string> } | null {
+  if (variants.length < 2) return null;
+
+  // Find a property whose const value is present on every variant
+  const candidates = Object.keys(variants[0]?.properties ?? {});
+  let candidateProperty: string | null = null;
+  for (const propName of candidates) {
+    if (variants.every((v) => getConstPropertyValue(v, propName) !== null)) {
+      candidateProperty = propName;
+      break;
+    }
+  }
+  if (!candidateProperty) return null;
+
+  const mapping: Record<string, string> = {};
+  const seenModelNames = new Set<string>();
+  for (const v of variants) {
+    const value = getConstPropertyValue(v, candidateProperty);
+    if (value === null) return null;
+    const modelName = deriveDiscriminatedVariantName(v, fallbackName);
+    // If two variants map to the same model name, the discriminator is ambiguous
+    if (seenModelNames.has(modelName)) return null;
+    seenModelNames.add(modelName);
+    mapping[value] = modelName;
+  }
+
+  return { property: candidateProperty, mapping };
 }
 
 function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackName: string): Model[] {

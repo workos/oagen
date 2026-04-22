@@ -190,6 +190,16 @@ export interface Model {
   fields: Field[];
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
+  /**
+   * When set, this model is a discriminated union over allOf+oneOf variants.
+   * Emitters should generate a dispatcher (factory) instead of a regular dataclass.
+   * The `property` field is the discriminator key (e.g. "event"), and `mapping`
+   * maps each discriminator value to the concrete variant model name.
+   */
+  discriminator?: {
+    property: string;
+    mapping: Record<string, string>;
+  };
 }
 
 export interface Field {
