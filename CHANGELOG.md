@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/workos/oagen/compare/v0.6.0...v0.7.0) (2026-04-22)
+
+
+### Features
+
+* parameter groups, merger improvements, and extractor fixes ([#21](https://github.com/workos/oagen/issues/21)) ([68d28fd](https://github.com/workos/oagen/commit/68d28fd3ed27d97b463e5477dce2ee832d93d671))
+
 ## [0.6.0](https://github.com/workos/oagen/compare/v0.5.0...v0.6.0) (2026-04-14)
 
 
