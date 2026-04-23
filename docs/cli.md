@@ -180,9 +180,10 @@ Creates:
 
 - `package.json` with `@workos/oagen` dependency and `sdk:generate`/`sdk:verify`/`sdk:extract` scripts
 - `tsconfig.json`, `vitest.config.ts`, `tsup.config.ts` — build/test tooling
-- `oagen.config.ts` — registers the stub emitter
+- `oagen.config.ts` — minimal config for local development, imports the plugin bundle
+- `src/plugin.ts` — plugin bundle export registering the stub emitter
 - `src/{language}/index.ts` — stub emitter implementing the full `Emitter` interface
-- `src/index.ts` — barrel export
+- `src/index.ts` — barrel export including the plugin bundle
 - Empty directories: `test/`, `smoke/`, `docs/sdk-architecture/`
 
 After initialization, `npm run typecheck` passes immediately. Implement your emitter methods in `src/{language}/` to start generating SDK code.
@@ -218,19 +219,80 @@ oagen resolve --spec openapi.yml --format json
 
 When `oagen.config.ts` defines `operationHints` and/or `mountRules`, they are applied automatically. The table format flags operations that have no hint and are resolved purely by algorithm.
 
+## `--config <path>`
+
+All commands accept a global `--config <path>` option to load a specific config file instead of the default cwd-based discovery.
+
+```bash
+# Explicit config
+oagen generate --config ../openapi-spec/oagen.config.ts --spec openapi.yml --lang node --output ./sdk
+
+# Default: searches for oagen.config.ts in the current directory
+oagen generate --spec openapi.yml --lang node --output ./sdk
+```
+
+When `--config` is omitted, the CLI searches the current working directory for `oagen.config.ts`, `oagen.config.js`, or `oagen.config.mjs` in that order.
+
 ## Configuration (`oagen.config.ts`)
 
-Place an `oagen.config.ts` (or `.js`/`.mjs`) in your project root to register emitters, extractors, and customize pipeline behavior. The CLI loads this file at startup before any command runs.
+Place an `oagen.config.ts` (or `.js`/`.mjs`) in the project that drives generation. The CLI loads this file at startup before any command runs.
+
+The config file belongs to the **consumer project** (the project that owns spec interpretation policy), not the emitter library. Emitter packages export plugin bundles that the consumer config composes.
+
+### Consumer config (recommended)
+
+```ts
+import type { OagenConfig } from "@workos/oagen";
+import { workosEmittersPlugin } from "@workos/oagen-emitters";
+
+const config: OagenConfig = {
+  ...workosEmittersPlugin,
+  docUrl: "https://workos.com/docs",
+  operationIdTransform: (id) => id.replace(/Controller_/, ""),
+  operationHints,
+  mountRules,
+};
+
+export default config;
+```
+
+### Standalone emitter config
+
+For standalone emitter projects that also serve as the consumer:
 
 ```ts
 import type { OagenConfig } from "@workos/oagen";
 import { nodeEmitter } from "./src/node/index.js";
-import { nodeExtractor } from "./src/node/extractor.js";
 
 const config: OagenConfig = {
   emitters: [nodeEmitter],
-  extractors: [nodeExtractor],
-  docUrl: "https://workos.com/docs",
+};
+
+export default config;
+```
+
+### Composing multiple plugin bundles
+
+```ts
+import type { OagenConfig } from "@workos/oagen";
+import { workosEmittersPlugin } from "@workos/oagen-emitters";
+import { experimentalPlugin } from "@workos/oagen-experimental";
+
+const config: OagenConfig = {
+  emitters: [
+    ...(workosEmittersPlugin.emitters ?? []),
+    ...(experimentalPlugin.emitters ?? []),
+  ],
+  extractors: [
+    ...(workosEmittersPlugin.extractors ?? []),
+    ...(experimentalPlugin.extractors ?? []),
+  ],
+  smokeRunners: {
+    ...(workosEmittersPlugin.smokeRunners ?? {}),
+    ...(experimentalPlugin.smokeRunners ?? {}),
+  },
+  operationHints,
+  mountRules,
 };
 
 export default config;
@@ -245,6 +307,7 @@ export default config;
 | `emitterProject`       | `string`                        | Path to the emitter project directory. Used by skills to scaffold new emitters, tests, and smoke runners in the correct location.                                                                                                                |
 | `smokeRunners`         | `Record<string, string>`        | Map from language key to custom smoke runner script path. Overrides the built-in `sdk-test.ts` for `oagen verify`. Can also be set per-invocation with `--smoke-runner`.                                                                         |
 | `operationIdTransform` | `(id: string) => string`        | Custom transform for operation IDs. Receives the raw `operationId` from the spec; return the desired operation name. No additional casing conversion is applied. When omitted, `operationId` values are converted to `camelCase`.                |
+| `schemaNameTransform`  | `(name: string) => string`      | Custom transform for schema (model/enum) names. Applied after the built-in `cleanSchemaName` normalization. Receives the cleaned PascalCase name; return the desired name.                                                                       |
 | `docUrl`               | `string`                        | Base URL for documentation links. When set, relative markdown paths in descriptions (e.g. `[User](/reference/authkit/user)`) are expanded to full URLs (e.g. `[User](https://workos.com/docs/reference/authkit/user)`).                          |
 | `operationHints`       | `Record<string, OperationHint>` | Per-operation overrides keyed by `"METHOD /path"`. Override derived method names, remount to a different service, or split union-body operations into typed wrappers. See [Operation Resolution](architecture/ir-types.md#operation-resolution). |
 | `mountRules`           | `Record<string, string>`        | Service-level remounting. Maps IR service name to target service/namespace (PascalCase). All operations in the source service are mounted on the target unless overridden per-operation in `operationHints`.                                     |

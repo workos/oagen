@@ -13,7 +13,7 @@ Scaffold a language extractor for oagen's compat verification system. An extract
 Live SDK → Extractor → ApiSurface JSON → Differ ← Generated SDK → Violations
 ```
 
-Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface and is registered via `oagen.config.ts` in the emitter project.
+Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface and is exported through the emitter project's plugin bundle (e.g., `workosEmittersPlugin`), which the consumer project's `oagen.config.ts` imports.
 
 ## Reference Docs
 
@@ -115,15 +115,21 @@ export const {language}Extractor: Extractor = {
 
 ## Step 3: Register the Extractor
 
-Add to `oagen.config.ts`:
+Add the extractor to the plugin bundle export (e.g., `src/plugin.ts`) and re-export from `src/index.ts`:
 
 ```typescript
-import { {language}Extractor } from './src/compat/extractors/{language}.js';
-const config: OagenConfig = {
-  emitters: [/* ... */],
-  extractors: [{language}Extractor],
+// src/plugin.ts
+import { {language}Extractor } from './compat/extractors/{language}.js';
+export const workosEmittersPlugin = {
+  extractors: [/* existing, */ {language}Extractor],
+  // ...
 };
+
+// src/index.ts
+export { {language}Extractor } from './compat/extractors/{language}.js';
 ```
+
+The consumer project's `oagen.config.ts` imports the plugin bundle, so the new extractor is automatically available.
 
 ## Step 4: Create a Fixture SDK
 
@@ -175,7 +181,7 @@ If `sdk_path` was provided, also test against the real SDK and verify all public
 ```
 === Extractor: {language} ===
 Files created:   src/compat/extractors/{language}.ts, test suite, fixture SDK
-Modified:        oagen.config.ts
+Modified:        src/plugin.ts, src/index.ts
 Validation:      Tests / Fixture extract / Determinism / Real SDK extract
 ApiSurface:      {N} classes, {N} interfaces, {N} type aliases, {N} enums, {N} exports
 ```
@@ -187,7 +193,7 @@ This skill produces, in the emitter project:
 - `src/compat/extractors/{language}.ts` — extractor implementing the `Extractor` interface with `LanguageHints`
 - `test/compat/extractors/{language}.test.ts` — extraction tests against fixture SDK
 - `test/fixtures/sample-sdk-{language}/` — minimal fixture SDK for testing
-- Updated `oagen.config.ts` with the new extractor registered
+- Updated plugin bundle (`src/plugin.ts`) and `src/index.ts` with the new extractor registered
 
 ## Common Pitfalls
 

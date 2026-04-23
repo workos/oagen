@@ -15,7 +15,7 @@ It includes:
 - spec diffing APIs such as `diffSpecs`
 - naming utilities used by emitters
 - `planOperation`
-- config typing needed by emitter projects
+- config typing needed by consumer and emitter projects
 
 Changes to this surface require a deliberate compatibility review.
 

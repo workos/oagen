@@ -35,10 +35,17 @@ npm install
 
 The scaffold gives you:
 
-- `oagen.config.ts`
-- `src/demo/index.ts`
+- `oagen.config.ts` -- a minimal config for local development that imports the plugin bundle
+- `src/plugin.ts` -- plugin bundle export registering the stub emitter
+- `src/demo/index.ts` -- stub emitter implementing the `Emitter` interface
 - build/test tooling
 - `sdk:generate` and related package scripts
+
+> **Note:** The scaffolded project uses the plugin model. The consumer project
+> (e.g. a spec repo) imports the plugin bundle from `src/plugin.ts` and layers
+> its own spec interpretation policy on top. See the
+> [CLI Reference](../cli.md#configuration-oagenconfigts) for plugin
+> composition examples.
 
 ## 4. Replace the Stub Emitter
 

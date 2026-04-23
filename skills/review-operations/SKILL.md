@@ -19,7 +19,7 @@ Accept `--spec <path>` as an optional argument. If not provided, fall back to th
 ## Step 1: Resolve Paths
 
 1. **Spec path**: from argument, `OPENAPI_SPEC_PATH` env, or `../openapi-spec/spec/open-api-spec.yaml`
-2. **oagen-emitters project**: check if `oagen.config.ts` exists in the current directory. If not, use `AskUserQuestion`: "Where is your oagen-emitters project?"
+2. **Consumer config project**: check if `oagen.config.ts` exists in the current directory. If not, try `../openapi-spec/oagen.config.ts`. If neither exists, use `AskUserQuestion`: "Where is your consumer config project (the project with `oagen.config.ts`)?"
 3. Validate the spec file exists before proceeding.
 
 ## Step 2: Run Resolution
@@ -80,4 +80,4 @@ Print a summary:
 - Algorithm-derived (no action needed)
 - Needs review (may need hints)
 
-If there are operations needing review, ask the user: "Would you like me to add hints for any of these operations to `oagen.config.ts`?"
+If there are operations needing review, ask the user: "Would you like me to add hints for any of these operations to the consumer project's `oagen.config.ts`?"

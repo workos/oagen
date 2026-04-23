@@ -91,7 +91,7 @@ ls {project}/src/{language}/index.ts
 cd {project} && npx vitest run test/{language}/ 2>&1 | tail -5
 
 # After /generate-extractor — extractor registered with hints
-grep -l "{language}Extractor\|{language}_extractor" {project}/oagen.config.ts
+grep -l "{language}Extractor\|{language}_extractor" {project}/src/plugin.ts {project}/src/index.ts
 grep -l "hints" {project}/src/compat/extractors/{language}.ts
 
 # After /verify-compat — handled by the skill itself
@@ -148,7 +148,7 @@ Only include this next section in the output if this is Scenario A:
 
 This skill produces, via its sub-skills:
 
-- A complete language emitter registered in `oagen.config.ts`
+- A complete language emitter registered in the plugin bundle (`src/plugin.ts`)
 - An API surface extractor (Scenario A only)
 - A smoke test script at `smoke/sdk-{language}.ts`
 - Generated SDK code at `{project}/sdk/`

@@ -154,9 +154,9 @@ Production emitters live in the separate `oagen-emitters` project and import typ
 1. Create design doc at `docs/sdk-architecture/{language}.md` in the emitter project
 2. Scaffold files under `src/{language}/` in the emitter project
 3. Implement all `Emitter` methods
-4. Register in the emitter project's `oagen.config.ts`
+4. Export through the emitter project's plugin bundle (e.g. `src/plugin.ts`)
 5. Add tests under `test/{language}/` in the emitter project
 
 Or use: `/generate-emitter <language>`
 
-Emitters are registered via `oagen.config.ts` — no need to modify CLI source. See the Configuration section in the README.
+Emitters are registered via the plugin bundle exported from the emitter package. The consumer project's `oagen.config.ts` imports the bundle and layers spec interpretation policy on top. See the [CLI Reference](../cli.md#configuration-oagenconfigts) for details.
