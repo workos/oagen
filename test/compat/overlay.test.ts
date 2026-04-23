@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildOverlayLookup, patchOverlay } from '../../src/compat/overlay.js';
 import type { ManifestEntry } from '../../src/compat/overlay.js';
-import type { ApiSurface, Violation } from '../../src/compat/types.js';
+import type { ApiSurface } from '../../src/compat/types.js';
+import type { ClassifiedChange } from '../../src/compat/classify.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -802,25 +803,22 @@ describe('buildOverlayLookup', () => {
   });
 });
 
+function removedChange(symbol: string, overrides?: Partial<ClassifiedChange>): ClassifiedChange {
+  return {
+    category: 'symbol_removed',
+    severity: 'breaking',
+    symbol,
+    conceptualChangeId: `chg_symbol_removed_${symbol}`,
+    provenance: 'unknown',
+    old: { symbol },
+    new: { symbol: '(removed)' },
+    message: `Symbol "${symbol}" was removed`,
+    ...overrides,
+  };
+}
+
 describe('patchOverlay', () => {
-  it('adds export-structure violations to requiredExports', () => {
-    const overlay = buildOverlayLookup(emptySurface());
-    const violations: Violation[] = [
-      {
-        category: 'export-structure',
-        severity: 'warning',
-        symbolPath: 'exports[src/orgs/interfaces/index.ts].ListOrgsOptions',
-        baseline: 'ListOrgsOptions',
-        candidate: '(missing)',
-        message: 'Export "ListOrgsOptions" not found',
-      },
-    ];
-
-    const patched = patchOverlay(overlay, violations, emptySurface());
-    expect(patched.requiredExports.get('src/orgs/interfaces/index.ts')).toEqual(new Set(['ListOrgsOptions']));
-  });
-
-  it('adds interface name mappings from public-api violations', () => {
+  it('adds interface name mappings from symbol_removed changes', () => {
     const baseline = emptySurface({
       interfaces: {
         Organization: { name: 'Organization', fields: {}, extends: [] },
@@ -828,36 +826,18 @@ describe('patchOverlay', () => {
     });
 
     const overlay = buildOverlayLookup(emptySurface());
-    const violations: Violation[] = [
-      {
-        category: 'public-api',
-        severity: 'breaking',
-        symbolPath: 'Organization',
-        baseline: 'Organization',
-        candidate: '(missing)',
-        message: 'Interface "Organization" missing',
-      },
-    ];
+    const changes: ClassifiedChange[] = [removedChange('Organization')];
 
-    const patched = patchOverlay(overlay, violations, baseline);
+    const patched = patchOverlay(overlay, changes, baseline);
     expect(patched.interfaceByName.get('Organization')).toBe('Organization');
   });
 
   it('does not mutate the original overlay', () => {
     const overlay = buildOverlayLookup(emptySurface());
-    const violations: Violation[] = [
-      {
-        category: 'export-structure',
-        severity: 'warning',
-        symbolPath: 'exports[foo.ts].Bar',
-        baseline: 'Bar',
-        candidate: '(missing)',
-        message: 'Export missing',
-      },
-    ];
+    const changes: ClassifiedChange[] = [removedChange('Org')];
 
-    patchOverlay(overlay, violations, emptySurface());
-    expect(overlay.requiredExports.size).toBe(0);
+    patchOverlay(overlay, changes, emptySurface());
+    expect(overlay.interfaceByName.size).toBe(0);
   });
 
   it('preserves fileBySymbol entries from the original overlay', () => {
@@ -895,41 +875,14 @@ describe('patchOverlay', () => {
 
     let overlay = buildOverlayLookup(emptySurface());
 
-    overlay = patchOverlay(
-      overlay,
-      [
-        {
-          category: 'public-api',
-          severity: 'breaking',
-          symbolPath: 'Org',
-          baseline: 'Org',
-          candidate: '(missing)',
-          message: '',
-        },
-      ],
-      baseline,
-    );
-
-    overlay = patchOverlay(
-      overlay,
-      [
-        {
-          category: 'public-api',
-          severity: 'breaking',
-          symbolPath: 'User',
-          baseline: 'User',
-          candidate: '(missing)',
-          message: '',
-        },
-      ],
-      baseline,
-    );
+    overlay = patchOverlay(overlay, [removedChange('Org')], baseline);
+    overlay = patchOverlay(overlay, [removedChange('User')], baseline);
 
     expect(overlay.interfaceByName.get('Org')).toBe('Org');
     expect(overlay.interfaceByName.get('User')).toBe('User');
   });
 
-  it('warns about missing manifest when method-level violations hit empty httpKeyByMethod', () => {
+  it('warns about missing manifest when method-level changes hit empty httpKeyByMethod', () => {
     const baseline = emptySurface({
       classes: {
         Users: {
@@ -951,24 +904,15 @@ describe('patchOverlay', () => {
     });
 
     const overlay = buildOverlayLookup(emptySurface());
-    const violations: Violation[] = [
-      {
-        category: 'public-api',
-        severity: 'breaking',
-        symbolPath: 'Users.listUsers',
-        baseline: 'listUsers',
-        candidate: '(missing)',
-        message: 'Method "Users.listUsers" missing',
-      },
-    ];
+    const changes: ClassifiedChange[] = [removedChange('Users.listUsers')];
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    patchOverlay(overlay, violations, baseline);
+    patchOverlay(overlay, changes, baseline);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No smoke-manifest.json available'));
     warnSpy.mockRestore();
   });
 
-  it('gracefully handles method violation when no manifest (no httpKeyByMethod)', () => {
+  it('gracefully handles method change when no manifest (no httpKeyByMethod)', () => {
     const baseline = emptySurface({
       classes: {
         Users: {
@@ -990,28 +934,17 @@ describe('patchOverlay', () => {
     });
 
     const overlay = buildOverlayLookup(emptySurface());
-    // No manifest → httpKeyByMethod is empty
     expect(overlay.httpKeyByMethod.size).toBe(0);
 
-    const violations: Violation[] = [
-      {
-        category: 'public-api',
-        severity: 'breaking',
-        symbolPath: 'Users.listUsers',
-        baseline: 'listUsers',
-        candidate: '(missing)',
-        message: 'Method "Users.listUsers" missing',
-      },
-    ];
+    const changes: ClassifiedChange[] = [removedChange('Users.listUsers')];
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const patched = patchOverlay(overlay, violations, baseline);
+    const patched = patchOverlay(overlay, changes, baseline);
     warnSpy.mockRestore();
-    // Should not crash, and should not add a method mapping (no HTTP key available)
     expect(patched.methodByOperation.size).toBe(0);
   });
 
-  it('returns equivalent overlay when violations array is empty', () => {
+  it('returns equivalent overlay when changes array is empty', () => {
     const surface = emptySurface({
       interfaces: {
         Org: { name: 'Org', fields: {}, extends: [] },
@@ -1025,30 +958,41 @@ describe('patchOverlay', () => {
     expect(patched.requiredExports.size).toBe(overlay.requiredExports.size);
   });
 
-  it('handles violation referencing symbol not in baseline without crashing', () => {
+  it('handles change referencing symbol not in baseline without crashing', () => {
     const overlay = buildOverlayLookup(emptySurface());
-    const violations: Violation[] = [
-      {
-        category: 'public-api',
-        severity: 'breaking',
-        symbolPath: 'NonExistentClass.missingMethod',
-        baseline: 'missingMethod',
-        candidate: '(missing)',
-        message: 'Method missing',
+    const changes: ClassifiedChange[] = [
+      removedChange('NonExistentClass.missingMethod'),
+      removedChange('GhostInterface'),
+    ];
+
+    const patched = patchOverlay(overlay, changes, emptySurface());
+    expect(patched.methodByOperation.size).toBe(0);
+    expect(patched.interfaceByName.size).toBe(0);
+  });
+
+  it('skips non-patchable changes like field_type_changed', () => {
+    const baseline = emptySurface({
+      interfaces: {
+        Org: { name: 'Org', fields: { id: { name: 'id', type: 'string', optional: false } }, extends: [] },
       },
+    });
+
+    const overlay = buildOverlayLookup(emptySurface());
+    const changes: ClassifiedChange[] = [
       {
-        category: 'public-api',
+        category: 'field_type_changed',
         severity: 'breaking',
-        symbolPath: 'GhostInterface',
-        baseline: 'GhostInterface',
-        candidate: '(missing)',
-        message: 'Interface missing',
+        symbol: 'Org.id',
+        conceptualChangeId: 'chg_field_type_changed_org_id',
+        provenance: 'unknown',
+        old: { type: 'string' },
+        new: { type: 'number' },
+        message: 'Type changed for "Org.id"',
       },
     ];
 
-    // Should not throw — baseline has no matching symbols
-    const patched = patchOverlay(overlay, violations, emptySurface());
-    expect(patched.methodByOperation.size).toBe(0);
+    const patched = patchOverlay(overlay, changes, baseline);
+    // Non-patchable changes should be ignored
     expect(patched.interfaceByName.size).toBe(0);
   });
 });

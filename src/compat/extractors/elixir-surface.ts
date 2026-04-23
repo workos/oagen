@@ -136,10 +136,11 @@ export function buildSurface(
       if (seenFuncs.has(func.name)) continue;
       seenFuncs.add(func.name);
 
-      const params: ApiParam[] = func.params.map((p) => ({
+      const params: ApiParam[] = func.params.map((p, i) => ({
         name: p,
         type: 'any',
         optional: false,
+        passingStyle: func.paramStyles[i] ?? ('positional' as const),
       }));
 
       if (!methods[func.name]) methods[func.name] = [];

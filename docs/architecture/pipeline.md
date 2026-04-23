@@ -96,11 +96,12 @@ Every generator method receives:
 Simple map from language name → `Emitter` instance. Emitters are registered at startup via `oagen.config.ts`:
 
 ```typescript
-// In oagen.config.ts (emitter project)
-import { nodeEmitter, rubyEmitter } from "./src/index.js";
+// In oagen.config.ts (consumer project)
+import { workosEmittersPlugin } from "@workos/oagen-emitters";
 
 export default {
-  emitters: [nodeEmitter, rubyEmitter],
+  ...workosEmittersPlugin,
+  // spec interpretation policy...
 };
 ```
 

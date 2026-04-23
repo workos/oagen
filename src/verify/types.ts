@@ -1,4 +1,5 @@
-import type { DiffResult, Violation } from '../compat/types.js';
+import type { Violation } from '../compat/types.js';
+import type { CompatDiffResult } from '../compat/differ.js';
 
 export interface VerifyDiagnostics {
   compatCheck?: {
@@ -30,7 +31,7 @@ export interface VerifyDiagnostics {
 
 export interface CompatCheckResult {
   passed: boolean;
-  diff: DiffResult;
+  diff: CompatDiffResult;
   scopedToSpec: boolean;
   scopedSymbolCount?: number;
 }

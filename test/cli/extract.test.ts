@@ -20,6 +20,11 @@ describe('extractCommand', () => {
       typeAliases: {},
       enums: { MyEnum: { members: ['A', 'B'] } },
     }),
+    async extractSnapshot(sdkPath: string) {
+      const surface = await this.extract(sdkPath);
+      const { apiSurfaceToSnapshot } = await import('../../src/compat/ir.js');
+      return apiSurfaceToSnapshot(surface);
+    },
   };
 
   beforeEach(() => {

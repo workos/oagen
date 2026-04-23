@@ -44,7 +44,7 @@ All artifacts (surface files, generated output) live **inside the emitter projec
 
 Determine required paths:
 
-1. **Emitter project** (`project`): from argument, or detect from CWD (look for `oagen.config.ts`), or use `AskUserQuestion`
+1. **Emitter project** (`project`): from argument, or detect from CWD (look for `src/plugin.ts` or `oagen.config.ts`), or use `AskUserQuestion`
 2. **Spec** (`spec`): from argument, or use `AskUserQuestion`
 3. **Live SDK** (`sdk_path`): from argument, or use `AskUserQuestion`
 4. **API surface file**: `{project}/sdk-{language}-surface.json` — always in the emitter project root

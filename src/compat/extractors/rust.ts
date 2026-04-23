@@ -10,6 +10,8 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkRustFiles, parseRustFile } from './rust-parser.js';
 import { buildSurface } from './rust-surface.js';
@@ -78,6 +80,11 @@ const rustHints: LanguageHints = {
 export const rustExtractor: Extractor = {
   language: 'rust',
   hints: rustHints,
+
+  async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+    const surface = await this.extract(sdkPath);
+    return apiSurfaceToSnapshot(surface);
+  },
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     const rsFiles = walkRustFiles(sdkPath);

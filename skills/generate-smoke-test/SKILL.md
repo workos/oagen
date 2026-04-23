@@ -136,16 +136,20 @@ Create the script **in the emitter project**:
 
 ## Step 6: Register the Smoke Runner
 
-Add to `oagen.config.ts`:
+Add the smoke runner path to the plugin bundle export (e.g., `src/plugin.ts`):
 
 ```typescript
-const config: OagenConfig = {
-  emitters: [/* ... */],
+// src/plugin.ts
+export const workosEmittersPlugin = {
   smokeRunners: {
-    {language}: './smoke/sdk-{language}.ts',
+    // existing runners...
+    {language}: path.join(smokeDir, 'sdk-{language}.ts'),
   },
+  // ...
 };
 ```
+
+The consumer project's `oagen.config.ts` imports the plugin bundle, so the new smoke runner is automatically available.
 
 ## Step 7: Validate
 
@@ -182,4 +186,4 @@ See `scripts/smoke/README.md` (in oagen core) for the full remediation guide. Se
 This skill produces, in the emitter project:
 
 - `smoke/sdk-{language}.ts` — self-contained smoke test script
-- Updated `oagen.config.ts` with the smoke runner path registered
+- Updated plugin bundle (`src/plugin.ts`) with the smoke runner path registered

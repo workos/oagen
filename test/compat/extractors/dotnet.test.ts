@@ -155,6 +155,27 @@ describe('dotnetExtractor', () => {
     expect(surface.extractedAt).toBeTruthy();
   });
 
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to named for all .NET params', async () => {
+    const surface = await dotnetExtractor.extract(fixturePath);
+    const orgSvc = surface.classes.OrganizationService;
+    const getOrg = orgSvc.methods.GetOrganizationAsync[0];
+    for (const param of getOrg.params) {
+      expect(param.passingStyle).toBe('named');
+    }
+  });
+
+  it('sets passingStyle to named for constructor params', async () => {
+    const surface = await dotnetExtractor.extract(fixturePath);
+    const orgSvc = surface.classes.OrganizationService;
+    for (const param of orgSvc.constructorParams) {
+      expect(param.passingStyle).toBe('named');
+    }
+  });
+
   it('throws for non-DotNet projects', async () => {
     await expect(dotnetExtractor.extract('/tmp/nonexistent-dotnet-project')).rejects.toThrow('No .cs files found');
   });

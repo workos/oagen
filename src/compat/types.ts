@@ -33,6 +33,9 @@ export interface ApiParam {
   name: string;
   type: string;
   optional: boolean;
+  /** Per-parameter passing style, populated by extractors.
+   *  When absent, the bridge infers from language defaults. */
+  passingStyle?: import('./ir.js').CompatPassingStyle;
 }
 
 export interface ApiProperty {
@@ -141,6 +144,7 @@ export interface LanguageHints {
 export interface Extractor {
   language: string;
   extract(sdkPath: string): Promise<ApiSurface>;
+  extractSnapshot(sdkPath: string): Promise<import('./ir.js').CompatSnapshot>;
   hints: LanguageHints;
 }
 

@@ -29,10 +29,14 @@ vi.mock('../../src/compat/extractor-registry.js', async () => {
 // Mock overlay module for retry loop tests
 const mockBuildOverlayLookup = vi.fn();
 const mockPatchOverlay = vi.fn();
-vi.mock('../../src/compat/overlay.js', () => ({
-  buildOverlayLookup: (...args: unknown[]) => mockBuildOverlayLookup(...args),
-  patchOverlay: (...args: unknown[]) => mockPatchOverlay(...args),
-}));
+vi.mock('../../src/compat/overlay.js', async () => {
+  const actual = await import('../../src/compat/overlay.js');
+  return {
+    buildOverlayLookup: (...args: unknown[]) => mockBuildOverlayLookup(...args),
+    patchOverlay: (...args: unknown[]) => mockPatchOverlay(...args),
+    isPatchableChange: actual.isPatchableChange,
+  };
+});
 
 // Mock orchestrator for retry loop tests
 const mockGenerate = vi.fn();
@@ -656,7 +660,7 @@ describe('verifyCommand', () => {
       }),
     ).rejects.toThrow('Compat violations found');
 
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Stalled at'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Stalled'));
     // generate is called once (the retry after attempt 0 succeeds in patching,
     // but the stall is detected when attempt 1 checks the result)
     expect(mockGenerate).toHaveBeenCalledTimes(1);

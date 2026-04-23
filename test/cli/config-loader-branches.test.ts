@@ -19,7 +19,7 @@ describe('loadConfig — .ts config hint', () => {
 
   it('shows TypeScript hint when .ts config file fails to load', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.ts'), `throw new Error('ts config broken');`);
-    await expect(loadConfig(tmpDir)).rejects.toBeInstanceOf(ConfigLoadError);
-    await expect(loadConfig(tmpDir)).rejects.toThrow('TypeScript config files require');
+    await expect(loadConfig(undefined, tmpDir)).rejects.toBeInstanceOf(ConfigLoadError);
+    await expect(loadConfig(undefined, tmpDir)).rejects.toThrow('TypeScript config files require');
   });
 });

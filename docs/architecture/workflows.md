@@ -12,7 +12,7 @@ gets written or fixed.
 
 ### Skill sequence
 
-**Project setup:** Run `oagen init --lang {language}` to create the emitter project, then implement the emitter methods.
+**Project setup:** Run `oagen init --lang {language}` to scaffold an emitter project, then implement the emitter methods. Export the emitter through a plugin bundle so the consumer project can register it via its `oagen.config.ts`.
 
 **Scenario A** (existing SDK to preserve):
 
@@ -106,8 +106,10 @@ to preserve backwards compatibility:
 3. **Verify:** `oagen verify --spec v2.yml --lang {lang} --output ./sdk --api-surface sdk-{lang}-surface.json`
 4. **Ship** if verify exits 0
 
-**External consumers** configure emitters and extractors via `oagen.config.ts`
-instead of modifying CLI source — see the Configuration section in the README.
+**Consumer projects** register emitters and extractors by importing plugin bundles
+from emitter packages into their `oagen.config.ts`. Spec interpretation policy
+(transforms, hints, mount rules) also lives in the consumer config. See the
+[CLI Reference](../cli.md#configuration-oagenconfigts) for details.
 
 ### If verify fails on a spec update
 

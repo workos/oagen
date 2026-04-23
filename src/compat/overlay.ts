@@ -1,4 +1,5 @@
-import type { ApiSurface, ApiInterface, ApiMethod, Violation, OverlayLookup, LanguageHints } from './types.js';
+import type { ApiSurface, ApiInterface, ApiMethod, OverlayLookup, LanguageHints } from './types.js';
+import type { ClassifiedChange } from './classify.js';
 import type { ApiSpec, Model } from '../ir/types.js';
 import { toSnakeCase, splitWords } from '../utils/naming.js';
 import { nodeHints as defaultNodeHints } from './language-hints.js';
@@ -496,12 +497,20 @@ function buildModelNameMap(
   }
 }
 
+/** Categories that can be patched by the overlay retry loop. */
+const PATCHABLE_CATEGORIES = new Set(['symbol_removed', 'symbol_renamed']);
+
+/** Check if a classified change is patchable by the overlay loop. */
+export function isPatchableChange(change: ClassifiedChange): boolean {
+  return PATCHABLE_CATEGORIES.has(change.category);
+}
+
 /**
- * Patch overlay with violations from a failed verification.
+ * Patch overlay with classified changes from a failed verification.
  * Adds explicit name mappings for symbols that were generated with wrong names.
  * Returns a new OverlayLookup (immutable).
  */
-export function patchOverlay(overlay: OverlayLookup, violations: Violation[], baseline: ApiSurface): OverlayLookup {
+export function patchOverlay(overlay: OverlayLookup, changes: ClassifiedChange[], baseline: ApiSurface): OverlayLookup {
   const patched: OverlayLookup = {
     methodByOperation: new Map(overlay.methodByOperation),
     httpKeyByMethod: new Map(overlay.httpKeyByMethod),
@@ -514,64 +523,44 @@ export function patchOverlay(overlay: OverlayLookup, violations: Violation[], ba
 
   let warnedManifest = false;
 
-  for (const v of violations) {
-    if (v.category === 'public-api') {
-      // For missing methods: symbolPath is "ClassName.methodName"
-      const parts = v.symbolPath.split('.');
-      if (parts.length === 2) {
-        const [className, methodName] = parts;
-        // Check if this is a method on a class in the baseline
-        const baseClass = baseline.classes[className];
-        if (baseClass && baseClass.methods[methodName]?.length > 0) {
-          // Use reverse map to resolve the HTTP key for this method.
-          // NOTE: httpKeyByMethod is only populated when a manifest was provided
-          // to buildOverlayLookup. Without a manifest, method-level violations
-          // cannot be patched via overlay — the emitter must implement
-          // generateManifest for the self-correcting loop to resolve these.
-          const httpKey = overlay.httpKeyByMethod.get(`${className}.${methodName}`);
-          if (!httpKey && overlay.httpKeyByMethod.size === 0 && !warnedManifest) {
-            console.warn(
-              'Warning: No smoke-manifest.json available. Method-level violations cannot be auto-patched. ' +
-                'Implement generateManifest in your emitter for the self-correcting loop to resolve these.',
-            );
-            warnedManifest = true;
-          }
-          if (httpKey) {
-            const method = baseClass.methods[methodName][0];
-            patched.methodByOperation.set(httpKey, {
-              className,
-              methodName,
-              params: method.params,
-              returnType: method.returnType,
-            });
-          }
+  for (const c of changes) {
+    if (!isPatchableChange(c)) continue;
+
+    // symbol is the fqName, e.g. "ClassName.methodName" or "ClassName"
+    const parts = c.symbol.split('.');
+    if (parts.length === 2) {
+      const [className, methodName] = parts;
+      const baseClass = baseline.classes[className];
+      if (baseClass && baseClass.methods[methodName]?.length > 0) {
+        const httpKey = overlay.httpKeyByMethod.get(`${className}.${methodName}`);
+        if (!httpKey && overlay.httpKeyByMethod.size === 0 && !warnedManifest) {
+          console.warn(
+            'Warning: No smoke-manifest.json available. Method-level violations cannot be auto-patched. ' +
+              'Implement generateManifest in your emitter for the self-correcting loop to resolve these.',
+          );
+          warnedManifest = true;
         }
-        // Also check if it's an interface field
-        const baseIface = baseline.interfaces[className];
-        if (baseIface) {
-          patched.interfaceByName.set(className, className);
-        }
-      } else if (parts.length === 1) {
-        // Top-level symbol: class, interface, type alias, or enum
-        const name = parts[0];
-        if (baseline.interfaces[name]) {
-          patched.interfaceByName.set(name, name);
-        }
-        if (baseline.typeAliases[name]) {
-          patched.typeAliasByName.set(name, name);
+        if (httpKey) {
+          const method = baseClass.methods[methodName][0];
+          patched.methodByOperation.set(httpKey, {
+            className,
+            methodName,
+            params: method.params,
+            returnType: method.returnType,
+          });
         }
       }
-    }
-
-    if (v.category === 'export-structure') {
-      // symbolPath is "exports[path].symbolName"
-      const match = v.symbolPath.match(/^exports\[(.+?)\]\.(.+)$/);
-      if (match) {
-        const [, path, symbol] = match;
-        if (!patched.requiredExports.has(path)) {
-          patched.requiredExports.set(path, new Set());
-        }
-        patched.requiredExports.get(path)!.add(symbol);
+      const baseIface = baseline.interfaces[className];
+      if (baseIface) {
+        patched.interfaceByName.set(className, className);
+      }
+    } else if (parts.length === 1) {
+      const name = parts[0];
+      if (baseline.interfaces[name]) {
+        patched.interfaceByName.set(name, name);
+      }
+      if (baseline.typeAliases[name]) {
+        patched.typeAliasByName.set(name, name);
       }
     }
   }

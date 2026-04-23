@@ -320,4 +320,42 @@ describe('pythonExtractor', () => {
     expect(surface.interfaces.ListMetadata.fields.before).toBeDefined();
     expect(surface.interfaces.ListMetadata.fields.after).toBeDefined();
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets keyword passingStyle for keyword-only params (after *)', async () => {
+    const surface = await pydanticExtractor.extract(fixturePath);
+    const listOrgs = surface.classes.OrganizationsModule.methods.list_organizations[0];
+    // def list_organizations(self, *, domains=..., limit=..., before=..., after=...) — all keyword-only
+    for (const param of listOrgs.params) {
+      expect(param.passingStyle).toBe('keyword');
+    }
+  });
+
+  it('sets keyword_or_positional for params before * marker', async () => {
+    const surface = await pydanticExtractor.extract(fixturePath);
+    const getOrg = surface.classes.OrganizationsModule.methods.get_organization[0];
+    // def get_organization(self, organization_id: str) — positional-or-keyword
+    expect(getOrg.params[0].passingStyle).toBe('keyword_or_positional');
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order for list_organizations', async () => {
+    const surface = await pydanticExtractor.extract(fixturePath);
+    const listOrgs = surface.classes.OrganizationsModule.methods.list_organizations[0];
+    const paramNames = listOrgs.params.map((p) => p.name);
+    expect(paramNames).toEqual(['domains', 'limit', 'before', 'after']);
+  });
+
+  it('preserves parameter order for create_organization', async () => {
+    const surface = await pydanticExtractor.extract(fixturePath);
+    const createOrg = surface.classes.OrganizationsModule.methods.create_organization[0];
+    const paramNames = createOrg.params.map((p) => p.name);
+    expect(paramNames).toEqual(['name', 'domains']);
+  });
 });

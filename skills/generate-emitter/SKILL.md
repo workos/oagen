@@ -11,7 +11,7 @@ Scaffold a complete language emitter for oagen that translates the intermediate 
 
 oagen has a plugin architecture for code generation. Each target language is an **emitter** — a TypeScript module that implements the `Emitter` interface. An emitter receives parsed IR nodes (models, enums, services, etc.) and returns `GeneratedFile[]` — arrays of `{ path, content }` pairs. The engine orchestrator calls each emitter method, prepends a file header, and writes the results to disk.
 
-Emitters live in **external projects** (not inside the oagen core repo). They import all oagen types from `@workos/oagen` and register via `oagen.config.ts` in their project.
+Emitters live in **external projects** (not inside the oagen core repo). They import all oagen types from `@workos/oagen` and are exported through the emitter project's plugin bundle (e.g., `workosEmittersPlugin`), which the consumer project's `oagen.config.ts` imports.
 
 ## Reference Docs
 
@@ -41,7 +41,7 @@ Before starting, read and understand these oagen core types (all imported from `
 - `planOperation`, `OperationPlan` — operation analysis helpers
 - `toPascalCase`, `toSnakeCase`, `toCamelCase`, `toKebabCase`, `toUpperSnakeCase` — naming utilities
 
-Also read the project's `oagen.config.ts` to understand how emitters are registered.
+Also read the project's plugin bundle export (e.g., `src/plugin.ts`) to understand how emitters are registered.
 
 If an `sdk_path` argument is provided, you MUST thoroughly study that SDK before proceeding to Step 1. The existing SDK's actual code — not generic conventions — drives every design decision.
 
@@ -227,16 +227,21 @@ export const {language}Emitter: Emitter = {
 
 ## Step 7: Register Emitter
 
-Add the emitter to `oagen.config.ts` and re-export from `src/index.ts`:
+Add the emitter to the plugin bundle export (e.g., `src/plugin.ts`) and re-export from `src/index.ts`:
 
 ```typescript
-// oagen.config.ts
-import { {language}Emitter } from './src/{language}/index.js';
-const config: OagenConfig = { emitters: [/* existing, */ {language}Emitter] };
+// src/plugin.ts
+import { {language}Emitter } from './{language}/index.js';
+export const workosEmittersPlugin = {
+  emitters: [/* existing, */ {language}Emitter],
+  // ...
+};
 
 // src/index.ts
 export { {language}Emitter } from './{language}/index.js';
 ```
+
+The consumer project's `oagen.config.ts` imports the plugin bundle, so the new emitter is automatically available.
 
 ## Step 8: Create Tests
 
@@ -386,7 +391,7 @@ This skill produces, in the emitter project:
 - `src/{language}/*.ts` — emitter generator files implementing the `Emitter` interface
 - `test/{language}/*.ts` — unit tests for each generator
 - `docs/sdk-architecture/{language}.md` — SDK design document
-- Updated `oagen.config.ts` with the new emitter registered
+- Updated plugin bundle (`src/plugin.ts`) and `src/index.ts` with the new emitter registered
 
 ## Backwards Compatibility
 

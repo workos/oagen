@@ -1,4 +1,18 @@
-import type { ApiSurface, ApiMethod, DiffResult, Violation, Addition, LanguageHints } from './types.js';
+/**
+ * Compatibility diff engine.
+ *
+ * Compares two API surfaces (or compat snapshots) and produces classified
+ * changes with policy-aware severity, provenance, and conceptual change IDs.
+ *
+ * This replaces the previous unclassified diff engine with a richer model
+ * that supports cross-language severity analysis and approval matching.
+ */
+
+import type { ApiSurface, ApiMethod, LanguageHints, DiffResult, Violation, Addition } from './types.js';
+import type { CompatSnapshot, CompatSymbol } from './ir.js';
+import type { CompatPolicyHints } from './policy.js';
+import type { ClassifiedChange, ClassificationResult } from './classify.js';
+import { classifySymbolChanges, classifyAddedSymbol, summarizeChanges } from './classify.js';
 import { NAMED_TYPE_RE, typeExistsInSurface } from './language-hints.js';
 
 export {
@@ -10,6 +24,73 @@ export {
   filterSurface,
 } from './spec-filter.js';
 
+// ---------------------------------------------------------------------------
+// New: CompatSnapshot-based diff
+// ---------------------------------------------------------------------------
+
+/** Result of diffing two compat snapshots. */
+export interface CompatDiffResult {
+  changes: ClassifiedChange[];
+  summary: ClassificationResult['summary'];
+}
+
+/**
+ * Diff two compat snapshots, producing classified changes with
+ * policy-aware severity.
+ */
+export function diffSnapshots(
+  baseline: CompatSnapshot,
+  candidate: CompatSnapshot,
+  policy?: CompatPolicyHints,
+): CompatDiffResult {
+  const effectivePolicy = policy ?? baseline.policies;
+  const changes: ClassifiedChange[] = [];
+
+  // Index candidate symbols by ID and fqName for lookup
+  const candById = new Map<string, CompatSymbol>();
+  const candByFqName = new Map<string, CompatSymbol>();
+  for (const sym of candidate.symbols) {
+    candById.set(sym.id, sym);
+    candByFqName.set(sym.fqName, sym);
+  }
+
+  // Index baseline symbols by fqName
+  const baseByFqName = new Set<string>();
+  for (const sym of baseline.symbols) {
+    baseByFqName.add(sym.fqName);
+  }
+
+  // Compare each baseline symbol against candidate
+  for (const baseSym of baseline.symbols) {
+    const candSym = candById.get(baseSym.id) ?? candByFqName.get(baseSym.fqName);
+    changes.push(...classifySymbolChanges(baseSym, candSym, effectivePolicy));
+  }
+
+  // Detect added symbols
+  for (const candSym of candidate.symbols) {
+    if (!baseByFqName.has(candSym.fqName)) {
+      changes.push(classifyAddedSymbol(candSym));
+    }
+  }
+
+  return {
+    changes,
+    summary: summarizeChanges(changes),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Legacy: ApiSurface-based diff (delegates to existing logic)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare two ApiSurface objects and return a DiffResult.
+ *
+ * This preserves the existing diffing behavior used by the overlay retry loop,
+ * compat check, and all existing tests. The internal implementation uses the
+ * same algorithms as before to maintain full backward compatibility with
+ * overlay patching and verification workflows.
+ */
 export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints: LanguageHints): DiffResult {
   const violations: Violation[] = [];
   const additions: Addition[] = [];
@@ -143,9 +224,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
     totalBaseline++;
     const candIface = candidate.interfaces[name];
     if (!candIface) {
-      // When tolerateCategoryMismatch is on, also check if this interface is
-      // a derived type (Serialized*) whose base model exists.
-      // These are emitter implementation details, not public API contract violations.
       let tolerated = false;
       if (hints.tolerateCategoryMismatch && name.startsWith('Serialized')) {
         const baseName = name.slice('Serialized'.length);
@@ -159,16 +237,9 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         preserved += Object.keys(baseIface.fields).length;
         continue;
       }
-      // Field-structure matching: look for a candidate interface or class with
-      // the same set of field names (possibly under a different name and case).
-      // Handles cases where the emitter generates a response model with a spec-derived
-      // name (e.g., PortalSessionsCreateResponse) while the live SDK used a custom
-      // name (e.g., GenerateLinkResponse). Also tolerates PascalCase vs camelCase
-      // field names (e.g., C# "Link" vs extracted "link").
       if (!tolerated) {
         const baseFieldNamesLower = new Set(Object.keys(baseIface.fields).map((f) => f.toLowerCase()));
         if (baseFieldNamesLower.size > 0) {
-          // Check candidate interfaces
           for (const [, candFieldNamesLower] of candIfaceFieldSets) {
             if (
               candFieldNamesLower.size === baseFieldNamesLower.size &&
@@ -178,7 +249,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
               break;
             }
           }
-          // Check candidate classes (properties match fields)
           if (!tolerated) {
             for (const [, candPropNamesLower] of candClassPropSets) {
               if (
@@ -191,12 +261,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
             }
           }
         } else {
-          // Zero fields after spec-filtering: the interface was filtered to name-only.
-          // Tolerate this as a structural match when the candidate has any model/interface
-          // whose name shares word components with the baseline name (e.g.,
-          // GenerateLinkResponse → PortalSessionsCreateResponse, both are "Response" types).
-          // This prevents false positives from spec-filtered interfaces that can't be
-          // meaningfully compared without their fields.
           tolerated = true;
         }
       }
@@ -223,10 +287,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
       totalBaseline++;
       const candField = candIface.fields[fieldName];
       if (!candField) {
-        // Downgrade to warning when the field's type references a named model/interface/enum
-        // that doesn't exist in the candidate surface. This indicates the field is missing
-        // because the type couldn't be resolved from the spec (parser limitation), not
-        // because the emitter chose to omit it.
         const baseTypeClean = baseField.type.replace(/\[\]$/, '').replace(/ \| null$/, '');
         const typeIsUnresolvable = NAMED_TYPE_RE.test(baseTypeClean) && !typeExistsInSurface(baseTypeClean, candidate);
         violations.push({
@@ -241,23 +301,16 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         continue;
       }
       if (baseField.type !== candField.type) {
-        // Union member reordering is not a real difference
         if (hints.isUnionReorder(baseField.type, candField.type)) {
           preserved++;
           continue;
         }
-        // Named type vs inline union equivalence (e.g., ConnectionState ≡ "active" | "inactive")
         if (hints.isTypeEquivalent?.(baseField.type, candField.type, candidate)) {
           preserved++;
           continue;
         }
         const nullableOnly = hints.isNullableOnlyDifference(baseField.type, candField.type);
-        // Generic type params (T, TCustomAttributes, etc.) can't be preserved
-        // in generated output — the extractor resolves them to `any`.
         const genericParam = hints.isGenericTypeParam(baseField.type);
-        // When candidate resolves to an extraction artifact, it's typically because
-        // the extractor couldn't resolve the type due to missing imports.
-        // Downgrade to warning since the generated source likely has the correct type.
         const extractionArtifact = hints.isExtractionArtifact(candField.type);
         const isWarning = nullableOnly || genericParam || extractionArtifact;
         violations.push({
@@ -268,14 +321,12 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
           candidate: candField.type,
           message: `Field type mismatch for "${name}.${fieldName}"`,
         });
-        // Warning-level mismatches are backwards-compatible — count as preserved
         if (isWarning) preserved++;
         continue;
       }
       preserved++;
     }
 
-    // Check for new fields (additions)
     for (const fieldName of Object.keys(candIface.fields)) {
       if (!baseIface.fields[fieldName]) {
         additions.push({ symbolPath: `${name}.${fieldName}`, symbolType: 'property' });
@@ -295,9 +346,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
     totalBaseline++;
     const candAlias = candidate.typeAliases[name];
     if (!candAlias) {
-      // Category mismatch tolerance: if the candidate has this name as an
-      // interface, class, or enum instead of a type alias, it's still "present" —
-      // just in a different declaration form (e.g., TypeScript type alias vs interface vs enum).
       if (hints.tolerateCategoryMismatch && typeExistsInSurface(name, candidate)) {
         preserved++;
         continue;
@@ -313,9 +361,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
       continue;
     }
     if (baseAlias.value !== candAlias.value) {
-      // Type serialization may not guarantee union member ordering,
-      // so two identical unions can produce different strings.
-      // Check for order-independent equality before flagging.
       if (hints.isUnionReorder(baseAlias.value, candAlias.value)) {
         preserved++;
         continue;
@@ -358,9 +403,6 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
       continue;
     }
 
-    // Build a reverse lookup: wire value → candidate member name(s).
-    // This enables matching by wire value when member names differ due to
-    // naming conventions (e.g., baseline "Active"="linked" vs candidate "Linked"="linked").
     const candValueToMembers = new Map<string | number, string[]>();
     for (const [candMember, candValue] of Object.entries(candEnum.members)) {
       const existing = candValueToMembers.get(candValue);
@@ -374,17 +416,11 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
     let enumMatch = true;
     for (const [member, value] of Object.entries(baseEnum.members)) {
       if (candEnum.members[member] === value) {
-        // Exact match by member name and value — no issue
         continue;
       }
 
-      // Member name doesn't match. Check if the wire value exists under a
-      // different member name in the candidate — this is a naming convention
-      // difference, not a functional difference. Downgrade to warning.
       const valueMatches = candValueToMembers.get(value);
       if (valueMatches && valueMatches.length > 0) {
-        // Wire value is preserved — the member is just named differently.
-        // This is a cosmetic naming difference, not a breaking change.
         violations.push({
           category: 'signature',
           severity: 'warning',
@@ -393,12 +429,9 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
           candidate: `${valueMatches[0]}=${String(value)}`,
           message: `Enum member name differs for "${name}.${member}" (value "${value}" preserved as "${valueMatches[0]}")`,
         });
-        // Count as preserved since the wire value is correct
         continue;
       }
 
-      // Case-insensitive value match: some extractors produce PascalCase values
-      // (e.g., "Pending", "Verified") while the spec uses lowercase ("pending", "verified").
       const lowerValue = String(value).toLowerCase();
       const caseInsensitiveMatch = [...candValueToMembers.entries()].find(
         ([candVal]) => String(candVal).toLowerCase() === lowerValue,
@@ -415,13 +448,8 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
         continue;
       }
 
-      // Check if this member is an extraction artifact (e.g., "JsonEnumDefaultValue",
-      // "Unknown" fallbacks, or values that match their member names exactly which
-      // suggests the extractor read the annotation name rather than the wire value).
       const isExtractionArtifact =
-        String(value) === member || // Value equals member name → annotation artifact
-        member === 'JsonEnumDefaultValue' ||
-        member === 'JsonProperty';
+        String(value) === member || member === 'JsonEnumDefaultValue' || member === 'JsonProperty';
       if (isExtractionArtifact) {
         violations.push({
           category: 'signature',
@@ -496,17 +524,12 @@ export function diffSurfaces(baseline: ApiSurface, candidate: ApiSurface, hints:
   };
 }
 
-/**
- * Compare method signatures using raw type strings.
- * NOTE: This only produces meaningful results when both surfaces were extracted
- * by the same extractor for the same language. Cross-language or cross-extractor
- * comparisons will always fail because type representations differ.
- */
-function signaturesMatch(baseline: ApiMethod, candidate: ApiMethod): boolean {
-  // Return type must match
-  if (baseline.returnType !== candidate.returnType) return false;
+// ---------------------------------------------------------------------------
+// Internal helpers (legacy)
+// ---------------------------------------------------------------------------
 
-  // All baseline params must exist with matching types and names
+function signaturesMatch(baseline: ApiMethod, candidate: ApiMethod): boolean {
+  if (baseline.returnType !== candidate.returnType) return false;
   for (let i = 0; i < baseline.params.length; i++) {
     const baseParam = baseline.params[i];
     const candParam = candidate.params[i];
@@ -514,14 +537,12 @@ function signaturesMatch(baseline: ApiMethod, candidate: ApiMethod): boolean {
     if (baseParam.type !== candParam.type) return false;
     if (baseParam.name !== candParam.name) return false;
   }
-
-  // New params in candidate must be optional
   for (let i = baseline.params.length; i < candidate.params.length; i++) {
     if (!candidate.params[i].optional) return false;
   }
-
   return true;
 }
+
 function formatSignature(method: ApiMethod): string {
   const params = method.params.map((p) => `${p.name}${p.optional ? '?' : ''}: ${p.type}`).join(', ');
   return `(${params}) => ${method.returnType}`;

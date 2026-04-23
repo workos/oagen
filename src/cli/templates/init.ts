@@ -19,6 +19,7 @@ export function packageJson(lang: string): string {
       types: 'dist/index.d.ts',
       exports: {
         '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+        './plugin': { types: './dist/plugin.d.ts', import: './dist/plugin.js' },
       },
       scripts: {
         build: 'tsup',
@@ -80,7 +81,7 @@ export default defineConfig({
 export function tsupConfig(): string {
   return `import { defineConfig } from 'tsup';
 export default defineConfig({
-  entry: { index: 'src/index.ts' },
+  entry: { index: 'src/index.ts', plugin: 'src/plugin.ts' },
   format: ['esm'],
   dts: true,
   clean: true,
@@ -89,21 +90,37 @@ export default defineConfig({
 `;
 }
 
-export function oagenConfig(lang: string): string {
-  const varName = `${toCamelCase(lang)}Emitter`;
+export function oagenConfig(): string {
   return `import type { OagenConfig } from '@workos/oagen';
-import { ${varName} } from './src/${lang}/index.js';
+import { plugin } from './src/plugin.js';
 
+// Minimal config for local emitter development.
+// The canonical consumer config lives in the consumer project's oagen.config.ts,
+// which imports the plugin bundle from this package.
 const config: OagenConfig = {
-  emitters: [${varName}],
+  ...plugin,
 };
 export default config;
+`;
+}
+
+export function srcPlugin(lang: string): string {
+  const varName = `${toCamelCase(lang)}Emitter`;
+  return `import type { OagenConfig } from '@workos/oagen';
+import { ${varName} } from './${lang}/index.js';
+
+export const plugin: Pick<OagenConfig, 'emitters' | 'extractors' | 'smokeRunners'> = {
+  emitters: [${varName}],
+  extractors: [],
+  smokeRunners: {},
+};
 `;
 }
 
 export function srcIndex(lang: string): string {
   const varName = `${toCamelCase(lang)}Emitter`;
   return `export { ${varName} } from './${lang}/index.js';
+export { plugin } from './plugin.js';
 `;
 }
 

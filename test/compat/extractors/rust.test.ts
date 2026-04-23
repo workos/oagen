@@ -210,4 +210,27 @@ describe('rustExtractor', () => {
     const nameParam = createOrg.params.find((p) => p.name === 'name');
     expect(nameParam).toMatchObject({ optional: false });
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to positional for all Rust params', async () => {
+    const surface = await rustExtractor.extract(fixturePath);
+    const createOrg = surface.classes.WorkOs.methods.create_organization[0];
+    for (const param of createOrg.params) {
+      expect(param.passingStyle).toBe('positional');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order for create_organization', async () => {
+    const surface = await rustExtractor.extract(fixturePath);
+    const createOrg = surface.classes.WorkOs.methods.create_organization[0];
+    const paramNames = createOrg.params.map((p) => p.name);
+    expect(paramNames).toEqual(['name', 'domains']);
+  });
 });

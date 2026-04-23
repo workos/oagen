@@ -197,4 +197,41 @@ describe('rubyExtractor', () => {
     const sso = surface.classes.SSO;
     expect(sso.properties.PROVIDERS).toMatchObject({ name: 'PROVIDERS', readonly: true });
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to keyword for keyword arguments', async () => {
+    const surface = await rubyExtractor.extract(fixturePath);
+    const createOrg = surface.classes.Organizations.methods.create_organization[0];
+    // name:, domain_data:, idempotency_key: are all keyword params
+    for (const param of createOrg.params) {
+      expect(param.passingStyle).toBe('keyword');
+    }
+  });
+
+  it('sets passingStyle to positional for positional arguments', async () => {
+    const surface = await rubyExtractor.extract(fixturePath);
+    const listOrgs = surface.classes.Organizations.methods.list_organizations[0];
+    // options = {} is a positional param with default
+    expect(listOrgs.params[0].passingStyle).toBe('positional');
+  });
+
+  it('sets passingStyle to keyword for keyword-only id: param', async () => {
+    const surface = await rubyExtractor.extract(fixturePath);
+    const getOrg = surface.classes.Organizations.methods.get_organization[0];
+    expect(getOrg.params[0].passingStyle).toBe('keyword');
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order for create_organization', async () => {
+    const surface = await rubyExtractor.extract(fixturePath);
+    const createOrg = surface.classes.Organizations.methods.create_organization[0];
+    const paramNames = createOrg.params.map((p) => p.name);
+    expect(paramNames).toEqual(['name', 'domain_data', 'idempotency_key']);
+  });
 });

@@ -12,7 +12,8 @@ When `{project}/package.json` does **NOT** exist, create the following boilerpla
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./plugin": { "types": "./dist/plugin.d.ts", "import": "./dist/plugin.js" }
   },
   "scripts": {
     "build": "tsup",
@@ -76,7 +77,7 @@ export default defineConfig({
 ```ts
 import { defineConfig } from "tsup";
 export default defineConfig({
-  entry: { index: "src/index.ts" },
+  entry: { index: "src/index.ts", plugin: "src/plugin.ts" },
   format: ["esm"],
   dts: true,
   clean: true,
@@ -86,21 +87,41 @@ export default defineConfig({
 
 ## `oagen.config.ts`
 
+Minimal config for local emitter development. The canonical consumer config lives in the consumer project.
+
 ```ts
 import type { OagenConfig } from "@workos/oagen";
-const config: OagenConfig = { emitters: [] };
+import { plugin } from "./src/plugin.js";
+const config: OagenConfig = { ...plugin };
 export default config;
 ```
 
-(Step 6 of the main skill adds the emitter to this config.)
+## `src/plugin.ts`
+
+Plugin bundle export. The consumer project imports this to get all emitters, extractors, and smoke runners.
+
+```ts
+import type { OagenConfig } from "@workos/oagen";
+export const plugin: Pick<
+  OagenConfig,
+  "emitters" | "extractors" | "smokeRunners"
+> = {
+  emitters: [],
+  extractors: [],
+  smokeRunners: {},
+};
+```
+
+(Step 7 of the main skill adds the emitter to this plugin bundle.)
 
 ## `src/index.ts`
 
 ```ts
-// Barrel export — re-exports all emitters
+// Barrel export — re-exports all emitters and the plugin bundle
+export { plugin } from "./plugin.js";
 ```
 
-(Step 6 adds the re-export.)
+(Step 7 adds the emitter re-export.)
 
 ## `.gitignore`
 

@@ -13,6 +13,8 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkElixirFiles, parseElixirFile } from './elixir-parser.js';
 import { buildSurface } from './elixir-surface.js';
@@ -93,6 +95,11 @@ const elixirHints: LanguageHints = {
 export const elixirExtractor: Extractor = {
   language: 'elixir',
   hints: elixirHints,
+
+  async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+    const surface = await this.extract(sdkPath);
+    return apiSurfaceToSnapshot(surface);
+  },
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     // Determine the source directory: prefer lib/, fallback to root

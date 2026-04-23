@@ -19,6 +19,11 @@ describe('applyConfig — extractors', () => {
         enums: {},
         exports: {},
       }),
+      async extractSnapshot(sdkPath: string) {
+        const surface = await this.extract(sdkPath);
+        const { apiSurfaceToSnapshot } = await import('../../src/compat/ir.js');
+        return apiSurfaceToSnapshot(surface);
+      },
     };
 
     applyConfig({ extractors: [mockExtractor] });

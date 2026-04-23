@@ -18,6 +18,11 @@ describe('extractor registry', () => {
         enums: {},
         exports: {},
       }),
+      async extractSnapshot(sdkPath: string) {
+        const surface = await this.extract(sdkPath);
+        const { apiSurfaceToSnapshot } = await import('../../src/compat/ir.js');
+        return apiSurfaceToSnapshot(surface);
+      },
     };
     registerExtractor(mock);
 
@@ -39,6 +44,11 @@ describe('extractor registry', () => {
         enums: {},
         exports: {},
       }),
+      async extractSnapshot(sdkPath: string) {
+        const surface = await this.extract(sdkPath);
+        const { apiSurfaceToSnapshot } = await import('../../src/compat/ir.js');
+        return apiSurfaceToSnapshot(surface);
+      },
     };
     registerExtractor(mock);
     expect(getExtractor('extractor-roundtrip')).toBe(mock);

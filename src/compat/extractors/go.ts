@@ -12,6 +12,8 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkGoFiles, parseGoFile } from './go-parser.js';
 import { buildSurface } from './go-surface.js';
@@ -143,6 +145,11 @@ const goHints: LanguageHints = {
 export const goExtractor: Extractor = {
   language: 'go',
   hints: goHints,
+
+  async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+    const surface = await this.extract(sdkPath);
+    return apiSurfaceToSnapshot(surface);
+  },
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     const goFiles = walkGoFiles(sdkPath);

@@ -138,6 +138,7 @@ export function buildSurface(
           name: p.name,
           type: p.type,
           optional: p.optional,
+          passingStyle: 'named' as const,
         }));
 
         if (!apiMethods[method.name]) apiMethods[method.name] = [];

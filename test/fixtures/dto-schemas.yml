@@ -1,0 +1,59 @@
+openapi: '3.1.0'
+info:
+  title: Dto Schema API
+  version: '1.0.0'
+  description: Spec with Dto-suffixed schemas for testing schemaNameTransform
+servers:
+  - url: https://api.example.com
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users
+      responses:
+        '200':
+          description: A list of users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserDto'
+    post:
+      operationId: createUser
+      summary: Create a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserDto'
+      responses:
+        '201':
+          description: Created user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDto'
+components:
+  schemas:
+    UserDto:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    CreateUserDto:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string

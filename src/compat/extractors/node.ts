@@ -14,12 +14,19 @@ import type {
   ApiTypeAlias,
   ApiEnum,
 } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import { nodeHints } from '../language-hints.js';
 import { sortRecord } from './shared.js';
 
 export const nodeExtractor: Extractor = {
   language: 'node',
   hints: nodeHints,
+
+  async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+    const surface = await this.extract(sdkPath);
+    return apiSurfaceToSnapshot(surface);
+  },
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     sdkPath = resolve(sdkPath);
@@ -238,12 +245,13 @@ function extractClass(sym: ts.Symbol, checker: ts.TypeChecker): ApiClass {
         for (const member of decl.members) {
           if (ts.isConstructorDeclaration(member)) {
             for (const param of member.parameters) {
-              const paramName = extractParameterName(param, param.name.getText());
+              const { name: paramName, isDestructured } = extractParameterInfo(param, param.name.getText());
               const paramType = param.type ? checker.typeToString(checker.getTypeFromTypeNode(param.type)) : 'any';
               constructorParams.push({
                 name: paramName,
                 type: paramType,
                 optional: !!param.questionToken || !!param.initializer,
+                passingStyle: isDestructured ? 'options_object' : 'positional',
               });
             }
           }
@@ -307,25 +315,59 @@ function extractParam(sym: ts.Symbol, checker: ts.TypeChecker): ApiParam {
   const decl = sym.getDeclarations()?.[0];
   const isOptional = decl && ts.isParameter(decl) ? !!decl.questionToken || !!decl.initializer : false;
   const type = checker.getTypeOfSymbolAtLocation(sym, decl!);
+  const { name, isDestructured } = extractParameterInfo(decl, sym.name);
+  const typeStr = checker.typeToString(type);
+
+  // Detect options object pattern:
+  // - destructured object binding ({a, b}: Options)
+  // - single non-primitive param with an object/interface type
+  let passingStyle: ApiParam['passingStyle'];
+  if (isDestructured) {
+    passingStyle = 'options_object';
+  } else {
+    const resolvedType = checker.getTypeOfSymbolAtLocation(sym, decl!);
+    const isObjectLike = resolvedType.isClassOrInterface() || (resolvedType.getFlags() & ts.TypeFlags.Object) !== 0;
+    const isPrimitive = [
+      'string',
+      'number',
+      'boolean',
+      'undefined',
+      'null',
+      'void',
+      'never',
+      'any',
+      'unknown',
+    ].includes(typeStr);
+    if (isObjectLike && !isPrimitive && !typeStr.startsWith('Promise<')) {
+      passingStyle = 'options_object';
+    } else {
+      passingStyle = 'positional';
+    }
+  }
+
   return {
-    name: extractParameterName(decl, sym.name),
-    type: checker.typeToString(type),
+    name,
+    type: typeStr,
     optional: isOptional,
+    passingStyle,
   };
 }
 
-function extractParameterName(decl: ts.Declaration | undefined, fallback: string): string {
-  if (!decl || !ts.isParameter(decl)) return fallback;
-  if (ts.isIdentifier(decl.name)) return decl.name.text;
+function extractParameterInfo(
+  decl: ts.Declaration | undefined,
+  fallback: string,
+): { name: string; isDestructured: boolean } {
+  if (!decl || !ts.isParameter(decl)) return { name: fallback, isDestructured: false };
+  if (ts.isIdentifier(decl.name)) return { name: decl.name.text, isDestructured: false };
 
   const parentWithParameters = decl.parent as ts.Node & { parameters?: ts.NodeArray<ts.ParameterDeclaration> };
   const index = parentWithParameters.parameters?.indexOf(decl) ?? -1;
   const suffix = index > 0 ? String(index) : '';
 
-  if (ts.isObjectBindingPattern(decl.name)) return `options${suffix}`;
-  if (ts.isArrayBindingPattern(decl.name)) return `args${suffix}`;
+  if (ts.isObjectBindingPattern(decl.name)) return { name: `options${suffix}`, isDestructured: true };
+  if (ts.isArrayBindingPattern(decl.name)) return { name: `args${suffix}`, isDestructured: false };
 
-  return fallback;
+  return { name: fallback, isDestructured: false };
 }
 
 function extractInterface(sym: ts.Symbol, checker: ts.TypeChecker): ApiInterface {

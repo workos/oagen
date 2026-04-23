@@ -160,6 +160,39 @@ describe('kotlinExtractor', () => {
     expect(surface.extractedAt).toBeTruthy();
   });
 
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to named for all Kotlin params', async () => {
+    const surface = await kotlinExtractor.extract(fixturePath);
+    const orgApi = surface.classes.OrganizationApi;
+    const getOrg = orgApi.methods.getOrganization[0];
+    for (const param of getOrg.params) {
+      expect(param.passingStyle).toBe('named');
+    }
+  });
+
+  it('sets passingStyle to named for constructor params', async () => {
+    const surface = await kotlinExtractor.extract(fixturePath);
+    const orgApi = surface.classes.OrganizationApi;
+    for (const param of orgApi.constructorParams) {
+      expect(param.passingStyle).toBe('named');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order for methods', async () => {
+    const surface = await kotlinExtractor.extract(fixturePath);
+    const createOrg = surface.classes.OrganizationApi.methods.createOrganization[0];
+    expect(createOrg.params.length).toBeGreaterThan(0);
+    // createOrganization(options: CreateOrganizationOptions)
+    expect(createOrg.params[0].name).toBe('options');
+  });
+
   it('throws for non-Kotlin projects', async () => {
     await expect(kotlinExtractor.extract('/tmp/nonexistent-kotlin-project')).rejects.toThrow('No .kt files found');
   });

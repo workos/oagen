@@ -4,6 +4,9 @@ import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
 import { extractCommand } from './extract.js';
+import { compatExtractCommand } from './compat-extract.js';
+import { compatDiffCommand } from './compat-diff.js';
+import { compatSummaryCommand } from './compat-summary.js';
 import { verifyCommand } from './verify.js';
 import { initCommand } from './init.js';
 import { resolveCommand } from './resolve.js';
@@ -18,17 +21,24 @@ function handleError(err: unknown): never {
   process.exit(exitCode);
 }
 
-// Load config synchronously at startup so user-provided emitters/extractors are
-// registered before any command runs. loadConfig is async (dynamic import), so
-// we use top-level await.
+// Parse --config before Commander runs so we can load the right config file
+// at startup. Commander's parseOptions isn't available before .parse(), so we
+// do a simple argv scan.
+const configArgIdx = process.argv.indexOf('--config');
+const explicitConfigPath = configArgIdx !== -1 ? process.argv[configArgIdx + 1] : undefined;
+
+// Load config at startup so user-provided emitters/extractors are registered
+// before any command runs. loadConfig is async (dynamic import), so we use
+// top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
 let configSchemaNameTransform: ((name: string) => string) | undefined;
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
+let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
-  const config = await loadConfig();
+  const config = await loadConfig(explicitConfigPath);
   if (config) {
     applyConfig(config);
     configSmokeRunners = config.smokeRunners;
@@ -37,12 +47,17 @@ try {
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
+    configCompat = config.compat;
   }
 } catch (err) {
   handleError(err);
 }
 
-const program = new Command().name('oagen').description('Framework for building OpenAPI SDK emitters').version('0.0.1');
+const program = new Command()
+  .name('oagen')
+  .description('Framework for building OpenAPI SDK emitters')
+  .version('0.0.1')
+  .option('--config <path>', 'Path to oagen config file (default: oagen.config.ts in cwd)');
 
 program
   .command('parse')
@@ -112,6 +127,39 @@ program
   });
 
 program
+  .command('compat-extract')
+  .description('Extract a compat snapshot from a live SDK and write .oagen-compat-snapshot.json')
+  .requiredOption('--sdk-path <path>', 'Path to the live SDK')
+  .requiredOption('--lang <language>', 'Target language')
+  .requiredOption('--output <dir>', 'Directory to write .oagen-compat-snapshot.json into')
+  .option('--spec <path>', 'Path to OpenAPI spec — enriches symbols with operationId, route, and specSha')
+  .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
+    compatExtractCommand(opts).catch(handleError);
+  });
+
+program
+  .command('compat-diff')
+  .description('Diff two compat snapshot files and produce a classified change report')
+  .requiredOption('--baseline <path>', 'Path to the baseline compat snapshot JSON')
+  .requiredOption('--candidate <path>', 'Path to the candidate compat snapshot JSON')
+  .option('--output <path>', 'Write machine-readable report to this path')
+  .option('--fail-on <level>', 'Fail threshold: none, breaking, or soft-risk', 'breaking')
+  .option('--explain', 'Include provenance explanations in output')
+  .action((opts) => {
+    compatDiffCommand(opts).catch(handleError);
+  });
+
+program
+  .command('compat-summary')
+  .description('Format compat report(s) as a markdown PR comment')
+  .requiredOption('--report <path...>', 'Path(s) to compat report JSON(s) — pass multiple for cross-language rollup')
+  .option('--output <path>', 'Write markdown to this file instead of stdout')
+  .action((opts) => {
+    compatSummaryCommand(opts).catch(handleError);
+  });
+
+program
   .command('verify')
   .description('Run smoke tests (and optional compat check) against an already-generated SDK')
   .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
@@ -129,6 +177,10 @@ program
   .option('--namespace <name>', 'SDK namespace/package name (used by retry loop for regeneration)')
   .option('--diagnostics', 'Output verify-diagnostics.json with structured violation breakdown')
   .option('--max-retries <n>', 'Max retry iterations for self-correcting overlay loop (default: 3)', '3')
+  .option('--compat-report <path>', 'Write machine-readable compat report to this path')
+  .option('--compat-fail-on <level>', 'Fail threshold: none, breaking, or soft-risk')
+  .option('--compat-baseline <path>', 'Path to baseline compatibility snapshot')
+  .option('--compat-explain', 'Include provenance explanations in compat output')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     // --spec is only required when we need to generate a baseline (no --raw-results
@@ -140,6 +192,11 @@ program
       maxRetries: parseInt(opts.maxRetries, 10),
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
+      compatConfig: configCompat,
+      compatReport: opts.compatReport,
+      compatFailOn: opts.compatFailOn,
+      compatBaseline: opts.compatBaseline,
+      compatExplain: opts.compatExplain,
     }).catch(handleError);
   });
 

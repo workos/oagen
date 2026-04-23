@@ -11,6 +11,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { ApiSurface, Extractor, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import {
   extractClasses,
@@ -84,6 +86,11 @@ function collectRbFiles(dir: string): string[] {
 export const rubyExtractor: Extractor = {
   language: 'ruby',
   hints: rubyHints,
+
+  async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+    const surface = await this.extract(sdkPath);
+    return apiSurfaceToSnapshot(surface);
+  },
 
   async extract(sdkPath: string): Promise<ApiSurface> {
     const libPath = resolve(sdkPath, 'lib');

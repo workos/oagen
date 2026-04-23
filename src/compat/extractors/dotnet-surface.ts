@@ -47,6 +47,7 @@ export function buildSurface(
           name: p.name,
           type: p.type,
           optional: p.optional,
+          passingStyle: 'named' as const,
         }));
 
         if (!methods[method.name]) methods[method.name] = [];
@@ -72,6 +73,7 @@ export function buildSurface(
         name: p.name,
         type: p.type,
         optional: false,
+        passingStyle: 'named' as const,
       }));
 
       classes[cls.name] = {

@@ -22,15 +22,29 @@ import * as path from 'node:path';
  */
 
 export const MANIFEST_FILENAME = '.oagen-manifest.json';
-const MANIFEST_VERSION = 1;
+const MANIFEST_VERSION = 2;
 
 export interface Manifest {
   /** Schema version.  Bump when the format changes incompatibly. */
   version: number;
   /** Emitter language (e.g. "python").  Used only as a consistency hint. */
   language: string;
+  /** Human-readable or package-level SDK identity (e.g. "workos-php"). */
+  sdkName?: string;
   /** ISO-8601 timestamp of the run that produced this manifest. */
   generatedAt: string;
+  /** SHA-256 hash of the source OpenAPI spec used for generation. */
+  specSha?: string;
+  /** Path or reference to the source spec. */
+  specPath?: string;
+  /** Git SHA or version of the emitter code used. */
+  emitterSha?: string;
+  /** Emitter version string if available. */
+  emitterVersion?: string;
+  /** SHA-256 hash of the effective oagen.config.ts after resolution. */
+  configSha?: string;
+  /** Version of the compat snapshot/report schema expected by this generation. */
+  compatSchemaVersion?: string;
   /** Sorted list of paths, relative to the manifest's containing directory. */
   files: string[];
 }
@@ -70,18 +84,39 @@ export async function readManifest(dir: string): Promise<Manifest | null> {
       );
       return null;
     }
+    // v1 manifests are forward-compatible — new fields are simply absent
     return parsed as Manifest;
   } catch {
     return null;
   }
 }
 
+/** Options for writing a manifest. */
+export interface WriteManifestOpts {
+  language: string;
+  files: Iterable<string>;
+  sdkName?: string;
+  specSha?: string;
+  specPath?: string;
+  emitterSha?: string;
+  emitterVersion?: string;
+  configSha?: string;
+  compatSchemaVersion?: string;
+}
+
 /** Write `.oagen-manifest.json` to a directory with sorted paths. */
-export async function writeManifest(dir: string, opts: { language: string; files: Iterable<string> }): Promise<void> {
+export async function writeManifest(dir: string, opts: WriteManifestOpts): Promise<void> {
   const manifest: Manifest = {
     version: MANIFEST_VERSION,
     language: opts.language,
+    ...(opts.sdkName !== undefined ? { sdkName: opts.sdkName } : {}),
     generatedAt: new Date().toISOString(),
+    ...(opts.specSha !== undefined ? { specSha: opts.specSha } : {}),
+    ...(opts.specPath !== undefined ? { specPath: opts.specPath } : {}),
+    ...(opts.emitterSha !== undefined ? { emitterSha: opts.emitterSha } : {}),
+    ...(opts.emitterVersion !== undefined ? { emitterVersion: opts.emitterVersion } : {}),
+    ...(opts.configSha !== undefined ? { configSha: opts.configSha } : {}),
+    ...(opts.compatSchemaVersion !== undefined ? { compatSchemaVersion: opts.compatSchemaVersion } : {}),
     files: [...new Set(opts.files)].sort(),
   };
   const manifestPath = path.join(dir, MANIFEST_FILENAME);

@@ -98,12 +98,13 @@ const goHints = resolveHints({
 Extractors are registered via `oagen.config.ts` in the consumer project. The CLI loads the config at startup and registers all extractors automatically before any command runs.
 
 ```typescript
-// oagen.config.ts
-import { myExtractor } from "./src/compat/extractors/my-language.js";
+// oagen.config.ts (consumer project)
+import { workosEmittersPlugin } from "@workos/oagen-emitters";
 import type { OagenConfig } from "@workos/oagen";
 
 const config: OagenConfig = {
-  extractors: [myExtractor],
+  ...workosEmittersPlugin, // includes all extractors
+  // spec interpretation policy...
 };
 export default config;
 ```
@@ -212,8 +213,8 @@ All tree-sitter parsers use `safeParse()` from `src/utils/tree-sitter.ts` to han
 3. Provide `hints` as a `LanguageHints` object. Every extractor must have hints — the differ and overlay delegate all language-specific logic through them.
 4. Split into `{language}-parser.ts` and `{language}-surface.ts` if either: (a) the language separates type definitions from method implementations (structural joining needed), or (b) the classification logic for mapping parsed types to `ApiClass`/`ApiInterface`/`ApiEnum` is non-trivial. If the AST co-locates symbols and classification is straightforward, a single `{language}-parser.ts` returning `ApiClass[]` directly is sufficient.
 5. Use `safeParse()` from `src/utils/tree-sitter.ts` instead of calling `parser.parse()` directly.
-6. Export from `src/index.ts`
-7. Register in the consumer project's `oagen.config.ts`
+6. Export from `src/index.ts` and include in the plugin bundle
+7. The consumer project's `oagen.config.ts` picks it up through the plugin bundle
 8. Add tests in `test/compat/extractors/{language}.test.ts`
 9. Create a fixture SDK in `test/fixtures/sample-sdk-{language}/` with known classes, methods, and exports
 10. Verify deterministic output: extracting twice produces identical JSON

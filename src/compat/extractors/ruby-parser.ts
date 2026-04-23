@@ -267,14 +267,14 @@ function extractMethodParams(methodNode: SyntaxNode): ApiParam[] {
     switch (paramNode.type) {
       case 'identifier': {
         // Plain positional argument
-        params.push({ name: paramNode.text, type: 'Object', optional: false });
+        params.push({ name: paramNode.text, type: 'Object', optional: false, passingStyle: 'positional' as const });
         break;
       }
       case 'optional_parameter': {
         // Positional argument with default: name = value
         const nameNode = paramNode.childForFieldName('name');
         if (nameNode) {
-          params.push({ name: nameNode.text, type: 'Object', optional: true });
+          params.push({ name: nameNode.text, type: 'Object', optional: true, passingStyle: 'positional' as const });
         }
         break;
       }
@@ -283,26 +283,46 @@ function extractMethodParams(methodNode: SyntaxNode): ApiParam[] {
         const nameNode = paramNode.childForFieldName('name');
         if (nameNode) {
           const valueNode = paramNode.childForFieldName('value');
-          params.push({ name: nameNode.text, type: 'Object', optional: valueNode !== null });
+          params.push({
+            name: nameNode.text,
+            type: 'Object',
+            optional: valueNode !== null,
+            passingStyle: 'keyword' as const,
+          });
         }
         break;
       }
       case 'splat_parameter': {
         // *args — variadic positional
         const nameNode = paramNode.childForFieldName('name');
-        params.push({ name: nameNode ? `*${nameNode.text}` : '*args', type: 'Object', optional: true });
+        params.push({
+          name: nameNode ? `*${nameNode.text}` : '*args',
+          type: 'Object',
+          optional: true,
+          passingStyle: 'positional' as const,
+        });
         break;
       }
       case 'hash_splat_parameter': {
         // **kwargs — variadic keyword
         const nameNode = paramNode.childForFieldName('name');
-        params.push({ name: nameNode ? `**${nameNode.text}` : '**kwargs', type: 'Object', optional: true });
+        params.push({
+          name: nameNode ? `**${nameNode.text}` : '**kwargs',
+          type: 'Object',
+          optional: true,
+          passingStyle: 'keyword' as const,
+        });
         break;
       }
       case 'block_parameter': {
         // &block — block argument
         const nameNode = paramNode.childForFieldName('name');
-        params.push({ name: nameNode ? `&${nameNode.text}` : '&block', type: 'Object', optional: true });
+        params.push({
+          name: nameNode ? `&${nameNode.text}` : '&block',
+          type: 'Object',
+          optional: true,
+          passingStyle: 'positional' as const,
+        });
         break;
       }
       default:

@@ -72,6 +72,12 @@ export async function generate(
     noPrune: options.noPrune,
   });
 
+  // Format output files so the emitter's formatter runs even without --target.
+  const allOutputFiles = [...writeResult.written, ...writeResult.merged];
+  if (allOutputFiles.length > 0) {
+    await formatTargetFiles(emitter, options.outputDir, allOutputFiles);
+  }
+
   // Target integration pass
   if (options.target) {
     // Reuse the manifest we already read to build the emitter context.  This

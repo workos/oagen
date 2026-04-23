@@ -90,6 +90,7 @@ export function buildSurface(
           name: p.name,
           type: rustTypeToString(p.type),
           optional: p.type.startsWith('Option<'),
+          passingStyle: 'positional' as const,
         }));
         const returnType = unwrapResultType(fn.returnType);
         if (!apiMethods[fn.name]) apiMethods[fn.name] = [];
