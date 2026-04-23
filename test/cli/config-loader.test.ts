@@ -21,13 +21,13 @@ describe('loadConfig', () => {
   });
 
   it('returns null when no config file exists', async () => {
-    const config = await loadConfig(tmpDir);
+    const config = await loadConfig(undefined, tmpDir);
     expect(config).toBeNull();
   });
 
   it('loads oagen.config.mjs and returns config object', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `export default { emitterProject: '../my-emitters' };`);
-    const config = await loadConfig(tmpDir);
+    const config = await loadConfig(undefined, tmpDir);
     expect(config).not.toBeNull();
     expect(config!.emitterProject).toBe('../my-emitters');
   });
@@ -37,7 +37,7 @@ describe('loadConfig', () => {
       path.join(tmpDir, 'oagen.config.mjs'),
       `export default { smokeRunners: { go: './smoke/go-runner.ts', python: './smoke/py-runner.ts' } };`,
     );
-    const config = await loadConfig(tmpDir);
+    const config = await loadConfig(undefined, tmpDir);
     expect(config).not.toBeNull();
     expect(config!.smokeRunners).toEqual({
       go: './smoke/go-runner.ts',
@@ -47,8 +47,35 @@ describe('loadConfig', () => {
 
   it('exits with error when config file exists but fails to load', async () => {
     writeFileSync(path.join(tmpDir, 'oagen.config.mjs'), `throw new Error('bad config');`);
-    await expect(loadConfig(tmpDir)).rejects.toBeInstanceOf(ConfigLoadError);
-    await expect(loadConfig(tmpDir)).rejects.toThrow('Failed to load oagen.config.mjs');
+    await expect(loadConfig(undefined, tmpDir)).rejects.toBeInstanceOf(ConfigLoadError);
+    await expect(loadConfig(undefined, tmpDir)).rejects.toThrow('Failed to load oagen.config.mjs');
+  });
+
+  it('loads an explicit config path', async () => {
+    const configFile = path.join(tmpDir, 'custom.config.mjs');
+    writeFileSync(configFile, `export default { docUrl: 'https://example.com' };`);
+    const config = await loadConfig(configFile);
+    expect(config).not.toBeNull();
+    expect(config!.docUrl).toBe('https://example.com');
+  });
+
+  it('loads an explicit config path relative to cwd', async () => {
+    writeFileSync(path.join(tmpDir, 'my-config.mjs'), `export default { docUrl: 'https://relative.test' };`);
+    const config = await loadConfig('my-config.mjs', tmpDir);
+    expect(config).not.toBeNull();
+    expect(config!.docUrl).toBe('https://relative.test');
+  });
+
+  it('throws ConfigLoadError when explicit config path does not exist', async () => {
+    await expect(loadConfig(path.join(tmpDir, 'missing.mjs'))).rejects.toBeInstanceOf(ConfigLoadError);
+    await expect(loadConfig(path.join(tmpDir, 'missing.mjs'))).rejects.toThrow('Config file not found');
+  });
+
+  it('throws ConfigLoadError when explicit config file fails to load', async () => {
+    const configFile = path.join(tmpDir, 'broken.mjs');
+    writeFileSync(configFile, `throw new Error('broken');`);
+    await expect(loadConfig(configFile)).rejects.toBeInstanceOf(ConfigLoadError);
+    await expect(loadConfig(configFile)).rejects.toThrow('Failed to load');
   });
 });
 

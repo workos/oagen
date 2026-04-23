@@ -21,9 +21,15 @@ function handleError(err: unknown): never {
   process.exit(exitCode);
 }
 
-// Load config synchronously at startup so user-provided emitters/extractors are
-// registered before any command runs. loadConfig is async (dynamic import), so
-// we use top-level await.
+// Parse --config before Commander runs so we can load the right config file
+// at startup. Commander's parseOptions isn't available before .parse(), so we
+// do a simple argv scan.
+const configArgIdx = process.argv.indexOf('--config');
+const explicitConfigPath = configArgIdx !== -1 ? process.argv[configArgIdx + 1] : undefined;
+
+// Load config at startup so user-provided emitters/extractors are registered
+// before any command runs. loadConfig is async (dynamic import), so we use
+// top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
 let configSchemaNameTransform: ((name: string) => string) | undefined;
@@ -32,7 +38,7 @@ let configOperationHints: Record<string, import('../ir/operation-hints.js').Oper
 let configMountRules: Record<string, string> | undefined;
 let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
-  const config = await loadConfig();
+  const config = await loadConfig(explicitConfigPath);
   if (config) {
     applyConfig(config);
     configSmokeRunners = config.smokeRunners;
@@ -47,7 +53,11 @@ try {
   handleError(err);
 }
 
-const program = new Command().name('oagen').description('Framework for building OpenAPI SDK emitters').version('0.0.1');
+const program = new Command()
+  .name('oagen')
+  .description('Framework for building OpenAPI SDK emitters')
+  .version('0.0.1')
+  .option('--config <path>', 'Path to oagen config file (default: oagen.config.ts in cwd)');
 
 program
   .command('parse')

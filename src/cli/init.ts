@@ -6,6 +6,7 @@ import {
   vitestConfig,
   tsupConfig,
   oagenConfig,
+  srcPlugin,
   srcIndex,
   gitignore,
   stubEmitter,
@@ -30,7 +31,8 @@ export async function initCommand(opts: { lang: string; project?: string }): Pro
     ['tsconfig.json', tsconfigJson()],
     ['vitest.config.ts', vitestConfig()],
     ['tsup.config.ts', tsupConfig()],
-    ['oagen.config.ts', oagenConfig(lang)],
+    ['oagen.config.ts', oagenConfig()],
+    ['src/plugin.ts', srcPlugin(lang)],
     ['src/index.ts', srcIndex(lang)],
     [`src/${lang}/index.ts`, stubEmitter(lang)],
   ];

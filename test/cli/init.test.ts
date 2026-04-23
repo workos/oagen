@@ -29,6 +29,7 @@ describe('initCommand', () => {
       'vitest.config.ts',
       'tsup.config.ts',
       'oagen.config.ts',
+      'src/plugin.ts',
       'src/index.ts',
       '.gitignore',
       'src/ruby/index.ts',
@@ -81,19 +82,28 @@ describe('initCommand', () => {
     expect(content).toContain('rubyEmitter');
   });
 
-  it('oagen.config.ts imports and registers the stub', async () => {
+  it('oagen.config.ts imports the plugin bundle', async () => {
     await initCommand({ lang: 'ruby', project: tmpDir });
 
     const content = readFileSync(resolve(tmpDir, 'oagen.config.ts'), 'utf-8');
-    expect(content).toContain("import { rubyEmitter } from './src/ruby/index.js'");
+    expect(content).toContain("import { plugin } from './src/plugin.js'");
+    expect(content).toContain('...plugin');
+  });
+
+  it('src/plugin.ts registers the stub emitter', async () => {
+    await initCommand({ lang: 'ruby', project: tmpDir });
+
+    const content = readFileSync(resolve(tmpDir, 'src/plugin.ts'), 'utf-8');
+    expect(content).toContain("import { rubyEmitter } from './ruby/index.js'");
     expect(content).toContain('emitters: [rubyEmitter]');
   });
 
-  it('src/index.ts re-exports the emitter', async () => {
+  it('src/index.ts re-exports the emitter and plugin', async () => {
     await initCommand({ lang: 'ruby', project: tmpDir });
 
     const content = readFileSync(resolve(tmpDir, 'src/index.ts'), 'utf-8');
     expect(content).toContain("export { rubyEmitter } from './ruby/index.js'");
+    expect(content).toContain("export { plugin } from './plugin.js'");
   });
 
   it('uses camelCase for multi-word language names', async () => {
@@ -102,8 +112,8 @@ describe('initCommand', () => {
     const emitterContent = readFileSync(resolve(tmpDir, 'src/objective-c/index.ts'), 'utf-8');
     expect(emitterContent).toContain('objectiveCEmitter');
 
-    const configContent = readFileSync(resolve(tmpDir, 'oagen.config.ts'), 'utf-8');
-    expect(configContent).toContain('objectiveCEmitter');
+    const pluginContent = readFileSync(resolve(tmpDir, 'src/plugin.ts'), 'utf-8');
+    expect(pluginContent).toContain('objectiveCEmitter');
   });
 
   it('defaults project to current directory', async () => {
@@ -182,6 +192,7 @@ describe('initCommand', () => {
     // Exports should be added
     expect(pkg.exports).toEqual({
       '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './plugin': { types: './dist/plugin.d.ts', import: './dist/plugin.js' },
     });
 
     // devDependencies merged (existing takes precedence for tsup, new ones added)

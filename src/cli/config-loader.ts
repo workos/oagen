@@ -50,12 +50,39 @@ export interface OagenConfig {
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];
 
-export async function loadConfig(cwd: string = process.cwd()): Promise<OagenConfig | null> {
-  for (const name of CONFIG_NAMES) {
-    const configPath = path.resolve(cwd, name);
-    if (!existsSync(configPath)) continue;
+/**
+ * Load an oagen config file.
+ *
+ * @param configPath - Explicit path to a config file. When provided, only that
+ *   file is attempted (no fallback search).
+ * @param cwd - Directory to search when `configPath` is omitted. Defaults to
+ *   `process.cwd()`. The loader tries each name in `CONFIG_NAMES` in order.
+ */
+export async function loadConfig(configPath?: string, cwd: string = process.cwd()): Promise<OagenConfig | null> {
+  if (configPath) {
+    const resolved = path.resolve(cwd, configPath);
+    if (!existsSync(resolved)) {
+      throw new ConfigLoadError(`Config file not found: ${resolved}`, 'Check that the path passed to --config exists.');
+    }
     try {
-      const mod = await import(pathToFileURL(configPath).href);
+      const mod = await import(pathToFileURL(resolved).href);
+      return (mod.default ?? mod) as OagenConfig;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ConfigLoadError(
+        `Failed to load ${resolved}: ${message}`,
+        resolved.endsWith('.ts')
+          ? 'TypeScript config files require tsx or ts-node. Use .mjs instead, or run via `npx tsx`.'
+          : 'Check that the config file is valid ESM.',
+      );
+    }
+  }
+
+  for (const name of CONFIG_NAMES) {
+    const resolved = path.resolve(cwd, name);
+    if (!existsSync(resolved)) continue;
+    try {
+      const mod = await import(pathToFileURL(resolved).href);
       const config = (mod.default ?? mod) as OagenConfig;
       return config;
     } catch (err) {
