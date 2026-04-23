@@ -23,11 +23,11 @@ The baseline snapshot is committed to the repository and updated on each release
 
 ### CLI Commands
 
-| Command | Purpose |
-|---------|---------|
+| Command                | Purpose                                        |
+| ---------------------- | ---------------------------------------------- |
 | `oagen compat-extract` | Extract a snapshot from a live SDK → JSON file |
-| `oagen compat-diff` | Diff two snapshot files → classified report |
-| `oagen compat-summary` | Format a report → markdown PR comment |
+| `oagen compat-diff`    | Diff two snapshot files → classified report    |
+| `oagen compat-summary` | Format a report → markdown PR comment          |
 
 See [CLI Reference](../cli.md) for full argument tables.
 

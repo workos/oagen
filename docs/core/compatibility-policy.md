@@ -7,10 +7,10 @@ Human-authored compatibility policy lives in the `compat` section of `oagen.conf
 ```ts
 export default {
   compat: {
-    failOn: 'breaking',
-    reportPath: 'compat-report.json',
+    failOn: "breaking",
+    reportPath: "compat-report.json",
     explain: true,
-    baselinePath: 'sdk-surface.json',
+    baselinePath: "sdk-surface.json",
     languagePolicy: {
       php: {
         // optional sparse overrides
@@ -25,30 +25,30 @@ export default {
 
 ### Fields
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `failOn` | `'none' \| 'breaking' \| 'soft-risk'` | `'breaking'` | Severity threshold for `verify` failure |
-| `reportPath` | `string` | — | Path to write machine-readable JSON report |
-| `explain` | `boolean` | `false` | Include provenance explanations in output |
-| `baselinePath` | `string` | — | Path to baseline compatibility snapshot |
-| `languagePolicy` | `Record<LanguageId, Partial<CompatPolicyHints>>` | — | Per-language policy overrides |
-| `allow` | `CompatApproval[]` | — | Intentional break approvals |
+| Field            | Type                                             | Default      | Description                                |
+| ---------------- | ------------------------------------------------ | ------------ | ------------------------------------------ |
+| `failOn`         | `'none' \| 'breaking' \| 'soft-risk'`            | `'breaking'` | Severity threshold for `verify` failure    |
+| `reportPath`     | `string`                                         | —            | Path to write machine-readable JSON report |
+| `explain`        | `boolean`                                        | `false`      | Include provenance explanations in output  |
+| `baselinePath`   | `string`                                         | —            | Path to baseline compatibility snapshot    |
+| `languagePolicy` | `Record<LanguageId, Partial<CompatPolicyHints>>` | —            | Per-language policy overrides              |
+| `allow`          | `CompatApproval[]`                               | —            | Intentional break approvals                |
 
 ## Language Policy
 
 Language policy determines which aspects of the public API are breaking. Built-in defaults capture language semantics:
 
 | Language | Caller Uses Param Names | Constructor Order | Param Names Public | Overloads Public | Arity Public |
-|----------|------------------------|-------------------|-------------------|-----------------|-------------|
-| PHP | yes | yes | yes | no | no |
-| Python | yes | yes | yes | no | no |
-| Ruby | yes | yes | yes | no | no |
-| Go | no | yes | no | no | yes |
-| Kotlin | yes | no | yes | yes | no |
-| .NET | yes | no | yes | yes | no |
-| Elixir | yes | no | yes | no | yes |
-| Rust | no | yes | no | no | yes |
-| Node | no | no | no | no | no |
+| -------- | ----------------------- | ----------------- | ------------------ | ---------------- | ------------ |
+| PHP      | yes                     | yes               | yes                | no               | no           |
+| Python   | yes                     | yes               | yes                | no               | no           |
+| Ruby     | yes                     | yes               | yes                | no               | no           |
+| Go       | no                      | yes               | no                 | no               | yes          |
+| Kotlin   | yes                     | no                | yes                | yes              | no           |
+| .NET     | yes                     | no                | yes                | yes              | no           |
+| Elixir   | yes                     | no                | yes                | no               | yes          |
+| Rust     | no                      | yes               | no                 | no               | yes          |
+| Node     | no                      | no                | no                 | no               | no           |
 
 ### Overriding Language Defaults
 
@@ -73,20 +73,21 @@ Approvals are concept-first: one approval covers one conceptual change across af
 
 ```ts
 interface CompatApproval {
-  symbol: string;          // Fully-qualified symbol
-  category: string;        // Change category (e.g., 'parameter_renamed')
-  appliesTo?: string[];    // Language IDs, or omit for all
-  match?: {                // Optional narrowing
+  symbol: string; // Fully-qualified symbol
+  category: string; // Change category (e.g., 'parameter_renamed')
+  appliesTo?: string[]; // Language IDs, or omit for all
+  match?: {
+    // Optional narrowing
     parameter?: string;
     member?: string;
     oldName?: string;
     newName?: string;
   };
-  allowedReleaseLevel?: 'major' | 'minor' | 'patch';
-  reason: string;          // Required explanation
-  issue?: string;          // Issue tracker reference
+  allowedReleaseLevel?: "major" | "minor" | "patch";
+  reason: string; // Required explanation
+  issue?: string; // Issue tracker reference
   expiresAfterVersion?: string;
-  approved?: boolean;      // Whether this approval is active (default: true)
+  approved?: boolean; // Whether this approval is active (default: true)
 }
 ```
 
@@ -130,23 +131,25 @@ compat: {
 Approvals must be narrow:
 
 **Good:**
+
 - One symbol, one category, one conceptual change
 - Optionally one parameter/member
 - Optionally a bounded set of affected languages
 
 **Bad (rejected by validation):**
+
 - Wildcard symbols (`*`, `Authorization.*`)
 - Empty reason
 - Missing symbol or category
 
 ### Anti-patterns
 
-| Pattern | Problem |
-|---------|---------|
+| Pattern                            | Problem                            |
+| ---------------------------------- | ---------------------------------- |
 | Approve all breaks in one language | Too broad — masks real regressions |
-| Approve all parameter changes | Hides future unintentional breaks |
-| No reason field | No audit trail |
-| No issue reference | Can't trace back to decisions |
+| Approve all parameter changes      | Hides future unintentional breaks  |
+| No reason field                    | No audit trail                     |
+| No issue reference                 | Can't trace back to decisions      |
 
 ## Severity Determination
 
@@ -160,8 +163,8 @@ The default severity for a category comes from the classification engine. Langua
 
 The `failOn` level determines which unapproved changes cause `oagen verify` to fail:
 
-| Level | Fails on |
-|-------|----------|
-| `none` | Never fails for compat |
-| `breaking` | Unapproved breaking changes |
+| Level       | Fails on                                 |
+| ----------- | ---------------------------------------- |
+| `none`      | Never fails for compat                   |
+| `breaking`  | Unapproved breaking changes              |
 | `soft-risk` | Unapproved breaking OR soft-risk changes |

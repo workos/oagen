@@ -102,7 +102,10 @@ Plugin bundle export. The consumer project imports this to get all emitters, ext
 
 ```ts
 import type { OagenConfig } from "@workos/oagen";
-export const plugin: Pick<OagenConfig, "emitters" | "extractors" | "smokeRunners"> = {
+export const plugin: Pick<
+  OagenConfig,
+  "emitters" | "extractors" | "smokeRunners"
+> = {
   emitters: [],
   extractors: [],
   smokeRunners: {},

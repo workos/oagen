@@ -61,11 +61,11 @@ oagen compat-extract --sdk-path ./existing-sdk --lang node --output .
 oagen compat-extract --sdk-path ./existing-sdk --lang php --output ./sdk --spec openapi.yml
 ```
 
-| Argument            | Required | Default                 | Description                                                              |
-| ------------------- | -------- | ----------------------- | ------------------------------------------------------------------------ |
-| `--sdk-path <path>` | Yes      |                         | Path to the live SDK                                                     |
-| `--lang <language>` | Yes      |                         | Target language                                                          |
-| `--output <dir>`    | Yes      |                         | Directory to write `.oagen-compat-snapshot.json` into                    |
+| Argument            | Required | Default                 | Description                                                                        |
+| ------------------- | -------- | ----------------------- | ---------------------------------------------------------------------------------- |
+| `--sdk-path <path>` | Yes      |                         | Path to the live SDK                                                               |
+| `--lang <language>` | Yes      |                         | Target language                                                                    |
+| `--output <dir>`    | Yes      |                         | Directory to write `.oagen-compat-snapshot.json` into                              |
 | `--spec <path>`     | No       | `OPENAPI_SPEC_PATH` env | Path to OpenAPI spec — enriches symbols with `operationId`, `route`, and `specSha` |
 
 Always writes `.oagen-compat-snapshot.json` in the specified directory. The snapshot file is meant to be committed to the repository and updated on each release.
@@ -88,13 +88,13 @@ oagen compat-diff \
   --fail-on breaking
 ```
 
-| Argument              | Required | Default      | Description                                     |
-| --------------------- | -------- | ------------ | ----------------------------------------------- |
-| `--baseline <path>`   | Yes      |              | Path to the baseline compat snapshot JSON        |
-| `--candidate <path>`  | Yes      |              | Path to the candidate compat snapshot JSON       |
-| `--output <path>`     | No       |              | Write machine-readable JSON report to this path  |
-| `--fail-on <level>`   | No       | `breaking`   | Fail threshold: `none`, `breaking`, or `soft-risk` |
-| `--explain`           | No       | `false`      | Include provenance explanations in terminal output |
+| Argument             | Required | Default    | Description                                        |
+| -------------------- | -------- | ---------- | -------------------------------------------------- |
+| `--baseline <path>`  | Yes      |            | Path to the baseline compat snapshot JSON          |
+| `--candidate <path>` | Yes      |            | Path to the candidate compat snapshot JSON         |
+| `--output <path>`    | No       |            | Write machine-readable JSON report to this path    |
+| `--fail-on <level>`  | No       | `breaking` | Fail threshold: `none`, `breaking`, or `soft-risk` |
+| `--explain`          | No       | `false`    | Include provenance explanations in terminal output |
 
 **Exit codes:** 0 = no changes exceed threshold, 1 = changes exceed threshold.
 
@@ -113,18 +113,20 @@ oagen compat-summary --report php.json --report python.json --report go.json
 oagen compat-summary --report compat-report.json --output summary.md
 ```
 
-| Argument              | Required | Default | Description                                                            |
-| --------------------- | -------- | ------- | ---------------------------------------------------------------------- |
-| `--report <path...>`  | Yes      |         | Path(s) to compat report JSON(s) — pass multiple for cross-language rollup |
-| `--output <path>`     | No       | stdout  | Write markdown to this file instead of stdout                           |
+| Argument             | Required | Default | Description                                                                |
+| -------------------- | -------- | ------- | -------------------------------------------------------------------------- |
+| `--report <path...>` | Yes      |         | Path(s) to compat report JSON(s) — pass multiple for cross-language rollup |
+| `--output <path>`    | No       | stdout  | Write markdown to this file instead of stdout                              |
 
 **Single report** output includes:
+
 - Status header (pass/warning/fail)
 - Summary table with breaking, soft-risk, and additive counts
 - Breaking changes table (always visible)
 - Soft-risk and additive changes in collapsible `<details>` sections
 
 **Multiple reports** produce a cross-language rollup:
+
 - Per-language summary table (breaking/soft-risk/additive per language)
 - Conceptual changes table showing per-language severity for each change
 - Same conceptual change across languages is shown as one row, not N separate rows

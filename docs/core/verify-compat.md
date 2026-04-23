@@ -6,22 +6,22 @@
 
 ### Existing Flags (Compat-Related)
 
-| Flag | Description |
-|------|-------------|
-| `--api-surface <path>` | Baseline API surface JSON — enables compat verification |
-| `--spec <path>` | OpenAPI spec for spec-scoped comparison |
-| `--scope <mode>` | `full` or `spec-only` (default: `spec-only` when `--spec` provided) |
-| `--max-retries <n>` | Max overlay patch iterations (default: 3) |
-| `--diagnostics` | Write `verify-diagnostics.json` |
+| Flag                   | Description                                                         |
+| ---------------------- | ------------------------------------------------------------------- |
+| `--api-surface <path>` | Baseline API surface JSON — enables compat verification             |
+| `--spec <path>`        | OpenAPI spec for spec-scoped comparison                             |
+| `--scope <mode>`       | `full` or `spec-only` (default: `spec-only` when `--spec` provided) |
+| `--max-retries <n>`    | Max overlay patch iterations (default: 3)                           |
+| `--diagnostics`        | Write `verify-diagnostics.json`                                     |
 
 ### New Flags (Classified Compat)
 
-| Flag | Description |
-|------|-------------|
-| `--compat-report <path>` | Write machine-readable classified compat report to this path |
-| `--compat-fail-on <level>` | Override fail threshold: `none`, `breaking`, or `soft-risk` |
-| `--compat-baseline <path>` | Path to baseline compatibility snapshot |
-| `--compat-explain` | Include provenance explanations in terminal output |
+| Flag                       | Description                                                  |
+| -------------------------- | ------------------------------------------------------------ |
+| `--compat-report <path>`   | Write machine-readable classified compat report to this path |
+| `--compat-fail-on <level>` | Override fail threshold: `none`, `breaking`, or `soft-risk`  |
+| `--compat-baseline <path>` | Path to baseline compatibility snapshot                      |
+| `--compat-explain`         | Include provenance explanations in terminal output           |
 
 CLI flags take precedence over `oagen.config.ts` settings.
 
@@ -79,11 +79,11 @@ The existing `verify-diagnostics.json` continues to include legacy compat data (
 
 The verify command fails when unapproved changes meet or exceed the fail threshold:
 
-| `--compat-fail-on` | Fails on |
-|---------------------|----------|
-| `none` | Never fails for compat changes |
-| `breaking` | Unapproved breaking changes (default) |
-| `soft-risk` | Unapproved breaking OR soft-risk changes |
+| `--compat-fail-on` | Fails on                                 |
+| ------------------ | ---------------------------------------- |
+| `none`             | Never fails for compat changes           |
+| `breaking`         | Unapproved breaking changes (default)    |
+| `soft-risk`        | Unapproved breaking OR soft-risk changes |
 
 Approved changes (matched by `compat.allow` in config) are excluded from the failure threshold.
 
@@ -205,11 +205,11 @@ The `oagen verify` command runs compat checks as part of its verification pipeli
 
 ### Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | All checks passed |
-| 1 | Compat violations or smoke test findings |
-| 2 | SDK compile errors |
+| Code | Meaning                                  |
+| ---- | ---------------------------------------- |
+| 0    | All checks passed                        |
+| 1    | Compat violations or smoke test findings |
+| 2    | SDK compile errors                       |
 
 ## How to Read and Act on Findings
 

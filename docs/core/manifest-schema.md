@@ -22,28 +22,25 @@
   "emitterVersion": "0.7.0",
   "configSha": "sha256:789abc...",
   "compatSchemaVersion": "1",
-  "files": [
-    "lib/Resource/CreateUser.php",
-    "lib/Service/UserManagement.php"
-  ]
+  "files": ["lib/Resource/CreateUser.php", "lib/Service/UserManagement.php"]
 }
 ```
 
 ## Field Semantics
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `version` | `number` | yes | Manifest schema version (currently `2`) |
-| `language` | `string` | yes | Emitter target language (e.g., `"php"`) |
-| `sdkName` | `string` | no | Human-readable SDK identity (e.g., `"workos-php"`) |
-| `generatedAt` | `string` | yes | ISO-8601 timestamp of the generation run |
-| `specSha` | `string` | no | SHA-256 hash of the source OpenAPI spec |
-| `specPath` | `string` | no | Path or reference to the source spec |
-| `emitterSha` | `string` | no | Git SHA of the emitter code used |
-| `emitterVersion` | `string` | no | Emitter version string |
-| `configSha` | `string` | no | SHA-256 hash of the effective `oagen.config.ts` |
-| `compatSchemaVersion` | `string` | no | Version of the compat snapshot schema |
-| `files` | `string[]` | yes | Sorted list of generated file paths (relative to manifest directory) |
+| Field                 | Type       | Required | Description                                                          |
+| --------------------- | ---------- | -------- | -------------------------------------------------------------------- |
+| `version`             | `number`   | yes      | Manifest schema version (currently `2`)                              |
+| `language`            | `string`   | yes      | Emitter target language (e.g., `"php"`)                              |
+| `sdkName`             | `string`   | no       | Human-readable SDK identity (e.g., `"workos-php"`)                   |
+| `generatedAt`         | `string`   | yes      | ISO-8601 timestamp of the generation run                             |
+| `specSha`             | `string`   | no       | SHA-256 hash of the source OpenAPI spec                              |
+| `specPath`            | `string`   | no       | Path or reference to the source spec                                 |
+| `emitterSha`          | `string`   | no       | Git SHA of the emitter code used                                     |
+| `emitterVersion`      | `string`   | no       | Emitter version string                                               |
+| `configSha`           | `string`   | no       | SHA-256 hash of the effective `oagen.config.ts`                      |
+| `compatSchemaVersion` | `string`   | no       | Version of the compat snapshot schema                                |
+| `files`               | `string[]` | yes      | Sorted list of generated file paths (relative to manifest directory) |
 
 ## Generated Ownership
 
