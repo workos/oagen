@@ -178,6 +178,16 @@ interface Extractor {
 
 Both `extract()` and `extractSnapshot()` are available. Use `extractSnapshot()` for the compat pipeline. Use `extract()` when you need the raw `ApiSurface` for overlay or legacy workflows.
 
+### Spec Enrichment
+
+When `oagen compat-extract` receives `--spec`, it enriches callable symbols with spec-derived metadata:
+
+- **`operationId`** — the operation name from the spec, matched by service + method name
+- **`route`** — the HTTP method and path (e.g., `{ method: "POST", path: "/users" }`)
+- **`source.specSha`** — SHA-256 of the spec file
+
+This enrichment happens after extraction, as a post-step in the CLI. Extractors themselves don't need spec awareness.
+
 ### Bridge: ApiSurface → CompatSnapshot
 
 The `apiSurfaceToSnapshot()` function converts an `ApiSurface` to a `CompatSnapshot`, applying language-appropriate passing styles and sensitivity flags. This is what `extractSnapshot()` uses internally.

@@ -1,15 +1,24 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import type { CompatReport, CompatReportChange } from '../compat/report.js';
+import type { CompatDiffResult } from '../compat/differ.js';
+import type { LanguageId } from '../compat/ir.js';
+import type { CompatChangeSeverity } from '../compat/config.js';
+import { buildConceptualRollup, highestSeverity, summarizeConceptualChanges } from '../compat/concepts.js';
 
 /**
- * Format a compat report as a markdown PR comment.
+ * Format compat report(s) as a markdown PR comment.
  *
- * Output is designed to be piped to `gh pr comment`:
- *   oagen compat-summary --report report.json | gh pr comment --body-file -
+ * Single report:
+ *   oagen compat-summary --report node-report.json | gh pr comment --body-file -
+ *
+ * Multiple reports (cross-language rollup):
+ *   oagen compat-summary --report php.json --report python.json --report go.json
  */
-export async function compatSummaryCommand(opts: { report: string; output?: string }): Promise<void> {
-  const data = JSON.parse(readFileSync(opts.report, 'utf-8')) as CompatReport;
-  const md = formatMarkdownSummary(data);
+export async function compatSummaryCommand(opts: { report: string | string[]; output?: string }): Promise<void> {
+  const paths = Array.isArray(opts.report) ? opts.report : [opts.report];
+  const reports = paths.map((p) => JSON.parse(readFileSync(p, 'utf-8')) as CompatReport);
+
+  const md = reports.length === 1 ? formatSingleReport(reports[0]) : formatCrossLanguageRollup(reports);
 
   if (opts.output) {
     writeFileSync(opts.output, md);
@@ -19,12 +28,15 @@ export async function compatSummaryCommand(opts: { report: string; output?: stri
   }
 }
 
-function formatMarkdownSummary(report: CompatReport): string {
+// ---------------------------------------------------------------------------
+// Single-language report
+// ---------------------------------------------------------------------------
+
+function formatSingleReport(report: CompatReport): string {
   const lines: string[] = [];
   const { breaking, softRisk, additive } = report.summary;
   const total = breaking + softRisk + additive;
 
-  // Header with status
   if (breaking > 0) {
     lines.push(`## :x: Compat check failed — ${report.language}`);
   } else if (softRisk > 0) {
@@ -34,10 +46,8 @@ function formatMarkdownSummary(report: CompatReport): string {
   }
 
   lines.push('');
-
-  // Summary counts
-  lines.push(`| Severity | Count |`);
-  lines.push(`| --- | --- |`);
+  lines.push('| Severity | Count |');
+  lines.push('| --- | --- |');
   lines.push(`| Breaking | ${breaking} |`);
   lines.push(`| Soft-risk | ${softRisk} |`);
   lines.push(`| Additive | ${additive} |`);
@@ -49,7 +59,6 @@ function formatMarkdownSummary(report: CompatReport): string {
     return lines.join('\n') + '\n';
   }
 
-  // Breaking changes (always shown)
   const breakingChanges = report.changes.filter((c) => c.severity === 'breaking');
   if (breakingChanges.length > 0) {
     lines.push('');
@@ -58,7 +67,6 @@ function formatMarkdownSummary(report: CompatReport): string {
     lines.push(formatChangesTable(breakingChanges));
   }
 
-  // Soft-risk changes
   const softRiskChanges = report.changes.filter((c) => c.severity === 'soft-risk');
   if (softRiskChanges.length > 0) {
     lines.push('');
@@ -69,7 +77,6 @@ function formatMarkdownSummary(report: CompatReport): string {
     lines.push('</details>');
   }
 
-  // Additive changes (collapsed)
   const additiveChanges = report.changes.filter((c) => c.severity === 'additive');
   if (additiveChanges.length > 0) {
     lines.push('');
@@ -82,6 +89,112 @@ function formatMarkdownSummary(report: CompatReport): string {
 
   return lines.join('\n') + '\n';
 }
+
+// ---------------------------------------------------------------------------
+// Cross-language rollup
+// ---------------------------------------------------------------------------
+
+function formatCrossLanguageRollup(reports: CompatReport[]): string {
+  const languages = reports.map((r) => r.language);
+
+  // Convert reports to the shape buildConceptualRollup expects
+  const perLanguage = reports.map((r) => ({
+    diff: { changes: r.changes, summary: r.summary } as CompatDiffResult,
+    language: r.language as LanguageId,
+  }));
+  const rollup = buildConceptualRollup(perLanguage);
+  const summary = summarizeConceptualChanges(rollup);
+
+  const lines: string[] = [];
+
+  // Header
+  if (summary.breaking > 0) {
+    lines.push(`## :x: Compat check failed — ${summary.breaking} breaking across ${languages.length} languages`);
+  } else if (summary.softRisk > 0) {
+    lines.push(
+      `## :warning: Compat check has warnings — ${summary.softRisk} soft-risk across ${languages.length} languages`,
+    );
+  } else {
+    lines.push(`## :white_check_mark: Compat check passed — ${languages.length} languages`);
+  }
+
+  lines.push('');
+
+  // Per-language summary table
+  lines.push('| Language | Breaking | Soft-risk | Additive |');
+  lines.push('| --- | --- | --- | --- |');
+  for (const r of reports) {
+    lines.push(`| ${r.language} | ${r.summary.breaking} | ${r.summary.softRisk} | ${r.summary.additive} |`);
+  }
+
+  if (rollup.conceptualChanges.length === 0) {
+    lines.push('');
+    lines.push('No compatibility changes detected.');
+    return lines.join('\n') + '\n';
+  }
+
+  // Conceptual changes table with per-language severity
+  const breakingConcepts = rollup.conceptualChanges.filter((c) => highestSeverity(c) === 'breaking');
+  if (breakingConcepts.length > 0) {
+    lines.push('');
+    lines.push('### Breaking changes');
+    lines.push('');
+    lines.push(formatConceptualTable(breakingConcepts, languages));
+  }
+
+  const softRiskConcepts = rollup.conceptualChanges.filter((c) => highestSeverity(c) === 'soft-risk');
+  if (softRiskConcepts.length > 0) {
+    lines.push('');
+    lines.push('<details>');
+    lines.push(`<summary>Soft-risk changes (${softRiskConcepts.length})</summary>`);
+    lines.push('');
+    lines.push(formatConceptualTable(softRiskConcepts, languages));
+    lines.push('</details>');
+  }
+
+  const additiveConcepts = rollup.conceptualChanges.filter((c) => highestSeverity(c) === 'additive');
+  if (additiveConcepts.length > 0) {
+    lines.push('');
+    lines.push('<details>');
+    lines.push(`<summary>Additive changes (${additiveConcepts.length})</summary>`);
+    lines.push('');
+    lines.push(formatConceptualTable(additiveConcepts, languages));
+    lines.push('</details>');
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+function formatConceptualTable(
+  concepts: Array<{ symbol: string; category: string; impact: Partial<Record<string, CompatChangeSeverity>> }>,
+  languages: string[],
+): string {
+  const lines: string[] = [];
+  const langHeaders = languages.map((l) => l).join(' | ');
+  lines.push(`| Symbol | Category | ${langHeaders} |`);
+  lines.push(`| --- | --- | ${languages.map(() => '---').join(' | ')} |`);
+  for (const c of concepts) {
+    const severities = languages.map((l) => severityIcon(c.impact[l])).join(' | ');
+    lines.push(`| \`${c.symbol}\` | \`${c.category}\` | ${severities} |`);
+  }
+  return lines.join('\n');
+}
+
+function severityIcon(severity: CompatChangeSeverity | undefined): string {
+  if (!severity) return '—';
+  switch (severity) {
+    case 'breaking':
+      return ':x: breaking';
+    case 'soft-risk':
+      return ':warning: soft-risk';
+    case 'additive':
+      return ':white_check_mark: additive';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 function formatChangesTable(changes: CompatReportChange[]): string {
   const lines: string[] = [];

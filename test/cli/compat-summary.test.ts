@@ -152,4 +152,123 @@ describe('compatSummaryCommand', () => {
     expect(output).toContain('| Additive | 3 |');
     expect(output).toContain('| **Total** | **6** |');
   });
+
+  // -----------------------------------------------------------------------
+  // Cross-language rollup (multiple --report)
+  // -----------------------------------------------------------------------
+
+  it('produces cross-language rollup from multiple reports', async () => {
+    const phpReport = makeReport({
+      language: 'php',
+      summary: { breaking: 1, softRisk: 0, additive: 0 },
+      changes: [
+        {
+          severity: 'breaking',
+          category: 'parameter_renamed',
+          symbol: 'Auth.check',
+          conceptualChangeId: 'chg_param_rename_auth_check',
+          provenance: 'unknown',
+          old: { parameter: 'resourceId' },
+          new: { parameter: 'resourceTarget' },
+          message: 'Parameter renamed',
+        },
+      ],
+    });
+    const goReport = makeReport({
+      language: 'go',
+      summary: { breaking: 0, softRisk: 1, additive: 0 },
+      changes: [
+        {
+          severity: 'soft-risk',
+          category: 'parameter_renamed',
+          symbol: 'Auth.check',
+          conceptualChangeId: 'chg_param_rename_auth_check',
+          provenance: 'unknown',
+          old: { parameter: 'resourceId' },
+          new: { parameter: 'resourceTarget' },
+          message: 'Parameter renamed',
+        },
+      ],
+    });
+
+    const phpPath = resolve(tmpDir, 'php.json');
+    const goPath = resolve(tmpDir, 'go.json');
+    writeFileSync(phpPath, JSON.stringify(phpReport));
+    writeFileSync(goPath, JSON.stringify(goReport));
+
+    await compatSummaryCommand({ report: [phpPath, goPath] });
+
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
+    // Should have cross-language header
+    expect(output).toContain(':x:');
+    expect(output).toContain('2 languages');
+    // Per-language summary table
+    expect(output).toContain('| php |');
+    expect(output).toContain('| go |');
+    // Conceptual table with per-language severity
+    expect(output).toContain('`Auth.check`');
+    expect(output).toContain(':x: breaking');
+    expect(output).toContain(':warning: soft-risk');
+  });
+
+  it('groups same conceptual change across languages', async () => {
+    const phpReport = makeReport({
+      language: 'php',
+      summary: { breaking: 1, softRisk: 0, additive: 0 },
+      changes: [
+        {
+          severity: 'breaking',
+          category: 'parameter_renamed',
+          symbol: 'Auth.check',
+          conceptualChangeId: 'chg_1',
+          provenance: 'unknown',
+          old: { parameter: 'resourceId' },
+          new: { parameter: 'resourceTarget' },
+        },
+      ],
+    });
+    const pythonReport = makeReport({
+      language: 'python',
+      summary: { breaking: 1, softRisk: 0, additive: 0 },
+      changes: [
+        {
+          severity: 'breaking',
+          category: 'parameter_renamed',
+          symbol: 'Auth.check',
+          conceptualChangeId: 'chg_1',
+          provenance: 'unknown',
+          old: { parameter: 'resourceId' },
+          new: { parameter: 'resourceTarget' },
+        },
+      ],
+    });
+
+    const phpPath = resolve(tmpDir, 'php.json');
+    const pyPath = resolve(tmpDir, 'py.json');
+    writeFileSync(phpPath, JSON.stringify(phpReport));
+    writeFileSync(pyPath, JSON.stringify(pythonReport));
+
+    await compatSummaryCommand({ report: [phpPath, pyPath] });
+
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
+    // Should show one row for Auth.check, not two
+    const authCheckMatches = output.match(/`Auth\.check`/g);
+    expect(authCheckMatches).toHaveLength(1);
+  });
+
+  it('shows passing rollup when all reports are clean', async () => {
+    const phpReport = makeReport({ language: 'php' });
+    const goReport = makeReport({ language: 'go' });
+
+    const phpPath = resolve(tmpDir, 'php.json');
+    const goPath = resolve(tmpDir, 'go.json');
+    writeFileSync(phpPath, JSON.stringify(phpReport));
+    writeFileSync(goPath, JSON.stringify(goReport));
+
+    await compatSummaryCommand({ report: [phpPath, goPath] });
+
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
+    expect(output).toContain(':white_check_mark:');
+    expect(output).toContain('No compatibility changes detected');
+  });
 });

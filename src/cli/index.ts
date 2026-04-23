@@ -122,7 +122,9 @@ program
   .requiredOption('--sdk-path <path>', 'Path to the live SDK')
   .requiredOption('--lang <language>', 'Target language')
   .requiredOption('--output <dir>', 'Directory to write .oagen-compat-snapshot.json into')
+  .option('--spec <path>', 'Path to OpenAPI spec — enriches symbols with operationId, route, and specSha')
   .action((opts) => {
+    opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     compatExtractCommand(opts).catch(handleError);
   });
 
@@ -140,8 +142,8 @@ program
 
 program
   .command('compat-summary')
-  .description('Format a compat report as a markdown PR comment')
-  .requiredOption('--report <path>', 'Path to the compat report JSON (from compat-diff --output)')
+  .description('Format compat report(s) as a markdown PR comment')
+  .requiredOption('--report <path...>', 'Path(s) to compat report JSON(s) — pass multiple for cross-language rollup')
   .option('--output <path>', 'Write markdown to this file instead of stdout')
   .action((opts) => {
     compatSummaryCommand(opts).catch(handleError);

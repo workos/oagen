@@ -102,34 +102,63 @@ on: [pull_request]
 jobs:
   compat:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        lang: [node, php, python, ruby, go, kotlin, dotnet, elixir, rust]
     steps:
       - uses: actions/checkout@v4
 
       - name: Generate candidate SDK
-        run: oagen generate --spec openapi.yml --lang node --output ./generated
+        run: oagen generate --spec openapi.yml --lang ${{ matrix.lang }} --output ./generated
 
       - name: Extract candidate snapshot
         run: |
           oagen compat-extract \
             --sdk-path ./generated \
-            --lang node \
-            --output /tmp
+            --lang ${{ matrix.lang }} \
+            --output /tmp \
+            --spec openapi.yml
 
       - name: Diff against baseline
         run: |
           oagen compat-diff \
             --baseline .oagen-compat-snapshot.json \
             --candidate /tmp/.oagen-compat-snapshot.json \
-            --output compat-report.json \
+            --output compat-report-${{ matrix.lang }}.json \
             --fail-on breaking
 
-      - name: Post PR summary
+      - uses: actions/upload-artifact@v4
         if: always()
+        with:
+          name: compat-report-${{ matrix.lang }}
+          path: compat-report-${{ matrix.lang }}.json
+
+  summary:
+    needs: compat
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: compat-report-*
+          merge-multiple: true
+
+      - name: Post cross-language PR summary
         run: |
-          oagen compat-summary --report compat-report.json \
+          oagen compat-summary \
+            --report compat-report-*.json \
             | gh pr comment ${{ github.event.pull_request.number }} --body-file -
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+For a single-language project, simplify to one job without the matrix:
+
+```bash
+oagen compat-extract --sdk-path ./generated --lang node --output /tmp --spec openapi.yml
+oagen compat-diff --baseline .oagen-compat-snapshot.json --candidate /tmp/.oagen-compat-snapshot.json --output report.json --fail-on breaking
+oagen compat-summary --report report.json | gh pr comment --body-file -
 ```
 
 #### Baseline Management
