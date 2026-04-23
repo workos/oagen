@@ -52,6 +52,73 @@ oagen extract --sdk-path ./existing-sdk --lang ruby --output my-surface.json
 | `--lang <language>` | Yes      |                           | Target language                                                                                                 |
 | `--output <path>`   | No       | `sdk-{lang}-surface.json` | Output file path (recommend writing to your output dir, e.g. `./sdk/sdk-ruby-surface.json`, and gitignoring it) |
 
+## `oagen compat-extract`
+
+Extract a compat snapshot from a live SDK and write it to a JSON file. The snapshot is a machine-readable record of the SDK's public API surface, used as input to `compat-diff`.
+
+```bash
+oagen compat-extract --sdk-path ./existing-sdk --lang node --output .oagen-compat-snapshot.json
+oagen compat-extract --sdk-path ./existing-sdk --lang php --output .oagen-compat-snapshot.json --sdk-name workos-php
+```
+
+| Argument            | Required | Default | Description                             |
+| ------------------- | -------- | ------- | --------------------------------------- |
+| `--sdk-path <path>` | Yes      |         | Path to the live SDK                    |
+| `--lang <language>` | Yes      |         | Target language                         |
+| `--output <path>`   | Yes      |         | Output file path for the snapshot JSON  |
+| `--sdk-name <name>` | No       |         | SDK name to embed in the snapshot       |
+
+The snapshot file is meant to be committed to the repository and updated on each release.
+
+## `oagen compat-diff`
+
+Diff two compat snapshot files and produce a classified change report. No extraction or spec required — pure file-in, report-out.
+
+```bash
+# Basic diff with terminal output
+oagen compat-diff --baseline .oagen-compat-snapshot.json --candidate /tmp/candidate.json
+
+# With machine-readable report and failure threshold
+oagen compat-diff \
+  --baseline .oagen-compat-snapshot.json \
+  --candidate /tmp/candidate.json \
+  --output compat-report.json \
+  --fail-on breaking
+```
+
+| Argument              | Required | Default      | Description                                     |
+| --------------------- | -------- | ------------ | ----------------------------------------------- |
+| `--baseline <path>`   | Yes      |              | Path to the baseline compat snapshot JSON        |
+| `--candidate <path>`  | Yes      |              | Path to the candidate compat snapshot JSON       |
+| `--output <path>`     | No       |              | Write machine-readable JSON report to this path  |
+| `--fail-on <level>`   | No       | `breaking`   | Fail threshold: `none`, `breaking`, or `soft-risk` |
+| `--explain`           | No       | `false`      | Include provenance explanations in terminal output |
+
+**Exit codes:** 0 = no changes exceed threshold, 1 = changes exceed threshold.
+
+## `oagen compat-summary`
+
+Format a compat report as a markdown PR comment. Reads the JSON report produced by `compat-diff --output` and outputs markdown to stdout or a file.
+
+```bash
+# Pipe directly to gh pr comment
+oagen compat-summary --report compat-report.json | gh pr comment --body-file -
+
+# Or write to a file
+oagen compat-summary --report compat-report.json --output summary.md
+```
+
+| Argument           | Required | Default | Description                                        |
+| ------------------ | -------- | ------- | -------------------------------------------------- |
+| `--report <path>`  | Yes      |         | Path to the compat report JSON (from `compat-diff`) |
+| `--output <path>`  | No       | stdout  | Write markdown to this file instead of stdout       |
+
+The output includes:
+- Status header (pass/warning/fail)
+- Summary table with breaking, soft-risk, and additive counts
+- Breaking changes table (always visible)
+- Soft-risk and additive changes in collapsible `<details>` sections
+
 ## `oagen verify`
 
 Verify an already-generated SDK — run smoke tests and optional compat checks. Use after `oagen generate`.

@@ -18,7 +18,12 @@ export interface PythonField {
 
 export interface PythonMethod {
   name: string;
-  params: { name: string; type: string; optional: boolean }[];
+  params: {
+    name: string;
+    type: string;
+    optional: boolean;
+    passingStyle?: 'positional' | 'keyword' | 'keyword_or_positional';
+  }[];
   returnType: string;
   isAsync: boolean;
   isProperty: boolean;
@@ -268,10 +273,21 @@ function extractClassMethods(bodyNode: SyntaxNode): PythonMethod[] {
 function extractFunctionParams(
   paramsNode: SyntaxNode | null,
   skipFirst: boolean,
-): { name: string; type: string; optional: boolean }[] {
+): {
+  name: string;
+  type: string;
+  optional: boolean;
+  passingStyle?: 'positional' | 'keyword' | 'keyword_or_positional';
+}[] {
   if (!paramsNode) return [];
-  const params: { name: string; type: string; optional: boolean }[] = [];
+  const params: {
+    name: string;
+    type: string;
+    optional: boolean;
+    passingStyle?: 'positional' | 'keyword' | 'keyword_or_positional';
+  }[] = [];
   let skippedFirst = false;
+  let seenStarMarker = false;
 
   for (const child of paramsNode.namedChildren) {
     // Skip `self` or `cls` parameter
@@ -285,15 +301,20 @@ function extractFunctionParams(
     }
 
     // `*` separator in parameters (keyword-only marker)
-    if (child.text === '*') continue;
+    if (child.text === '*') {
+      seenStarMarker = true;
+      continue;
+    }
 
-    // *args — variadic positional
+    // *args — variadic positional (also marks subsequent params as keyword-only)
     if (child.type === 'list_splat_pattern') {
+      seenStarMarker = true;
       const nameNode = child.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
       params.push({
         name: nameNode ? `*${nameNode.text}` : '*args',
         type: '',
         optional: true,
+        passingStyle: 'positional',
       });
       continue;
     }
@@ -305,9 +326,12 @@ function extractFunctionParams(
         name: nameNode ? `**${nameNode.text}` : '**kwargs',
         type: '',
         optional: true,
+        passingStyle: 'keyword',
       });
       continue;
     }
+
+    const passingStyle = seenStarMarker ? ('keyword' as const) : ('keyword_or_positional' as const);
 
     if (child.type === 'typed_parameter') {
       const nameNode = child.namedChildren.find((c) => c.type === 'identifier');
@@ -317,6 +341,7 @@ function extractFunctionParams(
           name: nameNode.text,
           type: typeNode ? typeNode.text : '',
           optional: false,
+          passingStyle,
         });
       }
     } else if (child.type === 'typed_default_parameter') {
@@ -327,6 +352,7 @@ function extractFunctionParams(
           name: nameNode.text,
           type: typeNode ? typeNode.text : '',
           optional: true,
+          passingStyle,
         });
       }
     } else if (child.type === 'default_parameter') {
@@ -336,6 +362,7 @@ function extractFunctionParams(
           name: nameNode.text,
           type: '',
           optional: true,
+          passingStyle,
         });
       }
     } else if (child.type === 'identifier') {
@@ -343,6 +370,7 @@ function extractFunctionParams(
         name: child.text,
         type: '',
         optional: false,
+        passingStyle,
       });
     }
   }

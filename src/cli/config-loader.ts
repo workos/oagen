@@ -4,11 +4,14 @@ import { pathToFileURL } from 'node:url';
 import type { Emitter } from '../engine/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import type { Extractor } from '../compat/types.js';
+import type { CompatConfig } from '../compat/config.js';
 import { ConfigLoadError } from '../errors.js';
 
 export interface OagenConfig {
   emitters?: Emitter[];
   extractors?: Extractor[];
+  /** Compatibility verification policy. See docs/core/compatibility-policy.md. */
+  compat?: CompatConfig;
   /** Path to the emitter project (where skills scaffold new emitters, tests, smoke runners). */
   emitterProject?: string;
   /** Map from language key to custom smoke runner script path. */

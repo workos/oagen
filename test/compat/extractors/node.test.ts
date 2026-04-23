@@ -172,4 +172,96 @@ describe('nodeExtractor', () => {
     expect(surface.extractedFrom).toBe(fixturePath);
     expect(surface.extractedAt).toBeTruthy();
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to positional for primitive params', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const getOrg = surface.classes.SampleClient.methods.getOrganization[0];
+    // getOrganization(id: string) — primitive positional
+    expect(getOrg.params[0].passingStyle).toBe('positional');
+  });
+
+  it('sets passingStyle to options_object for destructured object params', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const updateOrg = surface.classes.SampleClient.methods.updateOrganization[0];
+    // updateOrganization({ id, name }: { id: string; name?: string }) — destructured
+    expect(updateOrg.params[0].passingStyle).toBe('options_object');
+  });
+
+  it('sets passingStyle to options_object for constructor with interface param', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const ctor = surface.classes.SampleClient.constructorParams;
+    // constructor(options: ClientOptions) — interface type
+    expect(ctor[0].passingStyle).toBe('positional');
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves constructor param names', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const ctor = surface.classes.SampleClient.constructorParams;
+    expect(ctor).toHaveLength(1);
+    expect(ctor[0].name).toBe('options');
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter requiredness
+  // -----------------------------------------------------------------------
+
+  it('marks optional params correctly', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const listOrgs = surface.classes.SampleClient.methods.listOrganizations[0];
+    // listOrganizations(limit?: number) — optional
+    expect(listOrgs.params[0]).toMatchObject({ name: 'limit', optional: true });
+  });
+
+  it('marks required params correctly', async () => {
+    const surface = await nodeExtractor.extract(fixturePath);
+    const getOrg = surface.classes.SampleClient.methods.getOrganization[0];
+    // getOrganization(id: string) — required
+    expect(getOrg.params[0]).toMatchObject({ name: 'id', optional: false });
+  });
+
+  // -----------------------------------------------------------------------
+  // extractSnapshot
+  // -----------------------------------------------------------------------
+
+  it('extractSnapshot returns a valid CompatSnapshot', async () => {
+    const snapshot = await nodeExtractor.extractSnapshot(fixturePath);
+    expect(snapshot.schemaVersion).toBe('1');
+    expect(snapshot.language).toBe('node');
+    expect(snapshot.source.extractedAt).toBeDefined();
+    expect(snapshot.extractor.name).toBe('node-extractor');
+    expect(snapshot.policies).toBeDefined();
+    expect(Array.isArray(snapshot.symbols)).toBe(true);
+    expect(snapshot.symbols.length).toBeGreaterThan(0);
+  });
+
+  it('extractSnapshot symbols include classes as service_accessor', async () => {
+    const snapshot = await nodeExtractor.extractSnapshot(fixturePath);
+    const classSymbol = snapshot.symbols.find((s) => s.id === 'class:SampleClient');
+    expect(classSymbol).toBeDefined();
+    expect(classSymbol!.kind).toBe('service_accessor');
+    expect(classSymbol!.fqName).toBe('SampleClient');
+  });
+
+  it('extractSnapshot symbols include methods as callable', async () => {
+    const snapshot = await nodeExtractor.extractSnapshot(fixturePath);
+    const methodSymbol = snapshot.symbols.find((s) => s.id === 'method:SampleClient.getOrganization');
+    expect(methodSymbol).toBeDefined();
+    expect(methodSymbol!.kind).toBe('callable');
+    expect(methodSymbol!.parameters).toBeDefined();
+    expect(methodSymbol!.parameters!.length).toBeGreaterThan(0);
+  });
+
+  it('extractSnapshot preserves passingStyle on parameters', async () => {
+    const snapshot = await nodeExtractor.extractSnapshot(fixturePath);
+    const method = snapshot.symbols.find((s) => s.id === 'method:SampleClient.getOrganization');
+    expect(method!.parameters![0].passing).toBe('positional');
+  });
 });

@@ -1,7 +1,12 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { CommandError } from '../errors.js';
 import { parseSpec } from '../parser/parse.js';
 import type { ApiSurface } from '../compat/types.js';
+import type { CompatConfig, CompatFailLevel } from '../compat/config.js';
+import { severityMeetsThreshold } from '../compat/config.js';
+import { generateReport, formatHumanSummary } from '../compat/report.js';
+import { unapprovedChanges } from '../compat/approvals.js';
+import type { LanguageId } from '../compat/ir.js';
 import { runCompatCheck } from '../verify/run-compat-check.js';
 import { runOverlayRetryLoop } from '../verify/run-overlay-retry-loop.js';
 import { runStalenessCheck } from '../verify/run-staleness-check.js';
@@ -43,6 +48,11 @@ export async function verifyCommand(opts: {
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
   namespace?: string;
+  compatConfig?: CompatConfig;
+  compatReport?: string;
+  compatFailOn?: string;
+  compatBaseline?: string;
+  compatExplain?: boolean;
 }): Promise<void> {
   const {
     spec,
@@ -57,9 +67,18 @@ export async function verifyCommand(opts: {
     diagnostics,
     operationIdTransform,
     schemaNameTransform,
+    compatConfig,
+    compatReport,
+    compatExplain,
   } = opts;
   const maxRetries = opts.maxRetries ?? 3;
   const diagData: VerifyDiagnostics = {};
+
+  // Resolve compat options: CLI flags take precedence over config
+  const effectiveFailOn: CompatFailLevel =
+    (opts.compatFailOn as CompatFailLevel | undefined) ?? compatConfig?.failOn ?? 'breaking';
+  const effectiveReportPath = compatReport ?? compatConfig?.reportPath;
+  const effectiveExplain = compatExplain ?? compatConfig?.explain ?? false;
 
   let stepNum = 1;
   const baseline: ApiSurface | undefined = apiSurface
@@ -101,11 +120,15 @@ export async function verifyCommand(opts: {
 
     const compatSummary = summarizeCompatCheck(compatFlow.compatResult);
     printCompatResult(compatSummary, baseline);
-    for (const v of compatFlow.compatResult.diff.violations) {
-      console.log(`  [${v.category}] ${v.severity}: ${v.symbolPath} — ${v.message}`);
+    const classifiedDiff = compatFlow.compatResult.diff;
+    for (const c of classifiedDiff.changes) {
+      if (c.severity !== 'additive') {
+        console.log(`  [${c.category}] ${c.severity}: ${c.symbol} — ${c.message}`);
+      }
     }
-    if (compatFlow.compatResult.diff.additions.length > 0) {
-      console.log(`  + ${compatFlow.compatResult.diff.additions.length} new symbols added`);
+    const additiveCount = classifiedDiff.summary.additive;
+    if (additiveCount > 0) {
+      console.log(`  + ${additiveCount} new symbols added`);
     }
 
     if (diagnostics) {
@@ -115,7 +138,7 @@ export async function verifyCommand(opts: {
           diagData,
           compatFlow.attempts,
           compatFlow.status === 'passed',
-          compatFlow.compatResult.diff.preservationScore,
+          compatSummary.preservationScore,
           compatFlow.patchedPerIteration,
         );
       }
@@ -138,12 +161,35 @@ export async function verifyCommand(opts: {
           'No patchable violations — cannot self-correct. Remaining violations require emitter code changes.',
         );
       } else if (compatFlow.status === 'stalled') {
-        console.log(
-          `Stalled at ${compatFlow.compatResult.diff.preservationScore}% — overlay patching is not making progress.`,
-        );
+        console.log(`Stalled — overlay patching is not making progress.`);
       }
 
       throw new CommandError('\nCompat violations found — fix the emitter and re-run `oagen verify`.', '', 1);
+    }
+
+    // Classified compat analysis — approvals, reports, and explanations
+    // The diff is already classified from runCompatCheck/runOverlayRetryLoop
+    if (effectiveReportPath || effectiveExplain || (compatConfig?.allow?.length ?? 0) > 0) {
+      const langId = lang as LanguageId;
+      const approvals = compatConfig?.allow ?? [];
+      const remaining = unapprovedChanges(classifiedDiff.changes, approvals, langId);
+      const hasFailure = remaining.some((c) => severityMeetsThreshold(c.severity, effectiveFailOn));
+
+      if (effectiveExplain) {
+        console.log('');
+        console.log(formatHumanSummary(classifiedDiff, { explain: true }));
+      }
+
+      if (effectiveReportPath) {
+        const report = generateReport(classifiedDiff);
+        writeFileSync(effectiveReportPath, JSON.stringify(report, null, 2) + '\n');
+        console.log(`Compat report written to ${effectiveReportPath}`);
+      }
+
+      if (hasFailure && effectiveFailOn !== 'none') {
+        const unapprovedBreaking = remaining.filter((c) => severityMeetsThreshold(c.severity, effectiveFailOn));
+        console.log(`\n${unapprovedBreaking.length} unapproved change(s) at or above '${effectiveFailOn}' threshold`);
+      }
     }
 
     stepNum++;

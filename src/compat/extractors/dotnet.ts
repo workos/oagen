@@ -12,6 +12,8 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import {
   NAMED_TYPE_RE,
   typeExistsInSurface,
@@ -201,6 +203,11 @@ export function createDotnetExtractor(hintOverrides?: Partial<LanguageHints>): E
   return {
     language: 'dotnet',
     hints: mergedHints,
+
+    async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+      const surface = await this.extract(sdkPath);
+      return apiSurfaceToSnapshot(surface);
+    },
 
     async extract(sdkPath: string): Promise<ApiSurface> {
       // Determine the source directory: prefer src/, fallback to root

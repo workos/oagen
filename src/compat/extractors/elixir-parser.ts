@@ -21,6 +21,8 @@ export interface ElixirFunction {
   name: string;
   arity: number;
   params: string[];
+  /** Per-param passing style: 'positional' or 'keyword' (for keyword list params). */
+  paramStyles: ('positional' | 'keyword')[];
   isPrivate: boolean;
   sourceFile: string;
 }
@@ -250,6 +252,7 @@ function extractFunctions(modules: ExtractedModule[], sourceFile: string): Elixi
       if (name === 'defstruct' || name === 'defmodule') continue;
 
       const params: string[] = [];
+      const paramStyles: ('positional' | 'keyword')[] = [];
       if (paramsStr.trim()) {
         const paramParts = paramsStr.split(',');
         for (const part of paramParts) {
@@ -258,6 +261,9 @@ function extractFunctions(modules: ExtractedModule[], sourceFile: string): Elixi
           const paramNameMatch = trimmed.match(/^(\w+)/);
           if (paramNameMatch) {
             params.push(paramNameMatch[1]);
+            // Detect keyword list params: `opts \\ []` or `options \\ []`
+            const isKeywordList = /\\\\\s*\[/.test(trimmed);
+            paramStyles.push(isKeywordList ? 'keyword' : 'positional');
           }
         }
       }
@@ -267,6 +273,7 @@ function extractFunctions(modules: ExtractedModule[], sourceFile: string): Elixi
         name,
         arity: params.length,
         params,
+        paramStyles,
         isPrivate,
         sourceFile,
       });

@@ -4,18 +4,25 @@ import type { VerifyDiagnostics, CompatCheckResult } from './types.js';
 export function summarizeCompatCheck(result: CompatCheckResult): NonNullable<VerifyDiagnostics['compatCheck']> {
   const violationsByCategory: Record<string, number> = {};
   const violationsBySeverity: Record<string, number> = {};
-  for (const v of result.diff.violations) {
-    violationsByCategory[v.category] = (violationsByCategory[v.category] ?? 0) + 1;
-    violationsBySeverity[v.severity] = (violationsBySeverity[v.severity] ?? 0) + 1;
+  for (const c of result.diff.changes) {
+    violationsByCategory[c.category] = (violationsByCategory[c.category] ?? 0) + 1;
+    violationsBySeverity[c.severity] = (violationsBySeverity[c.severity] ?? 0) + 1;
   }
 
+  const { breaking, softRisk, additive } = result.diff.summary;
+  const totalChanges = breaking + softRisk + additive;
+  const totalBaselineSymbols = totalChanges + additive; // approximate; additive are new
+  const preservedSymbols = totalBaselineSymbols - breaking - softRisk;
+  const preservationScore =
+    totalBaselineSymbols > 0 ? Math.round((preservedSymbols / totalBaselineSymbols) * 100) : 100;
+
   return {
-    totalBaselineSymbols: result.diff.totalBaselineSymbols,
-    preservedSymbols: result.diff.preservedSymbols,
-    preservationScore: result.diff.preservationScore,
+    totalBaselineSymbols,
+    preservedSymbols,
+    preservationScore,
     violationsByCategory,
     violationsBySeverity,
-    additions: result.diff.additions.length,
+    additions: additive,
     scopedToSpec: result.scopedToSpec,
     ...(result.scopedSymbolCount !== undefined ? { scopedSymbolCount: result.scopedSymbolCount } : {}),
   };

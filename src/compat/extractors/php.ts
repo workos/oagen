@@ -12,6 +12,8 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import { defaultIsNullableOnlyDifference } from '../language-hints.js';
 import { walkPhpFiles, parsePhpFile } from './php-parser.js';
 import { buildSurface } from './php-surface.js';
@@ -155,6 +157,11 @@ export function createPhpExtractor(hintOverrides?: Partial<LanguageHints>): Extr
   return {
     language: 'php',
     hints: mergedHints,
+
+    async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+      const surface = await this.extract(sdkPath);
+      return apiSurfaceToSnapshot(surface);
+    },
 
     async extract(sdkPath: string): Promise<ApiSurface> {
       // Determine the source directory: prefer lib/, fallback to src/

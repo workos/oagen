@@ -196,6 +196,7 @@ export function buildSurface(
             name: p.name,
             type: p.type,
             optional: p.optional,
+            ...(p.passingStyle ? { passingStyle: p.passingStyle } : {}),
           }));
 
           const returnType = unwrapReturnType(method.returnType);
@@ -275,6 +276,7 @@ export function buildSurface(
             name: p.name,
             type: p.type,
             optional: p.optional,
+            ...(p.passingStyle ? { passingStyle: p.passingStyle } : {}),
           }));
           if (!apiMethods[method.name]) apiMethods[method.name] = [];
           apiMethods[method.name].push({
@@ -318,6 +320,7 @@ export function buildSurface(
                 name: p.name,
                 type: p.type,
                 optional: p.optional,
+                ...(p.passingStyle ? { passingStyle: p.passingStyle } : {}),
               })),
             );
             continue;
@@ -327,6 +330,7 @@ export function buildSurface(
             name: p.name,
             type: p.type,
             optional: p.optional,
+            ...(p.passingStyle ? { passingStyle: p.passingStyle } : {}),
           }));
           if (!apiMethods[method.name]) apiMethods[method.name] = [];
           apiMethods[method.name].push({

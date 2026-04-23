@@ -160,7 +160,12 @@ export function buildSurface(
       for (const fn of methods) {
         const params: ApiParam[] = fn.params
           .filter((p) => p.type !== 'context.Context')
-          .map((p) => ({ name: p.name, type: goTypeToString(p.type), optional: false }));
+          .map((p) => ({
+            name: p.name,
+            type: goTypeToString(p.type),
+            optional: false,
+            passingStyle: 'positional' as const,
+          }));
         if (!apiMethods[fn.name]) apiMethods[fn.name] = [];
         apiMethods[fn.name].push({ name: fn.name, params, returnType: buildReturnType(fn.returnTypes), async: false });
       }

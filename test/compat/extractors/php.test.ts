@@ -276,4 +276,47 @@ describe('phpExtractor', () => {
     const surface = await phpExtractor.extract(fixturePath);
     expect(surface.typeAliases).toEqual({});
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to named for all PHP params', async () => {
+    const surface = await phpExtractor.extract(fixturePath);
+    const createOrg = surface.classes.Organizations.methods.createOrganization[0];
+    // PHP 8+ supports named arguments on all params
+    for (const param of createOrg.params) {
+      expect(param.passingStyle).toBe('named');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order for createOrganization', async () => {
+    const surface = await phpExtractor.extract(fixturePath);
+    const createOrg = surface.classes.Organizations.methods.createOrganization[0];
+    const paramNames = createOrg.params.map((p) => p.name);
+    expect(paramNames).toEqual(['name', 'domains', 'allowProfilesOutsideOrganization']);
+  });
+
+  it('preserves parameter order for listOrganizations', async () => {
+    const surface = await phpExtractor.extract(fixturePath);
+    const listOrgs = surface.classes.Organizations.methods.listOrganizations[0];
+    const paramNames = listOrgs.params.map((p) => p.name);
+    expect(paramNames).toEqual(['domains', 'limit', 'before', 'after']);
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter requiredness
+  // -----------------------------------------------------------------------
+
+  it('distinguishes required vs optional params on createOrganization', async () => {
+    const surface = await phpExtractor.extract(fixturePath);
+    const createOrg = surface.classes.Organizations.methods.createOrganization[0];
+    expect(createOrg.params[0]).toMatchObject({ name: 'name', optional: false });
+    expect(createOrg.params[1]).toMatchObject({ name: 'domains', optional: false });
+    expect(createOrg.params[2]).toMatchObject({ name: 'allowProfilesOutsideOrganization', optional: true });
+  });
 });

@@ -4,6 +4,9 @@ import { parseCommand } from './parse.js';
 import { generateCommand } from './generate.js';
 import { diffCommand } from './diff.js';
 import { extractCommand } from './extract.js';
+import { compatExtractCommand } from './compat-extract.js';
+import { compatDiffCommand } from './compat-diff.js';
+import { compatSummaryCommand } from './compat-summary.js';
 import { verifyCommand } from './verify.js';
 import { initCommand } from './init.js';
 import { resolveCommand } from './resolve.js';
@@ -27,6 +30,7 @@ let configSchemaNameTransform: ((name: string) => string) | undefined;
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
+let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
   const config = await loadConfig();
   if (config) {
@@ -37,6 +41,7 @@ try {
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
+    configCompat = config.compat;
   }
 } catch (err) {
   handleError(err);
@@ -112,6 +117,38 @@ program
   });
 
 program
+  .command('compat-extract')
+  .description('Extract a compat snapshot from a live SDK and write it to a JSON file')
+  .requiredOption('--sdk-path <path>', 'Path to the live SDK')
+  .requiredOption('--lang <language>', 'Target language')
+  .requiredOption('--output <path>', 'Output file path for the compat snapshot JSON')
+  .option('--sdk-name <name>', 'SDK name to embed in the snapshot')
+  .action((opts) => {
+    compatExtractCommand(opts).catch(handleError);
+  });
+
+program
+  .command('compat-diff')
+  .description('Diff two compat snapshot files and produce a classified change report')
+  .requiredOption('--baseline <path>', 'Path to the baseline compat snapshot JSON')
+  .requiredOption('--candidate <path>', 'Path to the candidate compat snapshot JSON')
+  .option('--output <path>', 'Write machine-readable report to this path')
+  .option('--fail-on <level>', 'Fail threshold: none, breaking, or soft-risk', 'breaking')
+  .option('--explain', 'Include provenance explanations in output')
+  .action((opts) => {
+    compatDiffCommand(opts).catch(handleError);
+  });
+
+program
+  .command('compat-summary')
+  .description('Format a compat report as a markdown PR comment')
+  .requiredOption('--report <path>', 'Path to the compat report JSON (from compat-diff --output)')
+  .option('--output <path>', 'Write markdown to this file instead of stdout')
+  .action((opts) => {
+    compatSummaryCommand(opts).catch(handleError);
+  });
+
+program
   .command('verify')
   .description('Run smoke tests (and optional compat check) against an already-generated SDK')
   .option('--spec <path>', 'Path to OpenAPI spec file (or set OPENAPI_SPEC_PATH)')
@@ -129,6 +166,10 @@ program
   .option('--namespace <name>', 'SDK namespace/package name (used by retry loop for regeneration)')
   .option('--diagnostics', 'Output verify-diagnostics.json with structured violation breakdown')
   .option('--max-retries <n>', 'Max retry iterations for self-correcting overlay loop (default: 3)', '3')
+  .option('--compat-report <path>', 'Write machine-readable compat report to this path')
+  .option('--compat-fail-on <level>', 'Fail threshold: none, breaking, or soft-risk')
+  .option('--compat-baseline <path>', 'Path to baseline compatibility snapshot')
+  .option('--compat-explain', 'Include provenance explanations in compat output')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     // --spec is only required when we need to generate a baseline (no --raw-results
@@ -140,6 +181,11 @@ program
       maxRetries: parseInt(opts.maxRetries, 10),
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
+      compatConfig: configCompat,
+      compatReport: opts.compatReport,
+      compatFailOn: opts.compatFailOn,
+      compatBaseline: opts.compatBaseline,
+      compatExplain: opts.compatExplain,
     }).catch(handleError);
   });
 

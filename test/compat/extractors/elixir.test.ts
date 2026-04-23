@@ -134,4 +134,37 @@ describe('elixirExtractor', () => {
   it('throws for non-Elixir projects', async () => {
     await expect(elixirExtractor.extract('/tmp/nonexistent-elixir-project')).rejects.toThrow('No .ex files found');
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to positional for regular params', async () => {
+    const surface = await elixirExtractor.extract(fixturePath);
+    const getOrg = surface.classes.Organizations.methods.get_organization[0];
+    for (const param of getOrg.params) {
+      expect(param.passingStyle).toBe('positional');
+    }
+  });
+
+  it('sets passingStyle to keyword for keyword list params with \\\\ []', async () => {
+    const surface = await elixirExtractor.extract(fixturePath);
+    const listOrgs = surface.classes.Organizations.methods.list_organizations[0];
+    // list_organizations(client, opts \\ []) — opts is keyword
+    const opts = listOrgs.params.find((p) => p.name === 'opts');
+    if (opts) {
+      expect(opts.passingStyle).toBe('keyword');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order for get_organization', async () => {
+    const surface = await elixirExtractor.extract(fixturePath);
+    const getOrg = surface.classes.Organizations.methods.get_organization[0];
+    const paramNames = getOrg.params.map((p) => p.name);
+    expect(paramNames).toEqual(['client', 'id']);
+  });
 });

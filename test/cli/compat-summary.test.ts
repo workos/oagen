@@ -1,0 +1,155 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolve } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import * as os from 'node:os';
+import { compatSummaryCommand } from '../../src/cli/compat-summary.js';
+import type { CompatReport } from '../../src/compat/report.js';
+
+function makeReport(overrides?: Partial<CompatReport>): CompatReport {
+  return {
+    schemaVersion: '1',
+    language: 'node',
+    summary: { breaking: 0, softRisk: 0, additive: 0 },
+    changes: [],
+    ...overrides,
+  };
+}
+
+describe('compatSummaryCommand', () => {
+  let tmpDir: string;
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpDir = resolve(os.tmpdir(), `oagen-compat-summary-test-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('outputs passing markdown for clean report', async () => {
+    const reportPath = resolve(tmpDir, 'report.json');
+    writeFileSync(reportPath, JSON.stringify(makeReport()));
+
+    await compatSummaryCommand({ report: reportPath });
+
+    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    expect(output).toContain(':white_check_mark:');
+    expect(output).toContain('No compatibility changes detected');
+  });
+
+  it('outputs failing markdown for breaking changes', async () => {
+    const report = makeReport({
+      summary: { breaking: 1, softRisk: 0, additive: 0 },
+      changes: [
+        {
+          severity: 'breaking',
+          category: 'symbol_removed',
+          symbol: 'Client.deleteUser',
+          conceptualChangeId: 'chg_1',
+          provenance: 'unknown',
+          old: { name: 'deleteUser' },
+          new: {},
+          message: 'Symbol removed',
+        },
+      ],
+    });
+    const reportPath = resolve(tmpDir, 'report.json');
+    writeFileSync(reportPath, JSON.stringify(report));
+
+    await compatSummaryCommand({ report: reportPath });
+
+    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    expect(output).toContain(':x:');
+    expect(output).toContain('Breaking changes');
+    expect(output).toContain('`symbol_removed`');
+    expect(output).toContain('`Client.deleteUser`');
+  });
+
+  it('outputs warning markdown for soft-risk only', async () => {
+    const report = makeReport({
+      summary: { breaking: 0, softRisk: 1, additive: 0 },
+      changes: [
+        {
+          severity: 'soft-risk',
+          category: 'default_value_changed',
+          symbol: 'Client.list',
+          conceptualChangeId: 'chg_1',
+          provenance: 'unknown',
+          old: { default: '10' },
+          new: { default: '20' },
+          message: 'Default value changed',
+        },
+      ],
+    });
+    const reportPath = resolve(tmpDir, 'report.json');
+    writeFileSync(reportPath, JSON.stringify(report));
+
+    await compatSummaryCommand({ report: reportPath });
+
+    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    expect(output).toContain(':warning:');
+    expect(output).toContain('Soft-risk changes');
+  });
+
+  it('collapses additive changes in details tag', async () => {
+    const report = makeReport({
+      summary: { breaking: 0, softRisk: 0, additive: 1 },
+      changes: [
+        {
+          severity: 'additive',
+          category: 'symbol_added',
+          symbol: 'Client.newMethod',
+          conceptualChangeId: 'chg_1',
+          provenance: 'unknown',
+          old: {},
+          new: { name: 'newMethod' },
+          message: 'New symbol added',
+        },
+      ],
+    });
+    const reportPath = resolve(tmpDir, 'report.json');
+    writeFileSync(reportPath, JSON.stringify(report));
+
+    await compatSummaryCommand({ report: reportPath });
+
+    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    expect(output).toContain('<details>');
+    expect(output).toContain('Additive changes (1)');
+  });
+
+  it('writes to file when --output is provided', async () => {
+    const reportPath = resolve(tmpDir, 'report.json');
+    const outputPath = resolve(tmpDir, 'summary.md');
+    writeFileSync(reportPath, JSON.stringify(makeReport()));
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await compatSummaryCommand({ report: reportPath, output: outputPath });
+    consoleSpy.mockRestore();
+
+    const written = readFileSync(outputPath, 'utf-8');
+    expect(written).toContain(':white_check_mark:');
+    // Should NOT have written to stdout
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it('includes summary table with counts', async () => {
+    const report = makeReport({
+      summary: { breaking: 2, softRisk: 1, additive: 3 },
+      changes: [],
+    });
+    const reportPath = resolve(tmpDir, 'report.json');
+    writeFileSync(reportPath, JSON.stringify(report));
+
+    await compatSummaryCommand({ report: reportPath });
+
+    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    expect(output).toContain('| Breaking | 2 |');
+    expect(output).toContain('| Soft-risk | 1 |');
+    expect(output).toContain('| Additive | 3 |');
+    expect(output).toContain('| **Total** | **6** |');
+  });
+});

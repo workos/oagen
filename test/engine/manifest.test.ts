@@ -23,7 +23,7 @@ describe('manifest read/write', () => {
       const parsed = JSON.parse(raw);
       expect(parsed.files).toEqual(['a.py', 'b.py', 'c.py']);
       expect(parsed.language).toBe('python');
-      expect(parsed.version).toBe(1);
+      expect(parsed.version).toBe(2);
       expect(typeof parsed.generatedAt).toBe('string');
     } finally {
       await fs.rm(dir, { recursive: true });

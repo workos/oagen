@@ -228,4 +228,28 @@ describe('goExtractor', () => {
     expect(ssoClient.properties.APIKey).toBeDefined();
     expect(ssoClient.properties.ClientID).toBeDefined();
   });
+
+  // -----------------------------------------------------------------------
+  // Passing style detection
+  // -----------------------------------------------------------------------
+
+  it('sets passingStyle to positional for all Go params', async () => {
+    const surface = await goExtractor.extract(fixturePath);
+    const getOrg = surface.classes['organizations.Client'].methods.GetOrganization[0];
+    for (const param of getOrg.params) {
+      expect(param.passingStyle).toBe('positional');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Parameter order preservation
+  // -----------------------------------------------------------------------
+
+  it('preserves parameter order (context.Context filtered out)', async () => {
+    const surface = await goExtractor.extract(fixturePath);
+    const getOrg = surface.classes['organizations.Client'].methods.GetOrganization[0];
+    // context.Context is filtered; only opts remains
+    expect(getOrg.params).toHaveLength(1);
+    expect(getOrg.params[0].name).toBe('opts');
+  });
 });

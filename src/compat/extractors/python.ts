@@ -12,6 +12,8 @@
 
 import { ExtractorError } from '../../errors.js';
 import type { Extractor, ApiSurface, LanguageHints } from '../types.js';
+import type { CompatSnapshot } from '../ir.js';
+import { apiSurfaceToSnapshot } from '../ir.js';
 import {
   NAMED_TYPE_RE,
   typeExistsInSurface,
@@ -320,6 +322,11 @@ export function createPythonExtractor(hintOverrides?: Partial<LanguageHints>): E
   return {
     language: 'python',
     hints: mergedHints,
+
+    async extractSnapshot(sdkPath: string): Promise<CompatSnapshot> {
+      const surface = await this.extract(sdkPath);
+      return apiSurfaceToSnapshot(surface);
+    },
 
     async extract(sdkPath: string): Promise<ApiSurface> {
       const sourceRoot = findPythonSourceRoot(sdkPath);
