@@ -32,7 +32,6 @@ export {
 export interface CompatDiffResult {
   changes: ClassifiedChange[];
   summary: ClassificationResult['summary'];
-  language: string;
 }
 
 /**
@@ -77,7 +76,6 @@ export function diffSnapshots(
   return {
     changes,
     summary: summarizeChanges(changes),
-    language: baseline.language,
   };
 }
 

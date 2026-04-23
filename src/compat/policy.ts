@@ -10,10 +10,8 @@ import type { LanguageId } from './ir.js';
 
 /** Policy hints that determine what constitutes a breaking change. */
 export interface CompatPolicyHints {
-  /** Language supports named arguments (PHP 8+, Kotlin, C#). */
-  namedArgumentsSupported: boolean;
-  /** Language supports keyword arguments (Python, Ruby). */
-  keywordArgumentsSupported: boolean;
+  /** Callers reference parameter names at the call site (PHP named args, Python/Ruby keyword args, Kotlin/C# named args). */
+  callerUsesParamNames: boolean;
   /** Constructor positional order is part of the public API. */
   constructorOrderMatters: boolean;
   /** Method parameter names are visible to callers. */
@@ -29,8 +27,7 @@ export interface CompatPolicyHints {
 /** Built-in language defaults. */
 const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
   php: {
-    namedArgumentsSupported: true,
-    keywordArgumentsSupported: false,
+    callerUsesParamNames: true,
     constructorOrderMatters: true,
     methodParameterNamesArePublicApi: true,
     constructorParameterNamesArePublicApi: true,
@@ -38,8 +35,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: false,
   },
   python: {
-    namedArgumentsSupported: false,
-    keywordArgumentsSupported: true,
+    callerUsesParamNames: true,
     constructorOrderMatters: true,
     methodParameterNamesArePublicApi: true,
     constructorParameterNamesArePublicApi: true,
@@ -47,8 +43,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: false,
   },
   ruby: {
-    namedArgumentsSupported: false,
-    keywordArgumentsSupported: true,
+    callerUsesParamNames: true,
     constructorOrderMatters: true,
     methodParameterNamesArePublicApi: true,
     constructorParameterNamesArePublicApi: true,
@@ -56,8 +51,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: false,
   },
   go: {
-    namedArgumentsSupported: false,
-    keywordArgumentsSupported: false,
+    callerUsesParamNames: false,
     constructorOrderMatters: true,
     methodParameterNamesArePublicApi: false,
     constructorParameterNamesArePublicApi: false,
@@ -65,8 +59,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: true,
   },
   kotlin: {
-    namedArgumentsSupported: true,
-    keywordArgumentsSupported: false,
+    callerUsesParamNames: true,
     constructorOrderMatters: false,
     methodParameterNamesArePublicApi: true,
     constructorParameterNamesArePublicApi: true,
@@ -74,8 +67,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: false,
   },
   dotnet: {
-    namedArgumentsSupported: true,
-    keywordArgumentsSupported: false,
+    callerUsesParamNames: true,
     constructorOrderMatters: false,
     methodParameterNamesArePublicApi: true,
     constructorParameterNamesArePublicApi: true,
@@ -83,8 +75,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: false,
   },
   elixir: {
-    namedArgumentsSupported: false,
-    keywordArgumentsSupported: true,
+    callerUsesParamNames: true,
     constructorOrderMatters: false,
     methodParameterNamesArePublicApi: true,
     constructorParameterNamesArePublicApi: false,
@@ -92,8 +83,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: true,
   },
   rust: {
-    namedArgumentsSupported: false,
-    keywordArgumentsSupported: false,
+    callerUsesParamNames: false,
     constructorOrderMatters: true,
     methodParameterNamesArePublicApi: false,
     constructorParameterNamesArePublicApi: false,
@@ -101,8 +91,7 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     arityIsPublicApi: true,
   },
   node: {
-    namedArgumentsSupported: false,
-    keywordArgumentsSupported: false,
+    callerUsesParamNames: false,
     constructorOrderMatters: false,
     methodParameterNamesArePublicApi: false,
     constructorParameterNamesArePublicApi: false,

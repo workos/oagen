@@ -20,7 +20,6 @@ describe('apiSurfaceToSnapshot', () => {
   it('converts an empty surface to a snapshot with no symbols', () => {
     const snapshot = apiSurfaceToSnapshot(minimalSurface());
     expect(snapshot.schemaVersion).toBe('1');
-    expect(snapshot.language).toBe('node');
     expect(snapshot.symbols).toEqual([]);
   });
 
@@ -186,7 +185,7 @@ describe('apiSurfaceToSnapshot', () => {
 
   it('uses language policy for snapshot policies field', () => {
     const snapshot = apiSurfaceToSnapshot(minimalSurface({ language: 'php' }));
-    expect(snapshot.policies.namedArgumentsSupported).toBe(true);
+    expect(snapshot.policies.callerUsesParamNames).toBe(true);
     expect(snapshot.policies.constructorOrderMatters).toBe(true);
   });
 

@@ -11,10 +11,7 @@ function makeSnapshot(
 ): CompatSnapshot {
   return {
     schemaVersion: '1',
-    language,
-    sdkName: 'test-sdk',
     source: { extractedAt: '2026-04-22T00:00:00.000Z' },
-    extractor: { name: 'test' },
     policies: getDefaultPolicy(language),
     symbols,
   };
@@ -129,11 +126,6 @@ describe('diffSnapshots', () => {
     const phpResult = diffSnapshots(baseline, candidate, getDefaultPolicy('php'));
     const phpRename = phpResult.changes.find((c) => c.category === 'parameter_renamed');
     expect(phpRename?.severity).toBe('breaking');
-  });
-
-  it('sets language on the result', () => {
-    const result = diffSnapshots(makeSnapshot('ruby', []), makeSnapshot('ruby', []));
-    expect(result.language).toBe('ruby');
   });
 });
 

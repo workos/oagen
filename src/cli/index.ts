@@ -118,11 +118,10 @@ program
 
 program
   .command('compat-extract')
-  .description('Extract a compat snapshot from a live SDK and write it to a JSON file')
+  .description('Extract a compat snapshot from a live SDK and write .oagen-compat-snapshot.json')
   .requiredOption('--sdk-path <path>', 'Path to the live SDK')
   .requiredOption('--lang <language>', 'Target language')
-  .requiredOption('--output <path>', 'Output file path for the compat snapshot JSON')
-  .option('--sdk-name <name>', 'SDK name to embed in the snapshot')
+  .requiredOption('--output <dir>', 'Directory to write .oagen-compat-snapshot.json into')
   .action((opts) => {
     compatExtractCommand(opts).catch(handleError);
   });

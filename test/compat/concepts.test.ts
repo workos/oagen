@@ -18,7 +18,7 @@ function makeChange(overrides: Partial<ClassifiedChange>): ClassifiedChange {
   };
 }
 
-function makeDiff(language: string, changes: ClassifiedChange[]): CompatDiffResult {
+function makeDiff(changes: ClassifiedChange[]): CompatDiffResult {
   let breaking = 0,
     softRisk = 0,
     additive = 0;
@@ -27,16 +27,20 @@ function makeDiff(language: string, changes: ClassifiedChange[]): CompatDiffResu
     else if (c.severity === 'soft-risk') softRisk++;
     else additive++;
   }
-  return { changes, summary: { breaking, softRisk, additive }, language };
+  return { changes, summary: { breaking, softRisk, additive } };
 }
 
 describe('buildConceptualRollup', () => {
   it('groups identical conceptualChangeId across languages', () => {
-    const phpDiff = makeDiff('php', [makeChange({ severity: 'breaking' })]);
-    const goDiff = makeDiff('go', [makeChange({ severity: 'soft-risk' })]);
-    const pyDiff = makeDiff('python', [makeChange({ severity: 'breaking' })]);
+    const phpDiff = makeDiff([makeChange({ severity: 'breaking' })]);
+    const goDiff = makeDiff([makeChange({ severity: 'soft-risk' })]);
+    const pyDiff = makeDiff([makeChange({ severity: 'breaking' })]);
 
-    const rollup = buildConceptualRollup([phpDiff, goDiff, pyDiff]);
+    const rollup = buildConceptualRollup([
+      { diff: phpDiff, language: 'php' },
+      { diff: goDiff, language: 'go' },
+      { diff: pyDiff, language: 'python' },
+    ]);
     expect(rollup.conceptualChanges).toHaveLength(1);
     expect(rollup.conceptualChanges[0].impact).toEqual({
       php: 'breaking',
@@ -46,11 +50,11 @@ describe('buildConceptualRollup', () => {
   });
 
   it('keeps different conceptual changes separate', () => {
-    const diff = makeDiff('php', [
+    const diff = makeDiff([
       makeChange({ conceptualChangeId: 'chg_a' }),
       makeChange({ conceptualChangeId: 'chg_b', symbol: 'Other.method' }),
     ]);
-    const rollup = buildConceptualRollup([diff]);
+    const rollup = buildConceptualRollup([{ diff, language: 'php' }]);
     expect(rollup.conceptualChanges).toHaveLength(2);
   });
 
@@ -60,7 +64,10 @@ describe('buildConceptualRollup', () => {
   });
 
   it('handles no changes in any language', () => {
-    const rollup = buildConceptualRollup([makeDiff('php', []), makeDiff('go', [])]);
+    const rollup = buildConceptualRollup([
+      { diff: makeDiff([]), language: 'php' },
+      { diff: makeDiff([]), language: 'go' },
+    ]);
     expect(rollup.conceptualChanges).toEqual([]);
   });
 });

@@ -9,15 +9,14 @@ import type { CompatSnapshot } from '../../src/compat/ir.js';
 function makeSnapshot(overrides?: Partial<CompatSnapshot>): CompatSnapshot {
   return {
     schemaVersion: COMPAT_SCHEMA_VERSION,
-    language: 'node',
-    sdkName: 'test-sdk',
     source: { extractedAt: '2026-01-01T00:00:00.000Z' },
-    extractor: { name: 'node-extractor' },
     policies: {
+      callerUsesParamNames: false,
       constructorOrderMatters: false,
       constructorParameterNamesArePublicApi: false,
       methodParameterNamesArePublicApi: false,
-      overloadsExist: true,
+      overloadsArePublicApi: true,
+      arityIsPublicApi: false,
     },
     symbols: [],
     ...overrides,
@@ -120,7 +119,6 @@ describe('compatDiffCommand', () => {
 
     const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
     expect(report.schemaVersion).toBe('1');
-    expect(report.language).toBe('node');
     expect(report.summary).toBeDefined();
     expect(Array.isArray(report.changes)).toBe(true);
   });

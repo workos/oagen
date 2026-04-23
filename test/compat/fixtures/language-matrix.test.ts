@@ -13,10 +13,7 @@ import type { CompatSnapshot, CompatSymbol, CompatParameter, LanguageId } from '
 function makeSnapshot(language: LanguageId, symbols: CompatSymbol[]): CompatSnapshot {
   return {
     schemaVersion: '1',
-    language,
-    sdkName: `test-${language}`,
     source: { extractedAt: '2026-04-22T00:00:00.000Z' },
-    extractor: { name: 'test' },
     policies: getDefaultPolicy(language),
     symbols,
   };

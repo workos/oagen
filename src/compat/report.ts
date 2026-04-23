@@ -39,10 +39,10 @@ export interface CompatReportChange {
 }
 
 /** Generate a machine-readable compat report from a diff result. */
-export function generateReport(diff: CompatDiffResult): CompatReport {
+export function generateReport(diff: CompatDiffResult, language?: string): CompatReport {
   return {
     schemaVersion: '1',
-    language: diff.language,
+    language: language ?? 'unknown',
     summary: diff.summary,
     changes: diff.changes.map((c) => ({
       severity: c.severity,
@@ -62,10 +62,10 @@ export function generateReport(diff: CompatDiffResult): CompatReport {
 // ---------------------------------------------------------------------------
 
 /** Generate a human-readable summary string for terminal output. */
-export function formatHumanSummary(diff: CompatDiffResult, opts?: { explain?: boolean }): string {
+export function formatHumanSummary(diff: CompatDiffResult, opts?: { explain?: boolean; language?: string }): string {
   const lines: string[] = [];
 
-  lines.push(`Compat report for ${diff.language}:`);
+  lines.push(`Compat report${opts?.language ? ` for ${opts.language}` : ''}:`);
   lines.push(
     `  ${diff.summary.breaking} breaking, ${diff.summary.softRisk} soft-risk, ${diff.summary.additive} additive`,
   );
@@ -125,7 +125,9 @@ export interface ConceptualReport {
 }
 
 /** Generate a conceptual cross-language report from multiple per-language results. */
-export function generateConceptualReport(perLanguageResults: CompatDiffResult[]): ConceptualReport {
+export function generateConceptualReport(
+  perLanguageResults: Array<{ diff: CompatDiffResult; language: LanguageId }>,
+): ConceptualReport {
   const rollup = buildConceptualRollup(perLanguageResults);
   return {
     conceptualChanges: rollup.conceptualChanges.map((c) => ({
@@ -138,7 +140,9 @@ export function generateConceptualReport(perLanguageResults: CompatDiffResult[])
 }
 
 /** Format a conceptual cross-language summary for terminal output. */
-export function formatConceptualSummary(perLanguageResults: CompatDiffResult[]): string {
+export function formatConceptualSummary(
+  perLanguageResults: Array<{ diff: CompatDiffResult; language: LanguageId }>,
+): string {
   const rollup = buildConceptualRollup(perLanguageResults);
   const summary = summarizeConceptualChanges(rollup);
   const lines: string[] = [];

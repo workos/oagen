@@ -15,15 +15,14 @@ describe('compatExtractCommand', () => {
 
   const mockSnapshot: CompatSnapshot = {
     schemaVersion: COMPAT_SCHEMA_VERSION,
-    language: 'node',
-    sdkName: '',
     source: { extractedAt: '2026-01-01T00:00:00.000Z' },
-    extractor: { name: 'node-extractor' },
     policies: {
+      callerUsesParamNames: false,
       constructorOrderMatters: false,
       constructorParameterNamesArePublicApi: false,
       methodParameterNamesArePublicApi: false,
-      overloadsExist: true,
+      overloadsArePublicApi: true,
+      arityIsPublicApi: false,
     },
     symbols: [
       {
@@ -67,43 +66,24 @@ describe('compatExtractCommand', () => {
   });
 
   it('writes a valid compat snapshot JSON to output path', async () => {
-    const outputPath = resolve(tmpDir, 'snapshot.json');
-
     await compatExtractCommand({
       sdkPath: '/some/sdk',
       lang: 'test-compat-extract-lang',
-      output: outputPath,
+      output: tmpDir,
     });
 
-    const written = JSON.parse(readFileSync(outputPath, 'utf-8'));
+    const written = JSON.parse(readFileSync(resolve(tmpDir, '.oagen-compat-snapshot.json'), 'utf-8'));
     expect(written.schemaVersion).toBe(COMPAT_SCHEMA_VERSION);
-    expect(written.language).toBe('node');
     expect(Array.isArray(written.symbols)).toBe(true);
     expect(written.symbols).toHaveLength(1);
     expect(written.symbols[0].id).toBe('class:TestClient');
   });
 
-  it('enriches sdkName when provided', async () => {
-    const outputPath = resolve(tmpDir, 'snapshot.json');
-
-    await compatExtractCommand({
-      sdkPath: '/some/sdk',
-      lang: 'test-compat-extract-lang',
-      output: outputPath,
-      sdkName: 'my-sdk',
-    });
-
-    const written = JSON.parse(readFileSync(outputPath, 'utf-8'));
-    expect(written.sdkName).toBe('my-sdk');
-  });
-
   it('logs extraction progress and symbol count', async () => {
-    const outputPath = resolve(tmpDir, 'snapshot.json');
-
     await compatExtractCommand({
       sdkPath: '/some/sdk',
       lang: 'test-compat-extract-lang',
-      output: outputPath,
+      output: tmpDir,
     });
 
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Extracting test-compat-extract-lang'));

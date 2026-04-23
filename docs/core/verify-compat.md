@@ -113,13 +113,13 @@ jobs:
           oagen compat-extract \
             --sdk-path ./generated \
             --lang node \
-            --output /tmp/candidate-snapshot.json
+            --output /tmp
 
       - name: Diff against baseline
         run: |
           oagen compat-diff \
             --baseline .oagen-compat-snapshot.json \
-            --candidate /tmp/candidate-snapshot.json \
+            --candidate /tmp/.oagen-compat-snapshot.json \
             --output compat-report.json \
             --fail-on breaking
 
@@ -138,7 +138,7 @@ The baseline snapshot is committed to the repository and updated as part of the 
 
 ```bash
 # After releasing a new SDK version, update the baseline
-oagen compat-extract --sdk-path . --lang node --output .oagen-compat-snapshot.json
+oagen compat-extract --sdk-path . --lang node --output .
 git add .oagen-compat-snapshot.json
 git commit -m "chore: update compat baseline for v2.1.0"
 ```

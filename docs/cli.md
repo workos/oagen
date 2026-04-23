@@ -57,18 +57,17 @@ oagen extract --sdk-path ./existing-sdk --lang ruby --output my-surface.json
 Extract a compat snapshot from a live SDK and write it to a JSON file. The snapshot is a machine-readable record of the SDK's public API surface, used as input to `compat-diff`.
 
 ```bash
-oagen compat-extract --sdk-path ./existing-sdk --lang node --output .oagen-compat-snapshot.json
-oagen compat-extract --sdk-path ./existing-sdk --lang php --output .oagen-compat-snapshot.json --sdk-name workos-php
+oagen compat-extract --sdk-path ./existing-sdk --lang node --output .
+oagen compat-extract --sdk-path ./existing-sdk --lang php --output ./sdk
 ```
 
-| Argument            | Required | Default | Description                             |
-| ------------------- | -------- | ------- | --------------------------------------- |
-| `--sdk-path <path>` | Yes      |         | Path to the live SDK                    |
-| `--lang <language>` | Yes      |         | Target language                         |
-| `--output <path>`   | Yes      |         | Output file path for the snapshot JSON  |
-| `--sdk-name <name>` | No       |         | SDK name to embed in the snapshot       |
+| Argument            | Required | Default | Description                                           |
+| ------------------- | -------- | ------- | ----------------------------------------------------- |
+| `--sdk-path <path>` | Yes      |         | Path to the live SDK                                  |
+| `--lang <language>` | Yes      |         | Target language                                       |
+| `--output <dir>`    | Yes      |         | Directory to write `.oagen-compat-snapshot.json` into |
 
-The snapshot file is meant to be committed to the repository and updated on each release.
+Always writes `.oagen-compat-snapshot.json` in the specified directory. The snapshot file is meant to be committed to the repository and updated on each release.
 
 ## `oagen compat-diff`
 

@@ -38,17 +38,17 @@ export default {
 
 Language policy determines which aspects of the public API are breaking. Built-in defaults capture language semantics:
 
-| Language | Named Args | Keyword Args | Constructor Order | Param Names Public | Overloads Public | Arity Public |
-|----------|-----------|-------------|-------------------|-------------------|-----------------|-------------|
-| PHP | yes | no | yes | yes | no | no |
-| Python | no | yes | yes | yes | no | no |
-| Ruby | no | yes | yes | yes | no | no |
-| Go | no | no | yes | no | no | yes |
-| Kotlin | yes | no | no | yes | yes | no |
-| .NET | yes | no | no | yes | yes | no |
-| Elixir | no | yes | no | yes | no | yes |
-| Rust | no | no | yes | no | no | yes |
-| Node | no | no | no | no | no | no |
+| Language | Caller Uses Param Names | Constructor Order | Param Names Public | Overloads Public | Arity Public |
+|----------|------------------------|-------------------|-------------------|-----------------|-------------|
+| PHP | yes | yes | yes | no | no |
+| Python | yes | yes | yes | no | no |
+| Ruby | yes | yes | yes | no | no |
+| Go | no | yes | no | no | yes |
+| Kotlin | yes | no | yes | yes | no |
+| .NET | yes | no | yes | yes | no |
+| Elixir | yes | no | yes | no | yes |
+| Rust | no | yes | no | no | yes |
+| Node | no | no | no | no | no |
 
 ### Overriding Language Defaults
 

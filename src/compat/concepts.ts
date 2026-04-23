@@ -41,12 +41,12 @@ export interface ConceptualRollup {
  * derived from the symbol, category, and match details. Changes with the
  * same ID across different languages represent the same conceptual change.
  */
-export function buildConceptualRollup(perLanguageResults: CompatDiffResult[]): ConceptualRollup {
+export function buildConceptualRollup(
+  perLanguageResults: Array<{ diff: CompatDiffResult; language: LanguageId }>,
+): ConceptualRollup {
   const grouped = new Map<string, ConceptualChange>();
 
-  for (const result of perLanguageResults) {
-    const language = result.language as LanguageId;
-
+  for (const { diff: result, language } of perLanguageResults) {
     for (const change of result.changes) {
       const existing = grouped.get(change.conceptualChangeId);
       if (existing) {

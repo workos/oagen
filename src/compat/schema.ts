@@ -21,12 +21,8 @@ export function validateSnapshot(data: unknown): data is CompatSnapshot {
   const obj = data as Record<string, unknown>;
   return (
     typeof obj.schemaVersion === 'string' &&
-    typeof obj.language === 'string' &&
-    typeof obj.sdkName === 'string' &&
     typeof obj.source === 'object' &&
     obj.source !== null &&
-    typeof obj.extractor === 'object' &&
-    obj.extractor !== null &&
     typeof obj.policies === 'object' &&
     obj.policies !== null &&
     Array.isArray(obj.symbols)

@@ -22,7 +22,7 @@ function makeChange(overrides: Partial<ClassifiedChange>): ClassifiedChange {
   };
 }
 
-function makeDiffResult(language: string, changes: ClassifiedChange[]): CompatDiffResult {
+function makeDiffResult(changes: ClassifiedChange[]): CompatDiffResult {
   let breaking = 0,
     softRisk = 0,
     additive = 0;
@@ -31,13 +31,13 @@ function makeDiffResult(language: string, changes: ClassifiedChange[]): CompatDi
     else if (c.severity === 'soft-risk') softRisk++;
     else additive++;
   }
-  return { changes, summary: { breaking, softRisk, additive }, language };
+  return { changes, summary: { breaking, softRisk, additive } };
 }
 
 describe('generateReport', () => {
   it('produces a machine-readable report with correct schema', () => {
-    const diff = makeDiffResult('php', [makeChange({})]);
-    const report = generateReport(diff);
+    const diff = makeDiffResult([makeChange({})]);
+    const report = generateReport(diff, 'php');
     expect(report.schemaVersion).toBe('1');
     expect(report.language).toBe('php');
     expect(report.summary.breaking).toBe(1);
@@ -47,7 +47,7 @@ describe('generateReport', () => {
   });
 
   it('produces empty report for no changes', () => {
-    const diff = makeDiffResult('node', []);
+    const diff = makeDiffResult([]);
     const report = generateReport(diff);
     expect(report.changes).toEqual([]);
     expect(report.summary).toEqual({ breaking: 0, softRisk: 0, additive: 0 });
@@ -56,12 +56,12 @@ describe('generateReport', () => {
 
 describe('formatHumanSummary', () => {
   it('includes language and severity counts', () => {
-    const diff = makeDiffResult('php', [
+    const diff = makeDiffResult([
       makeChange({ severity: 'breaking' }),
       makeChange({ severity: 'soft-risk', category: 'default_value_changed', symbol: 'Auth.other' }),
       makeChange({ severity: 'additive', category: 'symbol_added', symbol: 'Auth.new' }),
     ]);
-    const output = formatHumanSummary(diff);
+    const output = formatHumanSummary(diff, { language: 'php' });
     expect(output).toContain('php');
     expect(output).toContain('1 breaking');
     expect(output).toContain('1 soft-risk');
@@ -69,13 +69,13 @@ describe('formatHumanSummary', () => {
   });
 
   it('includes provenance when explain is true', () => {
-    const diff = makeDiffResult('php', [makeChange({ provenance: 'emitter_template_change' })]);
+    const diff = makeDiffResult([makeChange({ provenance: 'emitter_template_change' })]);
     const output = formatHumanSummary(diff, { explain: true });
     expect(output).toContain('emitter_template_change');
   });
 
   it('omits provenance when explain is false', () => {
-    const diff = makeDiffResult('php', [makeChange({ provenance: 'emitter_template_change' })]);
+    const diff = makeDiffResult([makeChange({ provenance: 'emitter_template_change' })]);
     const output = formatHumanSummary(diff, { explain: false });
     expect(output).not.toContain('provenance:');
   });
@@ -83,9 +83,12 @@ describe('formatHumanSummary', () => {
 
 describe('generateConceptualReport', () => {
   it('groups same conceptualChangeId across languages', () => {
-    const phpDiff = makeDiffResult('php', [makeChange({})]);
-    const pyDiff = makeDiffResult('python', [makeChange({})]);
-    const report = generateConceptualReport([phpDiff, pyDiff]);
+    const phpDiff = makeDiffResult([makeChange({})]);
+    const pyDiff = makeDiffResult([makeChange({})]);
+    const report = generateConceptualReport([
+      { diff: phpDiff, language: 'php' },
+      { diff: pyDiff, language: 'python' },
+    ]);
     expect(report.conceptualChanges).toHaveLength(1);
     expect(report.conceptualChanges[0].impact).toEqual({
       php: 'breaking',
@@ -94,20 +97,23 @@ describe('generateConceptualReport', () => {
   });
 
   it('keeps different conceptual changes separate', () => {
-    const phpDiff = makeDiffResult('php', [
+    const phpDiff = makeDiffResult([
       makeChange({ conceptualChangeId: 'chg_a' }),
       makeChange({ conceptualChangeId: 'chg_b', symbol: 'Other.method' }),
     ]);
-    const report = generateConceptualReport([phpDiff]);
+    const report = generateConceptualReport([{ diff: phpDiff, language: 'php' }]);
     expect(report.conceptualChanges).toHaveLength(2);
   });
 });
 
 describe('formatConceptualSummary', () => {
   it('includes per-language impact', () => {
-    const phpDiff = makeDiffResult('php', [makeChange({})]);
-    const goDiff = makeDiffResult('go', [makeChange({ severity: 'soft-risk' })]);
-    const output = formatConceptualSummary([phpDiff, goDiff]);
+    const phpDiff = makeDiffResult([makeChange({})]);
+    const goDiff = makeDiffResult([makeChange({ severity: 'soft-risk' })]);
+    const output = formatConceptualSummary([
+      { diff: phpDiff, language: 'php' },
+      { diff: goDiff, language: 'go' },
+    ]);
     expect(output).toContain('php: breaking');
     expect(output).toContain('go: soft-risk');
   });

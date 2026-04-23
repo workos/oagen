@@ -9,17 +9,9 @@ A full snapshot of an SDK's public API surface.
 ```ts
 interface CompatSnapshot {
   schemaVersion: string;
-  language: LanguageId;
-  sdkName: string;
   source: {
     specSha?: string;
-    emitterSha?: string;
-    configSha?: string;
     extractedAt: string;
-  };
-  extractor: {
-    name: string;
-    version?: string;
   };
   policies: CompatPolicyHints;
   symbols: CompatSymbol[];

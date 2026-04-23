@@ -14,17 +14,9 @@ export type LanguageId = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'kotlin' | 
 /** A full compatibility snapshot of an SDK's public API surface. */
 export interface CompatSnapshot {
   schemaVersion: string;
-  language: LanguageId;
-  sdkName: string;
   source: {
     specSha?: string;
-    emitterSha?: string;
-    configSha?: string;
     extractedAt: string;
-  };
-  extractor: {
-    name: string;
-    version?: string;
   };
   policies: CompatPolicyHints;
   symbols: CompatSymbol[];
@@ -281,10 +273,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
 
   return {
     schemaVersion: COMPAT_SCHEMA_VERSION,
-    language,
-    sdkName: '',
     source: { extractedAt: surface.extractedAt },
-    extractor: { name: `${language}-extractor` },
     policies: getDefaultPolicy(language),
     symbols,
   };

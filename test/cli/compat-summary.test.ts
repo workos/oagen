@@ -36,7 +36,7 @@ describe('compatSummaryCommand', () => {
 
     await compatSummaryCommand({ report: reportPath });
 
-    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
     expect(output).toContain(':white_check_mark:');
     expect(output).toContain('No compatibility changes detected');
   });
@@ -62,7 +62,7 @@ describe('compatSummaryCommand', () => {
 
     await compatSummaryCommand({ report: reportPath });
 
-    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
     expect(output).toContain(':x:');
     expect(output).toContain('Breaking changes');
     expect(output).toContain('`symbol_removed`');
@@ -90,7 +90,7 @@ describe('compatSummaryCommand', () => {
 
     await compatSummaryCommand({ report: reportPath });
 
-    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
     expect(output).toContain(':warning:');
     expect(output).toContain('Soft-risk changes');
   });
@@ -116,7 +116,7 @@ describe('compatSummaryCommand', () => {
 
     await compatSummaryCommand({ report: reportPath });
 
-    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
     expect(output).toContain('<details>');
     expect(output).toContain('Additive changes (1)');
   });
@@ -146,7 +146,7 @@ describe('compatSummaryCommand', () => {
 
     await compatSummaryCommand({ report: reportPath });
 
-    const output = stdoutSpy.mock.calls.map((c) => c[0]).join('');
+    const output = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('');
     expect(output).toContain('| Breaking | 2 |');
     expect(output).toContain('| Soft-risk | 1 |');
     expect(output).toContain('| Additive | 3 |');

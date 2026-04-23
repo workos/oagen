@@ -234,9 +234,7 @@ describe('nodeExtractor', () => {
   it('extractSnapshot returns a valid CompatSnapshot', async () => {
     const snapshot = await nodeExtractor.extractSnapshot(fixturePath);
     expect(snapshot.schemaVersion).toBe('1');
-    expect(snapshot.language).toBe('node');
     expect(snapshot.source.extractedAt).toBeDefined();
-    expect(snapshot.extractor.name).toBe('node-extractor');
     expect(snapshot.policies).toBeDefined();
     expect(Array.isArray(snapshot.symbols)).toBe(true);
     expect(snapshot.symbols.length).toBeGreaterThan(0);
