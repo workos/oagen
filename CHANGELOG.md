@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/workos/oagen/compare/v0.9.1...v0.9.2) (2026-04-24)
+
+
+### Bug Fixes
+
+* **compat:** accept Python packages without root __init__.py ([#31](https://github.com/workos/oagen/issues/31)) ([e638f76](https://github.com/workos/oagen/commit/e638f76428ce544a1acfa8c6950cb47839b2af37))
+
 ## [0.9.1](https://github.com/workos/oagen/compare/v0.9.0...v0.9.1) (2026-04-24)
 
 
