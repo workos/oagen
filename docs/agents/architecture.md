@@ -10,7 +10,7 @@ Three stages transform an OpenAPI spec into SDK files:
 
 1. **Parse** (`src/parser/parse.ts`) — Load and bundle the spec via `@redocly/openapi-core`, extract `Model[]`, `Enum[]`, and `Service[]` into the IR (`ApiSpec`). Sub-modules handle ref resolution (`refs.ts`), schema walking (`schemas.ts`), operation grouping (`operations.ts`), pagination detection (`pagination.ts`), and inline model extraction (`inline-models.ts`).
 
-2. **Emit** (`src/engine/orchestrator.ts`) — Call each emitter method in order (`generateModels` → `generateEnums` → `generateResources` → `generateClient` → `generateErrors` → `generateTypeSignatures` → `generateTests` → `generateManifest`), collect `GeneratedFile[]`, prepend file headers.
+2. **Emit** (`src/engine/orchestrator.ts`) — Call each emitter method in order (`generateModels` → `generateEnums` → `generateResources` → `generateClient` → `generateErrors` → `generateTypeSignatures` → `generateTests`), then call `buildOperationsMap` to produce the operations map (stored in `.oagen-manifest.json`), collect `GeneratedFile[]`, prepend file headers.
 
 3. **Write** (`src/engine/writer.ts`) — Write files to disk. New files are created in full. Existing files are merged at the AST level via `merger.ts` (additive-only — new symbols appended, existing symbols untouched). Files marked `skipIfExists` are never overwritten.
 

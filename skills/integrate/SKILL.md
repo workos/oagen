@@ -32,7 +32,7 @@ Determine required paths:
 - **Emitter project** (`project`): from argument, or detect from current directory
 - **Output directory** (`output`): use a temp directory or the emitter project's `sdk/` directory
 - **API surface** (`api_surface`): `sdk-{language}-surface.json` in the emitter project
-- **Manifest** (`manifest`): `smoke-manifest.json` in the output directory (if it exists)
+- **Manifest** (`manifest`): `.oagen-manifest.json` in the output directory (contains file list and operations map)
 
 ## Step 2: Dry-Run Preview
 

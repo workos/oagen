@@ -63,7 +63,7 @@ generateClient(spec, ctx); // HTTP client
 generateErrors(ctx); // Error hierarchy
 generateTypeSignatures(spec, ctx); // Type annotations (optional)
 generateTests(spec, ctx); // Tests + fixtures
-generateManifest?.(spec, ctx); // Smoke-test manifest (optional)
+buildOperationsMap?.(spec, ctx); // Operations map for .oagen-manifest.json (optional)
 ```
 
 ### OperationPlan

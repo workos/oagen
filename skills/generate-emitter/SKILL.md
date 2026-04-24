@@ -220,7 +220,7 @@ export const {language}Emitter: Emitter = {
   generateConfig(ctx) { return generateConfig(ctx); },
   generateTypeSignatures(spec, ctx) { return generateTypeSignatures(spec, ctx); },
   generateTests(spec, ctx) { return generateTests(spec, ctx); },
-  generateManifest(spec, ctx) { return generateManifest(spec, ctx); },
+  buildOperationsMap(spec, ctx) { return buildOperationsMap(spec, ctx); },
   fileHeader() { return "{language-appropriate auto-generated file header}"; },
 };
 ```
@@ -323,9 +323,9 @@ Patterns replicated: (Scenario A only)
   Model / Enum / Resource / Client / Error / Serialization / Pagination / Testing / Barrel exports
 ```
 
-## Smoke Manifest Generation (required)
+## Operations Map (required)
 
-Every emitter **must** implement `generateManifest`. The smoke test runner uses the manifest to resolve SDK methods from HTTP operations — without it, the smoke test cannot find methods and most operations will be skipped.
+Every emitter **must** implement `buildOperationsMap`. The smoke test runner uses the operations map (stored in `.oagen-manifest.json`) to resolve SDK methods from HTTP operations — without it, the smoke test cannot find methods and most operations will be skipped.
 
 The manifest maps every `HTTP_METHOD /path` to `{ sdkMethod, service }`:
 
@@ -342,25 +342,22 @@ The manifest maps every `HTTP_METHOD /path` to `{ sdkMethod, service }`:
 }
 ```
 
-The emitter already knows every operation→method mapping (from `resolveMethodName` or the equivalent). `generateManifest` simply serializes that mapping to `smoke-manifest.json` as a `GeneratedFile`. The orchestrator calls `emitter.generateManifest?.(spec, ctx)` and writes the result alongside the SDK output.
+The emitter already knows every operation→method mapping (from `resolveMethodName` or the equivalent). `buildOperationsMap` returns this mapping as an `OperationsMap` object. The orchestrator calls `emitter.buildOperationsMap?.(spec, ctx)` and writes the result into the `operations` field of `.oagen-manifest.json`.
 
 **Implementation pattern** (`manifest.ts`):
 
 ```typescript
-export function generateManifest(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
-  const manifest: Record<string, { sdkMethod: string; service: string }> = {};
+export function buildOperationsMap(spec: ApiSpec, ctx: EmitterContext): OperationsMap {
+  const operations: OperationsMap = {};
   for (const service of spec.services) {
     const propName = /* service property name on the client */;
     for (const op of service.operations) {
       const httpKey = `${op.httpMethod.toUpperCase()} ${op.path}`;
       const methodName = /* resolved method name for this operation */;
-      manifest[httpKey] = { sdkMethod: methodName, service: propName };
+      operations[httpKey] = { sdkMethod: methodName, service: propName };
     }
   }
-  return [{
-    path: "smoke-manifest.json",
-    content: JSON.stringify(manifest, null, 2),
-  }];
+  return operations;
 }
 ```
 

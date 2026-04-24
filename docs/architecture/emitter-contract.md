@@ -19,7 +19,7 @@ interface Emitter {
   generateErrors(ctx: EmitterContext): GeneratedFile[];
   generateTypeSignatures?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
-  generateManifest?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
+  buildOperationsMap?(spec: ApiSpec, ctx: EmitterContext): OperationsMap;
   fileHeader(): string;
 }
 ```
@@ -85,7 +85,7 @@ When a user passes `--api-surface` to `oagen generate`, the engine builds an `Ov
 | `modelNameByIR`     | `Map<string, string>`        | IR model name → SDK interface name (auto-inferred from field structure) |
 | `fileBySymbol`      | `Map<string, string>`        | IR symbol name → relative file path in the live SDK                     |
 
-The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-manifest.json`) is available. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `generateManifest`.
+The `httpKeyByMethod` reverse map is only populated when an `operations` map is present in `.oagen-manifest.json`. Without it, method-level violations cannot be auto-patched in the self-correcting loop. Emitters that support compat verification should implement `buildOperationsMap`.
 
 ## Rules
 
@@ -97,7 +97,7 @@ The `httpKeyByMethod` reverse map is only populated when a manifest (`smoke-mani
 
 4. **Tests include fixtures** — `generateTests` should internally call fixture generation and return both test files and fixture files in the combined `GeneratedFile[]`.
 
-5. **Inapplicable methods return `[]`** — If a language doesn't need type signature files, `generateTypeSignatures` returns `[]`. Optional methods like `generateManifest` can simply be omitted.
+5. **Inapplicable methods return `[]`** — If a language doesn't need type signature files, `generateTypeSignatures` returns `[]`. Optional methods like `buildOperationsMap` can simply be omitted.
 
 6. **Composable generators** — Interface methods can compose multiple internal generators when a language needs them.
 
