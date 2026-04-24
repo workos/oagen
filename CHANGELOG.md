@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/workos/oagen/compare/v0.7.0...v0.8.0) (2026-04-23)
+
+
+### Features
+
+* **compat:** add cross-language compatibility safeguards engine ([#25](https://github.com/workos/oagen/issues/25)) ([451f3eb](https://github.com/workos/oagen/commit/451f3ebcbca770b9ce322abb6c06717a191d370d))
+
+
+### Bug Fixes
+
+* add discriminated unions, parameter groups, and engine improvements ([#23](https://github.com/workos/oagen/issues/23)) ([bb3e9cf](https://github.com/workos/oagen/commit/bb3e9cfd5680ae79a2ce95aaa2f798178d52b034))
+
 ## [0.7.0](https://github.com/workos/oagen/compare/v0.6.0...v0.7.0) (2026-04-22)
 
 
