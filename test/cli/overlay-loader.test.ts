@@ -3,10 +3,11 @@ import { resolve } from 'node:path';
 import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import { loadOverlayContext } from '../../src/cli/overlay-loader.js';
+import { MANIFEST_FILENAME } from '../../src/engine/manifest.js';
 
 /**
- * Covers uncovered branches in overlay-loader.ts:
- * - Lines 50-66: object-format manifest conversion
+ * Covers overlay-loader.ts:
+ * - Operations read from .oagen-manifest.json
  * - Error paths for missing/invalid files
  */
 describe('loadOverlayContext', () => {
@@ -44,7 +45,7 @@ describe('loadOverlayContext', () => {
     ).toThrow(/Failed to parse API surface JSON/);
   });
 
-  it('loads array-format manifest', () => {
+  it('loads operations from .oagen-manifest.json', () => {
     const surfacePath = resolve(tmpDir, 'api-surface.json');
     writeFileSync(
       surfacePath,
@@ -60,56 +61,19 @@ describe('loadOverlayContext', () => {
       }),
     );
 
-    const manifestPath = resolve(tmpDir, 'smoke-manifest.json');
+    const manifestPath = resolve(tmpDir, MANIFEST_FILENAME);
     writeFileSync(
       manifestPath,
-      JSON.stringify([
-        {
-          operationId: 'listUsers',
-          sdkResourceProperty: 'users',
-          sdkMethodName: 'list',
-          httpMethod: 'GET',
-          path: '/users',
-          pathParams: [],
-          bodyFields: [],
-          queryFields: [],
+      JSON.stringify({
+        version: 2,
+        language: 'node',
+        generatedAt: '2024-01-01T00:00:00Z',
+        files: [],
+        operations: {
+          'GET /users': { sdkMethod: 'list', service: 'users' },
+          'POST /users': { sdkMethod: 'create', service: 'users' },
+          'GET /users/{id}': { sdkMethod: 'get', service: 'users' },
         },
-      ]),
-    );
-
-    const ctx = loadOverlayContext({
-      apiSurfacePath: surfacePath,
-      outputDir: tmpDir,
-      lang: 'node',
-    });
-    expect(ctx.apiSurface).toBeDefined();
-    expect(ctx.overlayLookup).toBeDefined();
-  });
-
-  it('loads object-format manifest and converts to array', () => {
-    // Covers lines 50-66: object-format manifest conversion
-    const surfacePath = resolve(tmpDir, 'api-surface.json');
-    writeFileSync(
-      surfacePath,
-      JSON.stringify({
-        language: 'node',
-        extractedFrom: '/test',
-        extractedAt: '2024-01-01T00:00:00Z',
-        classes: {},
-        interfaces: {},
-        typeAliases: {},
-        enums: {},
-        exports: {},
-      }),
-    );
-
-    const manifestPath = resolve(tmpDir, 'smoke-manifest.json');
-    writeFileSync(
-      manifestPath,
-      JSON.stringify({
-        'GET /users': { sdkMethod: 'list', service: 'users' },
-        'POST /users': { sdkMethod: 'create', service: 'users' },
-        'GET /users/{id}': { sdkMethod: 'get', service: 'users' },
       }),
     );
 
@@ -122,36 +86,7 @@ describe('loadOverlayContext', () => {
     expect(ctx.overlayLookup).toBeDefined();
   });
 
-  it('throws when explicit manifest path is invalid', () => {
-    const surfacePath = resolve(tmpDir, 'api-surface.json');
-    writeFileSync(
-      surfacePath,
-      JSON.stringify({
-        language: 'node',
-        extractedFrom: '/test',
-        extractedAt: '2024-01-01T00:00:00Z',
-        classes: {},
-        interfaces: {},
-        typeAliases: {},
-        enums: {},
-        exports: {},
-      }),
-    );
-
-    const badManifest = resolve(tmpDir, 'bad-manifest.json');
-    writeFileSync(badManifest, 'not json');
-
-    expect(() =>
-      loadOverlayContext({
-        apiSurfacePath: surfacePath,
-        manifestPath: badManifest,
-        outputDir: tmpDir,
-        lang: 'node',
-      }),
-    ).toThrow(/Failed to read manifest/);
-  });
-
-  it('ignores missing auto-discovered manifest silently', () => {
+  it('ignores missing manifest silently', () => {
     const surfacePath = resolve(tmpDir, 'api-surface.json');
     writeFileSync(
       surfacePath,
@@ -168,6 +103,41 @@ describe('loadOverlayContext', () => {
     );
 
     // No manifest file exists — should not throw
+    const ctx = loadOverlayContext({
+      apiSurfacePath: surfacePath,
+      outputDir: tmpDir,
+      lang: 'node',
+    });
+    expect(ctx.apiSurface).toBeDefined();
+  });
+
+  it('ignores manifest without operations field', () => {
+    const surfacePath = resolve(tmpDir, 'api-surface.json');
+    writeFileSync(
+      surfacePath,
+      JSON.stringify({
+        language: 'node',
+        extractedFrom: '/test',
+        extractedAt: '2024-01-01T00:00:00Z',
+        classes: {},
+        interfaces: {},
+        typeAliases: {},
+        enums: {},
+        exports: {},
+      }),
+    );
+
+    const manifestPath = resolve(tmpDir, MANIFEST_FILENAME);
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        language: 'node',
+        generatedAt: '2024-01-01T00:00:00Z',
+        files: [],
+      }),
+    );
+
     const ctx = loadOverlayContext({
       apiSurfacePath: surfacePath,
       outputDir: tmpDir,

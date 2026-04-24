@@ -2,7 +2,7 @@ import type { ApiSpec, Model, TypeRef, Service } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
-import type { Emitter, EmitterContext, GeneratedFile } from './types.js';
+import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { toSnakeCase } from '../utils/naming.js';
 
@@ -125,7 +125,6 @@ export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterCo
     ...emitter.generateErrors(ctx),
     ...(emitter.generateTypeSignatures?.(reachableSpec, ctx) ?? []),
     ...emitter.generateTests(reachableSpec, ctx),
-    ...(emitter.generateManifest?.(spec, ctx) ?? []),
   ];
 }
 
@@ -152,9 +151,10 @@ export function generateFiles(
     target?: string;
     priorTargetManifestPaths?: Set<string>;
   },
-): { files: GeneratedFile[]; ctx: EmitterContext; header: string } {
+): { files: GeneratedFile[]; ctx: EmitterContext; header: string; operations?: OperationsMap } {
   const ctx = buildEmitterContext(spec, options);
   const files = generateAllFiles(spec, emitter, ctx);
+  const operations = emitter.buildOperationsMap?.(spec, ctx);
   const header = emitter.fileHeader();
-  return { files: applyFileHeaders(files, header), ctx, header };
+  return { files: applyFileHeaders(files, header), ctx, header, operations };
 }

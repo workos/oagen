@@ -13,7 +13,6 @@ export async function generateCommand(opts: {
   namespace?: string;
   dryRun?: boolean;
   apiSurface?: string;
-  manifest?: string;
   compatCheck?: boolean;
   /** From `--no-prune`. When false, manifest-driven stale-file pruning is skipped. */
   prune?: boolean;
@@ -39,7 +38,6 @@ export async function generateCommand(opts: {
   if (opts.apiSurface && opts.compatCheck !== false) {
     const ctx = loadOverlayContext({
       apiSurfacePath: opts.apiSurface,
-      manifestPath: opts.manifest,
       outputDir: opts.output,
       lang: opts.lang,
       spec: ir,

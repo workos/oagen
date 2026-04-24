@@ -908,7 +908,7 @@ describe('patchOverlay', () => {
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     patchOverlay(overlay, changes, baseline);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No smoke-manifest.json available'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No operations map in .oagen-manifest.json'));
     warnSpy.mockRestore();
   });
 

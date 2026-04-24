@@ -47,6 +47,8 @@ export interface Manifest {
   compatSchemaVersion?: string;
   /** Sorted list of paths, relative to the manifest's containing directory. */
   files: string[];
+  /** Maps "METHOD /path" to SDK method + service property name. */
+  operations?: Record<string, unknown>;
 }
 
 export interface PruneResult {
@@ -102,6 +104,7 @@ export interface WriteManifestOpts {
   emitterVersion?: string;
   configSha?: string;
   compatSchemaVersion?: string;
+  operations?: Record<string, unknown>;
 }
 
 /** Write `.oagen-manifest.json` to a directory with sorted paths. */
@@ -118,6 +121,7 @@ export async function writeManifest(dir: string, opts: WriteManifestOpts): Promi
     ...(opts.configSha !== undefined ? { configSha: opts.configSha } : {}),
     ...(opts.compatSchemaVersion !== undefined ? { compatSchemaVersion: opts.compatSchemaVersion } : {}),
     files: [...new Set(opts.files)].sort(),
+    ...(opts.operations !== undefined ? { operations: opts.operations } : {}),
   };
   const manifestPath = path.join(dir, MANIFEST_FILENAME);
   await fs.mkdir(dir, { recursive: true });

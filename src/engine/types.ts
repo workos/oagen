@@ -43,6 +43,10 @@ export interface FormatCommand {
   batchSize?: number;
 }
 
+/** Maps "METHOD /path" to SDK method info. Values may be arrays for polymorphic operations. */
+export type OperationsMapEntry = { sdkMethod: string; service: string };
+export type OperationsMap = Record<string, OperationsMapEntry | OperationsMapEntry[]>;
+
 export interface Emitter {
   language: string;
 
@@ -60,8 +64,8 @@ export interface Emitter {
 
   generateTests(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
 
-  /** Optional: generate a smoke-manifest.json mapping operationIds to SDK methods */
-  generateManifest?(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[];
+  /** Optional: build operation-to-SDK-method mapping, stored in .oagen-manifest.json */
+  buildOperationsMap?(spec: ApiSpec, ctx: EmitterContext): OperationsMap;
 
   fileHeader(): string;
 
