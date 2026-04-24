@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/workos/oagen/compare/v0.8.0...v0.9.0) (2026-04-24)
+
+
+### Features
+
+* compat pipeline, plugin bundles, and manifest consolidation ([#27](https://github.com/workos/oagen/issues/27)) ([8562e1d](https://github.com/workos/oagen/commit/8562e1dd035ec0aa8930923187a85b7fe962cf8d))
+
 ## [0.8.0](https://github.com/workos/oagen/compare/v0.7.0...v0.8.0) (2026-04-23)
 
 
