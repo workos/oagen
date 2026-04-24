@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/workos/oagen/compare/v0.9.0...v0.9.1) (2026-04-24)
+
+
+### Bug Fixes
+
+* **compat:** filter hand-written symbols from baseline using manifest ([#29](https://github.com/workos/oagen/issues/29)) ([24381f6](https://github.com/workos/oagen/commit/24381f6fba9be2fb74a54cb3e391d7dc32b2d2fa))
+
 ## [0.9.0](https://github.com/workos/oagen/compare/v0.8.0...v0.9.0) (2026-04-24)
 
 
