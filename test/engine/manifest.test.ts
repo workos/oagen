@@ -71,6 +71,34 @@ describe('manifest read/write', () => {
       await fs.rm(dir, { recursive: true });
     }
   });
+
+  it('round-trips operations map', async () => {
+    const dir = await tmp();
+    try {
+      const operations = {
+        'GET /users': { sdkMethod: 'list', service: 'users' },
+        'POST /users': { sdkMethod: 'create', service: 'users' },
+      };
+      await writeManifest(dir, { language: 'python', files: ['a.py'], operations });
+      const got = await readManifest(dir);
+      expect(got).not.toBeNull();
+      expect(got!.operations).toEqual(operations);
+    } finally {
+      await fs.rm(dir, { recursive: true });
+    }
+  });
+
+  it('omits operations key when not provided', async () => {
+    const dir = await tmp();
+    try {
+      await writeManifest(dir, { language: 'python', files: ['a.py'] });
+      const raw = await fs.readFile(path.join(dir, MANIFEST_FILENAME), 'utf-8');
+      const parsed = JSON.parse(raw);
+      expect(parsed.operations).toBeUndefined();
+    } finally {
+      await fs.rm(dir, { recursive: true });
+    }
+  });
 });
 
 describe('computeStalePaths', () => {

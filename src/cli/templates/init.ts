@@ -169,8 +169,8 @@ export const ${varName}: Emitter = {
     return [];
   },
 
-  generateManifest(_spec: ApiSpec, _ctx: EmitterContext): GeneratedFile[] {
-    return [];
+  buildOperationsMap(_spec: ApiSpec, _ctx: EmitterContext) {
+    return {};
   },
 
   fileHeader(): string {

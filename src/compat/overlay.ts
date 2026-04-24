@@ -535,8 +535,8 @@ export function patchOverlay(overlay: OverlayLookup, changes: ClassifiedChange[]
         const httpKey = overlay.httpKeyByMethod.get(`${className}.${methodName}`);
         if (!httpKey && overlay.httpKeyByMethod.size === 0 && !warnedManifest) {
           console.warn(
-            'Warning: No smoke-manifest.json available. Method-level violations cannot be auto-patched. ' +
-              'Implement generateManifest in your emitter for the self-correcting loop to resolve these.',
+            'Warning: No operations map in .oagen-manifest.json. Method-level violations cannot be auto-patched. ' +
+              'Implement buildOperationsMap in your emitter for the self-correcting loop to resolve these.',
           );
           warnedManifest = true;
         }

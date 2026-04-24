@@ -82,7 +82,6 @@ program
   .option('--namespace <name>', 'SDK namespace/package name')
   .option('--dry-run', 'Preview files without writing')
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
-  .option('--manifest <path>', 'Path to smoke-manifest.json for method overlay')
   .option('--no-compat-check', 'Skip compat overlay even if --api-surface is provided')
   .option('--no-prune', 'Skip deletion of stale files recorded in the previous .oagen-manifest.json')
   .action((opts) => {

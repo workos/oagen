@@ -31,7 +31,11 @@ export async function generate(
   const targetManifestForCtx = options.target && !options.noPrune ? await readManifest(options.target) : null;
   const priorTargetManifestPaths = targetManifestForCtx ? new Set(targetManifestForCtx.files) : undefined;
 
-  const { files: withHeaders, header } = generateFiles(spec, emitter, {
+  const {
+    files: withHeaders,
+    header,
+    operations,
+  } = generateFiles(spec, emitter, {
     ...options,
     priorTargetManifestPaths,
   });
@@ -70,6 +74,7 @@ export async function generate(
     language: emitter.language,
     header,
     noPrune: options.noPrune,
+    operations,
   });
 
   // Format output files so the emitter's formatter runs even without --target.
@@ -109,6 +114,7 @@ export async function generate(
       language: emitter.language,
       header,
       noPrune: options.noPrune,
+      operations,
     });
 
     // Run the emitter's formatter on all written/merged/identical files
@@ -133,10 +139,12 @@ async function applyManifestPrune(opts: {
   language: string;
   header: string;
   noPrune?: boolean;
+  operations?: Record<string, unknown>;
 }): Promise<void> {
+  const manifestOpts = { language: opts.language, files: opts.currentPaths, operations: opts.operations };
   if (opts.noPrune) {
     // Still refresh the manifest so future runs with pruning enabled have a baseline.
-    await writeManifest(opts.dir, { language: opts.language, files: opts.currentPaths });
+    await writeManifest(opts.dir, manifestOpts);
     return;
   }
 
@@ -144,7 +152,7 @@ async function applyManifestPrune(opts: {
     console.log(
       `${opts.label}: no ${MANIFEST_FILENAME} found — skipping prune (this baseline manifest will be written now).`,
     );
-    await writeManifest(opts.dir, { language: opts.language, files: opts.currentPaths });
+    await writeManifest(opts.dir, manifestOpts);
     return;
   }
 
@@ -162,5 +170,5 @@ async function applyManifestPrune(opts: {
     }
   }
 
-  await writeManifest(opts.dir, { language: opts.language, files: opts.currentPaths });
+  await writeManifest(opts.dir, manifestOpts);
 }
