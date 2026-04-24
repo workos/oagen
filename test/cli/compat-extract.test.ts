@@ -44,7 +44,14 @@ describe('compatExtractCommand', () => {
       language: 'test-compat-extract-lang',
       extractedFrom: '/test',
       extractedAt: '2026-01-01T00:00:00.000Z',
-      classes: {},
+      classes: {
+        TestClient: {
+          name: 'TestClient',
+          methods: {},
+          properties: {},
+          constructorParams: [],
+        },
+      },
       interfaces: {},
       typeAliases: {},
       enums: {},

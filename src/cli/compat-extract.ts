@@ -3,10 +3,125 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { getExtractor } from '../compat/extractor-registry.js';
 import { parseSpec } from '../parser/parse.js';
+import { apiSurfaceToSnapshot } from '../compat/ir.js';
+import { readManifest } from '../engine/manifest.js';
+import type { Manifest } from '../engine/manifest.js';
 import type { CompatSnapshot } from '../compat/ir.js';
+import type { ApiSurface, ApiClass } from '../compat/types.js';
 import type { ApiSpec } from '../ir/types.js';
 
 const SNAPSHOT_FILENAME = '.oagen-compat-snapshot.json';
+
+/** Normalize a name for case-insensitive matching: strip underscores and lowercase. */
+function normalize(name: string): string {
+  return name.replace(/_/g, '').toLowerCase();
+}
+
+/**
+ * Build a map of normalized service name → Set of generated method names
+ * from the manifest's operations record.
+ */
+function buildServiceMethodMap(operations: Record<string, unknown>): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  for (const value of Object.values(operations)) {
+    if (typeof value !== 'object' || value === null) continue;
+    const { sdkMethod, service } = value as { sdkMethod?: string; service?: string };
+    if (typeof sdkMethod !== 'string' || typeof service !== 'string') continue;
+    const key = normalize(service);
+    if (!result.has(key)) result.set(key, new Set());
+    result.get(key)!.add(sdkMethod);
+  }
+  return result;
+}
+
+/**
+ * Filter an ApiSurface to only include generated symbols based on the manifest.
+ *
+ * Two levels of filtering:
+ *  1. File-level: classes/interfaces/enums from files not in the manifest are
+ *     dropped entirely (they are wholly hand-written).
+ *  2. Method-level: for service classes (those whose name matches a manifest
+ *     service), only methods listed in the manifest operations are kept.
+ *     Constructors and properties are always preserved since they are structural.
+ *     Non-service classes (models, enums, etc.) keep all their symbols.
+ */
+function filterSurfaceByManifest(
+  surface: ApiSurface,
+  manifest: Manifest,
+): {
+  filtered: ApiSurface;
+  filesExcluded: number;
+  methodsExcluded: number;
+} {
+  const manifestFiles = new Set(manifest.files);
+  const serviceMethodMap = manifest.operations
+    ? buildServiceMethodMap(manifest.operations)
+    : new Map<string, Set<string>>();
+
+  let filesExcluded = 0;
+  let methodsExcluded = 0;
+
+  // Filter a record by manifest files, counting exclusions
+  const filterByFile = <T extends { sourceFile?: string }>(record: Record<string, T>): Record<string, T> => {
+    const result: Record<string, T> = {};
+    for (const [name, entry] of Object.entries(record)) {
+      if (entry.sourceFile && manifestFiles.has(entry.sourceFile)) {
+        result[name] = entry;
+      } else {
+        filesExcluded++;
+      }
+    }
+    return result;
+  };
+
+  // Filter classes: file-level first, then method-level for service classes
+  const filteredClasses: Record<string, ApiClass> = {};
+  for (const [name, cls] of Object.entries(surface.classes)) {
+    if (cls.sourceFile && !manifestFiles.has(cls.sourceFile)) {
+      filesExcluded++;
+      continue;
+    }
+
+    // Check if this class is a service with known operations
+    const generatedMethods = serviceMethodMap.get(normalize(name));
+    if (generatedMethods) {
+      // Service class — keep only methods that appear in manifest operations
+      const methods: typeof cls.methods = {};
+      for (const [methodName, overloads] of Object.entries(cls.methods)) {
+        if (generatedMethods.has(methodName)) {
+          methods[methodName] = overloads;
+        } else {
+          methodsExcluded++;
+        }
+      }
+      filteredClasses[name] = { ...cls, methods };
+    } else {
+      // Model / utility class — keep all symbols
+      filteredClasses[name] = cls;
+    }
+  }
+
+  // Filter exports to only include files in the manifest
+  const filteredExports: Record<string, string[]> = {};
+  for (const [filePath, symbols] of Object.entries(surface.exports)) {
+    if (manifestFiles.has(filePath)) {
+      filteredExports[filePath] = symbols;
+    }
+  }
+
+  return {
+    filtered: {
+      ...surface,
+      classes: filteredClasses,
+      interfaces: filterByFile(surface.interfaces),
+      typeAliases: filterByFile(surface.typeAliases),
+      enums: filterByFile(surface.enums),
+      exports: filteredExports,
+    },
+    filesExcluded,
+    methodsExcluded,
+  };
+}
 
 export async function compatExtractCommand(opts: {
   sdkPath: string;
@@ -16,7 +131,24 @@ export async function compatExtractCommand(opts: {
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
   console.log(`Extracting ${opts.lang} compat snapshot from ${opts.sdkPath}...`);
-  const snapshot = await extractor.extractSnapshot(opts.sdkPath);
+
+  let surface = await extractor.extract(opts.sdkPath);
+
+  // If the SDK has a manifest, scope extraction to only generated symbols.
+  // File-level: excludes wholly hand-written files.
+  // Method-level: excludes hand-written methods on service classes.
+  const manifest = await readManifest(opts.sdkPath);
+  if (manifest) {
+    const { filtered, filesExcluded, methodsExcluded } = filterSurfaceByManifest(surface, manifest);
+    surface = filtered;
+    if (filesExcluded > 0 || methodsExcluded > 0) {
+      console.log(
+        `Manifest filter: excluded ${filesExcluded} hand-written file(s), ${methodsExcluded} hand-written method(s)`,
+      );
+    }
+  }
+
+  const snapshot = apiSurfaceToSnapshot(surface);
 
   // Enrich with spec context if provided
   if (opts.spec) {
