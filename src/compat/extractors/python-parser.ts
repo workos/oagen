@@ -100,6 +100,23 @@ export function walkPythonFiles(dir: string): string[] {
 }
 
 /** Find the Python source root (prefers `src/`, falls back to top-level package). */
+/** True if a directory looks like a Python package (has __init__.py or .py files). */
+function isPythonPackageDir(dir: string): boolean {
+  try {
+    statSync(join(dir, '__init__.py'));
+    return true;
+  } catch {
+    // no __init__.py — check for .py files as a fallback
+    // (generated output may omit __init__.py when it's hand-maintained)
+  }
+  try {
+    const entries = readdirSync(dir);
+    return entries.some((e) => e.endsWith('.py'));
+  } catch {
+    return false;
+  }
+}
+
 export function findPythonSourceRoot(sdkPath: string): string | null {
   // Strategy 1: src/ directory
   const srcDir = join(sdkPath, 'src');
@@ -111,14 +128,8 @@ export function findPythonSourceRoot(sdkPath: string): string | null {
         const pkgDir = join(srcDir, entry);
         try {
           const pkgStat = statSync(pkgDir);
-          if (pkgStat.isDirectory()) {
-            const initFile = join(pkgDir, '__init__.py');
-            try {
-              statSync(initFile);
-              return srcDir;
-            } catch {
-              // no __init__.py, keep looking
-            }
+          if (pkgStat.isDirectory() && isPythonPackageDir(pkgDir)) {
+            return srcDir;
           }
         } catch {
           continue;
@@ -137,14 +148,8 @@ export function findPythonSourceRoot(sdkPath: string): string | null {
       const pkgDir = join(sdkPath, entry);
       try {
         const pkgStat = statSync(pkgDir);
-        if (pkgStat.isDirectory()) {
-          const initFile = join(pkgDir, '__init__.py');
-          try {
-            statSync(initFile);
-            return sdkPath;
-          } catch {
-            // no __init__.py
-          }
+        if (pkgStat.isDirectory() && isPythonPackageDir(pkgDir)) {
+          return sdkPath;
         }
       } catch {
         continue;
