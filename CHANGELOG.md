@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/workos/oagen/compare/v0.10.1...v0.10.2) (2026-04-25)
+
+
+### Bug Fixes
+
+* **compat:** exclude service class constructors from snapshots ([#37](https://github.com/workos/oagen/issues/37)) ([ee89bc6](https://github.com/workos/oagen/commit/ee89bc6e4c2f59e9dde259568631fb5509097e43))
+
 ## [0.10.1](https://github.com/workos/oagen/compare/v0.10.0...v0.10.1) (2026-04-25)
 
 
