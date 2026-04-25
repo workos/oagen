@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/workos/oagen/compare/v0.10.0...v0.10.1) (2026-04-25)
+
+
+### Bug Fixes
+
+* **compat:** pass schemaNameTransform to compat-extract spec parser ([#35](https://github.com/workos/oagen/issues/35)) ([7569926](https://github.com/workos/oagen/commit/7569926898ee8eff2529d05bc422c1649bc33539))
+
 ## [0.10.0](https://github.com/workos/oagen/compare/v0.9.2...v0.10.0) (2026-04-25)
 
 
