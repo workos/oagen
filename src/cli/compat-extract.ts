@@ -85,7 +85,9 @@ function filterSurfaceByManifest(
     // Check if this class is a service with known operations
     const generatedMethods = serviceMethodMap.get(normalize(name));
     if (generatedMethods) {
-      // Service class — keep only methods that appear in manifest operations
+      // Service class — keep only methods that appear in manifest operations.
+      // Also clear constructorParams: service constructors are internal DI
+      // wiring (e.g. __construct($client)), not user-facing API.
       const methods: typeof cls.methods = {};
       for (const [methodName, overloads] of Object.entries(cls.methods)) {
         if (generatedMethods.has(methodName)) {
@@ -94,7 +96,7 @@ function filterSurfaceByManifest(
           methodsExcluded++;
         }
       }
-      filteredClasses[name] = { ...cls, methods };
+      filteredClasses[name] = { ...cls, methods, constructorParams: [] };
     } else {
       // Model / utility class — keep all symbols
       filteredClasses[name] = cls;
