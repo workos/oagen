@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/workos/oagen/compare/v0.9.2...v0.10.0) (2026-04-25)
+
+
+### Features
+
+* **compat:** use spec-level identity for cross-language change grouping ([#33](https://github.com/workos/oagen/issues/33)) ([9837c72](https://github.com/workos/oagen/commit/9837c72915e1ed00d76797eb5ad79a470c3a4ccf))
+
 ## [0.9.2](https://github.com/workos/oagen/compare/v0.9.1...v0.9.2) (2026-04-24)
 
 
