@@ -165,17 +165,20 @@ export async function compatExtractCommand(opts: {
 }
 
 /**
- * Enrich snapshot symbols with operationId and route from the parsed spec.
+ * Enrich snapshot symbols with spec-level identity.
  *
- * Matches callable symbols to spec operations by comparing method names
- * derived from the spec against the symbol's fqName.
+ * - Callable symbols get `operationId` and `route` from spec operations.
+ * - Property/field/constructor/service_accessor symbols get `schemaName`
+ *   from spec models, enabling cross-language grouping in reports.
+ *
+ * The `schemaName` uses the spec-level identity (e.g. "GenerateLinkBody.admin_emails")
+ * which is the same regardless of the language's naming conventions.
  */
 function enrichWithSpecContext(snapshot: CompatSnapshot, spec: ApiSpec): void {
   // Build lookup: "ServiceName.methodName" → { operationId, method, path }
   const opLookup = new Map<string, { operationId: string; method: string; path: string }>();
   for (const service of spec.services) {
     for (const op of service.operations) {
-      // The symbol fqName is "ClassName.methodName" — match against service + operation name
       const key = `${service.name}.${op.name}`;
       opLookup.set(key, {
         operationId: op.name,
@@ -185,12 +188,49 @@ function enrichWithSpecContext(snapshot: CompatSnapshot, spec: ApiSpec): void {
     }
   }
 
+  // Build model field lookup for schema-level identity.
+  // Normalized class name → { specModelName, fields: Map<normalizedFieldName, specFieldName> }
+  const norm = (s: string) => s.replace(/_/g, '').toLowerCase();
+  const modelLookup = new Map<string, { specName: string; fields: Map<string, string> }>();
+  for (const model of spec.models) {
+    const fieldMap = new Map<string, string>();
+    for (const field of model.fields) {
+      fieldMap.set(norm(field.name), field.name);
+    }
+    modelLookup.set(norm(model.name), { specName: model.name, fields: fieldMap });
+  }
+
   for (const sym of snapshot.symbols) {
-    if (sym.kind !== 'callable') continue;
-    const match = opLookup.get(sym.fqName);
-    if (match) {
-      sym.operationId = match.operationId;
-      sym.route = { method: match.method, path: match.path };
+    // Enrich callables with operation identity
+    if (sym.kind === 'callable') {
+      const match = opLookup.get(sym.fqName);
+      if (match) {
+        sym.operationId = match.operationId;
+        sym.route = { method: match.method, path: match.path };
+      }
+    }
+
+    // Enrich all symbols with schema-level identity
+    if (sym.ownerFqName) {
+      // This symbol belongs to a class — try to match the class to a spec model
+      const modelMatch = modelLookup.get(norm(sym.ownerFqName));
+      if (modelMatch) {
+        // Extract the local name (part after the dot)
+        const localName = sym.fqName.includes('.') ? sym.fqName.split('.').pop()! : sym.fqName;
+        const fieldMatch = modelMatch.fields.get(norm(localName));
+        if (fieldMatch) {
+          sym.schemaName = `${modelMatch.specName}.${fieldMatch}`;
+        } else {
+          // Class-level symbol (constructor, etc.) — use just the model name
+          sym.schemaName = modelMatch.specName;
+        }
+      }
+    } else {
+      // Top-level symbol (class itself) — try to match to a spec model
+      const modelMatch = modelLookup.get(norm(sym.fqName));
+      if (modelMatch) {
+        sym.schemaName = modelMatch.specName;
+      }
     }
   }
 }

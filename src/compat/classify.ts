@@ -55,6 +55,10 @@ export function classifySymbolChanges(
 ): ClassifiedChange[] {
   const changes: ClassifiedChange[] = [];
 
+  // Build spec-level ref for cross-language grouping.
+  // Prefer schemaName from either symbol (baseline for removals, candidate for adds).
+  const specRef = baseline.schemaName ?? candidate?.schemaName;
+
   // Symbol removed
   if (!candidate) {
     changes.push(
@@ -65,6 +69,7 @@ export function classifySymbolChanges(
         new: { symbol: '(removed)' },
         message: `Symbol "${baseline.displayName}" was removed`,
         policy,
+        specRef,
       }),
     );
     return changes;
@@ -80,13 +85,14 @@ export function classifySymbolChanges(
         new: { name: candidate.fqName },
         message: `Symbol renamed from "${baseline.displayName}" to "${candidate.displayName}"`,
         policy,
+        specRef,
       }),
     );
   }
 
   // Parameter-level changes (for callables and constructors)
   if (baseline.parameters && candidate.parameters) {
-    changes.push(...classifyParameterChanges(baseline, candidate, policy));
+    changes.push(...classifyParameterChanges(baseline, candidate, policy, specRef));
   }
 
   // Return type changes (for callables)
@@ -99,6 +105,7 @@ export function classifySymbolChanges(
         new: { returnType: candidate.returns.name },
         message: `Return type changed for "${baseline.displayName}" from "${baseline.returns.name}" to "${candidate.returns.name}"`,
         policy,
+        specRef,
       }),
     );
   }
@@ -113,6 +120,7 @@ export function classifySymbolChanges(
         new: { type: candidate.typeRef.name },
         message: `Type changed for "${baseline.displayName}" from "${baseline.typeRef.name}" to "${candidate.typeRef.name}"`,
         policy,
+        specRef,
       }),
     );
   }
@@ -147,6 +155,7 @@ function classifyParameterChanges(
   baseline: CompatSymbol,
   candidate: CompatSymbol,
   policy: CompatPolicyHints,
+  specRef?: string,
 ): ClassifiedChange[] {
   const changes: ClassifiedChange[] = [];
   const baseParams = baseline.parameters ?? [];
@@ -174,6 +183,7 @@ function classifyParameterChanges(
             new: { parameter: positionalMatch.publicName },
             message: `Parameter "${baseParam.publicName}" renamed to "${positionalMatch.publicName}" on "${baseline.displayName}"`,
             policy,
+            specRef,
             severityOverride: isBreakingRename ? undefined : 'soft-risk',
           }),
         );
@@ -187,6 +197,7 @@ function classifyParameterChanges(
             new: { parameter: '(removed)' },
             message: `Parameter "${baseParam.publicName}" removed from "${baseline.displayName}"`,
             policy,
+            specRef,
           }),
         );
       }
@@ -203,6 +214,7 @@ function classifyParameterChanges(
           new: { parameter: candParam.publicName, required: 'true' },
           message: `Parameter "${baseParam.publicName}" became required on "${baseline.displayName}"`,
           policy,
+          specRef,
         }),
       );
     }
@@ -217,6 +229,7 @@ function classifyParameterChanges(
           new: { parameter: candParam.publicName, type: candParam.type.name },
           message: `Parameter type changed for "${baseParam.publicName}" on "${baseline.displayName}"`,
           policy,
+          specRef,
         }),
       );
     }
@@ -237,6 +250,7 @@ function classifyParameterChanges(
             new: { parameter: candParam.publicName, position: String(candParam.position) },
             message: `Parameter "${baseParam.publicName}" moved from position ${baseParam.position} to ${candParam.position} on "${baseline.displayName}"`,
             policy,
+            specRef,
           }),
         );
       } else {
@@ -249,6 +263,7 @@ function classifyParameterChanges(
             new: { parameter: candParam.publicName, position: String(candParam.position) },
             message: `Parameter "${baseParam.publicName}" reordered on "${baseline.displayName}" (named-friendly language)`,
             policy,
+            specRef,
           }),
         );
       }
@@ -280,6 +295,7 @@ function classifyParameterChanges(
             new: { parameter: candParam.publicName, required: 'true' },
             message: `Required parameter "${candParam.publicName}" added to "${baseline.displayName}"`,
             policy,
+            specRef,
           }),
         );
       } else {
@@ -291,6 +307,7 @@ function classifyParameterChanges(
             new: { parameter: candParam.publicName },
             message: `Optional parameter "${candParam.publicName}" added to "${baseline.displayName}"`,
             policy,
+            specRef,
           }),
         );
       }
@@ -310,13 +327,22 @@ function parameterNameIsPublicApi(param: CompatParameter, policy: CompatPolicyHi
   return policy.methodParameterNamesArePublicApi;
 }
 
-/** Build a deterministic conceptual change ID. */
+/**
+ * Build a deterministic conceptual change ID.
+ *
+ * When `specRef` is provided (e.g. "GenerateLinkBody.admin_emails"), it is
+ * used instead of the language-specific symbol name.  This ensures the same
+ * spec entity produces the same ID across all languages, enabling cross-
+ * language rollup in reports.
+ */
 function buildConceptualChangeId(
   category: CompatChangeCategory,
   symbol: string,
   match: Record<string, string>,
+  specRef?: string,
 ): string {
-  const parts = ['chg', category, symbol.replace(/[^a-zA-Z0-9_.]/g, '_')];
+  const identity = specRef ?? symbol;
+  const parts = ['chg', category, identity.replace(/[^a-zA-Z0-9_.]/g, '_')];
   if (match.parameter) parts.push(match.parameter);
   if (match.member) parts.push(match.member);
   return parts.join('_').toLowerCase();
@@ -331,12 +357,13 @@ function makeChange(opts: {
   policy: CompatPolicyHints;
   provenance?: CompatProvenance;
   severityOverride?: CompatChangeSeverity;
+  specRef?: string;
 }): ClassifiedChange {
   return {
     category: opts.category,
     severity: opts.severityOverride ?? defaultSeverityForCategory(opts.category),
     symbol: opts.symbol,
-    conceptualChangeId: buildConceptualChangeId(opts.category, opts.symbol, opts.old),
+    conceptualChangeId: buildConceptualChangeId(opts.category, opts.symbol, opts.old, opts.specRef),
     provenance: opts.provenance ?? 'unknown',
     old: opts.old,
     new: opts.new,
@@ -352,7 +379,7 @@ export function classifyAddedSymbol(symbol: CompatSymbol): ClassifiedChange {
     category: 'symbol_added',
     severity: 'additive',
     symbol: symbol.fqName,
-    conceptualChangeId: buildConceptualChangeId('symbol_added', symbol.fqName, {}),
+    conceptualChangeId: buildConceptualChangeId('symbol_added', symbol.fqName, {}, symbol.schemaName),
     provenance: 'unknown',
     old: { symbol: '(absent)' },
     new: { symbol: symbol.fqName },
