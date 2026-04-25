@@ -128,6 +128,7 @@ export async function compatExtractCommand(opts: {
   lang: string;
   output: string;
   spec?: string;
+  schemaNameTransform?: (name: string) => string;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
   console.log(`Extracting ${opts.lang} compat snapshot from ${opts.sdkPath}...`);
@@ -155,7 +156,9 @@ export async function compatExtractCommand(opts: {
     const specContent = readFileSync(opts.spec, 'utf-8');
     snapshot.source.specSha = createHash('sha256').update(specContent).digest('hex');
 
-    const parsedSpec = await parseSpec(opts.spec);
+    const parsedSpec = await parseSpec(opts.spec, {
+      schemaNameTransform: opts.schemaNameTransform,
+    });
     enrichWithSpecContext(snapshot, parsedSpec);
   }
 

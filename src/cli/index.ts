@@ -134,7 +134,10 @@ program
   .option('--spec <path>', 'Path to OpenAPI spec — enriches symbols with operationId, route, and specSha')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
-    compatExtractCommand(opts).catch(handleError);
+    compatExtractCommand({
+      ...opts,
+      schemaNameTransform: configSchemaNameTransform,
+    }).catch(handleError);
   });
 
 program
