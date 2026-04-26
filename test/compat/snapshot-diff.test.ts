@@ -31,6 +31,74 @@ function sym(overrides: Partial<CompatSymbol> & { fqName: string }): CompatSymbo
   };
 }
 
+describe('diffSnapshots — service wrapper constructor filtering', () => {
+  it('suppresses Ruby-style constructor removal on service wrappers', () => {
+    const baseline = makeSnapshot('ruby', [
+      sym({ fqName: 'AdminPortal', kind: 'service_accessor' }),
+      sym({
+        id: 'ctor:AdminPortal',
+        fqName: 'AdminPortal.constructor',
+        kind: 'constructor',
+        ownerFqName: 'AdminPortal',
+        sourceKind: 'generated_resource_constructor',
+      }),
+    ]);
+    const candidate = makeSnapshot('ruby', [sym({ fqName: 'AdminPortal', kind: 'service_accessor' })]);
+    const result = diffSnapshots(baseline, candidate);
+    expect(result.changes.filter((c) => c.symbol.includes('constructor'))).toHaveLength(0);
+    expect(result.summary.breaking).toBe(0);
+  });
+
+  it('suppresses PHP __construct removal on service wrappers', () => {
+    const baseline = makeSnapshot('php', [
+      sym({ fqName: 'AdminPortal', kind: 'service_accessor' }),
+      sym({
+        id: 'method:AdminPortal.__construct',
+        fqName: 'AdminPortal.__construct',
+        kind: 'callable',
+        ownerFqName: 'AdminPortal',
+      }),
+    ]);
+    const candidate = makeSnapshot('php', [sym({ fqName: 'AdminPortal', kind: 'service_accessor' })]);
+    const result = diffSnapshots(baseline, candidate);
+    expect(result.changes.filter((c) => c.symbol.includes('__construct'))).toHaveLength(0);
+    expect(result.summary.breaking).toBe(0);
+  });
+
+  it('still reports constructor removal on non-service classes', () => {
+    const baseline = makeSnapshot('ruby', [
+      sym({
+        id: 'ctor:Organization',
+        fqName: 'Organization.constructor',
+        kind: 'constructor',
+        ownerFqName: 'Organization',
+        sourceKind: 'generated_resource_constructor',
+      }),
+    ]);
+    const candidate = makeSnapshot('ruby', []);
+    const result = diffSnapshots(baseline, candidate);
+    const removed = result.changes.find((c) => c.symbol === 'Organization.constructor');
+    expect(removed).toBeDefined();
+    expect(removed!.category).toBe('symbol_removed');
+  });
+
+  it('suppresses added service wrapper constructor', () => {
+    const baseline = makeSnapshot('ruby', [sym({ fqName: 'NewService', kind: 'service_accessor' })]);
+    const candidate = makeSnapshot('ruby', [
+      sym({ fqName: 'NewService', kind: 'service_accessor' }),
+      sym({
+        id: 'ctor:NewService',
+        fqName: 'NewService.constructor',
+        kind: 'constructor',
+        ownerFqName: 'NewService',
+        sourceKind: 'generated_resource_constructor',
+      }),
+    ]);
+    const result = diffSnapshots(baseline, candidate);
+    expect(result.changes.filter((c) => c.symbol.includes('constructor'))).toHaveLength(0);
+  });
+});
+
 describe('diffSnapshots', () => {
   it('returns no changes for identical snapshots', () => {
     const symbols = [sym({ fqName: 'Svc.method' })];

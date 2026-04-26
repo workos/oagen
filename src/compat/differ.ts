@@ -46,6 +46,17 @@ export function diffSnapshots(
   const effectivePolicy = policy ?? baseline.policies;
   const changes: ClassifiedChange[] = [];
 
+  // Build set of service wrapper fqNames from both snapshots so we can
+  // suppress constructor noise — users never instantiate service classes
+  // directly, so their constructor changes are not public-API breaking.
+  const serviceAccessors = new Set<string>();
+  for (const sym of baseline.symbols) {
+    if (sym.kind === 'service_accessor') serviceAccessors.add(sym.fqName);
+  }
+  for (const sym of candidate.symbols) {
+    if (sym.kind === 'service_accessor') serviceAccessors.add(sym.fqName);
+  }
+
   // Index candidate symbols by ID and fqName for lookup
   const candById = new Map<string, CompatSymbol>();
   const candByFqName = new Map<string, CompatSymbol>();
@@ -62,6 +73,7 @@ export function diffSnapshots(
 
   // Compare each baseline symbol against candidate
   for (const baseSym of baseline.symbols) {
+    if (isServiceWrapperConstructor(baseSym, serviceAccessors)) continue;
     const candSym = candById.get(baseSym.id) ?? candByFqName.get(baseSym.fqName);
     changes.push(...classifySymbolChanges(baseSym, candSym, effectivePolicy));
   }
@@ -69,6 +81,7 @@ export function diffSnapshots(
   // Detect added symbols
   for (const candSym of candidate.symbols) {
     if (!baseByFqName.has(candSym.fqName)) {
+      if (isServiceWrapperConstructor(candSym, serviceAccessors)) continue;
       changes.push(classifyAddedSymbol(candSym));
     }
   }
@@ -77,6 +90,25 @@ export function diffSnapshots(
     changes,
     summary: summarizeChanges(changes),
   };
+}
+
+/**
+ * Check if a symbol is a constructor belonging to a service wrapper class.
+ *
+ * Service wrapper constructors are internal plumbing (taking a client/config
+ * object) — users interact with services via `client.admin_portal`, not
+ * `new AdminPortal(...)`.  Changes to these constructors should not be
+ * reported as breaking.
+ *
+ * Catches two patterns:
+ *  - Ruby: kind === 'constructor', ownerFqName is a service_accessor
+ *  - PHP:  kind === 'callable' with fqName ending in '.__construct'
+ */
+function isServiceWrapperConstructor(sym: CompatSymbol, serviceAccessors: Set<string>): boolean {
+  if (!sym.ownerFqName || !serviceAccessors.has(sym.ownerFqName)) return false;
+  if (sym.kind === 'constructor') return true;
+  if (sym.kind === 'callable' && sym.fqName.endsWith('.__construct')) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
