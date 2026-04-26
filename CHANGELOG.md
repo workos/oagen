@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.3](https://github.com/workos/oagen/compare/v0.10.2...v0.10.3) (2026-04-26)
+
+
+### Bug Fixes
+
+* **compat:** filter service wrapper constructors from diff output ([#39](https://github.com/workos/oagen/issues/39)) ([a7da939](https://github.com/workos/oagen/commit/a7da93919b093bbd0bfe4a578c80de2d95665ef8))
+
 ## [0.10.2](https://github.com/workos/oagen/compare/v0.10.1...v0.10.2) (2026-04-25)
 
 
