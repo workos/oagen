@@ -69,6 +69,8 @@ export interface CompatSymbol {
   typeRef?: CompatTypeRef;
   /** Value for enum member symbols. */
   value?: string | number;
+  /** Relative path to the source file where this symbol is defined. */
+  sourceFile?: string;
 }
 
 /** How a parameter is passed at the call site. */
@@ -137,6 +139,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       visibility: 'public',
       stability: cls.deprecationMessage ? 'deprecated' : 'stable',
       sourceKind: 'generated_service_wrapper',
+      ...(cls.sourceFile ? { sourceFile: cls.sourceFile } : {}),
     });
 
     // Constructor
@@ -151,6 +154,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
         stability: 'stable',
         sourceKind: 'generated_resource_constructor',
         parameters: cls.constructorParams.map((p, i) => apiParamToCompatParam(p, i, language)),
+        ...(cls.sourceFile ? { sourceFile: cls.sourceFile } : {}),
       });
     }
 
@@ -170,6 +174,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
           sourceKind: 'generated_service_wrapper',
           parameters: method.params.map((p, i) => apiParamToCompatParam(p, i, language)),
           returns: { name: method.returnType },
+          ...(cls.sourceFile ? { sourceFile: cls.sourceFile } : {}),
         });
       }
     }
@@ -186,6 +191,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
         stability: 'stable',
         sourceKind: 'generated_service_wrapper',
         typeRef: { name: prop.type },
+        ...(cls.sourceFile ? { sourceFile: cls.sourceFile } : {}),
       });
     }
   }
@@ -200,6 +206,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       visibility: 'public',
       stability: 'stable',
       sourceKind: 'generated_resource_constructor',
+      ...(iface.sourceFile ? { sourceFile: iface.sourceFile } : {}),
     });
 
     for (const [fieldName, field] of Object.entries(iface.fields)) {
@@ -213,6 +220,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
         stability: 'stable',
         sourceKind: 'generated_resource_constructor',
         typeRef: { name: field.type },
+        ...(iface.sourceFile ? { sourceFile: iface.sourceFile } : {}),
       });
     }
 
@@ -227,12 +235,13 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
         visibility: 'public',
         stability: 'stable',
         sourceKind: 'generated_resource_constructor',
+        ...(iface.sourceFile ? { sourceFile: iface.sourceFile } : {}),
       });
     }
   }
 
   // Convert type aliases
-  for (const [aliasName] of Object.entries(surface.typeAliases)) {
+  for (const [aliasName, alias] of Object.entries(surface.typeAliases)) {
     symbols.push({
       id: `alias:${aliasName}`,
       kind: 'alias',
@@ -241,6 +250,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       visibility: 'public',
       stability: 'stable',
       sourceKind: 'generated_resource_constructor',
+      ...(alias.sourceFile ? { sourceFile: alias.sourceFile } : {}),
     });
   }
 
@@ -254,6 +264,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
       visibility: 'public',
       stability: 'stable',
       sourceKind: 'generated_enum',
+      ...(enumDef.sourceFile ? { sourceFile: enumDef.sourceFile } : {}),
     });
 
     for (const [memberName, memberValue] of Object.entries(enumDef.members)) {
@@ -267,6 +278,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
         stability: 'stable',
         sourceKind: 'generated_enum',
         value: memberValue,
+        ...(enumDef.sourceFile ? { sourceFile: enumDef.sourceFile } : {}),
       });
     }
   }
