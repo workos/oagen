@@ -85,18 +85,14 @@ function filterSurfaceByManifest(
     // Check if this class is a service with known operations
     const generatedMethods = serviceMethodMap.get(normalize(name));
     if (generatedMethods) {
-      // Service class — keep only methods that appear in manifest operations.
-      // Also clear constructorParams: service constructors are internal DI
+      // Service class from a generated file — keep all methods.
+      // File-level filtering already ensures this is a generated file;
+      // method-level filtering was dropping wrapper methods (e.g.
+      // createM2MApplication) and utility methods (e.g. verify_event)
+      // that aren't tracked as HTTP operations in the manifest.
+      // Clear constructorParams: service constructors are internal DI
       // wiring (e.g. __construct($client)), not user-facing API.
-      const methods: typeof cls.methods = {};
-      for (const [methodName, overloads] of Object.entries(cls.methods)) {
-        if (generatedMethods.has(methodName)) {
-          methods[methodName] = overloads;
-        } else {
-          methodsExcluded++;
-        }
-      }
-      filteredClasses[name] = { ...cls, methods, constructorParams: [] };
+      filteredClasses[name] = { ...cls, constructorParams: [] };
     } else {
       // Model / utility class — keep all symbols
       filteredClasses[name] = cls;
@@ -139,15 +135,12 @@ export async function compatExtractCommand(opts: {
 
   // If the SDK has a manifest, scope extraction to only generated symbols.
   // File-level: excludes wholly hand-written files.
-  // Method-level: excludes hand-written methods on service classes.
   const manifest = await readManifest(opts.sdkPath);
   if (manifest) {
-    const { filtered, filesExcluded, methodsExcluded } = filterSurfaceByManifest(surface, manifest);
+    const { filtered, filesExcluded } = filterSurfaceByManifest(surface, manifest);
     surface = filtered;
-    if (filesExcluded > 0 || methodsExcluded > 0) {
-      console.log(
-        `Manifest filter: excluded ${filesExcluded} hand-written file(s), ${methodsExcluded} hand-written method(s)`,
-      );
+    if (filesExcluded > 0) {
+      console.log(`Manifest filter: excluded ${filesExcluded} hand-written file(s)`);
     }
   }
 
