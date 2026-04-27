@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.4](https://github.com/workos/oagen/compare/v0.10.3...v0.10.4) (2026-04-27)
+
+
+### Bug Fixes
+
+* **compat:** stop filtering service class methods by manifest operations ([#41](https://github.com/workos/oagen/issues/41)) ([f7f7787](https://github.com/workos/oagen/commit/f7f7787548b11f3f208dd8cc387a96a021a96298))
+
 ## [0.10.3](https://github.com/workos/oagen/compare/v0.10.2...v0.10.3) (2026-04-26)
 
 
