@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/workos/oagen/compare/v0.10.4...v0.11.0) (2026-04-27)
+
+
+### Features
+
+* **compat:** propagate sourceFile into CompatSnapshot ([#43](https://github.com/workos/oagen/issues/43)) ([6045e18](https://github.com/workos/oagen/commit/6045e1849257965d28b67ca5168188926a101d33))
+
 ## [0.10.4](https://github.com/workos/oagen/compare/v0.10.3...v0.10.4) (2026-04-27)
 
 
