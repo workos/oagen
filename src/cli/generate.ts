@@ -1,4 +1,4 @@
-import { parseSpec } from '../parser/parse.js';
+import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { generate } from '../engine/orchestrator.js';
 import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
@@ -18,6 +18,7 @@ export async function generateCommand(opts: {
   prune?: boolean;
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
+  transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
@@ -26,6 +27,7 @@ export async function generateCommand(opts: {
   let ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
+    transformSpec: opts.transformSpec,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);

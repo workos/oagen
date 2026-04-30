@@ -21,6 +21,7 @@ Read these when you need migration or verification workflows beyond basic genera
 - [Workflows](architecture/workflows.md)
 - [Extractor Contract](architecture/extractor-contract.md)
 - [Non-Additive Changes](architecture/non-additive-changes.md)
+- [`transformSpec` — Pre-IR Spec Overlay](advanced/transform-spec.md)
 
 ## Agent Task Guides
 

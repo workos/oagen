@@ -1,4 +1,4 @@
-import { parseSpec } from '../parser/parse.js';
+import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { diffSpecs } from '../differ/diff.js';
 import { CommandError } from '../errors.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
@@ -8,11 +8,13 @@ export async function diffCommand(opts: {
   new: string;
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
+  transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
 }): Promise<void> {
   const parseOptions = {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
+    transformSpec: opts.transformSpec,
   };
   let [oldSpec, newSpec] = await Promise.all([parseSpec(opts.old, parseOptions), parseSpec(opts.new, parseOptions)]);
   if (opts.docUrl) {

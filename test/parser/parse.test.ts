@@ -133,6 +133,113 @@ components:
     }
   });
 
+  describe('transformSpec hook', () => {
+    it('runs the hook on the bundled doc before extraction', async () => {
+      // Verify the hook sees the parsed OpenAPI document and that mutations
+      // flow into the IR. Drop the User schema's `email` field via the hook
+      // and confirm the resulting model has no email.
+      const ir = await parseSpec(`${FIXTURES}/minimal.yml`, {
+        transformSpec: (spec) => {
+          const components = (
+            spec as {
+              components?: { schemas?: Record<string, { properties?: Record<string, unknown>; required?: string[] }> };
+            }
+          ).components;
+          const userSchema = components?.schemas?.User;
+          if (userSchema?.properties) delete userSchema.properties.email;
+          if (userSchema?.required) {
+            userSchema.required = userSchema.required.filter((f) => f !== 'email');
+          }
+          return spec;
+        },
+      });
+      const user = ir.models.find((m) => m.name === 'User');
+      expect(user).toBeDefined();
+      expect(user!.fields.find((f) => f.name === 'email')).toBeUndefined();
+    });
+
+    it('lets the hook rewrite a path response $ref to a different schema', async () => {
+      // Simulate the "schema fork" workaround: rewrite a path's response
+      // $ref so the SDK keeps using the original schema even when upstream
+      // points at a forked one. We construct a spec with two schemas (Foo,
+      // FooWithExtra) where the path points at FooWithExtra; the hook
+      // redirects it to Foo.
+      const spec = `
+openapi: '3.1.0'
+info:
+  title: Hook Test
+  version: '1.0.0'
+servers:
+  - url: https://api.example.com
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FooWithExtra'
+components:
+  schemas:
+    Foo:
+      type: object
+      properties:
+        id: { type: string }
+      required: [id]
+    FooWithExtra:
+      type: object
+      properties:
+        id: { type: string }
+        extra: { type: string }
+      required: [id, extra]
+`;
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-transform-spec-'));
+      const specFile = path.join(tmpDir, 'fork.yml');
+      try {
+        await fs.writeFile(specFile, spec, 'utf-8');
+        const ir = await parseSpec(specFile, {
+          transformSpec: (doc) => {
+            const paths = (
+              doc as {
+                paths?: Record<
+                  string,
+                  Record<
+                    string,
+                    { responses?: Record<string, { content?: Record<string, { schema?: { $ref?: string } }> }> }
+                  >
+                >;
+              }
+            ).paths;
+            const responseSchema = paths?.['/things']?.get?.responses?.['200']?.content?.['application/json']?.schema;
+            if (responseSchema?.$ref === '#/components/schemas/FooWithExtra') {
+              responseSchema.$ref = '#/components/schemas/Foo';
+            }
+            return doc;
+          },
+        });
+        const op = ir.services.flatMap((s) => s.operations).find((o) => o.name === 'listThings');
+        expect(op).toBeDefined();
+        const responseType = (op as { response?: { kind?: string; name?: string } }).response;
+        expect(responseType?.kind).toBe('model');
+        expect(responseType?.name).toBe('Foo');
+      } finally {
+        await fs.rm(tmpDir, { recursive: true });
+      }
+    });
+
+    it('passes the document through unchanged when the hook is omitted', async () => {
+      const baseline = await parseSpec(`${FIXTURES}/minimal.yml`);
+      const noopTransformed = await parseSpec(`${FIXTURES}/minimal.yml`, {
+        transformSpec: (s) => s,
+      });
+      expect(noopTransformed.models.map((m) => m.name).sort()).toEqual(baseline.models.map((m) => m.name).sort());
+      expect(noopTransformed.services.map((s) => s.name).sort()).toEqual(baseline.services.map((s) => s.name).sort());
+    });
+  });
+
   it('qualifies inline model name to avoid collision with component schema', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

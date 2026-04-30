@@ -8,4 +8,5 @@ Use this section when you need to preserve an existing SDK surface, verify behav
 - [Extractor Contract](../architecture/extractor-contract.md)
 - [Non-Additive Changes](../architecture/non-additive-changes.md)
 - [`@oagen-ignore` — Preserving Hand-Written Code](./oagen-ignore.md)
+- [`transformSpec` — Pre-IR Spec Overlay](./transform-spec.md)
 - [CLI Reference](../cli.md)
