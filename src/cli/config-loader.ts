@@ -46,6 +46,19 @@ export interface OagenConfig {
    * takes priority.
    */
   mountRules?: Record<string, string>;
+  /**
+   * Pin specific models to a specific IR service for placement, overriding the
+   * default "first service to reference the model wins" assignment.
+   *
+   * Maps IR model name → IR service name (both PascalCase). Useful when a model
+   * is shared across services and the natural ordering would place it in a
+   * service that's wrong for the public API.
+   *
+   * Both names must exist in the parsed spec; unknown names throw at generation
+   * time so typos fail loud. Note that keys are post-cleanSchemaName /
+   * post-schemaNameTransform model names (e.g. `User`, not `UserlandUser`).
+   */
+  modelHints?: Record<string, string>;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];
