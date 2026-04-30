@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/workos/oagen/compare/v0.11.0...v0.12.0) (2026-04-30)
+
+
+### Features
+
+* **ir:** add modelHints config for explicit model→service placement ([#45](https://github.com/workos/oagen/issues/45)) ([eef6aca](https://github.com/workos/oagen/commit/eef6aca74764e44e63c7b68cd730a4f9ef01c442))
+
 ## [0.11.0](https://github.com/workos/oagen/compare/v0.10.4...v0.11.0) (2026-04-27)
 
 
