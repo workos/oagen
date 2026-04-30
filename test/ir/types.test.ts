@@ -372,6 +372,99 @@ describe('assignModelsToServices', () => {
     expect(map.get('Org')).toBe('Orgs');
     expect(map.has('Orphan')).toBe(false);
   });
+
+  it('overrides assignment when modelHints pin a model to a specific service', () => {
+    const models: Model[] = [
+      { name: 'User', fields: [] },
+      { name: 'Org', fields: [] },
+    ];
+    const services = [
+      {
+        name: 'Authorization',
+        operations: [
+          {
+            name: 'check',
+            httpMethod: 'get' as const,
+            path: '/authorization/check',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+      {
+        name: 'UserManagementUsers',
+        operations: [
+          {
+            name: 'getUser',
+            httpMethod: 'get' as const,
+            path: '/user_management/users/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    // Without hints: Authorization wins (it's listed first).
+    expect(assignModelsToServices(models, services).get('User')).toBe('Authorization');
+    // With hints: explicit pin wins regardless of service order.
+    expect(assignModelsToServices(models, services, { User: 'UserManagementUsers' }).get('User')).toBe(
+      'UserManagementUsers',
+    );
+  });
+
+  it('throws when modelHints names an unknown model', () => {
+    const models: Model[] = [{ name: 'User', fields: [] }];
+    const services = [
+      {
+        name: 'Users',
+        operations: [
+          {
+            name: 'getUser',
+            httpMethod: 'get' as const,
+            path: '/users/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    expect(() => assignModelsToServices(models, services, { Userrr: 'Users' })).toThrow(/unknown model "Userrr"/);
+  });
+
+  it('throws when modelHints names an unknown service', () => {
+    const models: Model[] = [{ name: 'User', fields: [] }];
+    const services = [
+      {
+        name: 'Users',
+        operations: [
+          {
+            name: 'getUser',
+            httpMethod: 'get' as const,
+            path: '/users/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    expect(() => assignModelsToServices(models, services, { User: 'Userzzz' })).toThrow(/unknown service "Userzzz"/);
+  });
 });
 
 describe('collectRequestBodyModels', () => {

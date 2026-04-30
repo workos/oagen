@@ -20,6 +20,7 @@ export async function generate(
     overlayLookup?: OverlayLookup;
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
+    modelHints?: Record<string, string>;
     /** When true, skip deletion of files recorded in the previous manifest but not in the current emission. */
     noPrune?: boolean;
   },

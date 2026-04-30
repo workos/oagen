@@ -196,6 +196,11 @@ export default {
     Connections: 'SSO',           // All Connections ops mount on SSO
     DirectoryGroups: 'DirectorySync',
   },
+  modelHints: {
+    // Pin a model's placement when "first service to reference it wins"
+    // would otherwise drift as the spec evolves.
+    User: 'UserManagementUsers',
+  },
 };
 ```
 

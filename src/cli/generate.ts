@@ -21,6 +21,7 @@ export async function generateCommand(opts: {
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
+  modelHints?: Record<string, string>;
 }): Promise<void> {
   let ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
@@ -55,6 +56,7 @@ export async function generateCommand(opts: {
     overlayLookup,
     operationHints: opts.operationHints,
     mountRules: opts.mountRules,
+    modelHints: opts.modelHints,
     noPrune: opts.prune === false,
   });
 

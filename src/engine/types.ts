@@ -22,6 +22,12 @@ export interface EmitterContext {
   overlayLookup?: OverlayLookup;
   /** Resolved operations from the hint-aware resolver. Populated by buildEmitterContext(). */
   resolvedOperations?: ResolvedOperation[];
+  /**
+   * Model-placement pins from `OagenConfig.modelHints`. Emitters that call
+   * `assignModelsToServices` should pass this through so hinted models land in
+   * the configured service instead of the default first-reference winner.
+   */
+  modelHints?: Record<string, string>;
   /** Absolute path to the integration target directory (when --target is used). */
   targetDir?: string;
   /**

@@ -36,6 +36,7 @@ let configSchemaNameTransform: ((name: string) => string) | undefined;
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
+let configModelHints: Record<string, string> | undefined;
 let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
   const config = await loadConfig(explicitConfigPath);
@@ -47,6 +48,7 @@ try {
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
+    configModelHints = config.modelHints;
     configCompat = config.compat;
   }
 } catch (err) {
@@ -97,6 +99,7 @@ program
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
+      modelHints: configModelHints,
     }).catch(handleError);
   });
 

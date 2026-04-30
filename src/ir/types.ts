@@ -391,8 +391,17 @@ export function collectFieldDependencies(model: Model): {
  * Assign each model to the service that first references it.
  * Models referenced by multiple services are assigned to the first.
  * Models not referenced by any service are unassigned (absent from the map).
+ *
+ * @param hints - Optional pin overrides keyed by IR model name → IR service
+ *   name. Applied after the natural assignment loop. Both names must exist in
+ *   the spec; unknown keys/values throw a config-style error so typos fail
+ *   loud at generation time.
  */
-export function assignModelsToServices(models: Model[], services: Service[]): Map<string, string> {
+export function assignModelsToServices(
+  models: Model[],
+  services: Service[],
+  hints?: Record<string, string>,
+): Map<string, string> {
   const modelToService = new Map<string, string>();
   const modelNames = new Set(models.map((m) => m.name));
 
@@ -440,6 +449,27 @@ export function assignModelsToServices(models: Model[], services: Service[]): Ma
       if (!modelToService.has(name)) {
         modelToService.set(name, service.name);
       }
+    }
+  }
+
+  if (hints) {
+    const serviceNames = new Set(services.map((s) => s.name));
+    for (const [modelName, serviceName] of Object.entries(hints)) {
+      if (!modelNames.has(modelName)) {
+        const err = new Error(
+          `modelHints: unknown model "${modelName}". Hint keys must match an IR model name (post-cleanSchemaName/schemaNameTransform).`,
+        );
+        err.name = 'ConfigError';
+        throw err;
+      }
+      if (!serviceNames.has(serviceName)) {
+        const err = new Error(
+          `modelHints: unknown service "${serviceName}" for model "${modelName}". Hint values must match an IR service name (PascalCase, derived from the operation's first tag).`,
+        );
+        err.name = 'ConfigError';
+        throw err;
+      }
+      modelToService.set(modelName, serviceName);
     }
   }
 
