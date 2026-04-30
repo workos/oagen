@@ -60,9 +60,11 @@ export async function writeFiles(
       continue;
     }
 
-    // skipIfExists → hard skip, no merge (but ensure header is present)
+    // skipIfExists → hard skip, no merge (but ensure header is present).
+    // JSON files are skipped from header injection because a leading `//`
+    // comment makes the file invalid JSON.
     if (file.skipIfExists) {
-      if (header && !existingContent.startsWith(header)) {
+      if (header && !existingContent.startsWith(header) && !file.path.endsWith('.json')) {
         await fs.writeFile(fullPath, header + '\n\n' + existingContent, 'utf-8');
       }
       result.skipped.push(file.path);
