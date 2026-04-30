@@ -5,7 +5,7 @@
 ## Signature
 
 ```typescript
-import type { OagenConfig, OpenApiDocument } from '@workos/oagen';
+import type { OagenConfig, OpenApiDocument } from "@workos/oagen";
 
 const config: OagenConfig = {
   // ...
@@ -36,25 +36,50 @@ oagen's compat differ flags this pattern via the `remediation` hint on classifie
 
 ```typescript
 // oagen.config.ts
-import type { OagenConfig } from '@workos/oagen';
+import type { OagenConfig } from "@workos/oagen";
 
 const config: OagenConfig = {
   transformSpec(spec) {
-    const components = (spec as {
-      components?: { schemas?: Record<string, { properties?: Record<string, unknown>; required?: string[] }> };
-    }).components;
-    const paths = (spec as {
-      paths?: Record<string, Record<string, { responses?: Record<string, { content?: Record<string, { schema?: { $ref?: string } }> }> }>>;
-    }).paths;
+    const components = (
+      spec as {
+        components?: {
+          schemas?: Record<
+            string,
+            { properties?: Record<string, unknown>; required?: string[] }
+          >;
+        };
+      }
+    ).components;
+    const paths = (
+      spec as {
+        paths?: Record<
+          string,
+          Record<
+            string,
+            {
+              responses?: Record<
+                string,
+                { content?: Record<string, { schema?: { $ref?: string } }> }
+              >;
+            }
+          >
+        >;
+      }
+    ).paths;
 
     // 1. Rewrite the path response refs back to the original schema.
-    const forkedRef = '#/components/schemas/FooWithBarList';
-    const originalRef = '#/components/schemas/FooList';
+    const forkedRef = "#/components/schemas/FooWithBarList";
+    const originalRef = "#/components/schemas/FooList";
     for (const pathItem of Object.values(paths ?? {})) {
       for (const op of Object.values(pathItem)) {
-        const ref = op?.responses?.['200']?.content?.['application/json']?.schema?.$ref;
-        if (ref === forkedRef && op.responses?.['200']?.content?.['application/json']?.schema) {
-          op.responses['200'].content['application/json'].schema!.$ref = originalRef;
+        const ref =
+          op?.responses?.["200"]?.content?.["application/json"]?.schema?.$ref;
+        if (
+          ref === forkedRef &&
+          op.responses?.["200"]?.content?.["application/json"]?.schema
+        ) {
+          op.responses["200"].content["application/json"].schema!.$ref =
+            originalRef;
         }
       }
     }
@@ -62,7 +87,9 @@ const config: OagenConfig = {
     // 2. Add the forked schema's new fields to the original schema additively.
     const foo = components?.schemas?.Foo;
     if (foo?.properties) {
-      foo.properties.bar = { $ref: '#/components/schemas/Bar' } as unknown as Record<string, unknown>;
+      foo.properties.bar = {
+        $ref: "#/components/schemas/Bar",
+      } as unknown as Record<string, unknown>;
     }
 
     // 3. Drop the now-orphaned forked schemas so they don't bloat the IR.
