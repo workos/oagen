@@ -168,3 +168,29 @@ The `failOn` level determines which unapproved changes cause `oagen verify` to f
 | `none`      | Never fails for compat                   |
 | `breaking`  | Unapproved breaking changes              |
 | `soft-risk` | Unapproved breaking OR soft-risk changes |
+
+## Remediation Hints
+
+Some changes have a recognized upstream root cause that the spec author can fix. When the differ detects one, it attaches a `remediation` string to the classified change. The hint surfaces in both the machine-readable report (`CompatReportChange.remediation`) and the human-readable summary (printed as `hint: ...` underneath the change).
+
+The classification, severity, and fail-threshold semantics are unchanged — `remediation` is purely advisory, telling the spec author how to make the change non-breaking.
+
+### Detected patterns
+
+| Pattern                  | Trigger                                                                                                                                                                                                       | Hint                                                                                                                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Schema fork**          | A `return_type_changed` or `field_type_changed` where the new type was newly added in the candidate snapshot _and_ its field set is a non-strict superset of the prior type's field set.                       | "Schema `NewType` looks like `OldType` with additional fields. Consider adding the new fields to `OldType` instead of forking a new schema." Forking forces a breaking type-name change in typed SDKs; extending the existing schema is additive. |
+
+### Example: schema fork
+
+A path's response `$ref` is redirected from `MembershipBaseList` to a brand-new `MembershipBaseWithUserList` whose only difference is an added `user` field. The differ reports a `return_type_changed` (breaking) for the affected method, plus the remediation hint pointing the spec author at the additive alternative.
+
+If the upstream fix can't land in time, `transformSpec` is the local escape hatch — see [`transformSpec` — Pre-IR Spec Overlay](../advanced/transform-spec.md).
+
+### Adding new patterns
+
+Detection rules live in `detectForkedSchemas` (`src/compat/differ.ts`). To add a rule:
+
+1. Add a heuristic that examines the existing `changes` list plus the baseline/candidate snapshots.
+2. When the pattern matches, set `change.remediation` on the relevant existing change. Don't introduce a new change for the same pattern — pile remediation onto what's already classified.
+3. Keep the rule scoped: it should match a recognizable upstream antipattern, not generic shape changes.

@@ -86,10 +86,123 @@ export function diffSnapshots(
     }
   }
 
+  // Post-pass: attach spec-level remediation hints when recognized upstream
+  // patterns are detected. Currently flags the "schema fork" antipattern —
+  // a path's response type was redirected to a brand-new schema whose field
+  // set is a superset of the prior schema, which forces a breaking SDK
+  // signature change instead of an additive field on the existing schema.
+  detectForkedSchemas(changes, baseline, candidate);
+
   return {
     changes,
     summary: summarizeChanges(changes),
   };
+}
+
+/**
+ * Detect "schema fork" antipattern and attach a remediation hint.
+ *
+ * Fires when:
+ *  1. A return type or field type changed from `OldType` → `NewType`.
+ *  2. `NewType` is newly added in the candidate snapshot.
+ *  3. `NewType.fields ⊇ OldType.fields` (every field on the old type still
+ *     exists on the new one — the new schema is a strict superset, so the
+ *     same fields could have been added to the existing schema additively).
+ *
+ * Mutates `changes` in place: sets `remediation` on the matching change.
+ * Leaves the original category and severity alone — this is just a hint.
+ *
+ * Identity match is by `displayName` of the type symbol, which corresponds
+ * to the type name as it appears in `change.old.returnType` / `.type` and
+ * `change.new.returnType` / `.type`.
+ */
+function detectForkedSchemas(changes: ClassifiedChange[], baseline: CompatSnapshot, candidate: CompatSnapshot): void {
+  // Build name → field-name set maps from each snapshot. A "type" here is any
+  // symbol that owns field/property children (alias, service_accessor, enum).
+  const baselineTypeFields = collectTypeFieldSets(baseline);
+  const candidateTypeFields = collectTypeFieldSets(candidate);
+  const baselineTypeNames = new Set(baselineTypeFields.keys());
+
+  for (const change of changes) {
+    if (change.remediation) continue;
+
+    let oldType: string | undefined;
+    let newType: string | undefined;
+    if (change.category === 'return_type_changed') {
+      oldType = change.old.returnType;
+      newType = change.new.returnType;
+    } else if (change.category === 'field_type_changed') {
+      oldType = change.old.type;
+      newType = change.new.type;
+    } else {
+      continue;
+    }
+    if (!oldType || !newType || oldType === newType) continue;
+
+    // Strip array/nullable decorations so we compare bare type names. This
+    // covers e.g. `FooList` vs `BarList`, plus simple `Foo[]` vs `Bar[]`.
+    const oldTypeBare = bareTypeName(oldType);
+    const newTypeBare = bareTypeName(newType);
+
+    // The new type must be newly introduced.
+    if (baselineTypeNames.has(newTypeBare)) continue;
+
+    const oldFields = baselineTypeFields.get(oldTypeBare);
+    const newFields = candidateTypeFields.get(newTypeBare);
+    if (!oldFields || !newFields) continue;
+    if (oldFields.size === 0) continue;
+
+    // newFields must be a (non-strict) superset of oldFields.
+    let isSuperset = true;
+    for (const f of oldFields) {
+      if (!newFields.has(f)) {
+        isSuperset = false;
+        break;
+      }
+    }
+    if (!isSuperset) continue;
+
+    change.remediation =
+      `Schema "${newTypeBare}" looks like "${oldTypeBare}" with additional fields. ` +
+      `Consider adding the new fields to "${oldTypeBare}" instead of forking a new schema — ` +
+      `forking forces a breaking type-name change in typed SDKs, while extending the existing ` +
+      `schema is additive.`;
+  }
+}
+
+/**
+ * Build a map from type fqName → set of (lowercased) child field names.
+ * Used by `detectForkedSchemas` for superset comparison.
+ */
+function collectTypeFieldSets(snapshot: CompatSnapshot): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  for (const sym of snapshot.symbols) {
+    if (sym.kind !== 'field' && sym.kind !== 'property') continue;
+    if (!sym.ownerFqName) continue;
+    const localName = sym.fqName.includes('.') ? sym.fqName.slice(sym.fqName.lastIndexOf('.') + 1) : sym.fqName;
+    let set = result.get(sym.ownerFqName);
+    if (!set) {
+      set = new Set<string>();
+      result.set(sym.ownerFqName, set);
+    }
+    set.add(localName.toLowerCase());
+  }
+  return result;
+}
+
+/**
+ * Strip array/nullable suffixes so we compare bare type names. Languages
+ * encode these differently (`Foo[]`, `Foo | null`, `Foo?`, `List<Foo>`,
+ * `Optional[Foo]`); this is a best-effort common-case stripper, not an
+ * exhaustive parser.
+ */
+function bareTypeName(t: string): string {
+  let s = t.trim();
+  s = s.replace(/\s*\|\s*null$/, '').replace(/\?$/, '');
+  s = s.replace(/\[\]$/, '');
+  const generic = s.match(/^[A-Za-z_][A-Za-z0-9_.]*<\s*([A-Za-z_][A-Za-z0-9_.]*)\s*>$/);
+  if (generic) s = generic[1];
+  return s;
 }
 
 /**

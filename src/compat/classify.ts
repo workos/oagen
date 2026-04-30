@@ -28,6 +28,13 @@ export interface ClassifiedChange {
   new: Record<string, string>;
   /** Human-readable explanation. */
   message: string;
+  /**
+   * Optional spec-level remediation hint. Set by post-classification rules
+   * (see `detectForkedSchemas` in differ.ts) when a change has a recognized
+   * upstream root cause that the spec author can fix. Surfaces in both the
+   * machine-readable report and the human-readable summary.
+   */
+  remediation?: string;
 }
 
 /** Result of classifying all changes between two snapshots. */

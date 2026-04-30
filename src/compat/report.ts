@@ -36,6 +36,8 @@ export interface CompatReportChange {
   old: Record<string, string>;
   new: Record<string, string>;
   message?: string;
+  /** Spec-level remediation hint when a recognized upstream pattern was detected. */
+  remediation?: string;
 }
 
 /** Generate a machine-readable compat report from a diff result. */
@@ -53,6 +55,7 @@ export function generateReport(diff: CompatDiffResult, language?: string): Compa
       old: c.old,
       new: c.new,
       ...(c.message ? { message: c.message } : {}),
+      ...(c.remediation ? { remediation: c.remediation } : {}),
     })),
   };
 }
@@ -85,6 +88,9 @@ export function formatHumanSummary(diff: CompatDiffResult, opts?: { explain?: bo
     lines.push('  Breaking:');
     for (const c of breaking) {
       lines.push(`    [${c.category}] ${c.symbol} — ${c.message}`);
+      if (c.remediation) {
+        lines.push(`      hint: ${c.remediation}`);
+      }
       if (opts?.explain && c.provenance !== 'unknown') {
         lines.push(`      provenance: ${c.provenance}`);
       }
@@ -96,6 +102,9 @@ export function formatHumanSummary(diff: CompatDiffResult, opts?: { explain?: bo
     lines.push('  Soft-risk:');
     for (const c of softRisk) {
       lines.push(`    [${c.category}] ${c.symbol} — ${c.message}`);
+      if (c.remediation) {
+        lines.push(`      hint: ${c.remediation}`);
+      }
       if (opts?.explain && c.provenance !== 'unknown') {
         lines.push(`      provenance: ${c.provenance}`);
       }
