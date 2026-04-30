@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/workos/oagen/compare/v0.12.0...v0.13.0) (2026-04-30)
+
+
+### Features
+
+* transformSpec hook + forked-schema remediation hint ([#48](https://github.com/workos/oagen/issues/48)) ([1e101c3](https://github.com/workos/oagen/commit/1e101c3d706715bc55a1ab77216820529114c91b))
+
+
+### Bug Fixes
+
+* do not write to JSON files ([61fe7f4](https://github.com/workos/oagen/commit/61fe7f40c3f045ddb9d9714866b95518296a074e))
+
 ## [0.12.0](https://github.com/workos/oagen/compare/v0.11.0...v0.12.0) (2026-04-30)
 
 
