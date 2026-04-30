@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { CommandError } from '../errors.js';
-import { parseSpec } from '../parser/parse.js';
+import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { CompatConfig, CompatFailLevel } from '../compat/config.js';
 import { severityMeetsThreshold } from '../compat/config.js';
@@ -47,6 +47,7 @@ export async function verifyCommand(opts: {
   maxRetries?: number;
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
+  transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   namespace?: string;
   compatConfig?: CompatConfig;
   compatReport?: string;
@@ -67,6 +68,7 @@ export async function verifyCommand(opts: {
     diagnostics,
     operationIdTransform,
     schemaNameTransform,
+    transformSpec,
     compatConfig,
     compatReport,
     compatExplain,
@@ -93,7 +95,7 @@ export async function verifyCommand(opts: {
     const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
     let parsedSpec;
     if (effectiveScope === 'spec-only' && spec) {
-      parsedSpec = await parseSpec(spec, { operationIdTransform, schemaNameTransform });
+      parsedSpec = await parseSpec(spec, { operationIdTransform, schemaNameTransform, transformSpec });
     } else if (effectiveScope === 'spec-only') {
       throw new CommandError('error: --scope spec-only requires --spec <path>', '', 1);
     }
@@ -200,8 +202,8 @@ export async function verifyCommand(opts: {
     console.log(`Step ${stepNum}: Staleness detection`);
     console.log(separator);
 
-    const oldParsedSpec = await parseSpec(oldSpec, { operationIdTransform, schemaNameTransform });
-    const newParsedSpec = await parseSpec(spec, { operationIdTransform, schemaNameTransform });
+    const oldParsedSpec = await parseSpec(oldSpec, { operationIdTransform, schemaNameTransform, transformSpec });
+    const newParsedSpec = await parseSpec(spec, { operationIdTransform, schemaNameTransform, transformSpec });
     const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
 
     if (stalenessResult.violations.length > 0) {

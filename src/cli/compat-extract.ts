@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { getExtractor } from '../compat/extractor-registry.js';
-import { parseSpec } from '../parser/parse.js';
+import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { apiSurfaceToSnapshot } from '../compat/ir.js';
 import { readManifest } from '../engine/manifest.js';
 import type { Manifest } from '../engine/manifest.js';
@@ -127,6 +127,7 @@ export async function compatExtractCommand(opts: {
   output: string;
   spec?: string;
   schemaNameTransform?: (name: string) => string;
+  transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
   console.log(`Extracting ${opts.lang} compat snapshot from ${opts.sdkPath}...`);
@@ -153,6 +154,7 @@ export async function compatExtractCommand(opts: {
 
     const parsedSpec = await parseSpec(opts.spec, {
       schemaNameTransform: opts.schemaNameTransform,
+      transformSpec: opts.transformSpec,
     });
     enrichWithSpecContext(snapshot, parsedSpec);
   }

@@ -1,4 +1,4 @@
-import { parseSpec } from '../parser/parse.js';
+import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
 import type { OperationHint, ResolvedOperation } from '../ir/operation-hints.js';
@@ -8,6 +8,7 @@ export async function resolveCommand(opts: {
   format?: 'table' | 'json';
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
+  transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
@@ -15,6 +16,7 @@ export async function resolveCommand(opts: {
   let ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
+    transformSpec: opts.transformSpec,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);

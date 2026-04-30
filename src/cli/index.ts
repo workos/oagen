@@ -33,6 +33,9 @@ const explicitConfigPath = configArgIdx !== -1 ? process.argv[configArgIdx + 1] 
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
 let configSchemaNameTransform: ((name: string) => string) | undefined;
+let configTransformSpec:
+  | ((spec: import('../parser/parse.js').OpenApiDocument) => import('../parser/parse.js').OpenApiDocument)
+  | undefined;
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
@@ -45,6 +48,7 @@ try {
     configSmokeRunners = config.smokeRunners;
     configOperationIdTransform = config.operationIdTransform;
     configSchemaNameTransform = config.schemaNameTransform;
+    configTransformSpec = config.transformSpec;
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
@@ -71,7 +75,12 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    return parseCommand(opts);
+    return parseCommand({
+      ...opts,
+      operationIdTransform: configOperationIdTransform,
+      schemaNameTransform: configSchemaNameTransform,
+      transformSpec: configTransformSpec,
+    });
   });
 
 program
@@ -96,6 +105,7 @@ program
       ...opts,
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
+      transformSpec: configTransformSpec,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
@@ -113,6 +123,7 @@ program
       ...opts,
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
+      transformSpec: configTransformSpec,
       docUrl: configDocUrl,
     }).catch(handleError);
   });
@@ -140,6 +151,7 @@ program
     compatExtractCommand({
       ...opts,
       schemaNameTransform: configSchemaNameTransform,
+      transformSpec: configTransformSpec,
     }).catch(handleError);
   });
 
@@ -197,6 +209,7 @@ program
       maxRetries: parseInt(opts.maxRetries, 10),
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
+      transformSpec: configTransformSpec,
       compatConfig: configCompat,
       compatReport: opts.compatReport,
       compatFailOn: opts.compatFailOn,
@@ -220,6 +233,7 @@ program
       ...opts,
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
+      transformSpec: configTransformSpec,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,

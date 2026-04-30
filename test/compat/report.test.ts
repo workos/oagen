@@ -52,6 +52,18 @@ describe('generateReport', () => {
     expect(report.changes).toEqual([]);
     expect(report.summary).toEqual({ breaking: 0, softRisk: 0, additive: 0 });
   });
+
+  it('passes remediation hints through to the machine-readable change entry', () => {
+    const diff = makeDiffResult([makeChange({ remediation: 'Consider extending Foo instead of forking FooWithBar.' })]);
+    const report = generateReport(diff);
+    expect(report.changes[0].remediation).toBe('Consider extending Foo instead of forking FooWithBar.');
+  });
+
+  it('omits remediation key when no hint was set', () => {
+    const diff = makeDiffResult([makeChange({})]);
+    const report = generateReport(diff);
+    expect(report.changes[0]).not.toHaveProperty('remediation');
+  });
 });
 
 describe('formatHumanSummary', () => {
@@ -78,6 +90,12 @@ describe('formatHumanSummary', () => {
     const diff = makeDiffResult([makeChange({ provenance: 'emitter_template_change' })]);
     const output = formatHumanSummary(diff, { explain: false });
     expect(output).not.toContain('provenance:');
+  });
+
+  it('surfaces remediation hints in the human summary regardless of explain', () => {
+    const diff = makeDiffResult([makeChange({ remediation: 'Consider extending Foo instead of forking FooWithBar.' })]);
+    const output = formatHumanSummary(diff, { explain: false });
+    expect(output).toContain('hint: Consider extending Foo instead of forking FooWithBar.');
   });
 });
 

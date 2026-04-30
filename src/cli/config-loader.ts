@@ -5,6 +5,7 @@ import type { Emitter } from '../engine/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import type { Extractor } from '../compat/types.js';
 import type { CompatConfig } from '../compat/config.js';
+import type { OpenApiDocument } from '../parser/parse.js';
 import { ConfigLoadError } from '../errors.js';
 
 export interface OagenConfig {
@@ -33,6 +34,18 @@ export interface OagenConfig {
   /** Base URL for documentation links. When set, relative paths in descriptions
    *  (e.g. `/reference/authkit/user`) are expanded to full URLs. */
   docUrl?: string;
+  /**
+   * Pre-IR overlay applied to the bundled OpenAPI document before any IR
+   * extraction. Use this when the upstream spec can't be changed but a quirk
+   * in it would otherwise emit a breaking SDK change — e.g. rewriting a
+   * path's response `$ref` back to its prior schema, merging the new fields
+   * onto the prior schema, and dropping the fork schema.
+   *
+   * The function may mutate the document in place and return it, or return a
+   * new object. Runs once, after `$ref` bundling and before schema/operation
+   * extraction. See `docs/advanced/transform-spec.md` for examples.
+   */
+  transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   /**
    * Per-operation overrides keyed by "METHOD /path" (e.g. "POST /sso/token").
    * Used by the operation resolver to override derived method names, mount
