@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/workos/oagen/compare/v0.13.0...v0.14.0) (2026-05-02)
+
+
+### Features
+
+* **compat:** detect type and enum renames as soft-risk, not breaking ([#49](https://github.com/workos/oagen/issues/49)) ([727021a](https://github.com/workos/oagen/commit/727021a8ab8e680f7e93f7ded3daf687adc61831))
+
 ## [0.13.0](https://github.com/workos/oagen/compare/v0.12.0...v0.13.0) (2026-04-30)
 
 
