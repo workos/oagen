@@ -107,7 +107,14 @@ export function diffSnapshots(
   // pure removals where no fork hint applies.
   const typeRenames = detectTypeRenames(changes, baseline, candidate);
   const enumRenames = detectEnumRenames(changes, baseline, candidate);
-  cascadeRenameDowngrades(changes, typeRenames, enumRenames);
+  // Transitive pass: when a typed field on a renamed parent points at an
+  // alias type that has no extractable children of its own (common for
+  // discriminated-union owner types — e.g. Go's `APIKeyWithValueOwner`,
+  // generated alongside its parent type), the structural detector can't
+  // pair them on its own. Use the recorded parent rename + the field
+  // typeRefs to derive the secondary rename.
+  inferTransitiveTypeRenames(typeRenames, baseline, candidate, changes);
+  cascadeRenameDowngrades(changes, typeRenames, enumRenames, baseline, candidate);
 
   return {
     changes,
@@ -245,25 +252,38 @@ function detectTypeRenames(
   const baselineTypeFields = collectTypeFieldSets(baseline);
   const candidateTypeFields = collectTypeFieldSets(candidate);
   const baselineTypeNames = new Set(baselineTypeFields.keys());
-
-  // Pre-sort candidate type names alphabetically for deterministic pairing
-  // when several candidates structurally match the same removed type.
   const candidateTypesSorted = [...candidateTypeFields.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
+  // Index parent `symbol_removed` changes by fqName so we can downgrade
+  // them when a rename is detected. Some languages (Go's enum-alias path
+  // for ordering enums; emitters that emit `type Old = New`) preserve the
+  // old fqName as a candidate alias and never report a removal — that's
+  // fine, the rename map is still populated for the cascade pass.
+  const parentRemovalByName = new Map<string, ClassifiedChange>();
   for (const change of changes) {
-    if (change.category !== 'symbol_removed') continue;
-    if (change.severity !== 'breaking') continue;
+    if (change.category === 'symbol_removed' && change.severity === 'breaking') {
+      parentRemovalByName.set(change.old.symbol ?? '', change);
+    }
+  }
 
-    const removedName = bareTypeName(change.old.symbol ?? '');
-    if (!removedName) continue;
+  // Walk every baseline type *directly*, not via `symbol_removed` events.
+  // The parent-removal path alone misses rename-as-alias cases (e.g. Go
+  // emits `type ApiKey = OrganizationApiKey` to preserve the old name)
+  // because no `symbol_removed` fires for the old name. The structural
+  // match (field-set superset) is what matters, regardless of whether
+  // the old fqName persists as an alias.
+  for (const [baselineTypeName, baselineFields] of baselineTypeFields) {
+    if (baselineFields.size === 0) continue;
 
-    const removedFields = baselineTypeFields.get(removedName);
-    if (!removedFields || removedFields.size === 0) continue;
+    // No-op: same name, same fields still in candidate.
+    const sameNameFields = candidateTypeFields.get(baselineTypeName);
+    if (sameNameFields && setEquals(baselineFields, sameNameFields)) continue;
 
-    // First newly-added candidate whose field set ⊇ removed field set.
+    // Find a newly-added candidate type (not in baseline) whose field set
+    // is a non-strict superset of the baseline type's fields.
     const match = candidateTypesSorted.find(([candName, candFields]) => {
       if (baselineTypeNames.has(candName)) return false;
-      for (const f of removedFields) {
+      for (const f of baselineFields) {
         if (!candFields.has(f)) return false;
       }
       return true;
@@ -271,17 +291,112 @@ function detectTypeRenames(
     if (!match) continue;
     const [newName] = match;
 
-    renameMap.set(removedName, newName);
-    change.severity = 'soft-risk';
-    change.remediation =
-      `Type "${removedName}" appears to have been renamed to "${newName}" — ` +
-      `the new type has every field of the old (a non-strict superset). ` +
-      `Field accesses and method calls on values of type "${newName}" continue to work; ` +
-      `only explicit "${removedName}" type annotations need to migrate. ` +
-      `Consider emitting a deprecated alias \`type ${removedName} = ${newName}\` in languages that support it.`;
+    renameMap.set(baselineTypeName, newName);
+
+    // Downgrade the parent removal if one was reported. Languages that
+    // emit a `type Old = New` alias keep the parent symbol alive, so this
+    // branch may not fire — but the rename is still recorded for the
+    // cascade pass to use on field/return-type swaps.
+    const parentRemoval = parentRemovalByName.get(baselineTypeName);
+    if (parentRemoval) {
+      parentRemoval.severity = 'soft-risk';
+      parentRemoval.remediation =
+        `Type "${baselineTypeName}" appears to have been renamed to "${newName}" — ` +
+        `the new type has every field of the old (a non-strict superset). ` +
+        `Field accesses and method calls on values of type "${newName}" continue to work; ` +
+        `only explicit "${baselineTypeName}" type annotations need to migrate. ` +
+        `Consider emitting a deprecated alias \`type ${baselineTypeName} = ${newName}\` in languages that support it.`;
+    }
   }
 
   return renameMap;
+}
+
+/**
+ * Transitive rename inference. After `detectTypeRenames` records direct
+ * structural matches (e.g. `ApiKeyWithValue → OrganizationApiKeyWithValue`),
+ * walk the parent's fields and follow the `typeRef.name` of each: if the
+ * baseline parent's field references an alias-type `OldOwner` and the new
+ * parent's same-named field references a different alias `NewOwner`, the
+ * pair is the same type-concept under a renamed name. Record the
+ * secondary rename so the cascade can downgrade `OldOwner`'s
+ * `symbol_removed` and any `field_type_changed` pointing at the pair.
+ *
+ * Why this is necessary: discriminated-union owner types (Go's
+ * `APIKeyWithValueOwner`, PHP/Python's nested constructor params) are
+ * frequently emitted as `kind: 'alias'` symbols with no extractable
+ * field children — so `collectTypeFieldSets` returns empty for them and
+ * the structural matcher can't pair them directly. The transitive
+ * lookup gives us a deterministic, conservative way to propagate the
+ * rename: it only fires when the parent rename has already been
+ * positively identified, and only follows fields that share the same
+ * wire name across baseline and candidate.
+ */
+function inferTransitiveTypeRenames(
+  typeRenames: Map<string, string>,
+  baseline: CompatSnapshot,
+  candidate: CompatSnapshot,
+  changes: ClassifiedChange[],
+): void {
+  if (typeRenames.size === 0) return;
+
+  // Index field/property symbols by `${ownerFqName}.${localName}` so we
+  // can read the typeRef both sides of the rename.
+  const baselineFieldType = new Map<string, string>();
+  for (const sym of baseline.symbols) {
+    if (sym.kind !== 'field' && sym.kind !== 'property') continue;
+    if (!sym.ownerFqName || !sym.typeRef) continue;
+    const localName = sym.fqName.includes('.') ? sym.fqName.slice(sym.fqName.lastIndexOf('.') + 1) : sym.fqName;
+    baselineFieldType.set(`${sym.ownerFqName}.${localName.toLowerCase()}`, sym.typeRef.name);
+  }
+  const candidateFieldType = new Map<string, string>();
+  for (const sym of candidate.symbols) {
+    if (sym.kind !== 'field' && sym.kind !== 'property') continue;
+    if (!sym.ownerFqName || !sym.typeRef) continue;
+    const localName = sym.fqName.includes('.') ? sym.fqName.slice(sym.fqName.lastIndexOf('.') + 1) : sym.fqName;
+    candidateFieldType.set(`${sym.ownerFqName}.${localName.toLowerCase()}`, sym.typeRef.name);
+  }
+
+  // Index parent `symbol_removed` changes for downgrade.
+  const parentRemovalByName = new Map<string, ClassifiedChange>();
+  for (const change of changes) {
+    if (change.category === 'symbol_removed' && change.severity === 'breaking') {
+      parentRemovalByName.set(change.old.symbol ?? '', change);
+    }
+  }
+
+  // Walk a snapshot of the rename map — we may mutate it inside the loop
+  // but only via `set`, never `delete`, and we don't re-iterate on the
+  // additions in the same pass (one transitive hop is enough; deeper
+  // chains can be handled by re-running, which we don't need today).
+  const initialEntries = [...typeRenames.entries()];
+  for (const [oldOwner, newOwner] of initialEntries) {
+    // Find every baseline field on the renamed owner whose typeRef points
+    // at a *different* type than the same-named field on the new owner.
+    for (const [baselineKey, baselineFieldTypeRef] of baselineFieldType) {
+      if (!baselineKey.startsWith(`${oldOwner}.`)) continue;
+      const localName = baselineKey.slice(oldOwner.length + 1);
+      const candidateKey = `${newOwner}.${localName}`;
+      const candidateFieldTypeRef = candidateFieldType.get(candidateKey);
+      if (!candidateFieldTypeRef) continue;
+
+      const oldT = bareTypeName(baselineFieldTypeRef);
+      const newT = bareTypeName(candidateFieldTypeRef);
+      if (!oldT || !newT || oldT === newT) continue;
+      if (typeRenames.has(oldT)) continue; // already recorded
+
+      typeRenames.set(oldT, newT);
+      const removal = parentRemovalByName.get(oldT);
+      if (removal) {
+        removal.severity = 'soft-risk';
+        removal.remediation =
+          `Type "${oldT}" appears to have been renamed to "${newT}" — ` +
+          `inferred transitively because the renamed parent "${oldOwner}" → "${newOwner}" ` +
+          `has a "${localName}" field whose type swapped from "${oldT}" to "${newT}". ` +
+          `Consider emitting a deprecated alias \`type ${oldT} = ${newT}\` in languages that support it.`;
+      }
+    }
+  }
 }
 
 /**
@@ -313,34 +428,50 @@ function detectEnumRenames(
 
   const candidateEnumsSorted = [...candidateEnumValues.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
+  // Index `symbol_removed` changes by fqName for O(1) lookup when downgrading
+  // a parent removal (only some languages report one; others alias).
+  const parentRemovalByName = new Map<string, ClassifiedChange>();
   for (const change of changes) {
-    if (change.category !== 'symbol_removed') continue;
-    if (change.severity !== 'breaking') continue;
+    if (change.category === 'symbol_removed' && change.severity === 'breaking') {
+      parentRemovalByName.set(change.old.symbol ?? '', change);
+    }
+  }
 
-    const removedName = bareTypeName(change.old.symbol ?? '');
-    if (!removedName) continue;
+  // Walk every baseline enum *directly*, not via `symbol_removed` events.
+  // The parent-removal path alone misses canonical-flips in languages that
+  // alias non-canonical enums (Go, Ruby, Python, PHP, Kotlin): the old
+  // fqName persists as `type ApplicationsOrder = APIKeysOrder`, no parent
+  // `symbol_removed` fires, and the rename map stays empty — so the
+  // member-removal cascade never runs. Iterating baseline enums fixes this
+  // by deciding "did this enum's value set move to a different owner?"
+  // independent of whether the parent symbol survived.
+  for (const [baselineEnumName, baselineValues] of baselineEnumValues) {
+    if (baselineValues.size === 0) continue;
 
-    const removedValues = baselineEnumValues.get(removedName);
-    if (!removedValues || removedValues.size === 0) continue;
+    // No-op case: same name, same value set still present in candidate.
+    const sameNameValues = candidateEnumValues.get(baselineEnumName);
+    if (sameNameValues && setEquals(baselineValues, sameNameValues)) continue;
 
-    const match = candidateEnumsSorted.find(([candName, candValues]) => {
-      if (baselineEnumNames.has(candName)) return false;
-      if (candValues.size !== removedValues.size) return false;
-      for (const v of removedValues) {
-        if (!candValues.has(v)) return false;
-      }
-      return true;
-    });
+    // Find a newly-added candidate enum (not present under that name in
+    // the baseline) with an exactly-equal wire-value set.
+    const match = candidateEnumsSorted.find(
+      ([candName, candValues]) => !baselineEnumNames.has(candName) && setEquals(baselineValues, candValues),
+    );
     if (!match) continue;
     const [newName] = match;
 
-    renameMap.set(removedName, newName);
-    change.severity = 'soft-risk';
-    change.remediation =
-      `Enum "${removedName}" appears to have been renamed to "${newName}" — ` +
-      `both enums have identical wire values, so on-the-wire serialization is unchanged. ` +
-      `This is typically the emitter's dedup canonical-flip after a new same-shape enum joined the spec. ` +
-      `Consider emitting a deprecated alias in languages that support it, or pinning the canonical via emitter config.`;
+    renameMap.set(baselineEnumName, newName);
+
+    // Downgrade the parent removal if one was reported (dotnet path).
+    const parentRemoval = parentRemovalByName.get(baselineEnumName);
+    if (parentRemoval) {
+      parentRemoval.severity = 'soft-risk';
+      parentRemoval.remediation =
+        `Enum "${baselineEnumName}" appears to have been renamed to "${newName}" — ` +
+        `both enums have identical wire values, so on-the-wire serialization is unchanged. ` +
+        `This is typically the emitter's dedup canonical-flip after a new same-shape enum joined the spec. ` +
+        `Consider emitting a deprecated alias in languages that support it, or pinning the canonical via emitter config.`;
+    }
   }
 
   return renameMap;
@@ -364,8 +495,53 @@ function cascadeRenameDowngrades(
   changes: ClassifiedChange[],
   typeRenames: Map<string, string>,
   enumRenames: Map<string, string>,
+  baseline: CompatSnapshot,
+  candidate: CompatSnapshot,
 ): void {
-  if (typeRenames.size === 0 && enumRenames.size === 0) return;
+  // Lazy-built field-set maps for the structural-equivalence fallback used
+  // by `*_type_changed`. Both maps are needed even when no renames were
+  // recorded — the structural test handles cases where both old and new
+  // types coexist (e.g. a method's return type was redirected from an
+  // existing schema to a structurally-equivalent newly-added schema, the
+  // canonical fork antipattern).
+  let baselineTypeFields: Map<string, Set<string>> | undefined;
+  let candidateTypeFields: Map<string, Set<string>> | undefined;
+  const getBaselineFields = (): Map<string, Set<string>> => {
+    if (!baselineTypeFields) baselineTypeFields = collectTypeFieldSets(baseline);
+    return baselineTypeFields;
+  };
+  const getCandidateFields = (): Map<string, Set<string>> => {
+    if (!candidateTypeFields) candidateTypeFields = collectTypeFieldSets(candidate);
+    return candidateTypeFields;
+  };
+
+  /**
+   * Structural equivalence: candidate type's field set is a non-strict
+   * superset of baseline type's field set, AND the candidate type was
+   * newly added in this diff (not a swap to a pre-existing type, which
+   * is a real signature break the consumer chose). When `New ⊇ Old` and
+   * `New` is new, every field the consumer accessed on the old type
+   * still exists on the value they receive — so the swap is non-breaking
+   * at the value level even though the declared type changed. This is
+   * the fork-detector's positive signal, applied as a severity
+   * downgrade in addition to the existing remediation hint.
+   */
+  const isStructurallyEquivalent = (oldT: string, newT: string): boolean => {
+    if (!oldT || !newT || oldT === newT) return false;
+    const baselineFields = getBaselineFields();
+    const candidateFields = getCandidateFields();
+    // The new type must be newly introduced — a swap to an existing type
+    // is a real signature change the consumer chose, not a rename.
+    if (baselineFields.has(newT)) return false;
+    const oldFields = baselineFields.get(oldT);
+    const newFields = candidateFields.get(newT);
+    if (!oldFields || !newFields) return false;
+    if (oldFields.size === 0) return false;
+    for (const f of oldFields) {
+      if (!newFields.has(f)) return false;
+    }
+    return true;
+  };
 
   for (const change of changes) {
     if (change.severity !== 'breaking') continue;
@@ -392,6 +568,19 @@ function cascadeRenameDowngrades(
         change.remediation =
           `Return type swap matches recorded rename "${oldT}" → "${newT}". ` +
           `The underlying field set is preserved (see the rename advisory on "${oldT}").`;
+      } else if (isStructurallyEquivalent(oldT, newT)) {
+        // Downgrade severity for the structural-equivalence case (the
+        // fork-detector's positive signal). Preserve any remediation
+        // already attached by `detectForkedSchemas` — its message
+        // already explains the situation; we only need to flip severity.
+        change.severity = 'soft-risk';
+        if (!change.remediation) {
+          change.remediation =
+            `Return type swap from "${oldT}" to "${newT}" is structurally equivalent — ` +
+            `every field on "${oldT}" still exists on "${newT}". ` +
+            `Consumer code accessing fields on the returned value continues to work; ` +
+            `only explicit "${oldT}" type annotations need to migrate.`;
+        }
       }
       continue;
     }
@@ -405,6 +594,13 @@ function cascadeRenameDowngrades(
         change.remediation =
           `Field type swap matches recorded rename "${oldT}" → "${newT}". ` +
           `On-the-wire shape is unchanged (see the rename advisory on "${oldT}").`;
+      } else if (isStructurallyEquivalent(oldT, newT)) {
+        change.severity = 'soft-risk';
+        if (!change.remediation) {
+          change.remediation =
+            `Field type swap from "${oldT}" to "${newT}" is structurally equivalent — ` +
+            `every field on "${oldT}" still exists on "${newT}".`;
+        }
       }
     }
   }
@@ -436,6 +632,15 @@ function collectEnumValueSets(snapshot: CompatSnapshot): Map<string, Set<string>
   return result;
 }
 
+/** Set equality for the small string sets used by rename detection. */
+function setEquals(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) {
+    if (!b.has(v)) return false;
+  }
+  return true;
+}
+
 /**
  * Strip array/nullable suffixes so we compare bare type names. Languages
  * encode these differently (`Foo[]`, `Foo | null`, `Foo?`, `List<Foo>`,
@@ -444,10 +649,21 @@ function collectEnumValueSets(snapshot: CompatSnapshot): Map<string, Set<string>
  */
 function bareTypeName(t: string): string {
   let s = t.trim();
+  // Go pointer prefix: `*Foo` → `Foo`. Strip first because the rest of the
+  // patterns expect a leading identifier character.
+  s = s.replace(/^\*/, '');
+  // Nullable suffixes: `Foo | null`, `Foo?`.
   s = s.replace(/\s*\|\s*null$/, '').replace(/\?$/, '');
+  // Array suffix: `Foo[]`.
   s = s.replace(/\[\]$/, '');
-  const generic = s.match(/^[A-Za-z_][A-Za-z0-9_.]*<\s*([A-Za-z_][A-Za-z0-9_.]*)\s*>$/);
-  if (generic) s = generic[1];
+  // Single-arg generic. Two encodings to support:
+  //   - angle brackets: `Iterator<Foo>`, `Optional<Foo>`, `List<Foo>`
+  //   - square brackets: `Iterator[Foo]` (Go iterator returns from the
+  //     emitter, e.g. `*Iterator[APIKey]`)
+  const angleGeneric = s.match(/^[A-Za-z_][A-Za-z0-9_.]*<\s*([A-Za-z_*][A-Za-z0-9_.*]*)\s*>$/);
+  if (angleGeneric) return bareTypeName(angleGeneric[1]);
+  const bracketGeneric = s.match(/^[A-Za-z_][A-Za-z0-9_.]*\[\s*([A-Za-z_*][A-Za-z0-9_.*]*)\s*\]$/);
+  if (bracketGeneric) return bareTypeName(bracketGeneric[1]);
   return s;
 }
 
