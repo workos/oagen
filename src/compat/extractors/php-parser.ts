@@ -194,8 +194,9 @@ function parseConstElement(constElement: SyntaxNode): { name: string; value: str
 // Method extraction
 // ---------------------------------------------------------------------------
 
-function parseMethods(classBody: SyntaxNode): PhpMethod[] {
+function parseMethods(classBody: SyntaxNode): { methods: PhpMethod[]; promotedProperties: PhpProperty[] } {
   const methods: PhpMethod[] = [];
+  const allPromotedProperties: PhpProperty[] = [];
 
   for (const child of classBody.namedChildren) {
     if (child.type !== 'method_declaration') continue;
@@ -213,12 +214,22 @@ function parseMethods(classBody: SyntaxNode): PhpMethod[] {
     // Get PHPDoc info
     const docInfo = findDocComment(child);
 
-    // Parse parameters
+    // Parse parameters. Two PHP parameter shapes are accepted:
+    //   - `simple_parameter`: standard `Type $name = default`
+    //   - `property_promotion_parameter`: PHP 8 constructor-promoted
+    //     property `public Type $name`. These declare *both* a parameter
+    //     on the constructor AND a property on the class — used by every
+    //     model emitted in the WorkOS PHP SDK (`readonly class Foo {
+    //     function __construct(public Type $field, …) {} }`). Without
+    //     accepting this node type the parser skips the parameter
+    //     entirely, model fields disappear from the surface, and the
+    //     compat differ has no field-level signal to pair renamed types.
+    const promotedProperties: PhpProperty[] = [];
     const params: PhpParam[] = [];
     const paramsList = child.childForFieldName('parameters');
     if (paramsList) {
       for (const paramNode of paramsList.namedChildren) {
-        if (paramNode.type !== 'simple_parameter') continue;
+        if (paramNode.type !== 'simple_parameter' && paramNode.type !== 'property_promotion_parameter') continue;
 
         const paramNameNode = paramNode.namedChildren.find((c) => c.type === 'variable_name');
         if (!paramNameNode) continue;
@@ -248,6 +259,20 @@ function parseMethods(classBody: SyntaxNode): PhpMethod[] {
           type: paramType,
           optional: hasDefault,
         });
+
+        // When the parameter carries a visibility modifier it is a
+        // *promoted property* — `public Type $field` declares the field
+        // on the class. Surface as a property so model classes pick up
+        // their fields without needing a separate `property_declaration`.
+        if (paramNode.type === 'property_promotion_parameter') {
+          const visibilityNode = paramNode.namedChildren.find((c) => c.type === 'visibility_modifier');
+          const visibility = (visibilityNode?.text as 'public' | 'protected' | 'private' | undefined) ?? 'public';
+          promotedProperties.push({
+            name: paramName,
+            type: paramType,
+            visibility,
+          });
+        }
       }
     }
 
@@ -271,9 +296,16 @@ function parseMethods(classBody: SyntaxNode): PhpMethod[] {
       params,
       returnType,
     });
+
+    // Promoted properties surface only from `__construct`. PHP's grammar
+    // technically allows them on any method, but only the constructor's
+    // promoted-properties create class fields per the language spec.
+    if (methodName === '__construct') {
+      allPromotedProperties.push(...promotedProperties);
+    }
   }
 
-  return methods;
+  return { methods, promotedProperties: allPromotedProperties };
 }
 
 // ---------------------------------------------------------------------------
@@ -407,12 +439,17 @@ function parseClassDeclarations(tree: Parser.Tree, sourceFile: string, namespace
     const bodyNode = node.childForFieldName('body');
     if (!bodyNode) continue;
 
-    const methods = parseMethods(bodyNode);
+    const { methods, promotedProperties } = parseMethods(bodyNode);
     const properties = parseProperties(bodyNode);
     const constants = parseConstants(bodyNode);
     const resourceAttributes = parseResourceAttributes(bodyNode);
 
     const hasCustomConstructor = methods.some((m) => m.name === 'constructFromResponse' && m.isStatic);
+
+    // Merge constructor-promoted properties into the class properties so
+    // model classes (PHP 8 readonly classes that put their fields on the
+    // constructor) carry their field info into the surface.
+    const allProperties: PhpProperty[] = [...properties, ...promotedProperties];
 
     classes.push({
       name: nameNode.text,
@@ -420,7 +457,7 @@ function parseClassDeclarations(tree: Parser.Tree, sourceFile: string, namespace
       extends: extendsName,
       isInterface: false,
       methods,
-      properties,
+      properties: allProperties,
       constants,
       resourceAttributes,
       hasCustomConstructor,
@@ -441,7 +478,7 @@ function parseInterfaceDeclarations(tree: Parser.Tree, sourceFile: string, names
     const bodyNode = node.childForFieldName('body');
     if (!bodyNode) continue;
 
-    const methods = parseMethods(bodyNode);
+    const { methods } = parseMethods(bodyNode);
 
     interfaces.push({
       name: nameNode.text,
@@ -494,7 +531,7 @@ function parseEnumDeclarations(tree: Parser.Tree, sourceFile: string, namespace:
       constants.push({ name: caseNameNode.text, value });
     }
 
-    const methods = parseMethods(bodyNode);
+    const { methods } = parseMethods(bodyNode);
 
     enums.push({
       name: nameNode.text,

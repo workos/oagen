@@ -652,6 +652,14 @@ function bareTypeName(t: string): string {
   // Go pointer prefix: `*Foo` → `Foo`. Strip first because the rest of the
   // patterns expect a leading identifier character.
   s = s.replace(/^\*/, '');
+  // PHP namespace prefix: `\Vendor\Pkg\Foo` → `Foo`. PHP fully-qualified
+  // type references in generated method signatures lead with a backslash
+  // and use backslash-separated segments. Split on the last segment to
+  // preserve nested generics inside the path.
+  if (s.startsWith('\\')) {
+    const lastBackslash = s.lastIndexOf('\\');
+    s = s.slice(lastBackslash + 1);
+  }
   // Nullable suffixes: `Foo | null`, `Foo?`.
   s = s.replace(/\s*\|\s*null$/, '').replace(/\?$/, '');
   // Array suffix: `Foo[]`.

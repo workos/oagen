@@ -46,6 +46,21 @@ function hasBase(cls: PythonClass, bases: Set<string>): boolean {
   return cls.bases.some((b) => bases.has(b));
 }
 
+/**
+ * True when the class carries a `@dataclass` decorator (with or without
+ * arguments — `@dataclass`, `@dataclass()`, `@dataclass(slots=True)`, etc.).
+ *
+ * Dataclasses are the canonical "data-shape" Python construct: their
+ * structural identity is the field set, even when generated alongside
+ * helper methods like `from_dict` / `to_dict`. Without this signal the
+ * extractor categorizes them as plain method-bearing classes (category 5)
+ * and loses the field info — which then prevents the compat differ from
+ * recognizing renames structurally.
+ */
+function isDataclass(cls: PythonClass): boolean {
+  return cls.decorators.some((d) => /^dataclass(\s*\(.*\))?$/.test(d));
+}
+
 /** Check if a class is a model class (inherits from BaseModel or configured model bases,
  *  transitively from another class that does). */
 function isModelClass(cls: PythonClass, allClasses: Map<string, PythonClass>, modelBases: Set<string>): boolean {
@@ -303,6 +318,32 @@ export function buildSurface(
           methods: sortRecord(apiMethods),
           properties: {},
           constructorParams: [],
+        };
+        collector.add(cls.sourceFile, cls.name);
+        continue;
+      }
+
+      // 4b. Dataclasses → ApiInterface. A `@dataclass`-decorated class is
+      //     fundamentally a data-shape; its structural identity is the
+      //     field set even when oagen also emits `from_dict` / `to_dict`
+      //     helper methods on it. Without this branch the class falls
+      //     through to category 5 (ApiClass with methods) and the field
+      //     info is dropped — which prevents the compat differ from
+      //     pairing renamed types structurally.
+      if (isDataclass(cls) && cls.fields.length > 0) {
+        const fields: Record<string, ApiField> = {};
+        for (const field of cls.fields) {
+          fields[field.name] = {
+            name: field.name,
+            type: field.type,
+            optional: field.hasDefault,
+          };
+        }
+        interfaces[cls.name] = {
+          name: cls.name,
+          sourceFile: cls.sourceFile,
+          fields: sortRecord(fields),
+          extends: [],
         };
         collector.add(cls.sourceFile, cls.name);
         continue;

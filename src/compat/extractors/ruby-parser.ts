@@ -44,6 +44,12 @@ export function extractClasses(source: string): ApiClass[] {
     // Skip if this class contains a singleton_class (class << self) — those are service modules
     if (node.descendantsOfType('singleton_class').length > 0) continue;
 
+    // Skip enum-shaped classes — they're handled by `extractEnumModules`
+    // (which also picks up class-shape enums alongside module-shape ones).
+    // Without this skip we'd double-emit the same name as both an
+    // ApiClass and an ApiEnum.
+    if (isEnumShapedClass(node)) continue;
+
     const nameNode = node.childForFieldName('name');
     if (!nameNode) continue;
     const className = nameNode.text;
@@ -128,6 +134,25 @@ export function extractServiceModules(source: string): ApiClass[] {
   return services;
 }
 
+/**
+ * True when a `class` node looks like a Ruby enum: only constant
+ * assignments, no methods, no attr_*, no singleton class. The
+ * `extractEnumModules` pass picks these up; `extractClasses` skips
+ * them to avoid double-emission. Shared so the two stay in sync.
+ */
+function isEnumShapedClass(classNode: SyntaxNode): boolean {
+  const bodyNode = classNode.childForFieldName('body');
+  if (!bodyNode) return false;
+  // Reject if the class has any method-shaped or call-shaped child
+  // (call covers attr_accessor / attr_reader / include).
+  for (const c of bodyNode.namedChildren) {
+    if (c.type === 'method' || c.type === 'singleton_method' || c.type === 'call') return false;
+  }
+  // Must have at least 2 scalar constants to be considered an enum.
+  const constants = extractEnumConstants(bodyNode);
+  return Object.keys(constants).length >= 2;
+}
+
 /** Extract enum-like modules (modules with string/number constants, no class << self). */
 export function extractEnumModules(source: string): ApiEnum[] {
   const tree = safeParse(source);
@@ -148,6 +173,44 @@ export function extractEnumModules(source: string): ApiEnum[] {
 
     const bodyNode = node.childForFieldName('body');
     if (!bodyNode) continue;
+
+    const constants = extractEnumConstants(bodyNode);
+    if (Object.keys(constants).length < 2) continue;
+
+    enums.push({
+      name: nameNode.text,
+      members: sortRecord(constants),
+    });
+  }
+
+  // Also extract enum-shaped *classes*: WorkOS Ruby SDKs emit dedup'd
+  // ordering enums and similar value-set types as
+  // `class ApplicationsOrder; ASC = "asc"; …; ALL = [...].freeze; end`
+  // — a class with only constants (no instance methods, no constructor).
+  // Without this branch they fall through to `extractClasses`, become
+  // ApiClass with no methods/properties, and surface as `kind:
+  // 'service_accessor'` with no enum_member children — which the compat
+  // differ can't pair on for canonical-flip detection.
+  for (const node of tree.rootNode.descendantsOfType('class')) {
+    if (node.type !== 'class') continue;
+    if (isInsideRanges(node.startPosition.row, serviceRanges)) continue;
+    if (node.descendantsOfType('singleton_class').length > 0) continue;
+
+    const nameNode = node.childForFieldName('name');
+    if (!nameNode) continue;
+
+    const bodyNode = node.childForFieldName('body');
+    if (!bodyNode) continue;
+
+    // Reject if the class has any non-constant declarations (methods,
+    // attr_accessor, etc.). The `ALL` aggregator constant (`ALL = [A,
+    // B, C].freeze`) is allowed and skipped — `extractEnumConstants`
+    // only collects scalar string/number values, so non-scalar
+    // constants (arrays) are naturally excluded.
+    const hasNonConstantBody = bodyNode.namedChildren.some(
+      (c) => c.type === 'method' || c.type === 'singleton_method' || c.type === 'call',
+    );
+    if (hasNonConstantBody) continue;
 
     const constants = extractEnumConstants(bodyNode);
     if (Object.keys(constants).length < 2) continue;
