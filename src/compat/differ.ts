@@ -93,6 +93,22 @@ export function diffSnapshots(
   // signature change instead of an additive field on the existing schema.
   detectForkedSchemas(changes, baseline, candidate);
 
+  // Post-pass: detect type and enum *renames* — cases where a baseline
+  // symbol disappears and a structurally-equivalent symbol takes its place
+  // in the candidate. These are reported as `symbol_removed` (breaking) by
+  // the symbol-level walker because the fqName is gone, but consumer code
+  // that uses the type's fields/methods or the enum's wire values continues
+  // to work — only explicit type annotations and (in dotnet) un-aliased
+  // enum class references actually need to migrate. Downgrade these to
+  // soft-risk so CI gates default-pass while the change stays visible.
+  //
+  // Ordered after detectForkedSchemas so the fork detector's remediation
+  // hint is preserved on the typed cases it owns; renames operate on
+  // pure removals where no fork hint applies.
+  const typeRenames = detectTypeRenames(changes, baseline, candidate);
+  const enumRenames = detectEnumRenames(changes, baseline, candidate);
+  cascadeRenameDowngrades(changes, typeRenames, enumRenames);
+
   return {
     changes,
     summary: summarizeChanges(changes),
@@ -186,6 +202,236 @@ function collectTypeFieldSets(snapshot: CompatSnapshot): Map<string, Set<string>
       result.set(sym.ownerFqName, set);
     }
     set.add(localName.toLowerCase());
+  }
+  return result;
+}
+
+/**
+ * Detect type renames: a baseline type symbol disappears and a candidate
+ * type symbol with the same (or superset) field set takes its place.
+ *
+ * Common when an upstream spec promotes a single schema into multiple
+ * (e.g. `ApiKey` → `OrganizationApiKey` + `UserApiKey`). The wire shape
+ * returned by individual endpoints is unchanged — `OrganizationApiKey`
+ * has the same fields `ApiKey` had — so consumer code accessing those
+ * fields keeps working. The compat report flags `ApiKey` as removed
+ * because its symbol is gone; this pass downgrades the removal to
+ * soft-risk and records the rename so its child fields/methods cascade.
+ *
+ * Identity criteria (must all hold):
+ *   1. The removed symbol owns ≥ 1 field/property in the baseline (i.e.
+ *      it's a type-shaped symbol — model/interface/class — not a plain
+ *      function or constant).
+ *   2. Some candidate type that did *not* exist in the baseline has a
+ *      field set that is a non-strict superset of the removed type's
+ *      fields. (Strict-subset would mean fields were lost — a real break.)
+ *   3. The candidate type is the alphabetically-first such match, so
+ *      pairing is deterministic when multiple candidates fit (e.g. both
+ *      `OrganizationApiKey` and `UserApiKey` share the original fields).
+ *
+ * Returns a `removedName -> newName` map so a downstream cascade pass
+ * can downgrade owned-field removals and `*_type_changed` pointing at
+ * the same pair.
+ *
+ * Mutates matching `symbol_removed` entries in `changes`: severity →
+ * `soft-risk`, attaches a `remediation` describing the rename.
+ */
+function detectTypeRenames(
+  changes: ClassifiedChange[],
+  baseline: CompatSnapshot,
+  candidate: CompatSnapshot,
+): Map<string, string> {
+  const renameMap = new Map<string, string>();
+  const baselineTypeFields = collectTypeFieldSets(baseline);
+  const candidateTypeFields = collectTypeFieldSets(candidate);
+  const baselineTypeNames = new Set(baselineTypeFields.keys());
+
+  // Pre-sort candidate type names alphabetically for deterministic pairing
+  // when several candidates structurally match the same removed type.
+  const candidateTypesSorted = [...candidateTypeFields.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  for (const change of changes) {
+    if (change.category !== 'symbol_removed') continue;
+    if (change.severity !== 'breaking') continue;
+
+    const removedName = bareTypeName(change.old.symbol ?? '');
+    if (!removedName) continue;
+
+    const removedFields = baselineTypeFields.get(removedName);
+    if (!removedFields || removedFields.size === 0) continue;
+
+    // First newly-added candidate whose field set ⊇ removed field set.
+    const match = candidateTypesSorted.find(([candName, candFields]) => {
+      if (baselineTypeNames.has(candName)) return false;
+      for (const f of removedFields) {
+        if (!candFields.has(f)) return false;
+      }
+      return true;
+    });
+    if (!match) continue;
+    const [newName] = match;
+
+    renameMap.set(removedName, newName);
+    change.severity = 'soft-risk';
+    change.remediation =
+      `Type "${removedName}" appears to have been renamed to "${newName}" — ` +
+      `the new type has every field of the old (a non-strict superset). ` +
+      `Field accesses and method calls on values of type "${newName}" continue to work; ` +
+      `only explicit "${removedName}" type annotations need to migrate. ` +
+      `Consider emitting a deprecated alias \`type ${removedName} = ${newName}\` in languages that support it.`;
+  }
+
+  return renameMap;
+}
+
+/**
+ * Detect enum canonical-flips: a baseline enum disappears and a candidate
+ * enum with the **same wire-value set** takes its place.
+ *
+ * Caused by the emitter's enum-dedup heuristic picking a different
+ * canonical name when a new same-shape enum joins the spec. Languages
+ * that emit type aliases (Go, Ruby, Python, PHP, Kotlin) handle this
+ * transparently via `type Old = New`; languages without first-class
+ * aliases (dotnet) report the old enum as removed. The wire values are
+ * unchanged — every legal value still serializes to the same JSON — so
+ * consumer code constructing or matching on these enum values keeps
+ * working. Only references to the typed enum class need migration.
+ *
+ * Identity criterion: a removed enum's value set is *exactly* equal to
+ * a newly-added enum's value set (not superset — narrowing the value
+ * set would be a real break for consumers expecting the dropped values).
+ */
+function detectEnumRenames(
+  changes: ClassifiedChange[],
+  baseline: CompatSnapshot,
+  candidate: CompatSnapshot,
+): Map<string, string> {
+  const renameMap = new Map<string, string>();
+  const baselineEnumValues = collectEnumValueSets(baseline);
+  const candidateEnumValues = collectEnumValueSets(candidate);
+  const baselineEnumNames = new Set(baselineEnumValues.keys());
+
+  const candidateEnumsSorted = [...candidateEnumValues.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  for (const change of changes) {
+    if (change.category !== 'symbol_removed') continue;
+    if (change.severity !== 'breaking') continue;
+
+    const removedName = bareTypeName(change.old.symbol ?? '');
+    if (!removedName) continue;
+
+    const removedValues = baselineEnumValues.get(removedName);
+    if (!removedValues || removedValues.size === 0) continue;
+
+    const match = candidateEnumsSorted.find(([candName, candValues]) => {
+      if (baselineEnumNames.has(candName)) return false;
+      if (candValues.size !== removedValues.size) return false;
+      for (const v of removedValues) {
+        if (!candValues.has(v)) return false;
+      }
+      return true;
+    });
+    if (!match) continue;
+    const [newName] = match;
+
+    renameMap.set(removedName, newName);
+    change.severity = 'soft-risk';
+    change.remediation =
+      `Enum "${removedName}" appears to have been renamed to "${newName}" — ` +
+      `both enums have identical wire values, so on-the-wire serialization is unchanged. ` +
+      `This is typically the emitter's dedup canonical-flip after a new same-shape enum joined the spec. ` +
+      `Consider emitting a deprecated alias in languages that support it, or pinning the canonical via emitter config.`;
+  }
+
+  return renameMap;
+}
+
+/**
+ * Cascade rename downgrades to changes whose meaning depends on a renamed
+ * symbol. Walks every change and:
+ *
+ *   - Downgrades child removals (`Owner.field` removed where `Owner` was
+ *     renamed) — the field still exists, just under a new owner fqName.
+ *     Same logic for enum members under a renamed enum.
+ *   - Downgrades `return_type_changed` / `field_type_changed` whose
+ *     old → new pair matches a recorded rename — the type swap is the
+ *     rename itself, not a meaningful signature break.
+ *
+ * Each cascaded change gets a remediation pointing at the parent rename
+ * so the reviewer can find the explanation in the report.
+ */
+function cascadeRenameDowngrades(
+  changes: ClassifiedChange[],
+  typeRenames: Map<string, string>,
+  enumRenames: Map<string, string>,
+): void {
+  if (typeRenames.size === 0 && enumRenames.size === 0) return;
+
+  for (const change of changes) {
+    if (change.severity !== 'breaking') continue;
+
+    if (change.category === 'symbol_removed') {
+      const removed = change.old.symbol ?? '';
+      const dotIdx = removed.indexOf('.');
+      if (dotIdx <= 0) continue;
+      const ownerName = removed.slice(0, dotIdx);
+      const renamedTo = typeRenames.get(ownerName) ?? enumRenames.get(ownerName);
+      if (!renamedTo) continue;
+      change.severity = 'soft-risk';
+      change.remediation =
+        `Owned by renamed symbol "${ownerName}" (now "${renamedTo}"). ` +
+        `The same member exists on the new symbol under "${renamedTo}.${removed.slice(dotIdx + 1)}".`;
+      continue;
+    }
+
+    if (change.category === 'return_type_changed') {
+      const oldT = bareTypeName(change.old.returnType ?? '');
+      const newT = bareTypeName(change.new.returnType ?? '');
+      if (typeRenames.get(oldT) === newT) {
+        change.severity = 'soft-risk';
+        change.remediation =
+          `Return type swap matches recorded rename "${oldT}" → "${newT}". ` +
+          `The underlying field set is preserved (see the rename advisory on "${oldT}").`;
+      }
+      continue;
+    }
+
+    if (change.category === 'field_type_changed') {
+      const oldT = bareTypeName(change.old.type ?? '');
+      const newT = bareTypeName(change.new.type ?? '');
+      const renamedTo = typeRenames.get(oldT) ?? enumRenames.get(oldT);
+      if (renamedTo === newT) {
+        change.severity = 'soft-risk';
+        change.remediation =
+          `Field type swap matches recorded rename "${oldT}" → "${newT}". ` +
+          `On-the-wire shape is unchanged (see the rename advisory on "${oldT}").`;
+      }
+    }
+  }
+}
+
+/**
+ * Build a map from enum fqName → set of wire values. Used by
+ * `detectEnumRenames` to find structurally-identical enums across
+ * baseline and candidate. Wire values come from `enum_member.value`
+ * (the JSON-level value) — not the member names, which are
+ * language-specific PascalCase forms.
+ *
+ * Members whose `value` is undefined are skipped — they contribute no
+ * identity information.
+ */
+function collectEnumValueSets(snapshot: CompatSnapshot): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  for (const sym of snapshot.symbols) {
+    if (sym.kind !== 'enum_member') continue;
+    if (!sym.ownerFqName) continue;
+    if (sym.value === undefined) continue;
+    let set = result.get(sym.ownerFqName);
+    if (!set) {
+      set = new Set<string>();
+      result.set(sym.ownerFqName, set);
+    }
+    set.add(String(sym.value));
   }
   return result;
 }
