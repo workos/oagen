@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/workos/oagen/compare/v0.14.1...v0.15.0) (2026-05-02)
+
+
+### Features
+
+* **compat:** emit field/enum_member info for PHP, Python, Ruby ([#53](https://github.com/workos/oagen/issues/53)) ([6a21ac1](https://github.com/workos/oagen/commit/6a21ac1d36ee85e235a00e3f14822b98cf381dc7))
+
 ## [0.14.1](https://github.com/workos/oagen/compare/v0.14.0...v0.14.1) (2026-05-02)
 
 
