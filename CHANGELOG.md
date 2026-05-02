@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/workos/oagen/compare/v0.14.0...v0.14.1) (2026-05-02)
+
+
+### Bug Fixes
+
+* **compat:** rename-detection edge cases for real-world snapshots ([#51](https://github.com/workos/oagen/issues/51)) ([436de7e](https://github.com/workos/oagen/commit/436de7e56d7b431bc353a3ebddffa9ca29f6e1e3))
+
 ## [0.14.0](https://github.com/workos/oagen/compare/v0.13.0...v0.14.0) (2026-05-02)
 
 
