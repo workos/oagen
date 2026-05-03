@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/workos/oagen/compare/v0.15.0...v0.16.0) (2026-05-03)
+
+
+### Features
+
+* **parser:** name oneOf variants from discriminator const values ([#55](https://github.com/workos/oagen/issues/55)) ([7191442](https://github.com/workos/oagen/commit/71914424c8166404157cccd15f09f1728fd8da12))
+
 ## [0.15.0](https://github.com/workos/oagen/compare/v0.14.1...v0.15.0) (2026-05-02)
 
 
