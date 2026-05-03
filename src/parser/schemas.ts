@@ -269,6 +269,16 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
   // Handle oneOf: extract each object variant as its own model
   if (schema.oneOf) {
     const models: Model[] = [];
+
+    // Collect the inline object variants up front. When every variant pins
+    // the same property to a const value, we can derive meaningful names
+    // from the const (e.g. `UserApiKeyOwner` instead of `ApiKeyOwner2`)
+    // — much friendlier for SDK consumers than numeric suffixes.
+    const inlineObjectVariants: SchemaObject[] = schema.oneOf.filter(
+      (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
+    );
+    const constNamingDiscriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
+
     for (const variant of schema.oneOf) {
       if (variant.$ref) continue;
       if (variant.properties && (variant.type === 'object' || !variant.type)) {
@@ -278,8 +288,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
           if (!fs) continue;
           fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
         }
-        // Use the name for the first variant, suffix for subsequent
-        const variantName = models.length === 0 ? name : `${name}${models.length + 1}`;
+        const variantName = nameVariantModel(variant, name, models, constNamingDiscriminator);
         models.push({ name: variantName, description: variant.description, fields });
       }
     }
@@ -309,6 +318,80 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
   }
 
   return [];
+}
+
+/**
+ * Derive a meaningful name for a oneOf object variant past the first,
+ * falling back to the numeric-suffix scheme (`Foo2`, `Foo3`) when no
+ * better signal is available. The "better signal" is a const-valued
+ * discriminator property that distinguishes one variant from the others.
+ *
+ * For a schema like `ApiKey.owner` whose oneOf has two variants — one
+ * with `type: { const: "organization" }` and one with `type: { const:
+ * "user" }` — this returns `ApiKeyOwner` for the first variant (the
+ * baseline name that the union TypeRef will reference, so consumer-
+ * visible typed fields stay backward-compatible) and `UserApiKeyOwner`
+ * for the second instead of `ApiKeyOwner2`. SDK consumers reading the
+ * generated types can tell the variants apart at a glance.
+ *
+ * The first variant always keeps the bare parent name because
+ * `schemaToTypeRef` builds union variants whose model refs collapse to
+ * `qualifyInlineModelName(field, parent)` — so the first model name
+ * must match for the union's degenerate-collapse to land on a valid
+ * type. Renaming variant 0 would orphan it.
+ *
+ * Falls back to numeric suffix when:
+ *   - The variant has no discriminator property (no shared const
+ *     property across all object variants), OR
+ *   - The const value PascalCases to an empty/whitespace name, OR
+ *   - The derived name collides with the parent name or an already-
+ *     emitted variant name (numeric keeps uniqueness).
+ */
+function nameVariantModel(
+  variant: SchemaObject,
+  parentName: string,
+  alreadyEmitted: Model[],
+  discriminator: { property: string } | null,
+): string {
+  // Variant 0 keeps the bare parent name so the union TypeRef's degenerate
+  // collapse target exists in the model registry.
+  if (alreadyEmitted.length === 0) return parentName;
+
+  if (discriminator) {
+    const constValue = getConstPropertyValue(variant, discriminator.property);
+    if (constValue) {
+      const prefix = toPascalCase(constValue);
+      if (prefix) {
+        const candidate = parentName.startsWith(prefix) ? parentName : `${prefix}${parentName}`;
+        const collision = candidate === parentName || alreadyEmitted.some((m) => m.name === candidate);
+        if (!collision) return candidate;
+      }
+    }
+  }
+  return `${parentName}${alreadyEmitted.length + 1}`;
+}
+
+/**
+ * Returns a discriminator descriptor when every inline object variant in a
+ * oneOf has a string-const value on the same property — the signature of a
+ * discriminated union without an explicit `discriminator:` keyword. Used by
+ * `nameVariantModel` to derive variant names from the const values.
+ *
+ * Distinct from `detectConstPropertyDiscriminator` (which requires every
+ * variant to carry a `$ref` or `title` so a name mapping can be built):
+ * this pass operates on inline anonymous variants, where naming is exactly
+ * what we're trying to derive.
+ */
+function deriveConstNamingDiscriminator(variants: SchemaObject[]): { property: string } | null {
+  if (variants.length < 2) return null;
+  const candidates = Object.keys(variants[0]?.properties ?? {});
+  for (const propName of candidates) {
+    const values = variants.map((v) => getConstPropertyValue(v, propName));
+    if (values.some((v) => v === null)) continue;
+    if (new Set(values).size !== values.length) continue; // collisions = no signal
+    return { property: propName };
+  }
+  return null;
 }
 
 /** Build a single Field from a schema property entry. Shared across all extraction sites. */
