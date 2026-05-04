@@ -512,6 +512,59 @@ function resolveVariantModelName(schema: SchemaObject): string | null {
   return null;
 }
 
+/** Look up the discriminator's mapped variant name for an inline object
+ *  variant by reading its const-valued discriminator property. Returns null
+ *  when the variant doesn't pin the property to a string const, or when
+ *  the value isn't in the mapping. */
+function mapVariantToDiscriminatorEntry(
+  variant: SchemaObject,
+  discriminator: { property: string; mapping: Record<string, string> },
+): string | null {
+  const value = getConstPropertyValue(variant, discriminator.property);
+  if (value === null) return null;
+  return discriminator.mapping[value] ?? null;
+}
+
+/**
+ * Derive a discriminator value → variant model name mapping for an inline-
+ * variant `oneOf` whose explicit `discriminator:` has no `mapping:` clause.
+ *
+ * Each variant model name is reproduced via `nameVariantModel` so it matches
+ * what `extractNestedSchema` registered when it walked the same `oneOf` to
+ * pull variants out as named models. Variant 0 keeps the bare parent name
+ * (e.g. `ApiKeyOwner`); subsequent variants get a const-derived prefix
+ * (e.g. `UserApiKeyOwner` for the `type: const: user` variant).
+ *
+ * The "parent name" used here mirrors the one `collectNestedInlineModels`
+ * passes to `extractNestedSchema`: it's the qualified inline model name
+ * built from `contextName` (the field name) plus `parentModelName` (the
+ * containing model). Returns null when any non-object variant is present
+ * or when a variant lacks a const value on the discriminator property.
+ */
+function deriveInlineVariantMapping(
+  variants: SchemaObject[],
+  discriminatorProperty: string,
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): Record<string, string> | null {
+  if (variants.length === 0 || !contextName) return null;
+  const inlineObjectVariants = variants.filter((v) => !v.$ref && v.properties && (v.type === 'object' || !v.type));
+  if (inlineObjectVariants.length !== variants.length) return null;
+
+  const baseInlineName = qualifyInlineModelName(toPascalCase(contextName), parentModelName);
+  const namingDiscriminator = { property: discriminatorProperty };
+  const mapping: Record<string, string> = {};
+  const emittedSoFar: Model[] = [];
+  for (const variant of inlineObjectVariants) {
+    const constValue = getConstPropertyValue(variant, discriminatorProperty);
+    if (constValue === null) return null;
+    const variantName = nameVariantModel(variant, baseInlineName, emittedSoFar, namingDiscriminator);
+    mapping[constValue] = variantName;
+    emittedSoFar.push({ name: variantName, fields: [] });
+  }
+  return mapping;
+}
+
 function extractEnum(name: string, schema: SchemaObject): Enum {
   const values: EnumValue[] = (schema.enum ?? []).map((v) => ({
     name: toUpperSnakeCase(String(v)),
@@ -779,9 +832,18 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
     }
 
     if (fieldSchema.oneOf) {
-      const objectVariant = fieldSchema.oneOf.find((v) => v.properties && (v.type === 'object' || !v.type));
-      if (objectVariant) {
-        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), objectVariant));
+      const inlineObjectVariants = fieldSchema.oneOf.filter(
+        (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
+      );
+      if (inlineObjectVariants.length > 0) {
+        const baseQualified = qualifyNestedInlineName(name, fieldName);
+        const namingDisc = deriveConstNamingDiscriminator(inlineObjectVariants);
+        const emitted: Model[] = [];
+        for (const variant of inlineObjectVariants) {
+          const variantName = nameVariantModel(variant, baseQualified, emitted, namingDisc);
+          emitted.push({ name: variantName, fields: [] });
+          nestedModels.push(...extractInlineModelDeep(variantName, variant));
+        }
       }
     }
   }
@@ -906,37 +968,81 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       return nullVariant ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
-    // Synthesize a discriminator when all non-null variants are objects that
-    // share a property whose schema carries a `const` value. Covers the
-    // EventSchema-style pattern where each oneOf variant pins `event:
-    // const: "..."` instead of the spec using an explicit `discriminator:`.
-    const syntheticDiscriminator =
-      !schema.discriminator && compositionKind === 'oneOf' ? detectConstPropertyDiscriminator(nonNullVariants) : null;
+    // Resolve the discriminator. Three sources, in order:
+    //   1. Explicit `discriminator:` with explicit `mapping:` — trust the spec.
+    //   2. Explicit `discriminator:` with no `mapping:` — derive mapping from
+    //      variants' const values on the discriminator property, pairing each
+    //      to its inline-extracted variant model name (built the same way
+    //      `extractNestedSchema` names them via `nameVariantModel`). This
+    //      covers `ApiKey.owner`-shaped schemas where the spec uses
+    //      `discriminator: { propertyName: type }` but lists inline anonymous
+    //      `oneOf` variants instead of `$ref` links.
+    //   3. No explicit discriminator but every variant pins the same const-
+    //      valued property AND the variants are nameable via $ref/title —
+    //      `detectConstPropertyDiscriminator` covers this.
+    //   4. As a last resort, when (3) doesn't apply because variants are
+    //      inline anonymous objects, derive the same const → variant-model-
+    //      name mapping using `nameVariantModel`. This covers
+    //      `ApiKeyCreatedData.owner`-shaped schemas (oneOf with inline
+    //      const-discriminating variants but no `discriminator:` keyword).
+    let resolvedDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
+    if (schema.discriminator) {
+      const property = schema.discriminator.propertyName;
+      const explicitMapping = schema.discriminator.mapping ?? {};
+      let mapping: Record<string, string> = Object.fromEntries(
+        Object.entries(explicitMapping).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
+      );
+      if (Object.keys(mapping).length === 0) {
+        const inlineMapping = deriveInlineVariantMapping(nonNullVariants, property, contextName, parentModelName);
+        if (inlineMapping) mapping = inlineMapping;
+      }
+      resolvedDiscriminator = { property, mapping };
+    } else if (compositionKind === 'oneOf') {
+      const synthetic = detectConstPropertyDiscriminator(nonNullVariants);
+      if (synthetic) {
+        resolvedDiscriminator = synthetic;
+      } else {
+        const namingDisc = deriveConstNamingDiscriminator(nonNullVariants);
+        if (namingDisc) {
+          const inlineMapping = deriveInlineVariantMapping(
+            nonNullVariants,
+            namingDisc.property,
+            contextName,
+            parentModelName,
+          );
+          if (inlineMapping) {
+            resolvedDiscriminator = { property: namingDisc.property, mapping: inlineMapping };
+          }
+        }
+      }
+    }
 
-    // General union
-    const variants = rawVariants
-      .filter((v: SchemaObject) => v.type !== 'null')
-      .map((v: SchemaObject) => schemaToTypeRef(v, contextName, parentModelName));
+    // Build variants. When we have a discriminator with a known mapping and
+    // every non-null variant is an inline object that pins the discriminator
+    // property to a const, route each variant's TypeRef through that mapping.
+    // This avoids the degenerate case where `qualifyInlineModelName` would
+    // assign the same parent-derived name (e.g. `ApiKeyOwner`) to every
+    // inline variant, collapsing the union to a single repeated model ref.
+    const variants: TypeRef[] = [];
+    for (const v of rawVariants) {
+      if (v === nullVariant) continue;
+      const inlineMappingName =
+        resolvedDiscriminator && !v.$ref && v.properties && (v.type === 'object' || !v.type)
+          ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator)
+          : null;
+      if (inlineMappingName) {
+        variants.push({ kind: 'model', name: inlineMappingName });
+      } else {
+        variants.push(schemaToTypeRef(v, contextName, parentModelName));
+      }
+    }
     const hasNull = !!nullVariant;
+
     const union: TypeRef = {
       kind: 'union',
       variants,
       compositionKind,
-      ...(schema.discriminator
-        ? {
-            discriminator: {
-              property: schema.discriminator.propertyName,
-              mapping: Object.fromEntries(
-                Object.entries(schema.discriminator.mapping ?? {}).map(([k, v]) => [
-                  k,
-                  v.replace(/^#\/components\/schemas\//, ''),
-                ]),
-              ),
-            },
-          }
-        : syntheticDiscriminator
-          ? { discriminator: syntheticDiscriminator }
-          : {}),
+      ...(resolvedDiscriminator ? { discriminator: resolvedDiscriminator } : {}),
     };
     return hasNull ? { kind: 'nullable', inner: union } : union;
   }
