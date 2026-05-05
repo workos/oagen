@@ -27,6 +27,11 @@ paths:
           schema:
             type: string
             enum: [active, archived]
+        - name: kind
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/WidgetKind'
       responses:
         '200':
           description: Paginated list

@@ -8,6 +8,15 @@ import { toPascalCase, toUpperSnakeCase, cleanSchemaName, singularize, stripList
  */
 let activeSchemaNameTransform: ((name: string) => string) | null = null;
 
+/**
+ * Module-level set of resolved schema names whose components/schemas entry is
+ * an enum (i.e. has `enum:`). Populated by extractSchemas() so schemaToTypeRef()
+ * can classify a `$ref` to a top-level enum schema as `kind: 'enum'` instead of
+ * `kind: 'model'`. Without this, every `$ref` was naively returned as a model
+ * ref, even when the target was a shared enum like `PaginationOrder`.
+ */
+let activeEnumSchemaNames: Set<string> = new Set();
+
 /** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
 function resolveSchemaName(rawName: string): string {
   let name = cleanSchemaName(toPascalCase(rawName));
@@ -79,6 +88,16 @@ export function extractSchemas(
     activeSchemaNameTransform = null;
   }
 
+  // Pre-compute the set of resolved names whose component schema is an enum so
+  // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
+  // pass because the per-schema loop mutates models/enums and we want this map
+  // available before any TypeRef is resolved (operations + nested fields both
+  // call schemaToTypeRef during extraction).
+  activeEnumSchemaNames = new Set();
+  for (const [name, schema] of Object.entries(schemas)) {
+    if (schema.enum) activeEnumSchemaNames.add(resolveSchemaName(name));
+  }
+
   const modelsByCleanName = new Map<string, Model>();
 
   for (const [name, schema] of Object.entries(schemas)) {
@@ -139,6 +158,7 @@ export function extractSchemas(
 /** Clear the module-level schemaNameTransform. Called by parseSpec() after all extraction phases. */
 export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
+  activeEnumSchemaNames = new Set();
 }
 
 /**
@@ -865,11 +885,20 @@ function qualifyNestedInlineName(parentName: string, fieldName: string): string 
 }
 
 export function schemaToTypeRef(schema: SchemaObject, contextName?: string, parentModelName?: string): TypeRef {
-  // Handle $ref → ModelRef
+  // Handle $ref → ModelRef or EnumRef.
+  // A `$ref` to a top-level component schema needs to preserve whether the
+  // target is a model or an enum, because emitters route imports differently
+  // for the two kinds (e.g. com.workos.models.X vs com.workos.types.X). The
+  // set of enum names is precomputed by extractSchemas() in a first pass so
+  // it's available even when called recursively for nested $refs.
   if (schema.$ref) {
     const segments = schema.$ref.split('/');
     const rawName = segments[segments.length - 1];
-    return { kind: 'model', name: resolveSchemaName(rawName) };
+    const resolved = resolveSchemaName(rawName);
+    if (activeEnumSchemaNames.has(resolved)) {
+      return { kind: 'enum', name: resolved };
+    }
+    return { kind: 'model', name: resolved };
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
