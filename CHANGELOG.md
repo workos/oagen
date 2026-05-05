@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2](https://github.com/workos/oagen/compare/v0.17.1...v0.17.2) (2026-05-05)
+
+
+### Bug Fixes
+
+* **merger:** bump tree-sitter-kotlin to v0.4.0 (GH) for multi-line constructors ([#61](https://github.com/workos/oagen/issues/61)) ([611888a](https://github.com/workos/oagen/commit/611888af1bc5463caf78a07f2d423686a28feca6))
+
 ## [0.17.1](https://github.com/workos/oagen/compare/v0.17.0...v0.17.1) (2026-05-05)
 
 
