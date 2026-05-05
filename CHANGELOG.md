@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/workos/oagen/compare/v0.16.0...v0.17.0) (2026-05-05)
+
+
+### Features
+
+* **parser:** populate inline oneOf discriminator mapping and extract every variant ([#57](https://github.com/workos/oagen/issues/57)) ([2d01eb8](https://github.com/workos/oagen/commit/2d01eb853989e554c3af672f2cea885b1b261ccb))
+
 ## [0.16.0](https://github.com/workos/oagen/compare/v0.15.0...v0.16.0) (2026-05-03)
 
 
