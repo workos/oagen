@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/workos/oagen/compare/v0.17.0...v0.17.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* $ref-to-enum classification and overload-index leakage in derived names ([#59](https://github.com/workos/oagen/issues/59)) ([fd5ac29](https://github.com/workos/oagen/commit/fd5ac29879af2dcbf23352bc39c2bcf9354c9ba0))
+
 ## [0.17.0](https://github.com/workos/oagen/compare/v0.16.0...v0.17.0) (2026-05-05)
 
 
