@@ -168,6 +168,19 @@ function inferServiceName(path: string, tag?: string): string {
   return toPascalCase(first);
 }
 
+/**
+ * Strip overload indices (e.g. NestJS emits `Foo_bar[0]` when a controller
+ * method handles multiple routes) from an operationId so derived names never
+ * leak the bracketed digit. Without this, `authenticate[0]` would surface as
+ * `authenticate0` in method names and `Authenticate0Request` in body model
+ * names. Brackets at the end (or with trailing whitespace) are common in
+ * NestJS-style backends; this regex is intentionally narrow to avoid eating
+ * legitimate digits like `oauth2`.
+ */
+function normalizeOperationIdForNaming(operationId: string): string {
+  return operationId.replace(/\[\d+\]\s*$/, '');
+}
+
 function inferOperationName(
   method: HttpMethod,
   path: string,
@@ -175,10 +188,11 @@ function inferOperationName(
   operationIdTransform?: (id: string) => string,
 ): string {
   if (operationId) {
+    const normalized = normalizeOperationIdForNaming(operationId);
     if (operationIdTransform) {
-      return operationIdTransform(operationId);
+      return operationIdTransform(normalized);
     }
-    return toCamelCase(operationId);
+    return toCamelCase(normalized);
   }
 
   // Fallback when no operationId is available — use method + path to build
@@ -651,7 +665,9 @@ function extractRequestBody(
     return {};
   }
 
-  const rawName = op?.operationId ? toPascalCase(op.operationId) + 'Request' : 'RequestBody';
+  const rawName = op?.operationId
+    ? toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Request'
+    : 'RequestBody';
   const contextName = cleanSchemaName(rawName);
 
   // If the request body is an inline object with properties, extract it as a model
@@ -734,7 +750,7 @@ function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existin
 
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
   if (op?.operationId) {
-    return cleanSchemaName(toPascalCase(op.operationId) + 'Response');
+    return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Response');
   }
   const segments = path.split('/').filter(Boolean);
   const resource = segments[0] ?? 'Unknown';
