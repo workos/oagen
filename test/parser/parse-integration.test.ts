@@ -65,9 +65,11 @@ describe('parseSpec – schema types', () => {
     expect(field?.type).toEqual({ kind: 'primitive', type: 'boolean' });
   });
 
-  it('$ref field → ModelRef with correct name', () => {
+  it('$ref to enum schema → EnumRef with correct name', () => {
+    // WidgetKind is a top-level enum schema; $ref to it must resolve to an
+    // enum-kind ref so emitters can route the import to the correct package.
     const field = findField('Widget', 'kind');
-    expect(field?.type).toEqual({ kind: 'model', name: 'WidgetKind' });
+    expect(field?.type).toEqual({ kind: 'enum', name: 'WidgetKind' });
   });
 
   it('array of string primitives → ArrayType', () => {
@@ -378,6 +380,16 @@ describe('parseSpec – operations', () => {
     const limit = op!.queryParams.find((p) => p.name === 'limit');
     expect(cursor?.required).toBe(false);
     expect(limit?.required).toBe(false);
+  });
+
+  it('query parameter $ref to enum schema → EnumRef (not ModelRef)', () => {
+    // Regression: a `$ref` to a top-level enum schema (e.g. PaginationOrder)
+    // used to be returned as `kind: 'model'` from schemaToTypeRef, causing
+    // emitters to import it from the models package even though the file is
+    // emitted as an enum.
+    const op = findOperation('Widgets', 'listWidgets');
+    const kind = op!.queryParams.find((p) => p.name === 'kind');
+    expect(kind?.type).toEqual({ kind: 'enum', name: 'WidgetKind' });
   });
 
   it('header parameter extracted', () => {

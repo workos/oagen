@@ -258,6 +258,72 @@ describe('extractOperations', () => {
     expect(op.requestBody).toEqual({ kind: 'model', name: 'CreateUserRequest' });
   });
 
+  it('strips overload index `[N]` from operationId in derived names', () => {
+    // NestJS emits operationIds like `Foo_bar[0]` for controller methods that
+    // handle multiple routes. Without normalization the trailing digit leaks
+    // into derived names: the operation method becomes `bar0`, the inline
+    // request body becomes `Bar0Request`, and a oneOf variant becomes
+    // `XBar0Request` — breaking name-based config references downstream.
+    const paths = {
+      '/things/authenticate': {
+        post: {
+          operationId: 'ThingsController_authenticate[0]',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { email: { type: 'string' } },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    // The operation name is camelCased without the `[0]` suffix.
+    expect(op.name).toBe('thingsControllerAuthenticate');
+    // cleanSchemaName strips `Controller` (anywhere) and singularizes the
+    // leading word, giving `ThingAuthenticate*` — but critically with no `0`.
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'ThingAuthenticateRequest' });
+    expect(op.response).toEqual({ kind: 'model', name: 'ThingAuthenticateResponse' });
+  });
+
+  it('applies operationIdTransform after stripping overload index', () => {
+    // The transform should receive the normalized id (without `[0]`) so its
+    // own logic doesn't have to know about NestJS overload markers.
+    const paths = {
+      '/things/authenticate': {
+        post: {
+          operationId: 'ThingsController_authenticate[0]',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const seen: string[] = [];
+    const transform = (id: string): string => {
+      seen.push(id);
+      return id.split('_').pop()!;
+    };
+    const { services } = extractOperations(paths, transform);
+    expect(seen).toEqual(['ThingsController_authenticate']);
+    expect(services[0].operations[0].name).toBe('authenticate');
+  });
+
   it('resolves $ref request body to named model', () => {
     const paths = {
       '/users': {
