@@ -82,6 +82,7 @@ export interface OperationExtractionResult {
 export function extractOperations(
   paths: Record<string, PathItem> | undefined,
   operationIdTransform?: (id: string) => string,
+  componentSchemas?: Record<string, SchemaObject>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -104,6 +105,7 @@ export function extractOperations(
         pathLevelParams,
         operationIdTransform,
         serviceName,
+        componentSchemas,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
@@ -492,6 +494,7 @@ function buildOperation(
   pathLevelParams: ParameterObject[],
   operationIdTransform?: (id: string) => string,
   serviceName?: string,
+  componentSchemas?: Record<string, SchemaObject>,
 ): { operation: Operation; inlineModels: Model[] } {
   const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
 
@@ -500,12 +503,12 @@ function buildOperation(
   // Use the service name as context so inline parameter enums get qualified
   // names. e.g., service "SSO" + param "provider" → "SSOProvider".
   const opContext = serviceName;
-  const pathParams = extractParams(allParams, 'path', opContext);
-  const queryParams = extractParams(allParams, 'query', opContext);
-  const headerParams = extractParams(allParams, 'header', opContext).filter(
+  const pathParams = extractParams(allParams, 'path', opContext, componentSchemas);
+  const queryParams = extractParams(allParams, 'query', opContext, componentSchemas);
+  const headerParams = extractParams(allParams, 'header', opContext, componentSchemas).filter(
     (p) => p.name.toLowerCase() !== 'idempotency-key',
   );
-  const cookieParams = extractParams(allParams, 'cookie', opContext);
+  const cookieParams = extractParams(allParams, 'cookie', opContext, componentSchemas);
 
   const reqBodyModels: Model[] = [];
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
@@ -608,22 +611,48 @@ function extractParams(
   params: ParameterObject[],
   location: 'path' | 'query' | 'header' | 'cookie',
   operationContext?: string,
+  componentSchemas?: Record<string, SchemaObject>,
 ): Parameter[] {
   return params
     .filter((p) => p.in === location)
-    .map((p) => ({
-      name: p.name,
-      type: p.schema
-        ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
-        : ({ kind: 'primitive', type: 'string' } as TypeRef),
-      required: p.required ?? false,
-      description: p.description,
-      deprecated: p.deprecated || p.schema?.deprecated || undefined,
-      default: p.schema?.default,
-      example: p.example ?? p.schema?.example,
-      style: p.style as Parameter['style'],
-      explode: p.explode,
-    }));
+    .map((p) => {
+      const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
+      return {
+        name: p.name,
+        type: p.schema
+          ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+          : ({ kind: 'primitive', type: 'string' } as TypeRef),
+        required: p.required ?? false,
+        description: p.description,
+        deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
+        default: p.schema?.default ?? refTarget?.default,
+        example: p.example ?? p.schema?.example ?? refTarget?.example,
+        style: p.style as Parameter['style'],
+        explode: p.explode,
+      };
+    });
+}
+
+/**
+ * If a parameter's schema is a `$ref` to `#/components/schemas/X`, return the
+ * referenced component schema. Used to surface schema-level metadata (default,
+ * example, deprecated) that wouldn't otherwise be visible at the param level.
+ *
+ * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
+ * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
+ * silently loses the target's `default: desc` and the SDK stops emitting the
+ * spec-mandated default value in generated method signatures.
+ */
+function resolveParamSchemaRef(
+  schema: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  if (!schema || !componentSchemas) return undefined;
+  const ref = (schema as { $ref?: string }).$ref;
+  if (!ref) return undefined;
+  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
+  if (!match) return undefined;
+  return componentSchemas[match[1]];
 }
 
 function extractRequestBody(
