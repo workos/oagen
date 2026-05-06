@@ -218,6 +218,8 @@ export interface Field {
 export interface Enum {
   name: string;
   values: EnumValue[];
+  /** Spec-level default value (the value of `default:` on the schema). Optional. */
+  default?: string | number;
 }
 
 export interface EnumValue {
