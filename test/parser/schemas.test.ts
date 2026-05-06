@@ -111,7 +111,50 @@ describe('extractSchemas', () => {
       { name: 'INACTIVE', value: 'inactive', description: undefined },
       { name: 'PENDING', value: 'pending', description: undefined },
     ]);
+    expect(enums[0].default).toBeUndefined();
     expect(models).toHaveLength(0);
+  });
+
+  it('captures default on enum when present and a member', () => {
+    const schemas = {
+      PaginationOrder: {
+        type: 'string',
+        enum: ['normal', 'desc', 'asc'],
+        default: 'desc',
+      },
+    };
+
+    const { enums } = extractSchemas(schemas);
+    expect(enums).toHaveLength(1);
+    expect(enums[0].default).toBe('desc');
+  });
+
+  it('drops default that is not a member of the enum values', () => {
+    const schemas = {
+      Status: {
+        type: 'string',
+        enum: ['active', 'inactive'],
+        default: 'archived',
+      },
+    };
+
+    const { enums } = extractSchemas(schemas);
+    expect(enums).toHaveLength(1);
+    expect(enums[0].default).toBeUndefined();
+  });
+
+  it('captures numeric enum default', () => {
+    const schemas = {
+      Priority: {
+        type: 'integer',
+        enum: [0, 1, 2],
+        default: 1,
+      },
+    };
+
+    const { enums } = extractSchemas(schemas);
+    expect(enums).toHaveLength(1);
+    expect(enums[0].default).toBe(1);
   });
 
   it('extracts allOf model by merging fields', () => {

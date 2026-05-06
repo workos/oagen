@@ -592,7 +592,13 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
     description: undefined,
   }));
 
-  return { name, values };
+  const rawDefault = schema.default;
+  const def =
+    rawDefault !== undefined && values.some((v) => v.value === rawDefault)
+      ? (rawDefault as string | number)
+      : undefined;
+
+  return { name, values, default: def };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   if (schema.allOf) {
