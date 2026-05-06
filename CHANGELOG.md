@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/workos/oagen/compare/v0.18.0...v0.18.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* **parser,differ:** catch silent default & format regressions ([#68](https://github.com/workos/oagen/issues/68)) ([0ece2f0](https://github.com/workos/oagen/commit/0ece2f098ca3267879cd7c3743fb4bd8818138b6))
+
 ## [0.18.0](https://github.com/workos/oagen/compare/v0.17.3...v0.18.0) (2026-05-06)
 
 
