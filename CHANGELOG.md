@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/workos/oagen/compare/v0.17.3...v0.18.0) (2026-05-06)
+
+
+### Features
+
+* capture enum default value in IR ([#66](https://github.com/workos/oagen/issues/66)) ([67fdf02](https://github.com/workos/oagen/commit/67fdf02b4b7ecf7b753520691535fe189988b596))
+
 ## [0.17.3](https://github.com/workos/oagen/compare/v0.17.2...v0.17.3) (2026-05-06)
 
 
