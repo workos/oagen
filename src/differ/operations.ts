@@ -1,7 +1,7 @@
 import type { ErrorResponse, Operation } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
 import { classifyParamChange } from './classify.js';
-import { typeRefsEqual } from './models.js';
+import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
 export function diffOperations(serviceName: string, oldOps: Operation[], newOps: Operation[]): Change[] {
   const changes: Change[] = [];
@@ -135,14 +135,24 @@ function classifyErrorsChange(
 
 function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
   const changes: ParamChange[] = [];
-  const allOldParams = [...oldOp.pathParams, ...oldOp.queryParams, ...oldOp.headerParams];
-  const allNewParams = [...newOp.pathParams, ...newOp.queryParams, ...newOp.headerParams];
-  const oldByName = new Map(allOldParams.map((p) => [p.name, p]));
-  const newByName = new Map(allNewParams.map((p) => [p.name, p]));
+  const tagged = (loc: 'path' | 'query' | 'header', params: typeof oldOp.queryParams) =>
+    params.map((p) => ({ p, loc }));
+  const allOldParams = [
+    ...tagged('path', oldOp.pathParams),
+    ...tagged('query', oldOp.queryParams),
+    ...tagged('header', oldOp.headerParams),
+  ];
+  const allNewParams = [
+    ...tagged('path', newOp.pathParams),
+    ...tagged('query', newOp.queryParams),
+    ...tagged('header', newOp.headerParams),
+  ];
+  const oldByName = new Map(allOldParams.map((e) => [e.p.name, e]));
+  const newByName = new Map(allNewParams.map((e) => [e.p.name, e]));
 
-  for (const [name, param] of newByName) {
+  for (const [name, entry] of newByName) {
     if (!oldByName.has(name)) {
-      changes.push(classifyParamChange('param-added', name, param.required));
+      changes.push(classifyParamChange('param-added', name, entry.p.required));
     }
   }
 
@@ -152,18 +162,50 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     }
   }
 
-  for (const [name, newParam] of newByName) {
-    const oldParam = oldByName.get(name);
-    if (!oldParam) continue;
+  for (const [name, newEntry] of newByName) {
+    const oldEntry = oldByName.get(name);
+    if (!oldEntry) continue;
 
-    if (!typeRefsEqual(oldParam.type, newParam.type)) {
-      changes.push(classifyParamChange('param-type-changed', name));
+    if (!typeRefsEqual(oldEntry.p.type, newEntry.p.type)) {
+      if (primitivesDifferOnlyByFormat(oldEntry.p.type, newEntry.p.type)) {
+        const change = classifyParamChange('param-format-changed', name);
+        change.details = formatChangeDetails(oldEntry.p.type, newEntry.p.type);
+        changes.push(change);
+      } else {
+        changes.push(classifyParamChange('param-type-changed', name));
+      }
     }
 
-    if (oldParam.required !== newParam.required) {
-      changes.push(classifyParamChange('param-required-changed', name, newParam.required));
+    if (oldEntry.p.required !== newEntry.p.required) {
+      changes.push(classifyParamChange('param-required-changed', name, newEntry.p.required));
+    }
+
+    const oldDefault = serializeDefault(oldEntry.p.default);
+    const newDefault = serializeDefault(newEntry.p.default);
+    if (oldDefault !== newDefault) {
+      const change = classifyParamChange('param-default-changed', name);
+      change.oldDefault = oldDefault;
+      change.newDefault = newDefault;
+      change.paramLocation = newEntry.loc;
+      change.details = `default ${oldDefault ?? '<unset>'} → ${newDefault ?? '<unset>'}`;
+      changes.push(change);
     }
   }
 
   return changes;
+}
+
+function serializeDefault(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  // Objects/arrays: stable JSON. Stringification of equal-valued objects is
+  // deterministic enough for this comparison since callers typically pass
+  // primitives; complex defaults are rare.
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }

@@ -133,6 +133,45 @@ describe('diffOperations', () => {
     }
   });
 
+  it('classifies adding format to a primitive param as additive (param-format-changed)', () => {
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: listUsers.queryParams.map((p) =>
+        p.name === 'cursor'
+          ? { ...p, type: { kind: 'primitive' as const, type: 'string' as const, format: 'uuid' } }
+          : p,
+      ),
+    };
+    const changes = diffOperations('Users', [listUsers], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', classification: 'additive' });
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].paramChanges[0]).toMatchObject({
+        kind: 'param-format-changed',
+        paramName: 'cursor',
+        classification: 'additive',
+      });
+      expect(changes[0].paramChanges[0].details).toContain('uuid');
+    }
+  });
+
+  it('still reports a real param base-type change as breaking', () => {
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: listUsers.queryParams.map((p) =>
+        p.name === 'limit'
+          ? { ...p, type: { kind: 'primitive' as const, type: 'string' as const, format: 'int64' } }
+          : p,
+      ),
+    };
+    const changes = diffOperations('Users', [listUsers], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', classification: 'breaking' });
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].paramChanges[0]).toMatchObject({ kind: 'param-type-changed', paramName: 'limit' });
+    }
+  });
+
   it('detects param required changed', () => {
     const modified: Operation = {
       ...listUsers,
@@ -358,5 +397,94 @@ describe('diffOperations', () => {
     const modified: Operation = { ...getUser, errors: [] };
     const changes = diffOperations('Users', [old], [modified]);
     expect(changes).toHaveLength(0);
+  });
+
+  it('detects param default removed (breaking behavior change)', () => {
+    const orderParam = {
+      name: 'order',
+      type: { kind: 'primitive' as const, type: 'string' as const },
+      required: false,
+      default: 'desc',
+    };
+    const old: Operation = { ...listUsers, queryParams: [...listUsers.queryParams, orderParam] };
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: [...listUsers.queryParams, { ...orderParam, default: undefined }],
+    };
+    const changes = diffOperations('Users', [old], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].classification).toBe('breaking');
+      const defaultChange = changes[0].paramChanges.find((pc) => pc.kind === 'param-default-changed');
+      expect(defaultChange).toMatchObject({
+        kind: 'param-default-changed',
+        paramName: 'order',
+        classification: 'breaking',
+        oldDefault: 'desc',
+        newDefault: null,
+        paramLocation: 'query',
+      });
+    }
+  });
+
+  it('detects param default value changed (breaking behavior change)', () => {
+    const limitParam = {
+      name: 'limit',
+      type: { kind: 'primitive' as const, type: 'integer' as const },
+      required: false,
+      default: 10,
+    };
+    const old: Operation = {
+      ...listUsers,
+      queryParams: [listUsers.queryParams[0], limitParam],
+    };
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: [listUsers.queryParams[0], { ...limitParam, default: 50 }],
+    };
+    const changes = diffOperations('Users', [old], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      const defaultChange = changes[0].paramChanges.find((pc) => pc.kind === 'param-default-changed');
+      expect(defaultChange).toMatchObject({
+        kind: 'param-default-changed',
+        paramName: 'limit',
+        oldDefault: '10',
+        newDefault: '50',
+      });
+    }
+  });
+
+  it('does not emit param-default-changed when default is unchanged', () => {
+    const orderParam = {
+      name: 'order',
+      type: { kind: 'primitive' as const, type: 'string' as const },
+      required: false,
+      default: 'desc',
+    };
+    const op: Operation = { ...listUsers, queryParams: [...listUsers.queryParams, orderParam] };
+    const changes = diffOperations('Users', [op], [op]);
+    expect(changes).toHaveLength(0);
+  });
+
+  it('detects param default added (also a behavior change)', () => {
+    const orderParam = {
+      name: 'order',
+      type: { kind: 'primitive' as const, type: 'string' as const },
+      required: false,
+    };
+    const old: Operation = { ...listUsers, queryParams: [...listUsers.queryParams, orderParam] };
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: [...listUsers.queryParams, { ...orderParam, default: 'asc' }],
+    };
+    const changes = diffOperations('Users', [old], [modified]);
+    if (changes[0].kind === 'operation-modified') {
+      const defaultChange = changes[0].paramChanges.find((pc) => pc.kind === 'param-default-changed');
+      expect(defaultChange).toMatchObject({
+        oldDefault: null,
+        newDefault: 'asc',
+      });
+    }
   });
 });

@@ -508,6 +508,89 @@ describe('extractOperations', () => {
     expect(services[0].operations).toHaveLength(2);
   });
 
+  it('hoists default and example from a referenced component schema onto the param', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: {
+        type: 'string',
+        enum: ['desc', 'asc'],
+        default: 'desc',
+        example: 'desc',
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    const orderParam = services[0].operations[0].queryParams[0];
+    expect(orderParam.name).toBe('order');
+    expect(orderParam.default).toBe('desc');
+    expect(orderParam.example).toBe('desc');
+  });
+
+  it('prefers param-level default over the referenced schema default', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder', default: 'asc' } as never,
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: { type: 'string', enum: ['desc', 'asc'], default: 'desc' },
+    };
+
+    const { services } = extractOperations(paths as never, undefined, componentSchemas);
+    expect(services[0].operations[0].queryParams[0].default).toBe('asc');
+  });
+
+  it('leaves default undefined when neither param nor referenced schema sets one', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: { type: 'string', enum: ['desc', 'asc'] },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
+  });
+
   it('extracts cookie parameters', () => {
     const paths = {
       '/users': {

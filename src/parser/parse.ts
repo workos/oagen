@@ -77,6 +77,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const { services, inlineModels } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
+    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
 
   // schemaNameTransform is kept active through extractOperations so that

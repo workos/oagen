@@ -2,13 +2,38 @@ export interface DiffReport {
   oldVersion: string;
   newVersion: string;
   changes: Change[];
+  /**
+   * Cross-cutting events that change observable runtime behavior for callers
+   * who did not previously set the affected parameter explicitly. Surfaced
+   * separately so PR-description tooling can flag them as breaking even when
+   * the type signatures of the operation are otherwise unchanged.
+   */
+  behaviorChanges: BehaviorChange[];
   summary: {
     added: number;
     removed: number;
     modified: number;
     breaking: number;
     additive: number;
+    behaviorChanges: number;
   };
+}
+
+export interface BehaviorChange {
+  kind: 'param-default-changed';
+  /** Service name (e.g. 'authorization', 'user_management'). */
+  serviceName: string;
+  /** Operation name within the service. */
+  operationName: string;
+  /** Parameter name (e.g. 'order', 'limit'). */
+  paramName: string;
+  /** 'path' | 'query' | 'header'. */
+  paramLocation: 'path' | 'query' | 'header';
+  /** Old default value as a string, or null if previously unset. */
+  oldDefault: string | null;
+  /** New default value as a string, or null if now unset. */
+  newDefault: string | null;
+  classification: 'breaking';
 }
 
 export type Change =
@@ -44,7 +69,13 @@ export interface ModelModified {
 }
 
 export interface FieldChange {
-  kind: 'field-added' | 'field-removed' | 'field-type-changed' | 'field-required-changed' | 'field-access-changed';
+  kind:
+    | 'field-added'
+    | 'field-removed'
+    | 'field-type-changed'
+    | 'field-format-changed'
+    | 'field-required-changed'
+    | 'field-access-changed';
   fieldName: string;
   classification: 'additive' | 'breaking';
   details?: string;
@@ -118,7 +149,20 @@ export interface OperationModified {
 }
 
 export interface ParamChange {
-  kind: 'param-added' | 'param-removed' | 'param-type-changed' | 'param-required-changed';
+  kind:
+    | 'param-added'
+    | 'param-removed'
+    | 'param-type-changed'
+    | 'param-format-changed'
+    | 'param-required-changed'
+    | 'param-default-changed';
   paramName: string;
   classification: 'additive' | 'breaking';
+  /** For `param-default-changed`: serialized old default value, or `null` if previously unset. */
+  oldDefault?: string | null;
+  /** For `param-default-changed`: serialized new default value, or `null` if now unset. */
+  newDefault?: string | null;
+  /** For `param-default-changed`: 'query' | 'header' | 'path' — where the parameter lives. */
+  paramLocation?: 'path' | 'query' | 'header';
+  details?: string;
 }
