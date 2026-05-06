@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.3](https://github.com/workos/oagen/compare/v0.17.2...v0.17.3) (2026-05-06)
+
+
+### Bug Fixes
+
+* **writer:** repair on-disk filename casing on case-insensitive filesystems ([#63](https://github.com/workos/oagen/issues/63)) ([c6f93d4](https://github.com/workos/oagen/commit/c6f93d40162977af2d8a58d6540c1b0574f4f2dc))
+
 ## [0.17.2](https://github.com/workos/oagen/compare/v0.17.1...v0.17.2) (2026-05-05)
 
 
