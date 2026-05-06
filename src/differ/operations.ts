@@ -1,7 +1,7 @@
 import type { ErrorResponse, Operation } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
 import { classifyParamChange } from './classify.js';
-import { typeRefsEqual } from './models.js';
+import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
 export function diffOperations(serviceName: string, oldOps: Operation[], newOps: Operation[]): Change[] {
   const changes: Change[] = [];
@@ -167,7 +167,13 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     if (!oldEntry) continue;
 
     if (!typeRefsEqual(oldEntry.p.type, newEntry.p.type)) {
-      changes.push(classifyParamChange('param-type-changed', name));
+      if (primitivesDifferOnlyByFormat(oldEntry.p.type, newEntry.p.type)) {
+        const change = classifyParamChange('param-format-changed', name);
+        change.details = formatChangeDetails(oldEntry.p.type, newEntry.p.type);
+        changes.push(change);
+      } else {
+        changes.push(classifyParamChange('param-type-changed', name));
+      }
     }
 
     if (oldEntry.p.required !== newEntry.p.required) {

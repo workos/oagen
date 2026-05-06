@@ -94,6 +94,71 @@ describe('diffModels', () => {
     }
   });
 
+  it('classifies adding format to a primitive field as additive (field-format-changed)', () => {
+    // Reproduces the regression in workos/workos-go#545 where adding `format:
+    // email` to existing string `email` fields was reported as
+    // `feat!: Change email field type`. The IR base type is unchanged, so the
+    // diff is additive, not breaking.
+    const modified: Model = {
+      ...userModel,
+      fields: userModel.fields.map((f) =>
+        f.name === 'email'
+          ? { ...f, type: { kind: 'primitive' as const, type: 'string' as const, format: 'email' } }
+          : f,
+      ),
+    };
+    const changes = diffModels([userModel], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'model-modified', classification: 'additive' });
+    if (changes[0].kind === 'model-modified') {
+      expect(changes[0].fieldChanges).toHaveLength(1);
+      expect(changes[0].fieldChanges[0]).toMatchObject({
+        kind: 'field-format-changed',
+        fieldName: 'email',
+        classification: 'additive',
+      });
+      expect(changes[0].fieldChanges[0].details).toContain('email');
+    }
+  });
+
+  it('classifies changing format between two formats as additive', () => {
+    const modified: Model = {
+      ...userModel,
+      fields: userModel.fields.map((f) =>
+        f.name === 'created_at'
+          ? { ...f, type: { kind: 'primitive' as const, type: 'string' as const, format: 'date' } }
+          : f,
+      ),
+    };
+    const changes = diffModels([userModel], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'model-modified', classification: 'additive' });
+    if (changes[0].kind === 'model-modified') {
+      expect(changes[0].fieldChanges[0]).toMatchObject({
+        kind: 'field-format-changed',
+        fieldName: 'created_at',
+        classification: 'additive',
+      });
+    }
+  });
+
+  it('still reports a real base-type change as breaking even when one side carries a format', () => {
+    // Guards against the format-only carve-out swallowing a genuine type swap
+    // (e.g. string format=email → integer).
+    const modified: Model = {
+      ...userModel,
+      fields: userModel.fields.map((f) =>
+        f.name === 'email' ? { ...f, type: { kind: 'primitive' as const, type: 'integer' as const } } : f,
+      ),
+    };
+    const changes = diffModels([userModel], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'model-modified', classification: 'breaking' });
+    if (changes[0].kind === 'model-modified') {
+      expect(changes[0].fieldChanges[0]).toMatchObject({ kind: 'field-type-changed', fieldName: 'email' });
+    }
+  });
+
   it('detects field required changed', () => {
     const modified: Model = {
       ...userModel,

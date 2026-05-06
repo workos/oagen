@@ -61,12 +61,19 @@ function diffFields(oldModel: Model, newModel: Model): FieldChange[] {
     if (!oldField) continue;
 
     if (!typeRefsEqual(oldField.type, newField.type)) {
-      changes.push({
-        kind: 'field-type-changed',
-        fieldName: name,
-        classification: 'breaking',
-        details: `type changed`,
-      });
+      if (primitivesDifferOnlyByFormat(oldField.type, newField.type)) {
+        changes.push({
+          ...classifyFieldChange('field-format-changed', name),
+          details: formatChangeDetails(oldField.type, newField.type),
+        });
+      } else {
+        changes.push({
+          kind: 'field-type-changed',
+          fieldName: name,
+          classification: 'breaking',
+          details: `type changed`,
+        });
+      }
     }
 
     if (oldField.required !== newField.required) {
@@ -79,6 +86,25 @@ function diffFields(oldModel: Model, newModel: Model): FieldChange[] {
   }
 
   return changes;
+}
+
+/**
+ * True when both refs are primitives with the same base `type` but different
+ * `format`. Used to downgrade format-only diffs from breaking type changes to
+ * additive `field-format-changed` / `param-format-changed` events: the wire
+ * base type is unchanged, so the diff is a hint to language emitters rather
+ * than a source-level break.
+ */
+export function primitivesDifferOnlyByFormat(a: TypeRef, b: TypeRef): boolean {
+  if (a.kind !== 'primitive' || b.kind !== 'primitive') return false;
+  if (a.type !== b.type) return false;
+  return (a.format ?? '') !== (b.format ?? '');
+}
+
+export function formatChangeDetails(a: TypeRef, b: TypeRef): string {
+  const oldFmt = a.kind === 'primitive' ? a.format : undefined;
+  const newFmt = b.kind === 'primitive' ? b.format : undefined;
+  return `format ${oldFmt ?? '<unset>'} → ${newFmt ?? '<unset>'}`;
 }
 
 export function typeRefsEqual(a: TypeRef, b: TypeRef): boolean {

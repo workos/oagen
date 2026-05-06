@@ -69,7 +69,13 @@ export interface ModelModified {
 }
 
 export interface FieldChange {
-  kind: 'field-added' | 'field-removed' | 'field-type-changed' | 'field-required-changed' | 'field-access-changed';
+  kind:
+    | 'field-added'
+    | 'field-removed'
+    | 'field-type-changed'
+    | 'field-format-changed'
+    | 'field-required-changed'
+    | 'field-access-changed';
   fieldName: string;
   classification: 'additive' | 'breaking';
   details?: string;
@@ -143,7 +149,13 @@ export interface OperationModified {
 }
 
 export interface ParamChange {
-  kind: 'param-added' | 'param-removed' | 'param-type-changed' | 'param-required-changed' | 'param-default-changed';
+  kind:
+    | 'param-added'
+    | 'param-removed'
+    | 'param-type-changed'
+    | 'param-format-changed'
+    | 'param-required-changed'
+    | 'param-default-changed';
   paramName: string;
   classification: 'additive' | 'breaking';
   /** For `param-default-changed`: serialized old default value, or `null` if previously unset. */

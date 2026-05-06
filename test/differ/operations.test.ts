@@ -133,6 +133,45 @@ describe('diffOperations', () => {
     }
   });
 
+  it('classifies adding format to a primitive param as additive (param-format-changed)', () => {
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: listUsers.queryParams.map((p) =>
+        p.name === 'cursor'
+          ? { ...p, type: { kind: 'primitive' as const, type: 'string' as const, format: 'uuid' } }
+          : p,
+      ),
+    };
+    const changes = diffOperations('Users', [listUsers], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', classification: 'additive' });
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].paramChanges[0]).toMatchObject({
+        kind: 'param-format-changed',
+        paramName: 'cursor',
+        classification: 'additive',
+      });
+      expect(changes[0].paramChanges[0].details).toContain('uuid');
+    }
+  });
+
+  it('still reports a real param base-type change as breaking', () => {
+    const modified: Operation = {
+      ...listUsers,
+      queryParams: listUsers.queryParams.map((p) =>
+        p.name === 'limit'
+          ? { ...p, type: { kind: 'primitive' as const, type: 'string' as const, format: 'int64' } }
+          : p,
+      ),
+    };
+    const changes = diffOperations('Users', [listUsers], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', classification: 'breaking' });
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].paramChanges[0]).toMatchObject({ kind: 'param-type-changed', paramName: 'limit' });
+    }
+  });
+
   it('detects param required changed', () => {
     const modified: Operation = {
       ...listUsers,
