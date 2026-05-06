@@ -44,6 +44,13 @@ export async function writeFiles(
   for (const file of sorted) {
     const fullPath = path.join(outputDir, file.path);
 
+    // Repair on-disk casing when an emitter renames a generated file in a
+    // case-only way (e.g. `AuthenticationMfaFailed.kt` → `AuthenticationMFAFailed.kt`
+    // after adding `MFA` to an acronym list). On case-insensitive filesystems
+    // (APFS, NTFS) `writeFile` would otherwise reuse the existing inode and
+    // preserve the stale casing — surfacing later as ktlint/eslint errors.
+    await renameMismatchedCasing(fullPath);
+
     // Check if file already exists
     let existingContent: string | null = null;
     try {
@@ -168,6 +175,31 @@ export async function writeFiles(
   }
 
   return result;
+}
+
+/**
+ * If a sibling exists with the same name except for letter case, rename it to
+ * the requested casing. Uses a two-step rename via a temporary unique name so
+ * case-insensitive filesystems (APFS on macOS, NTFS on Windows) actually
+ * update the entry — `rename('Foo', 'FOO')` is a no-op on those systems.
+ */
+async function renameMismatchedCasing(fullPath: string): Promise<void> {
+  const dir = path.dirname(fullPath);
+  const target = path.basename(fullPath);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  if (entries.includes(target)) return;
+  const targetLower = target.toLowerCase();
+  const mismatch = entries.find((e) => e.toLowerCase() === targetLower);
+  if (!mismatch) return;
+  const oldPath = path.join(dir, mismatch);
+  const tempPath = path.join(dir, `.oagen-case-${process.pid}-${Date.now()}-${target}`);
+  await fs.rename(oldPath, tempPath);
+  await fs.rename(tempPath, fullPath);
 }
 
 /** Comprehensive fallback when no adapter is available. */
