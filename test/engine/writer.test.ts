@@ -80,6 +80,27 @@ describe('writeFiles', () => {
     }
   });
 
+  it('repairs an existing file whose name differs only by letter case', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
+    try {
+      const dir = path.join(tmpDir, 'lib');
+      await fs.mkdir(dir, { recursive: true });
+      // Stale file with old casing — emulates what's left after an emitter
+      // begins uppercasing an acronym (e.g. Mfa → MFA).
+      await fs.writeFile(path.join(dir, 'AuthMfa.rb'), 'class AuthMfa; end');
+
+      await writeFiles([{ path: 'lib/AuthMFA.rb', content: 'class AuthMFA; end', overwriteExisting: true }], tmpDir);
+
+      const entries = await fs.readdir(dir);
+      expect(entries).toContain('AuthMFA.rb');
+      expect(entries).not.toContain('AuthMfa.rb');
+      const content = await fs.readFile(path.join(dir, 'AuthMFA.rb'), 'utf-8');
+      expect(content).toBe('class AuthMFA; end');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
   it('reports identical files when content matches', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
     try {
