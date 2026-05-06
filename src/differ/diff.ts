@@ -1,5 +1,5 @@
 import type { ApiSpec, Enum } from '../ir/types.js';
-import type { Change, DiffReport, EnumValueChange } from './types.js';
+import type { BehaviorChange, Change, DiffReport, EnumValueChange } from './types.js';
 import { diffModels } from './models.js';
 import { diffServices } from './services.js';
 
@@ -10,12 +10,36 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
     ...diffServices(oldSpec.services, newSpec.services),
   ];
 
+  const behaviorChanges = collectBehaviorChanges(changes);
+
   return {
     oldVersion: oldSpec.version,
     newVersion: newSpec.version,
     changes,
-    summary: summarize(changes),
+    behaviorChanges,
+    summary: { ...summarize(changes), behaviorChanges: behaviorChanges.length },
   };
+}
+
+function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
+  const out: BehaviorChange[] = [];
+  for (const c of changes) {
+    if (c.kind !== 'operation-modified') continue;
+    for (const pc of c.paramChanges) {
+      if (pc.kind !== 'param-default-changed') continue;
+      out.push({
+        kind: 'param-default-changed',
+        serviceName: c.serviceName,
+        operationName: c.operationName,
+        paramName: pc.paramName,
+        paramLocation: pc.paramLocation ?? 'query',
+        oldDefault: pc.oldDefault ?? null,
+        newDefault: pc.newDefault ?? null,
+        classification: 'breaking',
+      });
+    }
+  }
+  return out;
 }
 
 function diffEnums(oldEnums: Enum[], newEnums: Enum[]): Change[] {

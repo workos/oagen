@@ -57,7 +57,7 @@ describe('diffSpecs', () => {
   it('returns empty diff for identical specs', () => {
     const diff = diffSpecs(v1, v1);
     expect(diff.changes).toHaveLength(0);
-    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0 });
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0, behaviorChanges: 0 });
     expect(diff.oldVersion).toBe('1.0.0');
     expect(diff.newVersion).toBe('1.0.0');
   });
@@ -224,7 +224,7 @@ describe('diffSpecs', () => {
     };
     const diff = diffSpecs(empty, empty);
     expect(diff.changes).toHaveLength(0);
-    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0 });
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0, behaviorChanges: 0 });
   });
 
   it('detects multiple simultaneous changes across models + enums + services', () => {
@@ -245,5 +245,67 @@ describe('diffSpecs', () => {
     expect(diff.changes.length).toBeGreaterThanOrEqual(4); // model-modified, model-added, enum-modified, service-removed
     expect(diff.summary.breaking).toBeGreaterThan(0);
     expect(diff.summary.additive).toBeGreaterThan(0);
+  });
+
+  it('surfaces removed query-param defaults via behaviorChanges (breaking, even when types unchanged)', () => {
+    const withOrderDefault: ApiSpec = {
+      ...v1,
+      services: [
+        {
+          name: 'Users',
+          operations: [
+            {
+              ...v1.services[0].operations[0],
+              queryParams: [
+                ...v1.services[0].operations[0].queryParams,
+                {
+                  name: 'order',
+                  type: { kind: 'primitive', type: 'string' },
+                  required: false,
+                  default: 'desc',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const withoutDefault: ApiSpec = {
+      ...withOrderDefault,
+      services: [
+        {
+          name: 'Users',
+          operations: [
+            {
+              ...withOrderDefault.services[0].operations[0],
+              queryParams: [
+                ...v1.services[0].operations[0].queryParams,
+                {
+                  name: 'order',
+                  type: { kind: 'primitive', type: 'string' },
+                  required: false,
+                  default: undefined,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const diff = diffSpecs(withOrderDefault, withoutDefault);
+    expect(diff.summary.behaviorChanges).toBe(1);
+    expect(diff.summary.breaking).toBeGreaterThan(0);
+    expect(diff.behaviorChanges).toEqual([
+      {
+        kind: 'param-default-changed',
+        serviceName: 'Users',
+        operationName: 'listUsers',
+        paramName: 'order',
+        paramLocation: 'query',
+        oldDefault: 'desc',
+        newDefault: null,
+        classification: 'breaking',
+      },
+    ]);
   });
 });

@@ -42,5 +42,11 @@ export function classifyParamChange(kind: ParamChange['kind'], paramName: string
         paramName,
         classification: isRequired ? 'breaking' : 'additive',
       };
+    case 'param-default-changed':
+      // Removing or changing a default that callers may have implicitly relied on
+      // changes runtime behavior for clients who never set the param explicitly.
+      // We treat this as breaking so it surfaces as a major bump rather than
+      // sliding through as a silent regression.
+      return { kind, paramName, classification: 'breaking' };
   }
 }
