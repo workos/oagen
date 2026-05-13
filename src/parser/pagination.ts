@@ -20,8 +20,13 @@ export function detectPagination(
   queryParams: Parameter[],
   dataPath?: string,
 ): PaginationMeta | null {
-  // Try cursor-based first (preferred)
-  const cursorParam = queryParams.find((p) => CURSOR_PARAMS.includes(p.name));
+  // Try cursor-based first (preferred). Scan in CURSOR_PARAMS priority order
+  // rather than queryParams order so that an endpoint exposing both `before`
+  // and `after` reports `after` (forward iteration) — matches the wire
+  // convention where `after` advances through pages.
+  const cursorParam = CURSOR_PARAMS.map((name) => queryParams.find((p) => p.name === name)).find(
+    (p): p is Parameter => p !== undefined,
+  );
 
   if (cursorParam) {
     const itemType: TypeRef = response.kind === 'array' ? response.items : response;

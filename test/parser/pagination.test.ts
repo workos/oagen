@@ -51,6 +51,23 @@ describe('detectPagination', () => {
     });
   });
 
+  it('prefers `after` over `before` when both are present', () => {
+    const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'Event' } }, [
+      makeParam('before'),
+      makeParam('after'),
+    ]);
+    expect(result?.param).toBe('after');
+  });
+
+  it('prefers `cursor` over `after`/`before` when present', () => {
+    const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'Event' } }, [
+      makeParam('before'),
+      makeParam('after'),
+      makeParam('cursor'),
+    ]);
+    expect(result?.param).toBe('cursor');
+  });
+
   it('detects offset-based pagination with strategy and limitParam', () => {
     const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'Item' } }, [
       makeParam('offset'),
