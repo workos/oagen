@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/workos/oagen/compare/v0.18.1...v0.18.2) (2026-05-13)
+
+
+### Bug Fixes
+
+* some slight alteration to pagination logic ([328c816](https://github.com/workos/oagen/commit/328c816fae24b5ef381657e83f372c49005d05d5))
+
 ## [0.18.1](https://github.com/workos/oagen/compare/v0.18.0...v0.18.1) (2026-05-06)
 
 
