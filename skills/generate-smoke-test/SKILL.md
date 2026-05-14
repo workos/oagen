@@ -11,7 +11,7 @@ Create a self-contained smoke test script for a new SDK language that captures w
 
 Each language's smoke test is a single file: `smoke/sdk-{lang}.ts` **in the emitter project**. It uses the target language's native HTTP interception to capture what the SDK actually sends over the wire, then outputs `SmokeResults` JSON. The diff tool compares this against a baseline and reports mismatches by severity.
 
-The script is self-contained — no proxy, no subprocess protocol, no separate driver. It imports shared infrastructure from `@workos/oagen/smoke` and implements language-specific parts inline.
+It imports shared infrastructure from `@workos/oagen/smoke` and implements language-specific parts inline.
 
 ## Resolve Paths
 
@@ -50,15 +50,15 @@ Store it as `spec`.
 
 ## Step 1: Determine HTTP Interception Strategy
 
-The interception must capture the raw request (method, path, query params, body) and raw response (status, body). Choose based on the target language's SDK:
+Choose the interception mechanism for the target language. It must capture the raw request (method, path, query, body) and response (status, body), storing both in a `currentCapture` variable (~20-30 lines):
 
-- **Node:** Patch `globalThis.fetch`
-- **Ruby:** WebMock `stub_request` or monkey-patch `Net::HTTP`
-- **Python:** `responses`, `respx` (for httpx), or `unittest.mock.patch`
-- **Go:** Custom `http.RoundTripper`
-- **Java/Kotlin:** OkHttp `Interceptor`
-
-The interception code is typically ~20-30 lines. It must capture the request as-sent, let the real HTTP call proceed, capture the response, and store both in a `currentCapture` variable.
+| Language | Mechanism |
+|----------|-----------|
+| Node | Patch `globalThis.fetch` |
+| Ruby | WebMock `stub_request` or monkey-patch `Net::HTTP` |
+| Python | `responses`, `respx` (httpx), or `unittest.mock.patch` |
+| Go | Custom `http.RoundTripper` |
+| Java/Kotlin | OkHttp `Interceptor` |
 
 ## Step 2: Build the SERVICE_MAP
 
@@ -91,48 +91,27 @@ Each language's SDK will have different accessor names — discover them by read
 
 ## Step 3: Implement SDK Method Resolution
 
-Adapt the 4-tier resolution to the target language's naming conventions:
+Adapt the 4-tier resolution to the target language's naming conventions (Ruby/Python: `snake_case`, Go: `PascalCase`, Node: `camelCase`):
 
-0. **Manifest match** — Load the `operations` map from `.oagen-manifest.json` in the SDK output directory (emitter-generated, not hand-maintained). This is the **primary** resolution path for generated SDKs. The manifest maps every `HTTP_METHOD /path` to `{ sdkMethod, service }` and is produced by the emitter's `buildOperationsMap` hook. If the operations map is missing, warn and fall through to heuristic tiers.
+0. **Manifest match** — Primary path. Uses the operations map loaded in Step 2. Fall through if unavailable.
 1. **Exact match** — IR operation name converted to target convention
 2. **CRUD prefix match** — standard verbs (create, list, retrieve/get, update, delete) with service name tiebreaker
 3. **Keyword fuzzy match** — stem words and score overlap
-
-Key convention differences: Ruby/Python use `snake_case`, Go uses `PascalCase`, Node uses `camelCase`.
 
 Each resolution records provenance metadata (`ExchangeProvenance`) so findings can be traced back to the resolution path.
 
 ## Step 4: Implement Argument Construction
 
-Build SDK call arguments from IR operations (reference `buildArgs()` in existing smoke scripts):
-
-- No path params + has body → `method(payload)`
-- No path params + has query params → `method(queryOpts)`
-- Single path param, no body/query → `method(id)` (positional)
-- Complex (path params + body/query) → `method(mergedOptions)`
-- Idempotent POST → append empty options object for idempotency key
-
-Choose the right payload convention: Node uses `generateCamelPayload()`, Ruby/Python may use `generatePayload()` directly (snake_case).
+Build SDK call arguments from IR operations. Reference `buildArgs()` in existing smoke scripts and adapt to the target language's calling convention. See [references/implementation-patterns.md](references/implementation-patterns.md) for the concrete branching template covering all argument patterns (positional, payload-only, query-only, complex, idempotent POST).
 
 ## Step 5: Write `smoke/sdk-{lang}.ts`
 
-Create the script **in the emitter project**:
+Create the script **in the emitter project**. See [references/implementation-patterns.md](references/implementation-patterns.md) for the full structural template. The script follows this flow:
 
-1. Imports from `@workos/oagen/smoke`
-2. HTTP interception setup
-3. `main()` function:
-   - Parse CLI args, validate API key
-   - Parse spec via `parseSpec()`
-   - Load operations map from `{sdk-path}/.oagen-manifest.json` (emitter-generated). If missing, log a warning — method resolution will rely on heuristic tiers and most operations will likely be skipped.
-   - Load and configure the SDK
-   - Iterate `planOperations()` groups
-   - For each operation: resolve SDK method, resolve path params, build args, call SDK, capture exchange
-   - Extract IDs via `ids.extractAndStore()`
-   - Track POST creates for cleanup
-   - Cleanup created entities in reverse
-   - Restore original HTTP behavior
-   - Write `smoke-results-sdk-{lang}.json`
-4. Summary output (successes, errors, skipped, unexpected statuses)
+1. Import shared infrastructure from `@workos/oagen/smoke`
+2. Set up HTTP interception (Step 1)
+3. `main()`: parse spec → load operations map → init SDK → iterate `planOperations()` groups → resolve method (Step 3) → build args (Step 4) → call SDK → capture exchange → extract IDs via `ids.extractAndStore()` → track POST creates for cleanup
+4. Cleanup created entities in reverse order, restore HTTP, write `smoke-results-sdk-{lang}.json`
 
 ## Step 6: Register the Smoke Runner
 
@@ -167,11 +146,10 @@ During initial setup, run `oagen generate` then the smoke test until skips are m
 
 ```bash
 oagen generate --lang {lang} --output {sdk-path} --spec {spec} --namespace {ns}
-# The emitter writes the operations map into .oagen-manifest.json — the smoke test loads it automatically.
 oagen verify --lang {lang} --output {sdk-path} --spec {spec}
 ```
 
-If many operations are skipped with "No matching SDK method", check that the emitter's `buildOperationsMap` is implemented and that `.oagen-manifest.json` contains an `operations` field. The operations map is the primary mechanism the smoke test uses to find SDK methods.
+If many operations are skipped with "No matching SDK method", verify the operations map is present (see Step 2).
 
 | Exit | Meaning       | Output                      | Action                                  |
 | ---- | ------------- | --------------------------- | --------------------------------------- |
