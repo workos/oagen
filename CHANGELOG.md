@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/workos/oagen/compare/v0.18.2...v0.19.0) (2026-05-14)
+
+
+### Features
+
+* **config:** per-language emitterOptions; fix regen overwrite signal ([#73](https://github.com/workos/oagen/issues/73)) ([60ebffb](https://github.com/workos/oagen/commit/60ebffbacd01f021f8a15086d3c3cae56089010e))
+
 ## [0.18.2](https://github.com/workos/oagen/compare/v0.18.1...v0.18.2) (2026-05-13)
 
 
