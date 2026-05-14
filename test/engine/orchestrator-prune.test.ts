@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { generate } from '../../src/engine/orchestrator.js';
 import { readManifest, MANIFEST_FILENAME } from '../../src/engine/manifest.js';
-import type { Emitter } from '../../src/engine/types.js';
+import type { Emitter, EmitterContext } from '../../src/engine/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -154,6 +154,31 @@ describe('orchestrator — manifest-based pruning', () => {
       // Manifest should now exist and list only the current emission
       const manifest = await readManifest(outputDir);
       expect(manifest!.files).toEqual(['client.rb']);
+    } finally {
+      await fs.rm(outputDir, { recursive: true });
+    }
+  });
+
+  it('passes prior output manifest paths to the emitter context on regeneration', async () => {
+    const outputDir = await tmp();
+    try {
+      await generate(minimalSpec, mockEmitter([{ path: 'client.rb', content: 'class Client; end' }]), {
+        namespace: 'test',
+        outputDir,
+      });
+
+      let observedCtx: EmitterContext | undefined;
+      const emitter: Emitter = {
+        ...mockEmitter([{ path: 'client.rb', content: 'class Client; end' }]),
+        generateClient: (_spec, ctx) => {
+          observedCtx = ctx;
+          return [{ path: 'client.rb', content: 'class Client; end' }];
+        },
+      };
+
+      await generate(minimalSpec, emitter, { namespace: 'test', outputDir });
+
+      expect(observedCtx?.priorTargetManifestPaths?.has('client.rb')).toBe(true);
     } finally {
       await fs.rm(outputDir, { recursive: true });
     }

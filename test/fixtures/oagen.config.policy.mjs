@@ -16,4 +16,12 @@ export default {
     node: './smoke/custom-node.ts',
     python: './smoke/custom-python.ts',
   },
+  emitterOptions: {
+    node: {
+      adoptMissingServices: true,
+    },
+    ruby: {
+      preserveKeywordDefaults: true,
+    },
+  },
 };

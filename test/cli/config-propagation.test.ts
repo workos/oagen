@@ -98,6 +98,72 @@ describe('config propagation via --config', () => {
       });
     });
   });
+
+  describe('emitterOptions from config', () => {
+    it('loads language-specific emitter options from explicit config path', async () => {
+      const config = await loadConfig(POLICY_CONFIG);
+      expect(config).not.toBeNull();
+      expect(config!.emitterOptions).toEqual({
+        node: { adoptMissingServices: true },
+        ruby: { preserveKeywordDefaults: true },
+      });
+    });
+
+    it('passes only the active language options to the emitter context', async () => {
+      const tmpDir = resolve(os.tmpdir(), `oagen-emitter-options-test-${Date.now()}`);
+      mkdirSync(tmpDir, { recursive: true });
+      try {
+        const outputDir = resolve(tmpDir, 'out');
+        const configPath = resolve(tmpDir, 'oagen.config.mjs');
+        writeFileSync(
+          configPath,
+          `
+            export default {
+              emitters: [{
+                language: 'ctx-check',
+                generateModels: () => [],
+                generateEnums: () => [],
+                generateResources: () => [],
+                generateClient: (_spec, ctx) => [{
+                  path: 'ctx.json',
+                  content: JSON.stringify(ctx.emitterOptions ?? null),
+                  headerPlacement: 'skip',
+                }],
+                generateErrors: () => [],
+                generateTypeSignatures: () => [],
+                generateTests: () => [],
+                fileHeader: () => '',
+              }],
+              emitterOptions: {
+                'ctx-check': { adoptMissingServices: true },
+                other: { leaked: true },
+              },
+            };
+          `,
+        );
+
+        const result = await run([
+          '--config',
+          configPath,
+          'generate',
+          '--spec',
+          MINIMAL_SPEC,
+          '--lang',
+          'ctx-check',
+          '--output',
+          outputDir,
+        ]);
+
+        expect(result.code).toBe(0);
+        const generated = await import('node:fs/promises').then((fs) =>
+          fs.readFile(resolve(outputDir, 'ctx.json'), 'utf8'),
+        );
+        expect(JSON.parse(generated)).toEqual({ adoptMissingServices: true });
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe('plugin bundle composition', () => {

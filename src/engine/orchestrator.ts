@@ -21,16 +21,22 @@ export async function generate(
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
     modelHints?: Record<string, string>;
+    emitterOptions?: Record<string, unknown>;
     /** When true, skip deletion of files recorded in the previous manifest but not in the current emission. */
     noPrune?: boolean;
   },
 ): Promise<GeneratedFile[]> {
-  // Read the target's previous manifest up front so emitters can mark files
-  // the prior run wrote as safe-to-overwrite (vs files a human hand-maintains).
-  // Skipped when --no-prune is set so users opting out of lifecycle tracking
-  // also opt out of overwrite-on-regen behavior.
+  // Read previous manifests up front so emitters can mark files the prior run
+  // wrote as safe-to-overwrite (vs files a human hand-maintains). Skipped
+  // when --no-prune is set so users opting out of lifecycle tracking also opt
+  // out of overwrite-on-regen behavior.
+  const outputPrevManifestForCtx = options.noPrune ? null : await readManifest(options.outputDir);
   const targetManifestForCtx = options.target && !options.noPrune ? await readManifest(options.target) : null;
-  const priorTargetManifestPaths = targetManifestForCtx ? new Set(targetManifestForCtx.files) : undefined;
+  const priorTargetManifestPaths = targetManifestForCtx
+    ? new Set(targetManifestForCtx.files)
+    : outputPrevManifestForCtx
+      ? new Set(outputPrevManifestForCtx.files)
+      : undefined;
 
   const {
     files: withHeaders,
@@ -51,8 +57,8 @@ export async function generate(
     return withHeaders;
   }
 
-  // Read previous manifest BEFORE writing so a manifest overwrite can't alter the diff.
-  const outputPrevManifest = options.noPrune ? null : await readManifest(options.outputDir);
+  // Reuse the manifest read before generation; nothing above writes it.
+  const outputPrevManifest = outputPrevManifestForCtx;
 
   const writeResult = await writeFiles(withHeaders, options.outputDir, {
     language: emitter.language,

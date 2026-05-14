@@ -39,6 +39,7 @@ describe('generateCommand', () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     tmpDir = resolve(os.tmpdir(), `oagen-gen-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -85,6 +86,24 @@ describe('generateCommand', () => {
       expect.anything(),
       expect.anything(),
       expect.objectContaining({ namespace: 'my-sdk' }),
+    );
+  });
+
+  it('passes language-specific emitter options through to generation', async () => {
+    const { generate } = await import('../../src/engine/orchestrator.js');
+
+    await generateCommand({
+      spec: MINIMAL_SPEC,
+      lang: 'test-lang',
+      output: tmpDir,
+      dryRun: true,
+      emitterOptions: { adoptMissingServices: true },
+    });
+
+    expect(generate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ emitterOptions: { adoptMissingServices: true } }),
     );
   });
 
