@@ -31,11 +31,11 @@ export interface EmitterContext {
   /** Absolute path to the integration target directory (when --target is used). */
   targetDir?: string;
   /**
-   * Paths (relative to the target dir) that the previous run wrote into
-   * `--target`, loaded from that directory's `.oagen-manifest.json`.  Emitters
-   * can use this to distinguish "file exists because oagen wrote it last time"
-   * from "file exists because a human wrote it" — the former is safe to
-   * overwrite, the latter should be merged.
+   * Paths (relative to the output/target dir) that the previous run wrote,
+   * loaded from that directory's `.oagen-manifest.json`. Emitters can use this
+   * to distinguish "file exists because oagen wrote it last time" from "file
+   * exists because a human wrote it" — the former is safe to overwrite, the
+   * latter should be merged.
    */
   priorTargetManifestPaths?: Set<string>;
 }
