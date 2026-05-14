@@ -72,6 +72,11 @@ export interface OagenConfig {
    * post-schemaNameTransform model names (e.g. `User`, not `UserlandUser`).
    */
   modelHints?: Record<string, string>;
+  /**
+   * Language-specific emitter options. The CLI passes only the active
+   * language's option bag to that emitter.
+   */
+  emitterOptions?: Record<string, Record<string, unknown>>;
 }
 
 const CONFIG_NAMES = ['oagen.config.ts', 'oagen.config.js', 'oagen.config.mjs'];

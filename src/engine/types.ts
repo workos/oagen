@@ -28,6 +28,8 @@ export interface EmitterContext {
    * the configured service instead of the default first-reference winner.
    */
   modelHints?: Record<string, string>;
+  /** Language-specific emitter options from config for the active emitter. */
+  emitterOptions?: Record<string, unknown>;
   /** Absolute path to the integration target directory (when --target is used). */
   targetDir?: string;
   /**

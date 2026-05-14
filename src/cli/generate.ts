@@ -23,6 +23,7 @@ export async function generateCommand(opts: {
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
   modelHints?: Record<string, string>;
+  emitterOptions?: Record<string, unknown>;
 }): Promise<void> {
   let ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
@@ -59,6 +60,7 @@ export async function generateCommand(opts: {
     operationHints: opts.operationHints,
     mountRules: opts.mountRules,
     modelHints: opts.modelHints,
+    emitterOptions: opts.emitterOptions,
     noPrune: opts.prune === false,
   });
 

@@ -16,6 +16,7 @@ export function buildEmitterContext(
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
     modelHints?: Record<string, string>;
+    emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
   },
@@ -29,6 +30,7 @@ export function buildEmitterContext(
     overlayLookup: options.overlayLookup,
     resolvedOperations: resolveOperations(spec, options.operationHints, options.mountRules),
     modelHints: options.modelHints,
+    emitterOptions: options.emitterOptions,
     targetDir: options.target,
     priorTargetManifestPaths: options.priorTargetManifestPaths,
   };
@@ -151,6 +153,7 @@ export function generateFiles(
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
     modelHints?: Record<string, string>;
+    emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
   },

@@ -21,6 +21,7 @@ export async function generate(
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
     modelHints?: Record<string, string>;
+    emitterOptions?: Record<string, unknown>;
     /** When true, skip deletion of files recorded in the previous manifest but not in the current emission. */
     noPrune?: boolean;
   },
