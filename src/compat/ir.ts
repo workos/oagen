@@ -294,16 +294,20 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
 /** Convert a legacy ApiParam to a CompatParameter. */
 function apiParamToCompatParam(param: ApiParam, position: number, language: LanguageId): CompatParameter {
   const policy = getDefaultPolicy(language);
+  const passing = param.passingStyle ?? inferPassingStyle(language);
   return {
     publicName: param.name,
     position,
     required: !param.optional,
     nullable: false,
     hasDefault: param.optional,
-    passing: param.passingStyle ?? inferPassingStyle(language),
+    passing,
     type: { name: param.type },
     sensitivity: {
-      order: policy.constructorOrderMatters,
+      // Method-call order matters only when callers pass positionally. keyword
+      // (Ruby/Python/Elixir) and options_object (Node) hide position entirely;
+      // named (PHP/Kotlin/C#) is handled as soft-risk in classify.
+      order: passing === 'positional',
       publicName: policy.methodParameterNamesArePublicApi,
       requiredness: true,
       type: true,
