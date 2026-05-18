@@ -91,8 +91,11 @@ export function walkPythonFiles(dir: string): string[] {
     } else if (entry.endsWith('.py')) {
       // Skip test files
       if (entry.endsWith('_test.py') || entry.startsWith('test_')) continue;
-      // Skip private modules (but include __init__.py)
-      if (entry.startsWith('_') && entry !== '__init__.py') continue;
+      // Skip dunder modules (but include __init__.py). Single-underscore files
+      // like `_resource.py` or `_client.py` are an internal-by-convention
+      // pattern whose symbols get re-exported via `__init__.py`, so they carry
+      // public API surface and must be walked.
+      if (entry.startsWith('__') && entry !== '__init__.py') continue;
       results.push(fullPath);
     }
   }
