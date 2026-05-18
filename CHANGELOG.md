@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/workos/oagen/compare/v0.19.0...v0.19.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **compat:** method-param reorder severity follows passing style ([#76](https://github.com/workos/oagen/issues/76)) ([6f7d4dc](https://github.com/workos/oagen/commit/6f7d4dcbfedac643e0dc33eb2a16b93a2f2e7148))
+
 ## [0.19.0](https://github.com/workos/oagen/compare/v0.18.2...v0.19.0) (2026-05-14)
 
 
