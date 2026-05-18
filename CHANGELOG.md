@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.2](https://github.com/workos/oagen/compare/v0.19.1...v0.19.2) (2026-05-18)
+
+
+### Bug Fixes
+
+* **compat:** walk single-underscore Python module files ([#78](https://github.com/workos/oagen/issues/78)) ([347f2ad](https://github.com/workos/oagen/commit/347f2adfc61d6daae2ec5cf016d5d3ed6fc79bc1))
+
 ## [0.19.1](https://github.com/workos/oagen/compare/v0.19.0...v0.19.1) (2026-05-18)
 
 
