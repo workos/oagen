@@ -358,4 +358,16 @@ describe('pythonExtractor', () => {
     const paramNames = createOrg.params.map((p) => p.name);
     expect(paramNames).toEqual(['name', 'domains']);
   });
+
+  // -----------------------------------------------------------------------
+  // Single-underscore module files (e.g. `_resource.py`)
+  // -----------------------------------------------------------------------
+
+  it('walks single-underscore module files like `_resource.py`', async () => {
+    const surface = await pydanticExtractor.extract(fixturePath);
+    expect(surface.classes.Widgets).toBeDefined();
+    expect(surface.classes.Widgets.methods.list_widgets).toBeDefined();
+    const listWidgets = surface.classes.Widgets.methods.list_widgets[0];
+    expect(listWidgets.params.map((p) => p.name)).toEqual(['limit', 'before', 'after', 'search']);
+  });
 });
