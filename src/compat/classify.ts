@@ -241,17 +241,48 @@ function classifyParameterChanges(
       );
     }
 
-    // Position changed (order-sensitive)
+    // Position changed.
+    //
+    // Constructors are governed by `policy.constructorOrderMatters` — some
+    // languages treat ctor positional order as part of the public API even
+    // when method args are named.
+    //
+    // For methods, the parameter's `passing` style decides:
+    //   - 'positional'     → callers reference by index; reorder is breaking
+    //   - 'named'          → both styles work; reorder is soft-risk (positional callers exist)
+    //   - 'keyword'        → callers MUST use names (Ruby kwargs, Python kw-only, Elixir); position invisible
+    //   - 'options_object' → callers pass a single object literal (Node); position invisible
     if (baseParam.position !== candParam.position) {
-      const orderMatters = isConstructor ? policy.constructorOrderMatters : baseParam.sensitivity.order;
-
-      if (orderMatters) {
-        const category: CompatChangeCategory = isConstructor
-          ? 'constructor_position_changed_order_sensitive'
-          : 'parameter_position_changed_order_sensitive';
+      if (isConstructor) {
+        if (policy.constructorOrderMatters) {
+          changes.push(
+            makeChange({
+              category: 'constructor_position_changed_order_sensitive',
+              symbol: baseline.fqName,
+              old: { parameter: baseParam.publicName, position: String(baseParam.position) },
+              new: { parameter: candParam.publicName, position: String(candParam.position) },
+              message: `Parameter "${baseParam.publicName}" moved from position ${baseParam.position} to ${candParam.position} on "${baseline.displayName}"`,
+              policy,
+              specRef,
+            }),
+          );
+        } else {
+          changes.push(
+            makeChange({
+              category: 'constructor_reordered_named_friendly',
+              symbol: baseline.fqName,
+              old: { parameter: baseParam.publicName, position: String(baseParam.position) },
+              new: { parameter: candParam.publicName, position: String(candParam.position) },
+              message: `Parameter "${baseParam.publicName}" reordered on "${baseline.displayName}" (named-friendly language)`,
+              policy,
+              specRef,
+            }),
+          );
+        }
+      } else if (baseParam.passing === 'positional') {
         changes.push(
           makeChange({
-            category,
+            category: 'parameter_position_changed_order_sensitive',
             symbol: baseline.fqName,
             old: { parameter: baseParam.publicName, position: String(baseParam.position) },
             new: { parameter: candParam.publicName, position: String(candParam.position) },
@@ -260,8 +291,7 @@ function classifyParameterChanges(
             specRef,
           }),
         );
-      } else {
-        // Reordered but in a named-friendly language → soft-risk
+      } else if (baseParam.passing === 'named') {
         changes.push(
           makeChange({
             category: 'constructor_reordered_named_friendly',
@@ -274,6 +304,7 @@ function classifyParameterChanges(
           }),
         );
       }
+      // keyword / options_object: position is invisible to callers — no change emitted.
     }
   }
 

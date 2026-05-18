@@ -605,3 +605,80 @@ describe('PHP Case 4: Named-argument breaks', () => {
     expect(renames.every((c) => c.severity === 'breaking')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Method-parameter reorder: passing-style decides severity
+// (kwarg-only call sites cannot observe parameter declaration order)
+// ---------------------------------------------------------------------------
+describe('Method param reorder by passing style', () => {
+  const reorderedPair = (language: LanguageId, passing: CompatParameter['passing']) => {
+    const mk = (a: number, b: number) =>
+      makeSnapshot(language, [
+        callable('Authorization.listResources', [
+          param('search', a, { passing, required: false, hasDefault: true }),
+          param('requestOptions', b, { passing, required: false, hasDefault: true }),
+        ]),
+      ]);
+    return { baseline: mk(0, 1), candidate: mk(1, 0) };
+  };
+
+  it('ruby keyword-arg method reorder emits no change', () => {
+    const { baseline, candidate } = reorderedPair('ruby', 'keyword');
+    const result = diffSnapshots(baseline, candidate);
+    const posChanges = result.changes.filter(
+      (c) =>
+        c.category === 'parameter_position_changed_order_sensitive' ||
+        c.category === 'constructor_reordered_named_friendly',
+    );
+    expect(posChanges).toHaveLength(0);
+  });
+
+  it('python keyword-arg method reorder emits no change', () => {
+    const { baseline, candidate } = reorderedPair('python', 'keyword');
+    const result = diffSnapshots(baseline, candidate);
+    const posChanges = result.changes.filter(
+      (c) =>
+        c.category === 'parameter_position_changed_order_sensitive' ||
+        c.category === 'constructor_reordered_named_friendly',
+    );
+    expect(posChanges).toHaveLength(0);
+  });
+
+  it('elixir keyword-arg method reorder emits no change', () => {
+    const { baseline, candidate } = reorderedPair('elixir', 'keyword');
+    const result = diffSnapshots(baseline, candidate);
+    const posChanges = result.changes.filter(
+      (c) =>
+        c.category === 'parameter_position_changed_order_sensitive' ||
+        c.category === 'constructor_reordered_named_friendly',
+    );
+    expect(posChanges).toHaveLength(0);
+  });
+
+  it('node options_object method reorder emits no change', () => {
+    const { baseline, candidate } = reorderedPair('node', 'options_object');
+    const result = diffSnapshots(baseline, candidate);
+    const posChanges = result.changes.filter(
+      (c) =>
+        c.category === 'parameter_position_changed_order_sensitive' ||
+        c.category === 'constructor_reordered_named_friendly',
+    );
+    expect(posChanges).toHaveLength(0);
+  });
+
+  it('php named-arg method reorder is soft-risk (positional callers exist)', () => {
+    const { baseline, candidate } = reorderedPair('php', 'named');
+    const result = diffSnapshots(baseline, candidate);
+    const posChanges = result.changes.filter((c) => c.category === 'constructor_reordered_named_friendly');
+    expect(posChanges.length).toBeGreaterThan(0);
+    expect(posChanges.every((c) => c.severity === 'soft-risk')).toBe(true);
+  });
+
+  it('go positional method reorder is breaking', () => {
+    const { baseline, candidate } = reorderedPair('go', 'positional');
+    const result = diffSnapshots(baseline, candidate);
+    const posChanges = result.changes.filter((c) => c.category === 'parameter_position_changed_order_sensitive');
+    expect(posChanges.length).toBeGreaterThan(0);
+    expect(posChanges.every((c) => c.severity === 'breaking')).toBe(true);
+  });
+});
