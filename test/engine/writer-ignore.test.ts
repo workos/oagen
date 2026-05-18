@@ -172,6 +172,62 @@ describe('@oagen-ignore-start/end with overwriteExisting', () => {
     expect(ignoreStart).toBeLessThan(asyncClass);
   });
 
+  it('preserves hand-written TypeScript imports during overwrite', async () => {
+    // When a hand-owned TS file is partially regenerated, named/type-only
+    // imports referenced inside @oagen-ignore-start/end regions must be
+    // brought along at the top of the file, not appended at the end.
+    const existing = [
+      'import { deserializeEvent } from "../common/serializers";',
+      'import { Event, EventResponse } from "../common/interfaces";',
+      'import { SignatureProvider } from "../common/crypto/signature-provider";',
+      'import type { WorkOS } from "../workos";',
+      '',
+      'export class Webhooks {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '',
+      '  // @oagen-ignore-start',
+      '  private _sp?: SignatureProvider;',
+      '  async constructEvent(): Promise<Event> {',
+      '    const payload: EventResponse = {} as EventResponse;',
+      '    return deserializeEvent(payload);',
+      '  }',
+      '  // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      'import type { WorkOS } from "../workos";',
+      'import type { Foo } from "./interfaces/foo.interface";',
+      '',
+      'export class Webhooks {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '',
+      '  async listFoo(): Promise<Foo> { return {} as Foo; }',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'node');
+    const lines = result.split('\n');
+
+    // Hand-written imports survive.
+    expect(result).toContain("import { deserializeEvent } from '../common/serializers';");
+    expect(result).toContain("import { Event, EventResponse } from '../common/interfaces';");
+    expect(result).toContain("import { SignatureProvider } from '../common/crypto/signature-provider';");
+
+    // …and they land before the class declaration, not after it.
+    let lastImportLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^import\b/.test(lines[i].trim())) lastImportLine = i;
+    }
+    const classLine = lines.findIndex((l: string) => /^export class\b/.test(l.trim()));
+    expect(lastImportLine).toBeGreaterThan(-1);
+    expect(classLine).toBeGreaterThan(lastImportLine);
+
+    // Generated method and ignore-region body both survive.
+    expect(result).toContain('async listFoo()');
+    expect(result).toContain('constructEvent()');
+  });
+
   it('preserves multiple ignore regions across different classes', async () => {
     const existing = [
       'class SSO:',
