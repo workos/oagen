@@ -532,10 +532,15 @@ function collectTsImports(lines: string[]): TsImports {
 
 /**
  * Add imports from the existing file that are absent from the generated
- * result. Handles Python `import X` and `from X import Y` forms, plus
- * TypeScript `import { X } from 'module'`, `import type { X } from 'module'`,
- * `import X from 'module'`, `import * as X from 'module'`, and side-effect
- * `import 'module'` forms. Mutates `resultLines` in place.
+ * result. Handles:
+ *
+ * - Python: `import X` and `from X import Y`
+ * - TypeScript: `import { X } from 'module'`, `import type { X } from 'module'`,
+ *   `import X from 'module'`, `import * as X from 'module'`, `import 'module'`
+ * - PHP: `use Foo\Bar;` and `use Foo\Bar as Baz;` (namespace-qualified only)
+ * - Ruby: `require '…'` and `require_relative '…'`
+ *
+ * Mutates `resultLines` in place.
  */
 function spliceExtraImports(existingLines: string[], resultLines: string[]): void {
   // Python-style `import hashlib`. Excludes TS forms like `import X from '…'`
@@ -605,12 +610,31 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
     if (extra.length > 0) extraTsLines.push(`import type { ${extra.join(', ')} } from '${mod}';`);
   }
 
-  const allExtra = [...extraSimple, ...extraFromLines, ...extraTsLines];
+  // PHP `use Foo\Bar;` and `use Foo\Bar as Baz;` — namespace-qualified only
+  // (a backslash anywhere in the path) so this doesn't mistakenly hoist
+  // single-segment in-class trait references like `use TraitName;`.
+  const isPhpUseImport = (l: string) => /^use\s+[\w\\]+\\[\w\\]*(\s+as\s+\w+)?\s*;?$/.test(l);
+  const existingPhpUse = new Set(existingLines.filter(isPhpUseImport).map((l) => l.trim()));
+  const generatedPhpUse = new Set(resultLines.filter(isPhpUseImport).map((l) => l.trim()));
+  const extraPhpUse = [...existingPhpUse].filter((l) => !generatedPhpUse.has(l));
+
+  // Ruby `require '...'` and `require_relative '...'`.
+  const isRubyRequire = (l: string) => /^require(_relative)?\s+['"][^'"]+['"]\s*$/.test(l);
+  const existingRubyRequire = new Set(existingLines.filter(isRubyRequire).map((l) => l.trim()));
+  const generatedRubyRequire = new Set(resultLines.filter(isRubyRequire).map((l) => l.trim()));
+  const extraRubyRequire = [...existingRubyRequire].filter((l) => !generatedRubyRequire.has(l));
+
+  const allExtra = [...extraSimple, ...extraFromLines, ...extraTsLines, ...extraPhpUse, ...extraRubyRequire];
   if (allExtra.length === 0) return;
 
   // Find last import line in resultLines (accounting for multiline imports).
-  // Recognizes Python (`from X import Y`, `import X`) and TS (`import …`).
-  const isImportStart = (l: string) => /^\s*import(\s|$)/.test(l) || /^from\s+/.test(l);
+  // Recognizes Python (`from X import Y`, `import X`), TS (`import …`), PHP
+  // (`use …`), and Ruby (`require`, `require_relative`).
+  const isImportStart = (l: string) =>
+    /^\s*import(\s|$)/.test(l) ||
+    /^from\s+/.test(l) ||
+    /^\s*use\s+[\w\\]/.test(l) ||
+    /^\s*require(_relative)?\s+['"]/.test(l);
   let lastImportIdx = -1;
   for (let i = 0; i < resultLines.length; i++) {
     if (!isImportStart(resultLines[i])) continue;
