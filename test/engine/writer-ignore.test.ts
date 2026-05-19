@@ -14,7 +14,12 @@ describe('@oagen-ignore-file', () => {
       await fs.writeFile(filePath, '// @oagen-ignore-file\nexport class Client {}', 'utf-8');
 
       const result = await writeFiles(
-        [{ path: 'client.ts', content: 'export class Client { newMethod() {} }' }],
+        [
+          {
+            path: 'client.ts',
+            content: 'export class Client { newMethod() {} }',
+          },
+        ],
         tmpDir,
         { language: 'node', header },
       );
@@ -31,7 +36,12 @@ describe('@oagen-ignore-file', () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-test-'));
     try {
       const result = await writeFiles(
-        [{ path: 'client.ts', content: '// @oagen-ignore-file\nexport class Client {}' }],
+        [
+          {
+            path: 'client.ts',
+            content: '// @oagen-ignore-file\nexport class Client {}',
+          },
+        ],
         tmpDir,
         { language: 'node', header },
       );
@@ -51,7 +61,10 @@ describe('@oagen-ignore-file', () => {
 
       const result = await writeFiles(
         [
-          { path: 'ignored.ts', content: 'export class Ignored { updated() {} }' },
+          {
+            path: 'ignored.ts',
+            content: 'export class Ignored { updated() {} }',
+          },
           { path: 'normal.ts', content: 'export class Normal {}' },
         ],
         tmpDir,
@@ -606,5 +619,43 @@ describe('@oagen-ignore-start/end with overwriteExisting', () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true });
     }
+  });
+
+  it('does not splice `import type {` as a Python simple import when existing has multi-line TS type imports', async () => {
+    // Regression: the Python simple-import detector matched the first line
+    // of a multi-line TS `import type { … }` block (`import type {`), so the
+    // bare opener got spliced into the result as if it were a `import json`
+    // line. Result: a stranded `import type {` orphan before the value
+    // imports, breaking TypeScript parsing.
+    const existing = [
+      "import type { WorkOS } from '../workos';",
+      'import type {',
+      '  WebhookEndpoint,',
+      '  WebhookEndpointResponse,',
+      "} from './interfaces/webhook-endpoint.interface';",
+      "import { deserializeEvent } from '../common/serializers';",
+      '',
+      'export class Webhooks {',
+      '  // @oagen-ignore-start',
+      '  hand() { deserializeEvent({} as any); }',
+      '  // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      "import type { WorkOS } from '../workos';",
+      "import type { WebhookEndpoint, WebhookEndpointResponse } from './interfaces/webhook-endpoint.interface';",
+      '',
+      'export class Webhooks {',
+      '  list() { return [] as WebhookEndpoint[]; }',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'node');
+
+    // The bare `import type {` from existing must NOT appear in the result.
+    expect(result).not.toMatch(/^\s*import type \{\s*$/m);
+    // The hand-written value import survives, on its own line.
+    expect(result).toContain("import { deserializeEvent } from '../common/serializers';");
   });
 });
