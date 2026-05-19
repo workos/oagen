@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.4](https://github.com/workos/oagen/compare/v0.19.3...v0.19.4) (2026-05-19)
+
+
+### Bug Fixes
+
+* **writer:** don't splice `import type {` as a Python simple import ([#83](https://github.com/workos/oagen/issues/83)) ([8f7e245](https://github.com/workos/oagen/commit/8f7e24557bc76027f1615fe51731669f6c465034))
+
 ## [0.19.3](https://github.com/workos/oagen/compare/v0.19.2...v0.19.3) (2026-05-19)
 
 
