@@ -36,7 +36,13 @@ export async function writeFiles(
   outputDir: string,
   options?: WriteOptions,
 ): Promise<WriteResult> {
-  const result: WriteResult = { written: [], merged: [], skipped: [], identical: [], ignored: [] };
+  const result: WriteResult = {
+    written: [],
+    merged: [],
+    skipped: [],
+    identical: [],
+    ignored: [],
+  };
   const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
   const language = options?.language;
   const header = options?.header ?? '';
@@ -275,7 +281,11 @@ export async function overwriteWithPreservedRegions(
   //     a class matching one in the generated content.
   const replacedClasses = new Set<string>();
   const handledBlockKeys = new Set<string>();
-  const replacements: { startLine: number; endLine: number; content: string[] }[] = [];
+  const replacements: {
+    startLine: number;
+    endLine: number;
+    content: string[];
+  }[] = [];
   for (const [className, classBlocks] of blocksByClass) {
     // Determine the target class for replacement.  When the block has a
     // containing class, we check if the block redefines that class.  When
@@ -544,8 +554,10 @@ function collectTsImports(lines: string[]): TsImports {
  */
 function spliceExtraImports(existingLines: string[], resultLines: string[]): void {
   // Python-style `import hashlib`. Excludes TS forms like `import X from '…'`
-  // which have a `from` clause and are handled by the TS collector below.
-  const isPythonSimpleImport = (l: string) => /^import\s+\w/.test(l) && !/\sfrom\s/.test(l);
+  // (have a `from` clause) and TS multi-line type imports whose first line is
+  // `import type {` (have a brace) — both are handled by the TS collector
+  // below.
+  const isPythonSimpleImport = (l: string) => /^import\s+\w/.test(l) && !/\sfrom\s/.test(l) && !/[{}]/.test(l);
 
   // Simple imports (import hashlib, import json, …)
   const existingSimple = new Set(existingLines.filter(isPythonSimpleImport).map((l) => l.trim()));
