@@ -441,16 +441,115 @@ function collectFromImports(lines: string[]): Map<string, Set<string>> {
 }
 
 /**
+ * Collected TypeScript imports grouped by form. Each map keys on the module
+ * specifier (e.g. `./foo`, `node:fs`).
+ */
+interface TsImports {
+  /** `import { X, Y } from 'module'` — module → identifier names. */
+  named: Map<string, Set<string>>;
+  /** `import type { X } from 'module'` — module → identifier names. */
+  typeOnly: Map<string, Set<string>>;
+  /** `import X from 'module'` or `import type X from 'module'` — module → name. */
+  defaults: Map<string, string>;
+  /** `import * as X from 'module'` — module → namespace alias name. */
+  namespaces: Map<string, string>;
+  /** `import 'module'` — modules imported for side effects only. */
+  sideEffects: Set<string>;
+}
+
+/**
+ * Collect TypeScript imports, grouped by form. Handles single-line and
+ * multi-line `{ … }` named imports. Disjoint from Python's `from X import Y`
+ * syntax so this can be called in parallel with `collectFromImports`.
+ */
+function collectTsImports(lines: string[]): TsImports {
+  const out: TsImports = {
+    named: new Map(),
+    typeOnly: new Map(),
+    defaults: new Map(),
+    namespaces: new Map(),
+    sideEffects: new Set(),
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!/^import(\s|$)/.test(trimmed)) continue;
+
+    // Accumulate multi-line `{ … }` imports.
+    let fullText = lines[i];
+    if (fullText.includes('{') && !fullText.includes('}')) {
+      while (i + 1 < lines.length) {
+        i++;
+        fullText += ' ' + lines[i].trim();
+        if (lines[i].includes('}')) break;
+      }
+    }
+
+    const normalized = fullText.replace(/\s+/g, ' ').trim().replace(/;\s*$/, '');
+
+    // `import 'module'`
+    let m = normalized.match(/^import\s+['"]([^'"]+)['"]$/);
+    if (m) {
+      out.sideEffects.add(m[1]);
+      continue;
+    }
+
+    // `import * as X from 'module'`
+    m = normalized.match(/^import\s+\*\s+as\s+(\w+)\s+from\s+['"]([^'"]+)['"]$/);
+    if (m) {
+      out.namespaces.set(m[2], m[1]);
+      continue;
+    }
+
+    // `import [Default,] { X, Y as Z } from 'module'` or `import type { X } from 'module'`
+    m = normalized.match(/^import\s+(type\s+)?(?:(\w+)\s*,\s*)?\{\s*([^}]*)\s*\}\s+from\s+['"]([^'"]+)['"]$/);
+    if (m) {
+      const isTypeOnly = !!m[1];
+      const defaultName = m[2];
+      const namesRaw = m[3];
+      const mod = m[4];
+      if (defaultName) out.defaults.set(mod, defaultName);
+      const names = namesRaw
+        .split(',')
+        .map((s) => s.trim().replace(/\s+as\s+\w+$/, ''))
+        .filter(Boolean);
+      const target = isTypeOnly ? out.typeOnly : out.named;
+      if (!target.has(mod)) target.set(mod, new Set());
+      for (const n of names) target.get(mod)!.add(n);
+      continue;
+    }
+
+    // `import X from 'module'` or `import type X from 'module'`
+    m = normalized.match(/^import\s+(?:type\s+)?(\w+)\s+from\s+['"]([^'"]+)['"]$/);
+    if (m) {
+      out.defaults.set(m[2], m[1]);
+      continue;
+    }
+  }
+
+  return out;
+}
+
+/**
  * Add imports from the existing file that are absent from the generated
- * result. Handles both `import X` and `from X import Y` forms.
+ * result. Handles:
+ *
+ * - Python: `import X` and `from X import Y`
+ * - TypeScript: `import { X } from 'module'`, `import type { X } from 'module'`,
+ *   `import X from 'module'`, `import * as X from 'module'`, `import 'module'`
+ * - PHP: `use Foo\Bar;` and `use Foo\Bar as Baz;` (namespace-qualified only)
+ * - Ruby: `require '…'` and `require_relative '…'`
+ *
  * Mutates `resultLines` in place.
  */
 function spliceExtraImports(existingLines: string[], resultLines: string[]): void {
-  const isSimpleImport = (l: string) => /^import\s+\w/.test(l);
+  // Python-style `import hashlib`. Excludes TS forms like `import X from '…'`
+  // which have a `from` clause and are handled by the TS collector below.
+  const isPythonSimpleImport = (l: string) => /^import\s+\w/.test(l) && !/\sfrom\s/.test(l);
 
   // Simple imports (import hashlib, import json, …)
-  const existingSimple = new Set(existingLines.filter(isSimpleImport).map((l) => l.trim()));
-  const generatedSimple = new Set(resultLines.filter(isSimpleImport).map((l) => l.trim()));
+  const existingSimple = new Set(existingLines.filter(isPythonSimpleImport).map((l) => l.trim()));
+  const generatedSimple = new Set(resultLines.filter(isPythonSimpleImport).map((l) => l.trim()));
   const extraSimple = [...existingSimple].filter((l) => !generatedSimple.has(l));
 
   // From-imports — compare by module and find extra identifiers
@@ -483,20 +582,70 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
     }
   }
 
-  const allExtra = [...extraSimple, ...extraFromLines];
+  // TypeScript imports.
+  const existingTs = collectTsImports(existingLines);
+  const generatedTs = collectTsImports(resultLines);
+  const extraTsLines: string[] = [];
+
+  for (const mod of existingTs.sideEffects) {
+    if (!generatedTs.sideEffects.has(mod)) extraTsLines.push(`import '${mod}';`);
+  }
+  for (const [mod, name] of existingTs.defaults) {
+    if (generatedTs.defaults.has(mod)) continue;
+    extraTsLines.push(`import ${name} from '${mod}';`);
+  }
+  for (const [mod, name] of existingTs.namespaces) {
+    if (!generatedTs.namespaces.has(mod)) extraTsLines.push(`import * as ${name} from '${mod}';`);
+  }
+  for (const [mod, existIds] of existingTs.named) {
+    const genIds = generatedTs.named.get(mod) ?? new Set<string>();
+    const genTypeIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
+    const extra = [...existIds].filter((id) => !genIds.has(id) && !genTypeIds.has(id));
+    if (extra.length > 0) extraTsLines.push(`import { ${extra.join(', ')} } from '${mod}';`);
+  }
+  for (const [mod, existIds] of existingTs.typeOnly) {
+    const genIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
+    const genNamedIds = generatedTs.named.get(mod) ?? new Set<string>();
+    const extra = [...existIds].filter((id) => !genIds.has(id) && !genNamedIds.has(id));
+    if (extra.length > 0) extraTsLines.push(`import type { ${extra.join(', ')} } from '${mod}';`);
+  }
+
+  // PHP `use Foo\Bar;` and `use Foo\Bar as Baz;` — namespace-qualified only
+  // (a backslash anywhere in the path) so this doesn't mistakenly hoist
+  // single-segment in-class trait references like `use TraitName;`.
+  const isPhpUseImport = (l: string) => /^use\s+[\w\\]+\\[\w\\]*(\s+as\s+\w+)?\s*;?$/.test(l);
+  const existingPhpUse = new Set(existingLines.filter(isPhpUseImport).map((l) => l.trim()));
+  const generatedPhpUse = new Set(resultLines.filter(isPhpUseImport).map((l) => l.trim()));
+  const extraPhpUse = [...existingPhpUse].filter((l) => !generatedPhpUse.has(l));
+
+  // Ruby `require '...'` and `require_relative '...'`.
+  const isRubyRequire = (l: string) => /^require(_relative)?\s+['"][^'"]+['"]\s*$/.test(l);
+  const existingRubyRequire = new Set(existingLines.filter(isRubyRequire).map((l) => l.trim()));
+  const generatedRubyRequire = new Set(resultLines.filter(isRubyRequire).map((l) => l.trim()));
+  const extraRubyRequire = [...existingRubyRequire].filter((l) => !generatedRubyRequire.has(l));
+
+  const allExtra = [...extraSimple, ...extraFromLines, ...extraTsLines, ...extraPhpUse, ...extraRubyRequire];
   if (allExtra.length === 0) return;
 
-  // Find last import line in resultLines (accounting for multiline imports)
+  // Find last import line in resultLines (accounting for multiline imports).
+  // Recognizes Python (`from X import Y`, `import X`), TS (`import …`), PHP
+  // (`use …`), and Ruby (`require`, `require_relative`).
+  const isImportStart = (l: string) =>
+    /^\s*import(\s|$)/.test(l) ||
+    /^from\s+/.test(l) ||
+    /^\s*use\s+[\w\\]/.test(l) ||
+    /^\s*require(_relative)?\s+['"]/.test(l);
   let lastImportIdx = -1;
   for (let i = 0; i < resultLines.length; i++) {
-    if (isSimpleImport(resultLines[i]) || /^from\s+/.test(resultLines[i])) {
-      lastImportIdx = i;
-      if (resultLines[i].includes('(') && !resultLines[i].includes(')')) {
-        while (i + 1 < resultLines.length) {
-          i++;
-          lastImportIdx = i;
-          if (resultLines[i].includes(')')) break;
-        }
+    if (!isImportStart(resultLines[i])) continue;
+    lastImportIdx = i;
+    const opens = (resultLines[i].match(/[({]/g) ?? []).length;
+    const closes = (resultLines[i].match(/[)}]/g) ?? []).length;
+    if (opens > closes) {
+      while (i + 1 < resultLines.length) {
+        i++;
+        lastImportIdx = i;
+        if ((resultLines[i].match(/[)}]/g) ?? []).length > 0) break;
       }
     }
   }

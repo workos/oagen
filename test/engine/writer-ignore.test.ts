@@ -172,6 +172,167 @@ describe('@oagen-ignore-start/end with overwriteExisting', () => {
     expect(ignoreStart).toBeLessThan(asyncClass);
   });
 
+  it('preserves hand-written TypeScript imports during overwrite', async () => {
+    // When a hand-owned TS file is partially regenerated, named/type-only
+    // imports referenced inside @oagen-ignore-start/end regions must be
+    // brought along at the top of the file, not appended at the end.
+    const existing = [
+      'import { deserializeEvent } from "../common/serializers";',
+      'import { Event, EventResponse } from "../common/interfaces";',
+      'import { SignatureProvider } from "../common/crypto/signature-provider";',
+      'import type { WorkOS } from "../workos";',
+      '',
+      'export class Webhooks {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '',
+      '  // @oagen-ignore-start',
+      '  private _sp?: SignatureProvider;',
+      '  async constructEvent(): Promise<Event> {',
+      '    const payload: EventResponse = {} as EventResponse;',
+      '    return deserializeEvent(payload);',
+      '  }',
+      '  // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      'import type { WorkOS } from "../workos";',
+      'import type { Foo } from "./interfaces/foo.interface";',
+      '',
+      'export class Webhooks {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '',
+      '  async listFoo(): Promise<Foo> { return {} as Foo; }',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'node');
+    const lines = result.split('\n');
+
+    // Hand-written imports survive.
+    expect(result).toContain("import { deserializeEvent } from '../common/serializers';");
+    expect(result).toContain("import { Event, EventResponse } from '../common/interfaces';");
+    expect(result).toContain("import { SignatureProvider } from '../common/crypto/signature-provider';");
+
+    // …and they land before the class declaration, not after it.
+    let lastImportLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^import\b/.test(lines[i].trim())) lastImportLine = i;
+    }
+    const classLine = lines.findIndex((l: string) => /^export class\b/.test(l.trim()));
+    expect(lastImportLine).toBeGreaterThan(-1);
+    expect(classLine).toBeGreaterThan(lastImportLine);
+
+    // Generated method and ignore-region body both survive.
+    expect(result).toContain('async listFoo()');
+    expect(result).toContain('constructEvent()');
+  });
+
+  it('preserves hand-written PHP `use` imports during overwrite', async () => {
+    // PHP `use Foo\Bar;` and `use Foo\Bar as Baz;` referenced from inside an
+    // @oagen-ignore-start/end block must land alongside the other top-level
+    // use statements, not be dropped or appended to the end of the file.
+    const existing = [
+      '<?php',
+      '',
+      'namespace WorkOS;',
+      '',
+      'use WorkOS\\Service\\Foo;',
+      'use WorkOS\\Passwordless;',
+      'use WorkOS\\Vault as VaultAlias;',
+      '',
+      'class WorkOS {',
+      '    // @oagen-ignore-start',
+      '    private ?Passwordless $passwordless = null;',
+      '    private ?VaultAlias $vault = null;',
+      '    // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      '<?php',
+      '',
+      'namespace WorkOS;',
+      '',
+      'use WorkOS\\Service\\Foo;',
+      'use WorkOS\\Service\\Bar;',
+      '',
+      'class WorkOS {',
+      '    private Foo $foo;',
+      '    private Bar $bar;',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'php');
+    const lines = result.split('\n');
+
+    // Hand-written namespace imports survive.
+    expect(result).toContain('use WorkOS\\Passwordless;');
+    expect(result).toContain('use WorkOS\\Vault as VaultAlias;');
+
+    // …and they land before the class declaration, not after it.
+    let lastUseLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^use\b/.test(lines[i].trim())) lastUseLine = i;
+    }
+    const classLine = lines.findIndex((l: string) => /^class\b/.test(l.trim()));
+    expect(lastUseLine).toBeGreaterThan(-1);
+    expect(classLine).toBeGreaterThan(lastUseLine);
+
+    // Generated method/property and ignore-region body both survive.
+    expect(result).toContain('private Foo $foo;');
+    expect(result).toContain('private ?Passwordless $passwordless');
+  });
+
+  it('preserves hand-written Ruby `require`/`require_relative` during overwrite', async () => {
+    const existing = [
+      "require 'openssl'",
+      "require 'workos/version'",
+      "require_relative 'helpers/crypto'",
+      '',
+      'module WorkOS',
+      '  class Webhooks',
+      '    # @oagen-ignore-start',
+      '    def verify_event(sig:)',
+      '      OpenSSL::HMAC.hexdigest("SHA256", "k", sig)',
+      '    end',
+      '    # @oagen-ignore-end',
+      '  end',
+      'end',
+    ].join('\n');
+
+    const generated = [
+      "require 'workos/version'",
+      "require 'workos/http_client'",
+      '',
+      'module WorkOS',
+      '  class Webhooks',
+      '    def list_endpoints; end',
+      '  end',
+      'end',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'ruby');
+    const lines = result.split('\n');
+
+    // Hand-written requires survive.
+    expect(result).toContain("require 'openssl'");
+    expect(result).toContain("require_relative 'helpers/crypto'");
+
+    // …and they land before the module declaration.
+    let lastRequireLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^require(_relative)?\b/.test(lines[i].trim())) lastRequireLine = i;
+    }
+    const moduleLine = lines.findIndex((l: string) => /^module\b/.test(l.trim()));
+    expect(lastRequireLine).toBeGreaterThan(-1);
+    expect(moduleLine).toBeGreaterThan(lastRequireLine);
+
+    // Generated method and ignore-region body both survive.
+    expect(result).toContain('def list_endpoints');
+    expect(result).toContain('def verify_event');
+  });
+
   it('preserves multiple ignore regions across different classes', async () => {
     const existing = [
       'class SSO:',
