@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.3](https://github.com/workos/oagen/compare/v0.19.2...v0.19.3) (2026-05-19)
+
+
+### Bug Fixes
+
+* **writer:** splice hand-written TypeScript imports during overwrite ([#80](https://github.com/workos/oagen/issues/80)) ([0072235](https://github.com/workos/oagen/commit/0072235b3b44d3727a3b38150bcc186b39361089))
+
 ## [0.19.2](https://github.com/workos/oagen/compare/v0.19.1...v0.19.2) (2026-05-18)
 
 
