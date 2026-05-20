@@ -630,11 +630,30 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   const generatedPhpUse = new Set(resultLines.filter(isPhpUseImport).map((l) => l.trim()));
   const extraPhpUse = [...existingPhpUse].filter((l) => !generatedPhpUse.has(l));
 
-  // Ruby `require '...'` and `require_relative '...'`.
-  const isRubyRequire = (l: string) => /^require(_relative)?\s+['"][^'"]+['"]\s*$/.test(l);
-  const existingRubyRequire = new Set(existingLines.filter(isRubyRequire).map((l) => l.trim()));
-  const generatedRubyRequire = new Set(resultLines.filter(isRubyRequire).map((l) => l.trim()));
-  const extraRubyRequire = [...existingRubyRequire].filter((l) => !generatedRubyRequire.has(l));
+  // Ruby `require '...'` and `require_relative '...'`. Dedupe by (kind, path)
+  // so quote style differs without producing duplicates — e.g. when the
+  // emitter writes `require 'json'` but a Ruby formatter has rewritten the
+  // on-disk copy to `require "json"`.
+  const rubyRequireRe = /^(require(?:_relative)?)\s+['"]([^'"]+)['"]\s*$/;
+  const rubyRequireKey = (l: string): string | undefined => {
+    const m = l.trim().match(rubyRequireRe);
+    return m ? `${m[1]}\t${m[2]}` : undefined;
+  };
+  const generatedRubyRequireKeys = new Set<string>();
+  for (const l of resultLines) {
+    const key = rubyRequireKey(l);
+    if (key) generatedRubyRequireKeys.add(key);
+  }
+  const seenExistingKeys = new Set<string>();
+  const extraRubyRequire: string[] = [];
+  for (const l of existingLines) {
+    const key = rubyRequireKey(l);
+    if (!key) continue;
+    if (generatedRubyRequireKeys.has(key)) continue;
+    if (seenExistingKeys.has(key)) continue;
+    seenExistingKeys.add(key);
+    extraRubyRequire.push(l.trim());
+  }
 
   const allExtra = [...extraSimple, ...extraFromLines, ...extraTsLines, ...extraPhpUse, ...extraRubyRequire];
   if (allExtra.length === 0) return;
