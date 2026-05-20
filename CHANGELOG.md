@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/workos/oagen/compare/v0.19.6...v0.20.0) (2026-05-20)
+
+
+### Features
+
+* **compat:** keep parent symbol_removed at breaking severity in detected renames ([#89](https://github.com/workos/oagen/issues/89)) ([5c42f96](https://github.com/workos/oagen/commit/5c42f963d525e062c816e607e60a1ae678cc4f12))
+
 ## [0.19.6](https://github.com/workos/oagen/compare/v0.19.5...v0.19.6) (2026-05-20)
 
 
