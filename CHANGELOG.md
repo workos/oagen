@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.5](https://github.com/workos/oagen/compare/v0.19.4...v0.19.5) (2026-05-20)
+
+
+### Bug Fixes
+
+* **writer:** dedupe Ruby `require` lines by path, not raw line ([#85](https://github.com/workos/oagen/issues/85)) ([72963c2](https://github.com/workos/oagen/commit/72963c2e77bcd30716ec94449e067c157dcedddc))
+
 ## [0.19.4](https://github.com/workos/oagen/compare/v0.19.3...v0.19.4) (2026-05-19)
 
 
