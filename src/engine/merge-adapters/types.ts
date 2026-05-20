@@ -21,6 +21,13 @@ export interface ParsedMergeFile {
 export interface MergeMember {
   key: string;
   text: string;
+  /**
+   * Byte offsets of the member (including its preceding docstring, if any) in
+   * the source. Used by stale-managed-member pruning to splice the member out.
+   * Optional for adapters that don't support pruning.
+   */
+  startIndex?: number;
+  endIndex?: number;
 }
 
 export interface DeepMergeSymbol {
@@ -83,6 +90,17 @@ export interface MergeAdapter {
    * Use this when new members reference dependencies the existing symbol doesn't provide.
    */
   shouldSkipDeepMerge?(symbolName: string, existingMemberKeys: Set<string>, newMembers: MergeMember[]): boolean;
+  /**
+   * Return true when an existing member is "managed" by the generator (i.e.,
+   * the emitter is the source of truth for it). During deep merge, managed
+   * members present in the existing file but absent from the regenerated
+   * content are pruned — preventing stale leftovers when a mount target or
+   * accessor is removed from the spec.
+   *
+   * Only consulted when the adapter's `extractMembers` populates `startIndex`
+   * and `endIndex` on the returned `MergeMember`s.
+   */
+  isManagedMember?(member: MergeMember): boolean;
   /** Configuration for generic URL fingerprint extraction from method bodies. */
   urlFingerprintConfig?: UrlFingerprintConfig;
 }

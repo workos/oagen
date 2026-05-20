@@ -500,6 +500,7 @@ export async function mergeIntoExisting(
   // Deep merge pass: add new members to existing symbols
   // Runs after import/symbol merge so line numbers are based on the updated content
   let deepAdded = 0;
+  let deepPruned = 0;
   const insertions: { line: number; text: string }[] = [];
   if (adapter.extractMembers) {
     const parser = await getParser(language);
@@ -514,6 +515,42 @@ export async function mergeIntoExisting(
     const deepIgnoredRegions = findIgnoredRegions(existingContent);
     const deepIgnoredSymbols = buildIgnoredSymbolNames(existingDocs, deepIgnoredRegions);
 
+    // Pass 1: prune stale "managed" members (existing members the adapter
+    // recognizes as generator-owned but that no longer appear in the
+    // regenerated content — e.g. accessors whose mount target was remapped).
+    // Done as byte-range deletes before line-based insertions so insertion
+    // line numbers stay valid for the post-prune result.
+    if (adapter.isManagedMember) {
+      const pruneEdits: { start: number; end: number }[] = [];
+      for (const [symbolName, genSymbol] of generatedSymbols) {
+        if (deepIgnoredSymbols.has(symbolName)) continue;
+        const existSymbol = resultSymbols.get(symbolName);
+        if (!existSymbol) continue;
+        const genMemberKeys = new Set(genSymbol.members.map((m) => m.key));
+        for (const existMember of existSymbol.members) {
+          if (genMemberKeys.has(existMember.key)) continue;
+          if (existMember.startIndex === undefined || existMember.endIndex === undefined) continue;
+          if (!adapter.isManagedMember(existMember)) continue;
+          pruneEdits.push({ start: existMember.startIndex, end: existMember.endIndex });
+        }
+      }
+      if (pruneEdits.length > 0) {
+        pruneEdits.sort((a, b) => b.start - a.start);
+        for (const edit of pruneEdits) {
+          let end = edit.end;
+          while (end < result.length && (result[end] === ' ' || result[end] === '\t')) end++;
+          if (result[end] === '\n') end++;
+          result = result.slice(0, edit.start) + result.slice(end);
+        }
+        deepPruned = pruneEdits.length;
+        // Re-extract since byte offsets and line numbers shifted.
+        const reTree = safeParse(parser, result);
+        resultSymbols.clear();
+        for (const [k, v] of adapter.extractMembers(reTree, result)) resultSymbols.set(k, v);
+      }
+    }
+
+    // Pass 2: append new members the regenerated content adds.
     for (const [symbolName, genSymbol] of generatedSymbols) {
       if (deepIgnoredSymbols.has(symbolName)) continue;
       const existSymbol = resultSymbols.get(symbolName);
@@ -797,7 +834,7 @@ export async function mergeIntoExisting(
   const topLevelAdded = importsActuallyAdded + toAppend.length;
   const totalAdded = topLevelAdded + deepAdded;
 
-  if (totalAdded === 0 && docstringUpdates === 0) {
+  if (totalAdded === 0 && docstringUpdates === 0 && deepPruned === 0) {
     return { content: existingContent, added: 0, preserved, changed: false };
   }
 
