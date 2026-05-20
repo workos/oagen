@@ -221,9 +221,11 @@ function collectTypeFieldSets(snapshot: CompatSnapshot): Map<string, Set<string>
  * (e.g. `ApiKey` → `OrganizationApiKey` + `UserApiKey`). The wire shape
  * returned by individual endpoints is unchanged — `OrganizationApiKey`
  * has the same fields `ApiKey` had — so consumer code accessing those
- * fields keeps working. The compat report flags `ApiKey` as removed
- * because its symbol is gone; this pass downgrades the removal to
- * soft-risk and records the rename so its child fields/methods cascade.
+ * fields *through a return value* keeps working. The parent symbol
+ * itself, however, is gone: callers who referenced it by name (Sorbet
+ * annotations, `is_a?` checks, pattern matches, deserialization targets)
+ * will fail at runtime. The parent removal therefore stays `breaking`;
+ * we only attach a remediation hint pointing at the new name.
  *
  * Identity criteria (must all hold):
  *   1. The removed symbol owns ≥ 1 field/property in the baseline (i.e.
@@ -238,10 +240,11 @@ function collectTypeFieldSets(snapshot: CompatSnapshot): Map<string, Set<string>
  *
  * Returns a `removedName -> newName` map so a downstream cascade pass
  * can downgrade owned-field removals and `*_type_changed` pointing at
- * the same pair.
+ * the same pair — those *are* downgraded to `soft-risk`, since values
+ * flowing through the new type continue to expose the same fields.
  *
- * Mutates matching `symbol_removed` entries in `changes`: severity →
- * `soft-risk`, attaches a `remediation` describing the rename.
+ * Mutates matching `symbol_removed` entries in `changes`: attaches a
+ * `remediation` describing the rename. Severity is left at `breaking`.
  */
 function detectTypeRenames(
   changes: ClassifiedChange[],
@@ -293,13 +296,15 @@ function detectTypeRenames(
 
     renameMap.set(baselineTypeName, newName);
 
-    // Downgrade the parent removal if one was reported. Languages that
-    // emit a `type Old = New` alias keep the parent symbol alive, so this
-    // branch may not fire — but the rename is still recorded for the
-    // cascade pass to use on field/return-type swaps.
+    // Attach a remediation hint to the parent removal so reviewers can see
+    // where the symbol moved. Severity stays `breaking`: the symbol's name
+    // is gone, and callers who referenced it directly (Sorbet annotations,
+    // `is_a?` checks, pattern matches, deserialization targets) will fail
+    // at runtime. Languages that emit a `type Old = New` alias keep the
+    // parent symbol alive, so this branch may not fire — but the rename is
+    // still recorded for the cascade pass to use on field/return-type swaps.
     const parentRemoval = parentRemovalByName.get(baselineTypeName);
     if (parentRemoval) {
-      parentRemoval.severity = 'soft-risk';
       parentRemoval.remediation =
         `Type "${baselineTypeName}" appears to have been renamed to "${newName}" — ` +
         `the new type has every field of the old (a non-strict superset). ` +
@@ -319,8 +324,9 @@ function detectTypeRenames(
  * baseline parent's field references an alias-type `OldOwner` and the new
  * parent's same-named field references a different alias `NewOwner`, the
  * pair is the same type-concept under a renamed name. Record the
- * secondary rename so the cascade can downgrade `OldOwner`'s
- * `symbol_removed` and any `field_type_changed` pointing at the pair.
+ * secondary rename so the cascade can downgrade any `field_type_changed`
+ * pointing at the pair, and attach a remediation hint to `OldOwner`'s
+ * `symbol_removed` (which stays `breaking` — see `detectTypeRenames`).
  *
  * Why this is necessary: discriminated-union owner types (Go's
  * `APIKeyWithValueOwner`, PHP/Python's nested constructor params) are
@@ -388,7 +394,8 @@ function inferTransitiveTypeRenames(
       typeRenames.set(oldT, newT);
       const removal = parentRemovalByName.get(oldT);
       if (removal) {
-        removal.severity = 'soft-risk';
+        // Severity stays `breaking` — see `detectTypeRenames` for the
+        // rationale. We only attach a remediation hint here.
         removal.remediation =
           `Type "${oldT}" appears to have been renamed to "${newT}" — ` +
           `inferred transitively because the renamed parent "${oldOwner}" → "${newOwner}" ` +
@@ -462,10 +469,13 @@ function detectEnumRenames(
 
     renameMap.set(baselineEnumName, newName);
 
-    // Downgrade the parent removal if one was reported (dotnet path).
+    // Attach a remediation hint to the parent removal if one was reported
+    // (dotnet path). Severity stays `breaking`: even though the wire values
+    // are unchanged, the typed enum class is gone, so callers referencing
+    // it by name will fail to compile or resolve. See `detectTypeRenames`
+    // for the full rationale.
     const parentRemoval = parentRemovalByName.get(baselineEnumName);
     if (parentRemoval) {
-      parentRemoval.severity = 'soft-risk';
       parentRemoval.remediation =
         `Enum "${baselineEnumName}" appears to have been renamed to "${newName}" — ` +
         `both enums have identical wire values, so on-the-wire serialization is unchanged. ` +
