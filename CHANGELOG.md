@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.6](https://github.com/workos/oagen/compare/v0.19.5...v0.19.6) (2026-05-20)
+
+
+### Bug Fixes
+
+* **merger:** prune stale managed members during deep merge ([#87](https://github.com/workos/oagen/issues/87)) ([2ef3786](https://github.com/workos/oagen/commit/2ef378683295e4aecfc8c13c8cba340882e65fca))
+
 ## [0.19.5](https://github.com/workos/oagen/compare/v0.19.4...v0.19.5) (2026-05-20)
 
 
