@@ -35,7 +35,7 @@ describe('detectTypeRenames — model type rename detection', () => {
    * endpoint is identical, so consumer code accessing `.id`, `.value`, etc.
    * keeps working — only explicit type annotations need to migrate.
    */
-  it('downgrades a type removal to soft-risk when a structurally-equivalent new type exists', () => {
+  it('keeps a type removal at breaking severity when a structurally-equivalent new type exists, with remediation hint', () => {
     const baseline = makeSnapshot([
       sym({ fqName: 'ApiKeyWithValue', kind: 'alias' }),
       sym({
@@ -82,7 +82,10 @@ describe('detectTypeRenames — model type rename detection', () => {
     const result = diffSnapshots(baseline, candidate);
     const removal = result.changes.find((c) => c.category === 'symbol_removed' && c.old.symbol === 'ApiKeyWithValue');
     expect(removal, 'parent type removal change should exist').toBeDefined();
-    expect(removal!.severity).toBe('soft-risk');
+    // Parent stays breaking — its symbol name is gone, so callers who
+    // referenced it directly (annotations, is_a? checks, deserialization
+    // targets) still fail. The remediation hint tells them where it moved.
+    expect(removal!.severity).toBe('breaking');
     expect(removal!.remediation).toMatch(/renamed to "OrganizationApiKeyWithValue"/);
     expect(removal!.remediation).toMatch(/superset/);
   });
@@ -438,7 +441,8 @@ describe('detectTypeRenames — model type rename detection', () => {
       (c) => c.category === 'symbol_removed' && c.old.symbol === 'APIKeyWithValueOwner',
     );
     expect(ownerRemoval, 'owner type removal should exist').toBeDefined();
-    expect(ownerRemoval!.severity).toBe('soft-risk');
+    // Parent stays breaking — see top-level rename test for rationale.
+    expect(ownerRemoval!.severity).toBe('breaking');
     expect(ownerRemoval!.remediation).toMatch(/inferred transitively/);
     expect(ownerRemoval!.remediation).toMatch(/OrganizationAPIKeyOwner/);
   });
@@ -459,7 +463,8 @@ describe('detectTypeRenames — model type rename detection', () => {
 
     const result = diffSnapshots(baseline, candidate);
     const removal = result.changes.find((c) => c.old.symbol === 'OldType');
-    expect(removal!.severity).toBe('soft-risk');
+    // Parent stays breaking — see top-level rename test for rationale.
+    expect(removal!.severity).toBe('breaking');
     expect(removal!.remediation).toMatch(/renamed to "NewTypeA"/);
   });
 });
@@ -477,7 +482,7 @@ describe('detectEnumRenames — enum canonical-flip detection', () => {
    * unchanged, so consumer code constructing or matching on these values
    * keeps working — only typed-class references need migration.
    */
-  it('downgrades an enum removal to soft-risk when an identically-valued new enum exists', () => {
+  it('keeps an enum removal at breaking severity when an identically-valued new enum exists, with remediation hint', () => {
     const baseline = makeSnapshot([
       sym({ fqName: 'VaultByokKeyVerificationCompletedDataKeyProvider', kind: 'enum' }),
       sym({
@@ -526,7 +531,9 @@ describe('detectEnumRenames — enum canonical-flip detection', () => {
       (c) => c.category === 'symbol_removed' && c.old.symbol === 'VaultByokKeyVerificationCompletedDataKeyProvider',
     );
     expect(removal, 'enum removal change should exist').toBeDefined();
-    expect(removal!.severity).toBe('soft-risk');
+    // Parent stays breaking — the typed enum class is gone even though wire
+    // values survive on the new enum. See top-level rename test for details.
+    expect(removal!.severity).toBe('breaking');
     expect(removal!.remediation).toMatch(/identical wire values/);
   });
 
