@@ -108,11 +108,21 @@ function extractKotlinClassMembers(classBody: Parser.SyntaxNode, source: string)
       break;
     }
 
-    members.push({ key: memberName, text: source.slice(startIdx, endIdx) });
+    members.push({ key: memberName, text: source.slice(startIdx, endIdx), startIndex: startIdx, endIndex: endIdx });
   }
 
   return members;
 }
+
+/**
+ * KDoc signature that identifies a generator-emitted service accessor inside
+ * the WorkOS class. The Kotlin client emitter writes every accessor with this
+ * exact doc preamble — when the existing file carries a member with this doc
+ * but the regenerated content omits it, the member is stale (its mount target
+ * was remapped or removed) and gets pruned.
+ */
+const KOTLIN_MANAGED_ACCESSOR_DOC =
+  /\/\*\*[\s\S]*?Lazily-constructed \[[^\]]+\] accessor for this \[WorkOS\] client\.[\s\S]*?\*\//;
 
 export const kotlinMergeAdapter: MergeAdapter = {
   language: 'kotlin',
@@ -154,6 +164,9 @@ export const kotlinMergeAdapter: MergeAdapter = {
   },
   renderImports(imports) {
     return imports.map((entry) => entry.text);
+  },
+  isManagedMember(member) {
+    return KOTLIN_MANAGED_ACCESSOR_DOC.test(member.text);
   },
   shouldSkipDeepMerge(_symbolName, existingMemberKeys, newMembers) {
     // Skip if new members reference instance properties that don't exist in the target
