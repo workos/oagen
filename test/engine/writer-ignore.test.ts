@@ -346,6 +346,37 @@ describe('@oagen-ignore-start/end with overwriteExisting', () => {
     expect(result).toContain('def verify_event');
   });
 
+  it('does not duplicate Ruby `require` lines when quote styles differ', async () => {
+    // The on-disk file has been reformatted (e.g. by standardrb) to double
+    // quotes; the freshly generated content still uses single quotes. The
+    // dedup must treat them as the same require.
+    const existing = [
+      'require "json"',
+      '',
+      'module WorkOS',
+      '  class SSO',
+      '    # @oagen-ignore-start',
+      '    def helper; end',
+      '    # @oagen-ignore-end',
+      '  end',
+      'end',
+    ].join('\n');
+
+    const generated = [
+      "require 'json'",
+      '',
+      'module WorkOS',
+      '  class SSO',
+      '    def list_connections; end',
+      '  end',
+      'end',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'ruby');
+    const requireLines = result.split('\n').filter((l) => /^require\b/.test(l.trim()));
+    expect(requireLines).toHaveLength(1);
+  });
+
   it('preserves multiple ignore regions across different classes', async () => {
     const existing = [
       'class SSO:',
