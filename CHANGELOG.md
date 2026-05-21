@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0](https://github.com/workos/oagen/compare/v0.20.0...v0.21.0) (2026-05-21)
+
+
+### Features
+
+* **parser:** detect discriminated unions through allOf-wrapped variants ([#91](https://github.com/workos/oagen/issues/91)) ([a0907b9](https://github.com/workos/oagen/commit/a0907b94f2ac79c93b2cff999a16256f781cb42f))
+
+
+### Bug Fixes
+
+* improve generate-smoke-test skill score (85% → 92%) ([#75](https://github.com/workos/oagen/issues/75)) ([08d5708](https://github.com/workos/oagen/commit/08d570800edd91409b20f1c9aa634f2df1d27e30))
+
 ## [0.20.0](https://github.com/workos/oagen/compare/v0.19.6...v0.20.0) (2026-05-20)
 
 
