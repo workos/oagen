@@ -79,9 +79,21 @@ export function collectReferencedNames(
   // returns them directly. This matters for event/webhook unions where the base
   // operation references a generic envelope but the variant structs are still
   // useful public surface.
+  //
+  // Also preserve the variants mapped from an `allOf [base, oneOf […]]` base
+  // (carried as `Model.discriminator.mapping`). The base model is reached
+  // through the operation; without explicitly chasing its mapping, the
+  // variant structs would be unreachable and the dispatcher would dangle
+  // imports.
   for (const model of models) {
     if (isDiscriminatedModel(model)) {
       referencedModels.add(model.name);
+    }
+    const disc = model.discriminator;
+    if (disc?.mapping) {
+      for (const variantName of Object.values(disc.mapping)) {
+        referencedModels.add(variantName);
+      }
     }
   }
 
