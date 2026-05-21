@@ -1,6 +1,13 @@
 import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
-import { toPascalCase, toUpperSnakeCase, cleanSchemaName, singularize, stripListItemMarkers } from '../utils/naming.js';
+import {
+  toPascalCase,
+  toUpperSnakeCase,
+  cleanSchemaName,
+  singularize,
+  stripListItemMarkers,
+  splitWords,
+} from '../utils/naming.js';
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -467,7 +474,11 @@ function buildSyntheticEnumRef(
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
   const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
-  return { kind: 'enum', name: qualifiedName, values };
+  // Run the same `schemaNameTransform` we apply to component-schema names so
+  // a project-level rename map (e.g. `RadarAction` → `RadarListAction` in
+  // `oagen.config.ts`) catches inline parameter enums too.
+  const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
+  return { kind: 'enum', name: finalName, values };
 }
 
 /**
@@ -732,12 +743,56 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
 }
 
 /**
+ * Walk through `allOf` wrappers to collect the effective top-level properties
+ * of a schema. Stops at `oneOf` / `anyOf` boundaries — those are different
+ * variant axes, not part of the same flat object.
+ *
+ * Used by `detectAllOfVariantDiscriminator` and `deriveDiscriminatedVariantName`
+ * so a oneOf variant of the form `{ allOf: [{ properties: { … } }, { oneOf: […] }] }`
+ * still surfaces its top-level `properties` (in particular its discriminator
+ * `const`) instead of being treated as having none.
+ */
+function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObject> {
+  const props: Record<string, SchemaObject> = {};
+  const visit = (s: SchemaObject): void => {
+    if (s.properties) {
+      for (const [k, v] of Object.entries(s.properties)) {
+        if (!(k in props) && v) props[k] = v;
+      }
+    }
+    if (s.allOf) {
+      for (const sub of s.allOf) visit(sub);
+    }
+    // Do NOT walk into oneOf / anyOf — those are alternatives, not
+    // simultaneously-present properties.
+  };
+  visit(schema);
+  return props;
+}
+
+function getEffectiveConstPropertyValue(schema: SchemaObject, property: string): string | null {
+  const direct = getConstPropertyValue(schema, property);
+  if (direct !== null) return direct;
+  const effective = getEffectiveProperties(schema)[property];
+  if (!effective) return null;
+  if (typeof effective.const === 'string') return effective.const;
+  if (Array.isArray(effective.enum) && effective.enum.length === 1 && typeof effective.enum[0] === 'string') {
+    return effective.enum[0];
+  }
+  return null;
+}
+
+/**
  * Detect an implicit discriminator on an allOf+oneOf where every variant is an
  * object that pins the same property to a distinct const value. Unlike
  * detectConstPropertyDiscriminator (which requires $ref or title for variant
  * model names), this version derives model names from the const value itself
  * using deriveDiscriminatedVariantName — matching how extractDiscriminatedAllOfVariantModels
  * names those models.
+ *
+ * Walks through allOf wrappers on each variant so a oneOf branch like
+ *   { allOf: [{ properties: { type: { const: 'oauth' } } }, { oneOf: […] }] }
+ * still surfaces `type` as a candidate discriminator.
  *
  * Returns null when no discriminator can be reliably detected.
  */
@@ -748,10 +803,11 @@ function detectAllOfVariantDiscriminator(
   if (variants.length < 2) return null;
 
   // Find a property whose const value is present on every variant
-  const candidates = Object.keys(variants[0]?.properties ?? {});
+  // (looking through allOf wrappers on each variant).
+  const firstProps = getEffectiveProperties(variants[0] ?? {});
   let candidateProperty: string | null = null;
-  for (const propName of candidates) {
-    if (variants.every((v) => getConstPropertyValue(v, propName) !== null)) {
+  for (const propName of Object.keys(firstProps)) {
+    if (variants.every((v) => getEffectiveConstPropertyValue(v, propName) !== null)) {
       candidateProperty = propName;
       break;
     }
@@ -761,7 +817,7 @@ function detectAllOfVariantDiscriminator(
   const mapping: Record<string, string> = {};
   const seenModelNames = new Set<string>();
   for (const v of variants) {
-    const value = getConstPropertyValue(v, candidateProperty);
+    const value = getEffectiveConstPropertyValue(v, candidateProperty);
     if (value === null) return null;
     const modelName = deriveDiscriminatedVariantName(v, fallbackName);
     // If two variants map to the same model name, the discriminator is ambiguous
@@ -777,12 +833,51 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   const models: Model[] = [];
   const seenNames = new Set<string>();
 
+  // Collect base-object properties + required from the allOf wrapper so each
+  // variant can be emitted as a complete, self-contained type. Schemas like
+  // `EventSchema` repeat the base fields inside every variant in the spec
+  // (so this merge is a no-op there), but `ConnectApplication`'s OAuth /
+  // M2M variants don't — without this, dispatcher consumers would get a
+  // variant that's missing the shared `id` / `name` / `object` etc.
+  const baseProperties: Record<string, SchemaObject> = {};
+  const baseRequired = new Set<string>();
+  for (const subSchema of schema.allOf ?? []) {
+    if (subSchema.oneOf) continue; // the variant axis, handled below
+    const flat = subSchema.allOf ? flattenVariantForExtraction(subSchema) : subSchema;
+    if (flat.properties) {
+      for (const [k, v] of Object.entries(flat.properties)) {
+        if (!(k in baseProperties) && v) baseProperties[k] = v;
+      }
+    }
+    if (flat.required) for (const r of flat.required) baseRequired.add(r);
+  }
+
   for (const subSchema of schema.allOf ?? []) {
     for (const variant of subSchema.oneOf ?? []) {
-      if (!variant.properties || (variant.type !== undefined && variant.type !== 'object')) continue;
+      // Flatten any allOf wrapper on the variant (e.g. `ConnectApplication`'s
+      // OAuth branch is `allOf: [{ properties: {…} }, { oneOf: [first-party
+      // sub-variants] }]`). The flattened object has merged properties and
+      // an inlined sub-variant `oneOf` so `extractInlineModelDeep` can pull
+      // out a complete variant model.
+      const flat = flattenVariantForExtraction(variant);
+      if (!flat.properties || (flat.type !== undefined && flat.type !== 'object')) continue;
+
+      // Merge base fields into the variant. Variant-specific properties win
+      // on name collisions because the spec may pin a base field to a more
+      // specific shape inside a variant.
+      const mergedProperties: Record<string, SchemaObject> = { ...baseProperties };
+      for (const [k, v] of Object.entries(flat.properties)) {
+        if (v) mergedProperties[k] = v;
+      }
+      const mergedRequired = new Set<string>([...baseRequired, ...(flat.required ?? [])]);
+      const merged: SchemaObject = {
+        type: 'object',
+        properties: mergedProperties,
+        required: [...mergedRequired],
+      };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
-      for (const model of extractInlineModelDeep(variantName, variant)) {
+      for (const model of extractInlineModelDeep(variantName, merged)) {
         if (seenNames.has(model.name)) continue;
         seenNames.add(model.name);
         models.push(model);
@@ -793,32 +888,137 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   return models;
 }
 
+/**
+ * Flatten a oneOf variant schema into a single object-shaped schema for
+ * variant-model extraction. Recursively merges `allOf` members and folds
+ * any nested `oneOf` into an inline-oneOf field group whose properties are
+ * the union across sub-branches (required only when present in every
+ * sub-branch). Returns the schema unchanged when no flattening is needed.
+ */
+function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
+  if (!variant.allOf) return variant;
+
+  const mergedProperties: Record<string, SchemaObject> = {};
+  const mergedRequired = new Set<string>();
+  const nestedOneOfs: SchemaObject[][] = [];
+
+  const collect = (s: SchemaObject): void => {
+    if (s.properties) {
+      for (const [k, v] of Object.entries(s.properties)) {
+        if (!(k in mergedProperties) && v) mergedProperties[k] = v;
+      }
+    }
+    if (s.required) {
+      for (const r of s.required) mergedRequired.add(r);
+    }
+    if (s.allOf) {
+      for (const sub of s.allOf) collect(sub);
+    }
+    if (s.oneOf) nestedOneOfs.push(s.oneOf);
+  };
+  collect(variant);
+
+  // Fold each nested oneOf into the merged shape: any field appearing in any
+  // sub-branch is included as optional (or required iff present-and-required
+  // in every sub-branch). Conflicting literal types widen to their primitive
+  // base. This handles the `is_first_party: true | false` widening on the
+  // OAuth variant's first-party sub-oneOf.
+  for (const branches of nestedOneOfs) {
+    const flatBranches = branches.map(flattenVariantForExtraction);
+    const branchKeys = new Set<string>();
+    for (const b of flatBranches) {
+      for (const k of Object.keys(b.properties ?? {})) branchKeys.add(k);
+    }
+    for (const key of branchKeys) {
+      const schemas: SchemaObject[] = [];
+      for (const b of flatBranches) {
+        const s = b.properties?.[key];
+        if (s) schemas.push(s);
+      }
+      const merged = mergeBranchPropertySchemas(schemas);
+      if (!(key in mergedProperties)) mergedProperties[key] = merged;
+      const inAllBranches = flatBranches.every((b) => b.properties && key in b.properties);
+      const requiredInAll = inAllBranches && flatBranches.every((b) => (b.required ?? []).includes(key));
+      if (requiredInAll) mergedRequired.add(key);
+    }
+  }
+
+  return {
+    type: 'object',
+    properties: mergedProperties,
+    required: [...mergedRequired],
+  };
+}
+
+/**
+ * Merge same-named property schemas from across sub-variants. If every
+ * occurrence is a boolean const, widen to plain boolean; if every occurrence
+ * is a distinct string const, widen to plain string. Otherwise return the
+ * first occurrence — emitters that build their own widened types (e.g. the
+ * Node discriminated-models module) re-derive from the raw spec.
+ */
+function mergeBranchPropertySchemas(schemas: SchemaObject[]): SchemaObject {
+  if (schemas.length === 0) return {};
+  if (schemas.length === 1) return schemas[0];
+
+  const allBoolConst = schemas.every((s) => s.type === 'boolean' && typeof s.const === 'boolean');
+  if (allBoolConst) {
+    return { type: 'boolean', description: schemas[0].description };
+  }
+  const allStringConst = schemas.every((s) => s.type === 'string' && typeof s.const === 'string');
+  if (allStringConst) {
+    const values = schemas.map((s) => s.const as string);
+    if (new Set(values).size === 1) return schemas[0];
+    return { type: 'string', description: schemas[0].description };
+  }
+  return schemas[0];
+}
+
 function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: string): string {
-  if (!schema.properties) return fallbackName;
+  // Walk through allOf wrappers so a variant of the form
+  // `{ allOf: [{ properties: { type: const: 'oauth' } }, { oneOf: […] }] }`
+  // still surfaces its discriminator const value for naming.
+  const effective = getEffectiveProperties(schema);
+  if (Object.keys(effective).length === 0) return fallbackName;
 
-  const preferred = ['event', 'type', 'object'];
-  for (const name of preferred) {
-    const field = schema.properties[name];
-    if (!field) continue;
-    if (typeof field.const === 'string') {
-      return toPascalCase(field.const);
-    }
+  const pickConst = (name: string): string | null => {
+    const field = effective[name];
+    if (!field) return null;
+    if (typeof field.const === 'string') return field.const;
     if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
-      return toPascalCase(field.enum[0]);
+      return field.enum[0];
+    }
+    return null;
+  };
+
+  let constValue: string | null = null;
+  for (const preferred of ['event', 'type', 'object']) {
+    constValue = pickConst(preferred);
+    if (constValue) break;
+  }
+  if (constValue === null) {
+    for (const name of Object.keys(effective)) {
+      constValue = pickConst(name);
+      if (constValue) break;
     }
   }
+  if (constValue === null) return fallbackName;
 
-  for (const field of Object.values(schema.properties)) {
-    if (!field) continue;
-    if (typeof field.const === 'string') {
-      return toPascalCase(field.const);
-    }
-    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
-      return toPascalCase(field.enum[0]);
-    }
-  }
+  const pascal = toPascalCase(constValue);
+  if (!pascal) return fallbackName;
 
-  return fallbackName;
+  // A single-word const like `oauth` or `m2m` is too generic to stand alone
+  // as a top-level model name — it would collide with unrelated schemas. Pair
+  // it with the parent name so the variant resolves to e.g. `ConnectApplicationOAuth`
+  // / `ConnectApplicationM2M`. Multi-word consts like `action.authentication.denied`
+  // are already specific enough on their own, matching the established
+  // EventSchema variant naming.
+  const wordCount = splitWords(constValue).length;
+  if (wordCount >= 2) return pascal;
+  if (pascal === fallbackName) return pascal;
+  if (fallbackName.startsWith(pascal)) return fallbackName;
+  if (pascal.endsWith(fallbackName)) return pascal;
+  return `${fallbackName}${pascal}`;
 }
 
 function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
@@ -1112,9 +1312,14 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
     const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
+    // Run `schemaNameTransform` so project-level rename maps in
+    // `oagen.config.ts` reach inline parameter/field enums too — without
+    // this, `RadarAction` (built from path param `action` on the Radar
+    // service) couldn't be redirected to `RadarListAction` from config.
+    const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
     return {
       kind: 'enum',
-      name: qualifiedName,
+      name: finalName,
       values: schema.enum.map((v) => (typeof v === 'number' ? v : String(v))),
     };
   }
