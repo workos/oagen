@@ -52,13 +52,13 @@ Store it as `spec`.
 
 Choose the interception mechanism for the target language. It must capture the raw request (method, path, query, body) and response (status, body), storing both in a `currentCapture` variable (~20-30 lines):
 
-| Language | Mechanism |
-|----------|-----------|
-| Node | Patch `globalThis.fetch` |
-| Ruby | WebMock `stub_request` or monkey-patch `Net::HTTP` |
-| Python | `responses`, `respx` (httpx), or `unittest.mock.patch` |
-| Go | Custom `http.RoundTripper` |
-| Java/Kotlin | OkHttp `Interceptor` |
+| Language    | Mechanism                                              |
+| ----------- | ------------------------------------------------------ |
+| Node        | Patch `globalThis.fetch`                               |
+| Ruby        | WebMock `stub_request` or monkey-patch `Net::HTTP`     |
+| Python      | `responses`, `respx` (httpx), or `unittest.mock.patch` |
+| Go          | Custom `http.RoundTripper`                             |
+| Java/Kotlin | OkHttp `Interceptor`                                   |
 
 ## Step 2: Build the SERVICE_MAP
 
