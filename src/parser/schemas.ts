@@ -25,7 +25,7 @@ let activeSchemaNameTransform: ((name: string) => string) | null = null;
 let activeEnumSchemaNames: Set<string> = new Set();
 
 /** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
-function resolveSchemaName(rawName: string): string {
+export function resolveSchemaName(rawName: string): string {
   let name = cleanSchemaName(toPascalCase(rawName));
   if (activeSchemaNameTransform) name = activeSchemaNameTransform(name);
   return name;

@@ -154,5 +154,33 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     );
   }
 
+  // Pass 3: cascade renames to inline children of collapsed Json-suffix models.
+  // e.g. when AuditLogSchemaJson → AuditLogSchema, also rename
+  // AuditLogSchemaJsonTarget → AuditLogSchemaTarget.
+  for (const { jsonModel, baseModel } of mergeCandidates) {
+    const jsonPrefix = jsonModel.name;
+    const basePrefix = baseModel.name;
+
+    for (const model of normalizedModels) {
+      if (toRemove.has(model.name)) continue;
+      if (model.name.length <= jsonPrefix.length) continue;
+      if (!model.name.startsWith(jsonPrefix)) continue;
+
+      const newName = basePrefix + model.name.slice(jsonPrefix.length);
+      const existing = byName.get(newName);
+
+      if (existing && !toRemove.has(existing.name)) {
+        toRemove.add(model.name);
+        rewriteModelRefs(normalizedModels, services, model.name, newName);
+        console.warn(`[oagen] Collapsed child "${model.name}" into existing "${newName}"`);
+      } else {
+        rewriteModelRefs(normalizedModels, services, model.name, newName);
+        model.name = newName;
+        byName.set(newName, model);
+        console.warn(`[oagen] Renamed child "${jsonPrefix}…" → "${newName}"`);
+      }
+    }
+  }
+
   return normalizedModels.filter((m) => !toRemove.has(m.name));
 }

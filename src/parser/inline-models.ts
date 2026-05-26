@@ -1,7 +1,7 @@
 import type { Model, Field } from '../ir/types.js';
-import { toPascalCase, cleanSchemaName, stripListItemMarkers, singularize } from '../utils/naming.js';
+import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema } from './schemas.js';
+import { buildFieldFromSchema, resolveSchemaName } from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -38,7 +38,7 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
   const inlineModels: Model[] = [];
 
   for (const [schemaName, schema] of Object.entries(schemas)) {
-    const parentName = cleanSchemaName(toPascalCase(schemaName));
+    const parentName = resolveSchemaName(schemaName);
     extractInlineModelsFromProperties(schema, inlineModels, parentName);
   }
 
