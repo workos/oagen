@@ -242,15 +242,24 @@ export async function overwriteWithPreservedRegions(
   const existingLines = existingContent.split('\n');
   const generatedLines = generatedContent.split('\n');
 
-  // 1. Extract ignore blocks and their containing class from existing content.
-  const blocks: { containingClass: string; lines: string[] }[] = [];
+  // 1. Extract ignore blocks, their containing class, and the anchor line
+  //    (first non-blank line after the block in the existing file).
+  const blocks: { containingClass: string; lines: string[]; anchor: string }[] = [];
   for (let i = 0; i < existingLines.length; i++) {
     if (!existingLines[i].includes('@oagen-ignore-start')) continue;
     const startIdx = i;
     while (i < existingLines.length && !existingLines[i].includes('@oagen-ignore-end')) i++;
+    let anchor = '';
+    for (let a = i + 1; a < existingLines.length; a++) {
+      if (existingLines[a].trim()) {
+        anchor = existingLines[a].trimStart();
+        break;
+      }
+    }
     blocks.push({
       containingClass: findContainingClass(existingLines, startIdx),
       lines: existingLines.slice(startIdx, i + 1),
+      anchor,
     });
   }
   if (blocks.length === 0) return generatedContent;
@@ -269,10 +278,10 @@ export async function overwriteWithPreservedRegions(
   const classEndLines = await extractClassEndLines(genSource, language);
 
   // 4. Group ignore blocks by class and determine insertion points
-  const blocksByClass = new Map<string, string[][]>();
+  const blocksByClass = new Map<string, Array<{ lines: string[]; anchor: string }>>();
   for (const b of blocks) {
     if (!blocksByClass.has(b.containingClass)) blocksByClass.set(b.containingClass, []);
-    blocksByClass.get(b.containingClass)!.push(b.lines);
+    blocksByClass.get(b.containingClass)!.push({ lines: b.lines, anchor: b.anchor });
   }
 
   // 4a. Handle replacement blocks: ignore blocks that redefine their
@@ -293,8 +302,8 @@ export async function overwriteWithPreservedRegions(
     // class definition inside the block that matches a generated class.
     let targetClass = className;
     if (!targetClass) {
-      for (const blockLines of classBlocks) {
-        for (const l of blockLines) {
+      for (const entry of classBlocks) {
+        for (const l of entry.lines) {
           const m = l.match(/^(?:export\s+)?class\s+(\w+)/);
           if (m && classEndLines.has(m[1])) {
             targetClass = m[1];
@@ -305,8 +314,8 @@ export async function overwriteWithPreservedRegions(
       }
     }
     if (!targetClass) continue;
-    const isReplacement = classBlocks.some((blockLines) =>
-      blockLines.some((l) => {
+    const isReplacement = classBlocks.some((entry) =>
+      entry.lines.some((l) => {
         const m = l.match(/^(?:export\s+)?class\s+(\w+)/);
         return m?.[1] === targetClass;
       }),
@@ -317,9 +326,9 @@ export async function overwriteWithPreservedRegions(
     const startLine = findClassDeclarationStart(result, targetClass, info.bodyEndLine);
     if (startLine < 0) continue;
     const content: string[] = [];
-    for (const block of classBlocks) {
+    for (const entry of classBlocks) {
       content.push('');
-      content.push(...block);
+      content.push(...entry.lines);
     }
     replacements.push({ startLine, endLine: info.bodyEndLine, content });
     replacedClasses.add(targetClass);
@@ -342,13 +351,76 @@ export async function overwriteWithPreservedRegions(
   for (const [className, classBlocks] of blocksByClass) {
     if (handledBlockKeys.has(className) || replacedClasses.has(className)) continue;
     const info = className ? effectiveClassEndLines.get(className) : undefined;
-    const insertLine = info ? info.bodyEndLine : result.length;
-    const content: string[] = [];
-    for (const block of classBlocks) {
-      content.push('');
-      content.push(...block);
+
+    // Insert each block individually so each can use its own anchor.
+    for (const entry of classBlocks) {
+      let insertLine: number | undefined;
+
+      // Try anchor-based positioning: find the first line in the generated
+      // file whose trimmed-start content matches the anchor (the first
+      // non-blank line that followed this block in the existing file).
+      // Skip anchors that are just punctuation (braces, etc.) since they
+      // match too many locations. Accept doc comment starters (/** /// #)
+      // as valid anchors since they're structurally meaningful.
+      if (entry.anchor && /[a-zA-Z]|^\/\*|^\/\//.test(entry.anchor)) {
+        for (let li = 0; li < result.length; li++) {
+          if (result[li].trimStart() === entry.anchor) {
+            insertLine = li;
+            break;
+          }
+        }
+      }
+
+      // Fallback: class body end, or for top-level import blocks, after the
+      // last import line (so they stay near the top of the file, not at the
+      // bottom where they'd trigger E402 lint errors).
+      if (insertLine === undefined) {
+        if (info) {
+          insertLine = info.bodyEndLine;
+        } else {
+          const blockHasImportsFallback = entry.lines.some((l: string) => /^\s*(import|from)\s/.test(l));
+          if (blockHasImportsFallback) {
+            let lastImportLine = 0;
+            for (let li = 0; li < result.length; li++) {
+              const trimmed = result[li].trimStart();
+              if (/^(import|from)\s/.test(trimmed)) lastImportLine = li + 1;
+            }
+            insertLine = lastImportLine;
+          } else {
+            insertLine = result.length;
+          }
+        }
+      }
+
+      // When inserting an import-containing ignore block, move up past
+      // blank separator lines so the block sits flush with surrounding
+      // imports (e.g., Kotlin's ktlint forbids blank lines within import
+      // blocks).
+      const blockHasImports = entry.lines.some((l: string) => /^\s*import\s/.test(l));
+      if (blockHasImports) {
+        while (
+          insertLine >= 2 &&
+          result[insertLine - 1]?.trim() === '' &&
+          /^\s*(import|using|from)\s/.test(result[insertLine - 2] ?? '')
+        ) {
+          insertLine--;
+        }
+      }
+
+      // Skip the leading blank line when the block is adjacent to imports
+      // or already preceded by a blank line (avoids double-blank-line gaps).
+      const prevLine = insertLine > 0 ? (result[insertLine - 1]?.trimStart() ?? '') : '';
+      const prevIsImport = /^import\s/.test(prevLine) || /^using\s/.test(prevLine) || /^from\s/.test(prevLine);
+      const prevIsBlank = insertLine > 0 && prevLine === '';
+      const blockContent = prevIsImport || prevIsBlank ? [...entry.lines] : ['', ...entry.lines];
+      // Add a trailing blank line when the next line is a doc comment
+      // (C# SA1514 requires a blank line before `///` doc headers).
+      const nextLine = result[insertLine]?.trimStart() ?? '';
+      if (nextLine.startsWith('///')) {
+        blockContent.push('');
+      }
+      insertions.push({ line: insertLine, content: blockContent });
     }
-    insertions.push({ line: insertLine, content });
   }
 
   // Apply bottom-up to preserve line indices
@@ -388,10 +460,13 @@ function stripIgnoreRegions(lines: string[]): string[] {
 
 /** Scan backwards from `lineIdx` to find the nearest class declaration name. */
 function findContainingClass(lines: string[], lineIdx: number): string {
-  // Allow leading whitespace so indented declarations (e.g. Ruby classes
-  // nested inside `module Foo`, Python nested classes) are recognized.
+  // Allow leading whitespace and language-specific modifiers before `class`.
+  // Covers: `public class Foo` (C#/Java), `export class Foo` (TS),
+  // `class Foo` (Python/Ruby), `internal sealed class Foo` (C#), etc.
   for (let j = lineIdx - 1; j >= 0; j--) {
-    const m = lines[j].match(/^\s*(?:export\s+)?class\s+(\w+)/);
+    const m = lines[j].match(
+      /^\s*(?:(?:export|public|private|protected|internal|abstract|sealed|static|partial)\s+)*class\s+(\w+)/,
+    );
     if (m) return m[1];
   }
   return '';
@@ -552,7 +627,29 @@ function collectTsImports(lines: string[]): TsImports {
  *
  * Mutates `resultLines` in place.
  */
+function filterOutIgnoreRegions(lines: string[]): string[] {
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (!skipping && line.includes('@oagen-ignore-start')) {
+      skipping = true;
+      continue;
+    }
+    if (skipping) {
+      if (line.includes('@oagen-ignore-end')) skipping = false;
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 function spliceExtraImports(existingLines: string[], resultLines: string[]): void {
+  // Filter out lines inside @oagen-ignore regions — those imports are
+  // preserved via the ignore-block reinsertion path and must not be
+  // duplicated here.
+  const existingOutsideIgnore = filterOutIgnoreRegions(existingLines);
+
   // Python-style `import hashlib`. Excludes TS forms like `import X from '…'`
   // (have a `from` clause) and TS multi-line type imports whose first line is
   // `import type {` (have a brace) — both are handled by the TS collector
@@ -560,12 +657,12 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   const isPythonSimpleImport = (l: string) => /^import\s+\w/.test(l) && !/\sfrom\s/.test(l) && !/[{}]/.test(l);
 
   // Simple imports (import hashlib, import json, …)
-  const existingSimple = new Set(existingLines.filter(isPythonSimpleImport).map((l) => l.trim()));
+  const existingSimple = new Set(existingOutsideIgnore.filter(isPythonSimpleImport).map((l) => l.trim()));
   const generatedSimple = new Set(resultLines.filter(isPythonSimpleImport).map((l) => l.trim()));
   const extraSimple = [...existingSimple].filter((l) => !generatedSimple.has(l));
 
   // From-imports — compare by module and find extra identifiers
-  const existingFrom = collectFromImports(existingLines);
+  const existingFrom = collectFromImports(existingOutsideIgnore);
   const generatedFrom = collectFromImports(resultLines);
 
   // Build a set of all identifiers imported by the generated file (across all modules)
@@ -595,7 +692,7 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   }
 
   // TypeScript imports.
-  const existingTs = collectTsImports(existingLines);
+  const existingTs = collectTsImports(existingOutsideIgnore);
   const generatedTs = collectTsImports(resultLines);
   const extraTsLines: string[] = [];
 
@@ -626,7 +723,7 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   // (a backslash anywhere in the path) so this doesn't mistakenly hoist
   // single-segment in-class trait references like `use TraitName;`.
   const isPhpUseImport = (l: string) => /^use\s+[\w\\]+\\[\w\\]*(\s+as\s+\w+)?\s*;?$/.test(l);
-  const existingPhpUse = new Set(existingLines.filter(isPhpUseImport).map((l) => l.trim()));
+  const existingPhpUse = new Set(existingOutsideIgnore.filter(isPhpUseImport).map((l) => l.trim()));
   const generatedPhpUse = new Set(resultLines.filter(isPhpUseImport).map((l) => l.trim()));
   const extraPhpUse = [...existingPhpUse].filter((l) => !generatedPhpUse.has(l));
 
@@ -646,7 +743,7 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   }
   const seenExistingKeys = new Set<string>();
   const extraRubyRequire: string[] = [];
-  for (const l of existingLines) {
+  for (const l of existingOutsideIgnore) {
     const key = rubyRequireKey(l);
     if (!key) continue;
     if (generatedRubyRequireKeys.has(key)) continue;
