@@ -244,7 +244,7 @@ export async function overwriteWithPreservedRegions(
 
   // 1. Extract ignore blocks, their containing class, and the anchor line
   //    (first non-blank line after the block in the existing file).
-  const blocks: { containingClass: string; lines: string[]; anchor: string }[] = [];
+  const blocks: { containingClass: string; containingScope: string; lines: string[]; anchor: string }[] = [];
   for (let i = 0; i < existingLines.length; i++) {
     if (!existingLines[i].includes('@oagen-ignore-start')) continue;
     const startIdx = i;
@@ -258,6 +258,7 @@ export async function overwriteWithPreservedRegions(
     }
     blocks.push({
       containingClass: findContainingClass(existingLines, startIdx),
+      containingScope: findContainingDescribeScope(existingLines, startIdx),
       lines: existingLines.slice(startIdx, i + 1),
       anchor,
     });
@@ -278,10 +279,14 @@ export async function overwriteWithPreservedRegions(
   const classEndLines = await extractClassEndLines(genSource, language);
 
   // 4. Group ignore blocks by class and determine insertion points
-  const blocksByClass = new Map<string, Array<{ lines: string[]; anchor: string }>>();
+  const blocksByClass = new Map<string, Array<{ containingScope: string; lines: string[]; anchor: string }>>();
   for (const b of blocks) {
     if (!blocksByClass.has(b.containingClass)) blocksByClass.set(b.containingClass, []);
-    blocksByClass.get(b.containingClass)!.push({ lines: b.lines, anchor: b.anchor });
+    blocksByClass.get(b.containingClass)!.push({
+      containingScope: b.containingScope,
+      lines: b.lines,
+      anchor: b.anchor,
+    });
   }
 
   // 4a. Handle replacement blocks: ignore blocks that redefine their
@@ -347,7 +352,8 @@ export async function overwriteWithPreservedRegions(
     effectiveClassEndLines = await extractClassEndLines(result.join('\n'), language);
   }
 
-  const insertions: { line: number; content: string[] }[] = [];
+  const insertions: { line: number; order: number; content: string[] }[] = [];
+  let insertionOrder = 0;
   for (const [className, classBlocks] of blocksByClass) {
     if (handledBlockKeys.has(className) || replacedClasses.has(className)) continue;
     const info = className ? effectiveClassEndLines.get(className) : undefined;
@@ -362,7 +368,7 @@ export async function overwriteWithPreservedRegions(
       // Skip anchors that are just punctuation (braces, etc.) since they
       // match too many locations. Accept doc comment starters (/** /// #)
       // as valid anchors since they're structurally meaningful.
-      if (entry.anchor && /[a-zA-Z]|^\/\*|^\/\//.test(entry.anchor)) {
+      if (entry.anchor && !entry.anchor.includes('@oagen-ignore') && /[a-zA-Z]|^\/\*|^\/\//.test(entry.anchor)) {
         for (let li = 0; li < result.length; li++) {
           if (result[li].trimStart() === entry.anchor) {
             insertLine = li;
@@ -378,8 +384,13 @@ export async function overwriteWithPreservedRegions(
         if (info) {
           insertLine = info.bodyEndLine;
         } else {
+          const scopeEndLine = entry.containingScope
+            ? findDescribeScopeEndLine(result, entry.containingScope)
+            : undefined;
           const blockHasImportsFallback = entry.lines.some((l: string) => /^\s*(import|from)\s/.test(l));
-          if (blockHasImportsFallback) {
+          if (scopeEndLine !== undefined) {
+            insertLine = scopeEndLine;
+          } else if (blockHasImportsFallback || hasTopLevelDeclaration(entry.lines)) {
             let lastImportLine = 0;
             for (let li = 0; li < result.length; li++) {
               const trimmed = result[li].trimStart();
@@ -419,15 +430,19 @@ export async function overwriteWithPreservedRegions(
       if (nextLine.startsWith('///')) {
         blockContent.push('');
       }
-      insertions.push({ line: insertLine, content: blockContent });
+      insertions.push({ line: insertLine, order: insertionOrder++, content: blockContent });
     }
   }
 
-  // Apply bottom-up to preserve line indices
-  insertions.sort((a, b) => b.line - a.line);
+  // Apply bottom-up to preserve line indices. Blocks with the same insertion
+  // line must be applied in reverse discovery order because each splice inserts
+  // at the same index; otherwise repeated generation flips their order.
+  insertions.sort((a, b) => b.line - a.line || b.order - a.order);
   for (const ins of insertions) {
     result.splice(ins.line, 0, ...ins.content);
   }
+
+  removeDuplicateImportsCoveredByIgnoreBlocks(result);
 
   return result.join('\n');
 }
@@ -460,6 +475,7 @@ function stripIgnoreRegions(lines: string[]): string[] {
 
 /** Scan backwards from `lineIdx` to find the nearest class declaration name. */
 function findContainingClass(lines: string[], lineIdx: number): string {
+  if (/^\S/.test(lines[lineIdx] ?? '')) return '';
   // Allow leading whitespace and language-specific modifiers before `class`.
   // Covers: `public class Foo` (C#/Java), `export class Foo` (TS),
   // `class Foo` (Python/Ruby), `internal sealed class Foo` (C#), etc.
@@ -470,6 +486,50 @@ function findContainingClass(lines: string[], lineIdx: number): string {
     if (m) return m[1];
   }
   return '';
+}
+
+function findContainingDescribeScope(lines: string[], lineIdx: number): string {
+  const markerLine = lines[lineIdx] ?? '';
+  if (/^\S/.test(markerLine)) return '';
+  const markerIndent = leadingSpaces(markerLine);
+  for (let j = lineIdx - 1; j >= 0; j--) {
+    const line = lines[j];
+    const indent = leadingSpaces(line);
+    if (indent >= markerIndent) continue;
+    const match = line.match(/^\s*describe\((['"`])(.+?)\1\s*,/);
+    if (match) return match[2];
+    if (/^\s*(?:export\s+)?class\s+\w+/.test(line)) return '';
+  }
+  return '';
+}
+
+function findDescribeScopeEndLine(lines: string[], scopeName: string): number | undefined {
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^\s*describe\((['"`])(.+?)\1\s*,/);
+    if (!match || match[2] !== scopeName) continue;
+
+    let depth = 0;
+    for (let j = i; j < lines.length; j++) {
+      depth += countChar(lines[j], '{');
+      depth -= countChar(lines[j], '}');
+      if (j > i && depth <= 0) return j;
+    }
+  }
+  return undefined;
+}
+
+function leadingSpaces(line: string): number {
+  return line.match(/^\s*/)?.[0].length ?? 0;
+}
+
+function countChar(line: string, char: string): number {
+  return [...line].filter((c) => c === char).length;
+}
+
+function hasTopLevelDeclaration(lines: string[]): boolean {
+  return lines.some((line) =>
+    /^(?:export\s+)?(?:interface|type|class|function|const|let|var|enum)\s+\w+/.test(line.trim()),
+  );
 }
 
 /**
@@ -598,9 +658,13 @@ function collectTsImports(lines: string[]): TsImports {
         .split(',')
         .map((s) => s.trim().replace(/\s+as\s+\w+$/, ''))
         .filter(Boolean);
-      const target = isTypeOnly ? out.typeOnly : out.named;
-      if (!target.has(mod)) target.set(mod, new Set());
-      for (const n of names) target.get(mod)!.add(n);
+      for (const rawName of names) {
+        const isInlineTypeOnly = rawName.startsWith('type ');
+        const name = rawName.replace(/^type\s+/, '');
+        const target = isTypeOnly || isInlineTypeOnly ? out.typeOnly : out.named;
+        if (!target.has(mod)) target.set(mod, new Set());
+        target.get(mod)!.add(name);
+      }
       continue;
     }
 
@@ -644,11 +708,97 @@ function filterOutIgnoreRegions(lines: string[]): string[] {
   return out;
 }
 
+function collectIgnoreRegionUsageText(lines: string[]): string {
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (!skipping && line.includes('@oagen-ignore-start')) {
+      skipping = true;
+      continue;
+    }
+    if (!skipping) continue;
+    if (/^\s*(import|from)\s/.test(line)) continue;
+    out.push(line);
+    if (line.includes('@oagen-ignore-end')) skipping = false;
+  }
+  return out.join('\n');
+}
+
+function removeDuplicateImportsCoveredByIgnoreBlocks(lines: string[]): void {
+  const ignoredImports = new Set<string>();
+  const importStatements = collectImportStatements(lines);
+  for (const stmt of importStatements) {
+    if (stmt.inIgnore) ignoredImports.add(normalizeImportStatement(stmt.lines));
+  }
+  if (ignoredImports.size === 0) return;
+
+  for (const stmt of [...importStatements].reverse()) {
+    if (stmt.inIgnore) continue;
+    if (ignoredImports.has(normalizeImportStatement(stmt.lines))) {
+      lines.splice(stmt.start, stmt.end - stmt.start + 1);
+    }
+  }
+}
+
+function collectImportStatements(
+  lines: string[],
+): Array<{ start: number; end: number; lines: string[]; inIgnore: boolean }> {
+  const statements: Array<{ start: number; end: number; lines: string[]; inIgnore: boolean }> = [];
+  let inIgnore = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!inIgnore && line.includes('@oagen-ignore-start')) {
+      inIgnore = true;
+      continue;
+    }
+    if (inIgnore && line.includes('@oagen-ignore-end')) {
+      inIgnore = false;
+      continue;
+    }
+    if (!isImportLine(line)) continue;
+
+    const start = i;
+    let end = i;
+    const statementLines = [line];
+    const opens = (line.match(/[({]/g) ?? []).length;
+    const closes = (line.match(/[)}]/g) ?? []).length;
+    if (opens > closes) {
+      while (end + 1 < lines.length) {
+        end++;
+        statementLines.push(lines[end]);
+        if ((lines[end].match(/[)}]/g) ?? []).length > 0 && /\bfrom\b/.test(lines[end])) break;
+      }
+      i = end;
+    }
+    statements.push({ start, end, lines: statementLines, inIgnore });
+  }
+  return statements;
+}
+
+function normalizeImportStatement(lines: string[]): string {
+  return lines.join('\n').replace(/,\s*}/g, ' }').replace(/\s+/g, ' ').trim();
+}
+
+function isImportLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /^import(\s|$)/.test(trimmed) ||
+    /^from\s+/.test(trimmed) ||
+    /^use\s+[\w\\]/.test(trimmed) ||
+    /^require(_relative)?\s+['"]/.test(trimmed)
+  );
+}
+
+function identifierUsed(source: string, identifier: string): boolean {
+  return new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(source);
+}
+
 function spliceExtraImports(existingLines: string[], resultLines: string[]): void {
-  // Filter out lines inside @oagen-ignore regions — those imports are
-  // preserved via the ignore-block reinsertion path and must not be
-  // duplicated here.
+  // Imports inside @oagen-ignore regions are converted into normal imports
+  // only when non-import ignore content still references them. This prevents
+  // stale import-only ignore blocks from creating duplicate or unused imports.
   const existingOutsideIgnore = filterOutIgnoreRegions(existingLines);
+  const ignoreRegionText = collectIgnoreRegionUsageText(existingLines);
 
   // Python-style `import hashlib`. Excludes TS forms like `import X from '…'`
   // (have a `from` clause) and TS multi-line type imports whose first line is
@@ -701,21 +851,27 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   }
   for (const [mod, name] of existingTs.defaults) {
     if (generatedTs.defaults.has(mod)) continue;
+    if (!identifierUsed(ignoreRegionText, name)) continue;
     extraTsLines.push(`import ${name} from '${mod}';`);
   }
   for (const [mod, name] of existingTs.namespaces) {
+    if (!identifierUsed(ignoreRegionText, name)) continue;
     if (!generatedTs.namespaces.has(mod)) extraTsLines.push(`import * as ${name} from '${mod}';`);
   }
   for (const [mod, existIds] of existingTs.named) {
     const genIds = generatedTs.named.get(mod) ?? new Set<string>();
     const genTypeIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
-    const extra = [...existIds].filter((id) => !genIds.has(id) && !genTypeIds.has(id));
+    const extra = [...existIds].filter(
+      (id) => !genIds.has(id) && !genTypeIds.has(id) && identifierUsed(ignoreRegionText, id),
+    );
     if (extra.length > 0) extraTsLines.push(`import { ${extra.join(', ')} } from '${mod}';`);
   }
   for (const [mod, existIds] of existingTs.typeOnly) {
     const genIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
     const genNamedIds = generatedTs.named.get(mod) ?? new Set<string>();
-    const extra = [...existIds].filter((id) => !genIds.has(id) && !genNamedIds.has(id));
+    const extra = [...existIds].filter(
+      (id) => !genIds.has(id) && !genNamedIds.has(id) && identifierUsed(ignoreRegionText, id),
+    );
     if (extra.length > 0) extraTsLines.push(`import type { ${extra.join(', ')} } from '${mod}';`);
   }
 
