@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.21.1](https://github.com/workos/oagen/compare/v0.21.0...v0.21.1) (2026-06-01)
+
+
+### Bug Fixes
+
+* **renovate:** explicitly enable minor and patch updates ([#93](https://github.com/workos/oagen/issues/93)) ([888a3a0](https://github.com/workos/oagen/commit/888a3a04c4a9aa8923249bbb9c1fb8a09f1db002))
+* writer idempotency, manifest churn, and parser rename cascading ([#95](https://github.com/workos/oagen/issues/95)) ([5f2d84f](https://github.com/workos/oagen/commit/5f2d84f1ff602b57755408a270da2ebdd14e4b12))
+
 ## [0.21.0](https://github.com/workos/oagen/compare/v0.20.0...v0.21.0) (2026-05-21)
 
 
