@@ -689,4 +689,41 @@ describe('@oagen-ignore-start/end with overwriteExisting', () => {
     // The hand-written value import survives, on its own line.
     expect(result).toContain("import { deserializeEvent } from '../common/serializers';");
   });
+
+  it('keeps same-line top-level ignore block insertion idempotent', async () => {
+    const existing = [
+      "import type { WorkOS } from '../workos';",
+      '',
+      '// @oagen-ignore-start',
+      "import type { KeyContext } from './interfaces/key.interface';",
+      '// @oagen-ignore-end',
+      '// @oagen-ignore-start',
+      'interface Decoded {',
+      '  iv: Uint8Array;',
+      '}',
+      '// @oagen-ignore-end',
+      '',
+      'const helper = 1;',
+      '',
+      'export class Vault {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      "import type { WorkOS } from '../workos';",
+      '',
+      'const helper = 1;',
+      '',
+      'export class Vault {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '}',
+    ].join('\n');
+
+    const once = await overwriteWithPreservedRegions(existing, generated, 'node');
+    const twice = await overwriteWithPreservedRegions(once, generated, 'node');
+
+    expect(twice).toBe(once);
+    expect(once.indexOf('KeyContext')).toBeLessThan(once.indexOf('interface Decoded'));
+  });
 });

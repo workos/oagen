@@ -80,17 +80,16 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
 
-  // schemaNameTransform is kept active through extractOperations so that
-  // $ref-based TypeRefs in operations resolve to the same transformed names.
-  // Now that all extraction is done, clear it.
-  clearSchemaNameTransform();
-
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
 
-  // Extract inline models from model field definitions (objects/arrays with properties)
+  // Extract inline models from model field definitions (objects/arrays with properties).
+  // schemaNameTransform is kept active so inline child names use the
+  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
+  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget).
   const fieldInlineModels = extractInlineModelsFromSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
+  clearSchemaNameTransform();
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   collectInlineEnumsFromModels(finalModels, enums);

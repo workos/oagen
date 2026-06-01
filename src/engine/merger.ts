@@ -231,11 +231,14 @@ export async function extractClassEndLines(
   const map = new Map<string, { bodyEndLine: number }>();
 
   function processClassNode(node: Parser.SyntaxNode): void {
-    const nameNode = node.childForFieldName('name');
+    const nameNode =
+      node.childForFieldName('name') ??
+      node.children.find((c) => c.type === 'type_identifier' || c.type === 'identifier');
     if (!nameNode) return;
     const name = nameNode.text;
 
-    const body = node.childForFieldName('body');
+    const body =
+      node.childForFieldName('body') ?? node.children.find((c) => c.type === 'class_body' || c.type === 'body');
     const endRow = body ? body.endPosition.row : node.endPosition.row;
     const lastChar = source[body ? body.endIndex - 1 : node.endIndex - 1];
 
