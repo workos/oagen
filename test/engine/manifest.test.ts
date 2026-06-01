@@ -99,6 +99,60 @@ describe('manifest read/write', () => {
       await fs.rm(dir, { recursive: true });
     }
   });
+
+  it('preserves generatedAt when manifest content is unchanged', async () => {
+    const dir = await tmp();
+    try {
+      await fs.writeFile(
+        path.join(dir, MANIFEST_FILENAME),
+        JSON.stringify(
+          {
+            version: 2,
+            language: 'node',
+            generatedAt: '2026-01-01T00:00:00.000Z',
+            files: ['a.ts', 'b.ts'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+
+      await writeManifest(dir, { language: 'node', files: ['b.ts', 'a.ts'] });
+      const got = await readManifest(dir);
+
+      expect(got!.generatedAt).toBe('2026-01-01T00:00:00.000Z');
+      expect(got!.files).toEqual(['a.ts', 'b.ts']);
+    } finally {
+      await fs.rm(dir, { recursive: true });
+    }
+  });
+
+  it('refreshes generatedAt when manifest content changes', async () => {
+    const dir = await tmp();
+    try {
+      await fs.writeFile(
+        path.join(dir, MANIFEST_FILENAME),
+        JSON.stringify(
+          {
+            version: 2,
+            language: 'node',
+            generatedAt: '2026-01-01T00:00:00.000Z',
+            files: ['a.ts'],
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+
+      await writeManifest(dir, { language: 'node', files: ['a.ts', 'b.ts'] });
+      const got = await readManifest(dir);
+
+      expect(got!.generatedAt).not.toBe('2026-01-01T00:00:00.000Z');
+      expect(got!.files).toEqual(['a.ts', 'b.ts']);
+    } finally {
+      await fs.rm(dir, { recursive: true });
+    }
+  });
 });
 
 describe('computeStalePaths', () => {

@@ -31,7 +31,7 @@ export interface Manifest {
   language: string;
   /** Human-readable or package-level SDK identity (e.g. "workos-php"). */
   sdkName?: string;
-  /** ISO-8601 timestamp of the run that produced this manifest. */
+  /** ISO-8601 timestamp of the run that produced the current manifest contents. */
   generatedAt: string;
   /** SHA-256 hash of the source OpenAPI spec used for generation. */
   specSha?: string;
@@ -109,6 +109,7 @@ export interface WriteManifestOpts {
 
 /** Write `.oagen-manifest.json` to a directory with sorted paths. */
 export async function writeManifest(dir: string, opts: WriteManifestOpts): Promise<void> {
+  const manifestPath = path.join(dir, MANIFEST_FILENAME);
   const manifest: Manifest = {
     version: MANIFEST_VERSION,
     language: opts.language,
@@ -123,9 +124,18 @@ export async function writeManifest(dir: string, opts: WriteManifestOpts): Promi
     files: [...new Set(opts.files)].sort(),
     ...(opts.operations !== undefined ? { operations: opts.operations } : {}),
   };
-  const manifestPath = path.join(dir, MANIFEST_FILENAME);
+  const previous = await readManifest(dir);
+  if (previous && sameManifestExceptGeneratedAt(previous, manifest)) {
+    manifest.generatedAt = previous.generatedAt;
+  }
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
+}
+
+function sameManifestExceptGeneratedAt(a: Manifest, b: Manifest): boolean {
+  const { generatedAt: _aGeneratedAt, ...aComparable } = a;
+  const { generatedAt: _bGeneratedAt, ...bComparable } = b;
+  return JSON.stringify(aComparable) === JSON.stringify(bComparable);
 }
 
 /** Return the set of previous paths no longer present in the current emission. */
