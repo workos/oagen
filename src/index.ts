@@ -138,3 +138,15 @@ export type { OperationPlan } from './engine/operation-plan.js';
 
 // Config typing for emitter projects
 export type { OagenConfig } from './cli/config-loader.js';
+
+// Snippet emitters — render call-site samples per resolved operation for use
+// in REST API documentation, partner tooling, and other spec-driven docs.
+export type { SnippetEmitter, SnippetResult, ExampleBuilder, SnippetArg, CollectedArgs } from './snippets/index.js';
+export {
+  createExampleBuilder,
+  runSnippetEmitters,
+  snippetResultsToFiles,
+  collectSnippetArgs,
+  collectWrapperArgs,
+  hiddenParamSet,
+} from './snippets/index.js';
