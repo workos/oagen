@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.4](https://github.com/workos/oagen/compare/v0.22.3...v0.22.4) (2026-06-03)
+
+
+### Bug Fixes
+
+* preserve blank line before ignore blocks after C# using directives ([06c197e](https://github.com/workos/oagen/commit/06c197efe35175d9707a0af003c6fa0e3e492653))
+
 ## [0.22.3](https://github.com/workos/oagen/compare/v0.22.2...v0.22.3) (2026-06-03)
 
 
