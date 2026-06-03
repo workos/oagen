@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.3](https://github.com/workos/oagen/compare/v0.22.2...v0.22.3) (2026-06-03)
+
+
+### Bug Fixes
+
+* pin tree-sitter-c-sharp to exact 0.23.1 ([3284a68](https://github.com/workos/oagen/commit/3284a68e4ef9ec287f0c19bba4632bcc8ae5509d))
+
 ## [0.22.2](https://github.com/workos/oagen/compare/v0.22.1...v0.22.2) (2026-06-03)
 
 
