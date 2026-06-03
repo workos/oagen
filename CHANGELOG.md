@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/workos/oagen/compare/v0.22.1...v0.22.2) (2026-06-03)
+
+
+### Bug Fixes
+
+* skip ambiguous anchors and pin tree-sitter-c-sharp ([#100](https://github.com/workos/oagen/issues/100)) ([da7be0e](https://github.com/workos/oagen/commit/da7be0e30ddd9259b8296f36ae19297116e9579f))
+
 ## [0.22.1](https://github.com/workos/oagen/compare/v0.22.0...v0.22.1) (2026-06-03)
 
 
