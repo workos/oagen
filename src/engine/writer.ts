@@ -429,8 +429,10 @@ export async function overwriteWithPreservedRegions(
 
       // Skip the leading blank line when the block is adjacent to imports
       // or already preceded by a blank line (avoids double-blank-line gaps).
+      // Exclude C# `using` directives — StyleCop SA1515 requires a blank
+      // line before comments, so collapsing breaks the build.
       const prevLine = insertLine > 0 ? (result[insertLine - 1]?.trimStart() ?? '') : '';
-      const prevIsImport = /^import\s/.test(prevLine) || /^using\s/.test(prevLine) || /^from\s/.test(prevLine);
+      const prevIsImport = /^import\s/.test(prevLine) || /^from\s/.test(prevLine);
       const prevIsBlank = insertLine > 0 && prevLine === '';
       const blockContent = prevIsImport || prevIsBlank ? [...entry.lines] : ['', ...entry.lines];
       // Add a trailing blank line when the next line is a doc comment
