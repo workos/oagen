@@ -368,7 +368,16 @@ export async function overwriteWithPreservedRegions(
       // Skip anchors that are just punctuation (braces, etc.) since they
       // match too many locations. Accept doc comment starters (/** /// #)
       // as valid anchors since they're structurally meaningful.
-      if (entry.anchor && !entry.anchor.includes('@oagen-ignore') && /[a-zA-Z]|^\/\*|^\/\//.test(entry.anchor)) {
+      // Also skip bare language keywords (`end`, `end;`, `end)`) that appear
+      // on many lines and would match the wrong location (e.g. nesting the
+      // block inside a Ruby method body instead of at class level).
+      const isAmbiguousAnchor = /^end[;)\s]*$/.test(entry.anchor);
+      if (
+        entry.anchor &&
+        !entry.anchor.includes('@oagen-ignore') &&
+        !isAmbiguousAnchor &&
+        /[a-zA-Z]|^\/\*|^\/\//.test(entry.anchor)
+      ) {
         for (let li = 0; li < result.length; li++) {
           if (result[li].trimStart() === entry.anchor) {
             insertLine = li;
