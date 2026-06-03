@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/workos/oagen/compare/v0.22.0...v0.22.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* respect overwriteExisting for test files without autogen header ([#96](https://github.com/workos/oagen/issues/96)) ([be9efc5](https://github.com/workos/oagen/commit/be9efc5212066ff8afaa04de22250d96dcdb46f7))
+
 ## [0.22.0](https://github.com/workos/oagen/compare/v0.21.1...v0.22.0) (2026-06-03)
 
 
