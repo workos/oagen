@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/workos/oagen/compare/v0.21.1...v0.22.0) (2026-06-03)
+
+
+### Features
+
+* **snippets:** add snippet emitter framework primitives ([#97](https://github.com/workos/oagen/issues/97)) ([2c75d77](https://github.com/workos/oagen/commit/2c75d77dc46a1ff8a021181e4b3835dc743befa6))
+
 ## [0.21.1](https://github.com/workos/oagen/compare/v0.21.0...v0.21.1) (2026-06-01)
 
 
