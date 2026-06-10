@@ -886,6 +886,67 @@ end
     expect(result.changed).toBe(false);
     expect(result.content).toContain(':custom');
   });
+
+  it('treats a declaration inside an ignore region as present (no duplicate append)', async () => {
+    const existing = `${header}
+
+// @oagen-ignore-start
+export interface GenerateLink {
+  intent: string;
+  customField: boolean;
+}
+// @oagen-ignore-end
+
+export interface GenerateLinkResponse {
+  link: string;
+}
+`;
+    const generated = `${header}
+
+export interface GenerateLink {
+  intent: string;
+}
+
+export interface GenerateLinkResponse {
+  link: string;
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+
+    expect(result.changed).toBe(false);
+    expect((result.content.match(/export interface GenerateLink \{/g) || []).length).toBe(1);
+    expect(result.content).toContain('customField: boolean');
+  });
+
+  it('treats a type alias inside an ignore region as present when generated declares an interface of the same name', async () => {
+    const existing = `${header}
+
+// @oagen-ignore-start
+export type CreateResponse = WireCreateResponse;
+// @oagen-ignore-end
+
+export interface WireCreateResponse {
+  id: string;
+}
+`;
+    const generated = `${header}
+
+export interface CreateResponse {
+  id: string;
+}
+
+export interface WireCreateResponse {
+  id: string;
+}
+`;
+
+    const result = await mergeIntoExisting(existing, generated, 'node', header);
+
+    expect(result.changed).toBe(false);
+    expect(result.content).not.toContain('export interface CreateResponse');
+    expect(result.content).toContain('export type CreateResponse = WireCreateResponse;');
+  });
 });
 
 describe('deep merge', () => {
