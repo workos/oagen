@@ -1,6 +1,6 @@
 # oagen
 
-oagen ([**oʊweɪdd͡ʒɛn**](https://ipa-reader.com/?text=o%CA%8Awe%C9%AAdd%CD%A1%CA%92%C9%9Bn)) is a framework for building custom SDK generators from OpenAPI 3.x specifications.
+oagen ([oʊweɪdd͡ʒɛn](https://ipa-reader.com/?text=o%CA%8Awe%C9%AAdd%CD%A1%CA%92%C9%9Bn)) is a framework for building custom SDK generators from OpenAPI 3.x specifications.
 
 Its core job is narrow:
 
