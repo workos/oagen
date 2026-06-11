@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { GeneratedFile } from './types.js';
-import { mergeIntoExisting, hasGrammar, extractClassEndLines } from './merger.js';
+import { mergeIntoExisting, hasGrammar, extractClassEndLines, extractStatements } from './merger.js';
 import { deepMergeJson } from './json-merge.js';
 import { getMergeAdapter } from './merge-adapters/index.js';
 
@@ -345,10 +345,39 @@ export async function overwriteWithPreservedRegions(
     result.splice(rep.startLine, rep.endLine - rep.startLine, ...rep.content);
   }
 
+  // 4a-bis. Top-level declarations protected by ignore regions win over their
+  //         generated counterparts. For each top-level block, drop generated
+  //         declarations (interface/type/const/function/…) whose names are
+  //         declared inside the block; the block content replaces the first
+  //         such declaration in place. Without this, every regeneration
+  //         re-emits a duplicate of each region-protected declaration.
+  let regionDeclarationEdits = 0;
+  {
+    const topLevelEntries = blocksByClass.get('');
+    if (topLevelEntries) {
+      // When 4a already placed the top-level blocks (as part of a class
+      // replacement), only delete generated duplicates — never re-insert.
+      const alreadyPlaced = handledBlockKeys.has('');
+      const remaining: typeof topLevelEntries = [];
+      for (const entry of topLevelEntries) {
+        const outcome = await applyRegionDeclarationOverride(result, entry.lines, language, !alreadyPlaced);
+        if (outcome.edited) regionDeclarationEdits++;
+        if (!alreadyPlaced && !outcome.placed) remaining.push(entry);
+      }
+      if (!alreadyPlaced) {
+        if (remaining.length === 0) {
+          blocksByClass.delete('');
+        } else {
+          blocksByClass.set('', remaining);
+        }
+      }
+    }
+  }
+
   // 4b. Standard insertions for non-replacement blocks
   // Rebuild class end lines if replacements shifted line numbers.
   let effectiveClassEndLines = classEndLines;
-  if (replacedClasses.size > 0) {
+  if (replacedClasses.size > 0 || regionDeclarationEdits > 0) {
     effectiveClassEndLines = await extractClassEndLines(result.join('\n'), language);
   }
 
@@ -560,6 +589,143 @@ function findClassDeclarationStart(lines: string[], className: string, beforeLin
     return start;
   }
   return -1;
+}
+
+// --- region-protected top-level declaration overrides ---
+
+/**
+ * Conservative top-level declaration matcher for ignore-block content.
+ * Matches column-0 declarations like `export interface X`, `type X = …`,
+ * `const X = …`, `function X(…)`, `class X` (export optional). Names found
+ * here are only acted on when the language's merge adapter also reports a
+ * generated top-level statement with the same key, so false positives are
+ * filtered by the real parser.
+ */
+const REGION_DECLARATION_PATTERN =
+  /^(?:export\s+)?(?:declare\s+)?(?:interface|type|enum|class|const|let|var|async\s+function|function)\s+([A-Za-z_$][\w$]*)/;
+
+/** Extract top-level symbol names declared inside an ignore block's lines. */
+function collectRegionDeclaredNames(blockLines: string[]): Set<string> {
+  const names = new Set<string>();
+  for (const line of blockLines) {
+    if (line.includes('@oagen-ignore')) continue;
+    const m = line.match(REGION_DECLARATION_PATTERN);
+    if (m) names.add(m[1]);
+  }
+  return names;
+}
+
+/** Inclusive line ranges of `@oagen-ignore-start`..`@oagen-ignore-end` regions. */
+function collectIgnoreRegionLineRanges(lines: string[]): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (start === -1 && lines[i].includes('@oagen-ignore-start')) {
+      start = i;
+      continue;
+    }
+    if (start !== -1 && lines[i].includes('@oagen-ignore-end')) {
+      ranges.push({ start, end: i });
+      start = -1;
+    }
+  }
+  return ranges;
+}
+
+/**
+ * Walk upward from a declaration's first line over its contiguous comment
+ * block (doc comment), so the comment is dropped together with the
+ * declaration. Stops at blank lines, region markers, and line 0 (a comment
+ * on line 0 is the file header, not a docstring).
+ */
+function extendOverPrecedingComments(lines: string[], startLine: number): number {
+  let s = startLine;
+  while (s > 1) {
+    const prev = lines[s - 1].trim();
+    if (prev === '' || prev.includes('@oagen-ignore')) break;
+    const isComment = prev.startsWith('//') || prev.startsWith('/*') || prev.startsWith('*') || prev.startsWith('#');
+    if (!isComment) break;
+    s--;
+  }
+  return s;
+}
+
+/**
+ * Drop generated top-level declarations that are redeclared inside an ignore
+ * block ("region wins"). When `placeBlock` is set and at least one generated
+ * declaration matches, the block's lines replace the first match in place
+ * (mirroring the class-replacement behavior above); any further matches are
+ * deleted. Mutates `result` in place.
+ *
+ * Returns `placed` (the block content now lives in `result` and must not be
+ * inserted again) and `edited` (line numbers shifted).
+ */
+async function applyRegionDeclarationOverride(
+  result: string[],
+  blockLines: string[],
+  language: string,
+  placeBlock: boolean,
+): Promise<{ placed: boolean; edited: boolean }> {
+  const names = collectRegionDeclaredNames(blockLines);
+  if (names.size === 0) return { placed: false, edited: false };
+
+  const source = result.join('\n');
+  let parsed;
+  try {
+    parsed = await extractStatements(source, language);
+  } catch {
+    return { placed: false, edited: false };
+  }
+
+  const regionRanges = collectIgnoreRegionLineRanges(result);
+  const inRegion = (line: number) => regionRanges.some((r) => line >= r.start && line <= r.end);
+
+  const spans: Array<{ start: number; end: number }> = [];
+  for (const stmt of parsed.statements) {
+    if (stmt.kind !== 'declaration' || !stmt.key || !names.has(stmt.key)) continue;
+    // Locate the statement's line span; skip occurrences inside ignore
+    // regions (those ARE the protected content).
+    let idx = source.indexOf(stmt.text);
+    let startLine = -1;
+    while (idx !== -1) {
+      const line = source.slice(0, idx).split('\n').length - 1;
+      if (!inRegion(line)) {
+        startLine = line;
+        break;
+      }
+      idx = source.indexOf(stmt.text, idx + 1);
+    }
+    if (startLine === -1) continue;
+    const endLine = startLine + stmt.text.split('\n').length - 1;
+    spans.push({ start: extendOverPrecedingComments(result, startLine), end: endLine });
+  }
+  if (spans.length === 0) return { placed: false, edited: false };
+
+  spans.sort((a, b) => a.start - b.start);
+
+  // Delete all matches after the first, bottom-up to preserve indices.
+  for (let i = spans.length - 1; i >= 1; i--) {
+    const span = spans[i];
+    let deleteCount = span.end - span.start + 1;
+    // Collapse the blank separator the deletion leaves behind.
+    const prevBlank = span.start === 0 || (result[span.start - 1] ?? '').trim() === '';
+    const nextBlank = (result[span.end + 1] ?? '').trim() === '';
+    if (prevBlank && nextBlank && span.end + 1 < result.length) deleteCount++;
+    result.splice(span.start, deleteCount);
+  }
+
+  const first = spans[0];
+  if (placeBlock) {
+    result.splice(first.start, first.end - first.start + 1, ...blockLines);
+    return { placed: true, edited: true };
+  }
+
+  let deleteCount = first.end - first.start + 1;
+  const prevBlank = first.start === 0 || (result[first.start - 1] ?? '').trim() === '';
+  const nextBlank = (result[first.end + 1] ?? '').trim() === '';
+  if (prevBlank && nextBlank && first.end + 1 < result.length) deleteCount++;
+  result.splice(first.start, deleteCount);
+  return { placed: false, edited: true };
 }
 
 /**
