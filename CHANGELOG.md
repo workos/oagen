@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.5](https://github.com/workos/oagen/compare/v0.22.4...v0.22.5) (2026-06-11)
+
+
+### Bug Fixes
+
+* **engine:** treat region-protected declarations as present during merge ([#104](https://github.com/workos/oagen/issues/104)) ([e8e1299](https://github.com/workos/oagen/commit/e8e12992ffdd4c8a6cd684752b17b52e575a6df9))
+
 ## [0.22.4](https://github.com/workos/oagen/compare/v0.22.3...v0.22.4) (2026-06-03)
 
 
