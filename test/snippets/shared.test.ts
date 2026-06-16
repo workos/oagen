@@ -124,6 +124,35 @@ describe('snippets/shared: collectSnippetArgs', () => {
     expect(collisionNames).toEqual(new Set(['id']));
   });
 
+  it('de-duplicates a field present in both the request body and query params', () => {
+    const op = makeOp({
+      path: '/sso/token',
+      httpMethod: 'post',
+      requestBody: { kind: 'model', name: 'Req' },
+      queryParams: [{ name: 'code', type: { kind: 'primitive', type: 'string' }, required: true, example: 'q_code' }],
+    });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec(
+      [service],
+      [
+        {
+          name: 'Req',
+          fields: [{ name: 'code', type: { kind: 'primitive', type: 'string' }, required: true, example: 'b_code' }],
+        },
+      ],
+    );
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const examples = createExampleBuilder(spec);
+    const { args } = collectSnippetArgs(ctx.resolvedOperations![0]!, ctx, examples);
+    expect(args.map((a) => a.wireName)).toEqual(['code']);
+    expect(args.map((a) => a.source)).toEqual(['body']);
+  });
+
   it('hides params injected via defaults or inferFromClient', () => {
     const op = makeOp({
       requestBody: { kind: 'model', name: 'Req' },

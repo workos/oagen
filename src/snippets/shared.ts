@@ -67,6 +67,7 @@ export function collectSnippetArgs(
   }
 
   const collisionNames = new Set<string>();
+  const bodyWireNames = new Set<string>();
   if (op.requestBody?.kind === 'model') {
     const bodyModel = findModel(ctx, op.requestBody.name);
     if (bodyModel) {
@@ -74,6 +75,7 @@ export function collectSnippetArgs(
         if (!f.required || f.deprecated) continue;
         if (hidden.has(f.name)) continue;
         if (pathWireNames.has(f.name)) collisionNames.add(f.name);
+        bodyWireNames.add(f.name);
         args.push({
           source: 'body',
           wireName: f.name,
@@ -88,6 +90,11 @@ export function collectSnippetArgs(
   for (const q of op.queryParams) {
     if (!q.required) continue;
     if (hidden.has(q.name)) continue;
+    // Some operations (e.g. OAuth-style token endpoints) accept the same field
+    // via both the query string and the request body. The IR keeps both for
+    // wire-format fidelity, but a call site must pass each argument only once,
+    // so skip a query param already emitted as a body field or path param.
+    if (bodyWireNames.has(q.name) || pathWireNames.has(q.name)) continue;
     args.push({
       source: 'query',
       wireName: q.name,
