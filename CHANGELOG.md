@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.6](https://github.com/workos/oagen/compare/v0.22.5...v0.22.6) (2026-06-16)
+
+
+### Bug Fixes
+
+* **snippets:** de-duplicate fields present in both query and body ([#109](https://github.com/workos/oagen/issues/109)) ([433dda0](https://github.com/workos/oagen/commit/433dda00daef4ebd7b322236e7020b3299850db6))
+* **snippets:** scope query/body dedupe to body fields only ([#111](https://github.com/workos/oagen/issues/111)) ([8a367cf](https://github.com/workos/oagen/commit/8a367cf97036e780ab9523daeb48dd9b1da92d3f))
+
 ## [0.22.5](https://github.com/workos/oagen/compare/v0.22.4...v0.22.5) (2026-06-11)
 
 
