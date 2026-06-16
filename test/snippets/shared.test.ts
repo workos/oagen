@@ -153,6 +153,28 @@ describe('snippets/shared: collectSnippetArgs', () => {
     expect(args.map((a) => a.source)).toEqual(['body']);
   });
 
+  it('keeps a query param that only shares a name with a path param', () => {
+    // Dedup is scoped to body fields; a query param colliding with a path
+    // param is positional vs. options, so both are retained (no silent drop).
+    const op = makeOp({
+      path: '/things/{id}',
+      pathParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true, example: 'p1' }],
+      queryParams: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true, example: 'q1' }],
+    });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec([service]);
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const examples = createExampleBuilder(spec);
+    const { args } = collectSnippetArgs(ctx.resolvedOperations![0]!, ctx, examples);
+    expect(args.map((a) => a.source)).toEqual(['path', 'query']);
+    expect(args.map((a) => a.wireName)).toEqual(['id', 'id']);
+  });
+
   it('hides params injected via defaults or inferFromClient', () => {
     const op = makeOp({
       requestBody: { kind: 'model', name: 'Req' },
