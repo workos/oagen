@@ -93,8 +93,11 @@ export function collectSnippetArgs(
     // Some operations (e.g. OAuth-style token endpoints) accept the same field
     // via both the query string and the request body. The IR keeps both for
     // wire-format fidelity, but a call site must pass each argument only once,
-    // so skip a query param already emitted as a body field or path param.
-    if (bodyWireNames.has(q.name) || pathWireNames.has(q.name)) continue;
+    // so skip a query param already emitted as a body field. A query param
+    // that merely shares a path param's name is left intact: path args are
+    // positional and never share the options object, so there is no clash to
+    // resolve (path/body collisions are handled separately via collisionNames).
+    if (bodyWireNames.has(q.name)) continue;
     args.push({
       source: 'query',
       wireName: q.name,
