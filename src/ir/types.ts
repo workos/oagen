@@ -204,6 +204,15 @@ export interface Model {
 
 export interface Field {
   name: string;
+  /**
+   * Optional domain-facing name override. When set, emitters derive the
+   * domain-side identifier (in their own casing) from this instead of `name`,
+   * while serialization still uses `name` for the wire key. Lets an SDK expose
+   * a wire field under a friendlier name (e.g. `connection_type` → `type`)
+   * without changing the API contract. Set via the `fieldHints` config and
+   * honored by any emitter that reads it.
+   */
+  domainName?: string;
   type: TypeRef;
   required: boolean;
   description?: string;
