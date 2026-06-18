@@ -1023,32 +1023,39 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   const generatedTs = collectTsImports(resultLines);
   const extraTsLines: string[] = [];
 
+  // Every binding the generated file already imports, regardless of module.
+  // The generator frequently imports a symbol from a concrete file
+  // (`./interfaces/connection.interface`) while the existing hand-written file
+  // imported the same symbol from a barrel (`./interfaces`). Splicing the
+  // barrel form back in would re-declare the binding (TS2300 duplicate
+  // identifier), so a symbol already in scope is never re-imported even from a
+  // different specifier.
+  const allGeneratedTsIds = new Set<string>();
+  for (const ids of generatedTs.named.values()) for (const id of ids) allGeneratedTsIds.add(id);
+  for (const ids of generatedTs.typeOnly.values()) for (const id of ids) allGeneratedTsIds.add(id);
+  for (const name of generatedTs.defaults.values()) allGeneratedTsIds.add(name);
+  for (const name of generatedTs.namespaces.values()) allGeneratedTsIds.add(name);
+
   for (const mod of existingTs.sideEffects) {
     if (!generatedTs.sideEffects.has(mod)) extraTsLines.push(`import '${mod}';`);
   }
   for (const [mod, name] of existingTs.defaults) {
     if (generatedTs.defaults.has(mod)) continue;
+    if (allGeneratedTsIds.has(name)) continue;
     if (!identifierUsed(ignoreRegionText, name)) continue;
     extraTsLines.push(`import ${name} from '${mod}';`);
   }
   for (const [mod, name] of existingTs.namespaces) {
     if (!identifierUsed(ignoreRegionText, name)) continue;
+    if (allGeneratedTsIds.has(name)) continue;
     if (!generatedTs.namespaces.has(mod)) extraTsLines.push(`import * as ${name} from '${mod}';`);
   }
   for (const [mod, existIds] of existingTs.named) {
-    const genIds = generatedTs.named.get(mod) ?? new Set<string>();
-    const genTypeIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
-    const extra = [...existIds].filter(
-      (id) => !genIds.has(id) && !genTypeIds.has(id) && identifierUsed(ignoreRegionText, id),
-    );
+    const extra = [...existIds].filter((id) => !allGeneratedTsIds.has(id) && identifierUsed(ignoreRegionText, id));
     if (extra.length > 0) extraTsLines.push(`import { ${extra.join(', ')} } from '${mod}';`);
   }
   for (const [mod, existIds] of existingTs.typeOnly) {
-    const genIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
-    const genNamedIds = generatedTs.named.get(mod) ?? new Set<string>();
-    const extra = [...existIds].filter(
-      (id) => !genIds.has(id) && !genNamedIds.has(id) && identifierUsed(ignoreRegionText, id),
-    );
+    const extra = [...existIds].filter((id) => !allGeneratedTsIds.has(id) && identifierUsed(ignoreRegionText, id));
     if (extra.length > 0) extraTsLines.push(`import type { ${extra.join(', ')} } from '${mod}';`);
   }
 
