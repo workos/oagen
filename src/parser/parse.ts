@@ -26,6 +26,13 @@ export interface ParseOptions {
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
   /**
+   * Domain-facing field-name overrides, keyed by IR model name then wire field
+   * name: `{ Connection: { connection_type: 'type' } }`. Sets `Field.domainName`
+   * so emitters expose the field under the friendlier name while keeping the
+   * wire key. Language-agnostic — honored by any emitter that reads `domainName`.
+   */
+  fieldHints?: Record<string, Record<string, string>>;
+  /**
    * Pre-IR overlay applied to the bundled OpenAPI document before any IR
    * extraction runs. Use this when the upstream spec can't be changed but you
    * need to patch around a spec quirk that would otherwise emit a breaking SDK
@@ -92,6 +99,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   clearSchemaNameTransform();
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
+  applyFieldHints(finalModels, options?.fieldHints);
   collectInlineEnumsFromModels(finalModels, enums);
   collectInlineEnumsFromOperations(services, enums);
 
@@ -118,6 +126,26 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
 
   return result;
 }
+/**
+ * Apply `fieldHints` onto the built models, setting `Field.domainName` for each
+ * matching (model name, wire field name) pair. Serialization still uses
+ * `Field.name`; only the domain-facing identifier changes.
+ */
+function applyFieldHints(
+  models: import('../ir/types.js').Model[],
+  fieldHints: Record<string, Record<string, string>> | undefined,
+): void {
+  if (!fieldHints) return;
+  for (const model of models) {
+    const hints = fieldHints[model.name];
+    if (!hints) continue;
+    for (const field of model.fields) {
+      const domainName = hints[field.name];
+      if (domainName) field.domainName = domainName;
+    }
+  }
+}
+
 /** Extract authentication schemes from OpenAPI securitySchemes. */
 function extractAuthSchemes(
   securitySchemes?: Record<

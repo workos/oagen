@@ -23,12 +23,14 @@ export async function generateCommand(opts: {
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
   modelHints?: Record<string, string>;
+  fieldHints?: Record<string, Record<string, string>>;
   emitterOptions?: Record<string, unknown>;
 }): Promise<void> {
   let ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
+    fieldHints: opts.fieldHints,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);

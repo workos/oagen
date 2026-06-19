@@ -40,6 +40,7 @@ let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
 let configModelHints: Record<string, string> | undefined;
+let configFieldHints: Record<string, Record<string, string>> | undefined;
 let configEmitterOptions: Record<string, Record<string, unknown>> | undefined;
 let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
@@ -54,6 +55,7 @@ try {
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
     configModelHints = config.modelHints;
+    configFieldHints = config.fieldHints;
     configEmitterOptions = config.emitterOptions;
     configCompat = config.compat;
   }
@@ -112,6 +114,7 @@ program
       operationHints: configOperationHints,
       mountRules: configMountRules,
       modelHints: configModelHints,
+      fieldHints: configFieldHints,
       emitterOptions: configEmitterOptions?.[opts.lang],
     }).catch(handleError);
   });

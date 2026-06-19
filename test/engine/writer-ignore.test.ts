@@ -241,6 +241,116 @@ describe('@oagen-ignore-start/end with overwriteExisting', () => {
     expect(result).toContain('constructEvent()');
   });
 
+  it('preserves a value import when the generated file imports the symbol type-only', async () => {
+    // PR #112 review r3438661331: the cross-module dedup set conflated value
+    // and type bindings. A generated `import type { X }` must NOT suppress an
+    // existing value `import { X }` that a preserved region uses at runtime —
+    // otherwise the region is left referencing a compile-time-erased binding
+    // (TS2693 "only refers to a type, but is being used as a value").
+    const existing = [
+      "import { DateUtil } from './utils/date-util';",
+      "import type { WorkOS } from './workos';",
+      '',
+      'export class Reports {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '',
+      '  // @oagen-ignore-start',
+      '  formatStamp(): string {',
+      '    return DateUtil.now();', // runtime VALUE use
+      '  }',
+      '  // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    // Generated imports the SAME symbol, type-only, from a DIFFERENT module.
+    const generated = [
+      "import type { WorkOS } from './workos';",
+      "import type { DateUtil } from './interfaces/date-util.interface';",
+      '',
+      'export class Reports {',
+      '  constructor(private readonly workos: WorkOS) {}',
+      '',
+      '  asType(): DateUtil { return {} as DateUtil; }',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'node');
+
+    // The runtime value use survives…
+    expect(result).toContain('DateUtil.now()');
+    // …backed by a runtime-capable (non-type-only) import from the hand-written module.
+    expect(result).toMatch(/^import \{ DateUtil \} from '\.\/utils\/date-util';$/m);
+
+    // The generated type-only import is dropped (its only binding was reclaimed),
+    // so exactly one statement binds DateUtil — no TS2300 duplicate, no orphan.
+    const dateUtilImports = result.split('\n').filter((l) => /^import\b/.test(l.trim()) && /\bDateUtil\b/.test(l));
+    expect(dateUtilImports).toHaveLength(1);
+    expect(result).not.toContain('date-util.interface');
+  });
+
+  it('reclaims a same-module type-only import as a value import when a region needs the runtime binding', async () => {
+    // Same collision as above, but the generated type-only import is from the
+    // SAME module — splicing the value import alongside it would still be a
+    // duplicate identifier, so the type-only binding must be dropped.
+    const existing = [
+      "import { Encryptor } from './crypto';",
+      '',
+      'export class Vault {',
+      '  // @oagen-ignore-start',
+      '  seal(s: string): string {',
+      '    return new Encryptor().seal(s);', // runtime VALUE use
+      '  }',
+      '  // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      "import type { Encryptor } from './crypto';",
+      '',
+      'export class Vault {',
+      '  describe(): Encryptor { return {} as Encryptor; }',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'node');
+
+    expect(result).toContain('new Encryptor()');
+    const encryptorImports = result.split('\n').filter((l) => /^import\b/.test(l.trim()) && /\bEncryptor\b/.test(l));
+    expect(encryptorImports).toHaveLength(1);
+    // The surviving import is a value import, not `import type`.
+    expect(encryptorImports[0].trim()).toBe("import { Encryptor } from './crypto';");
+  });
+
+  it('does not duplicate a value symbol re-imported from a different module specifier', async () => {
+    // Regression guard for the cross-module dedup (commit 7e9e36c): when the
+    // generated file already imports a symbol as a VALUE from a concrete file,
+    // the existing barrel value import must not be spliced back (TS2300). The
+    // value/type split must not weaken this.
+    const existing = [
+      "import { Connection } from './interfaces';",
+      '',
+      'export class SSO {',
+      '  // @oagen-ignore-start',
+      '  wrap(c: Connection): Connection { return c; }',
+      '  // @oagen-ignore-end',
+      '}',
+    ].join('\n');
+
+    const generated = [
+      "import { Connection } from './interfaces/connection.interface';",
+      '',
+      'export class SSO {',
+      '  get(): Connection { return {} as Connection; }',
+      '}',
+    ].join('\n');
+
+    const result = await overwriteWithPreservedRegions(existing, generated, 'node');
+
+    const connImports = result.split('\n').filter((l) => /^import\b/.test(l.trim()) && /\bConnection\b/.test(l));
+    expect(connImports).toHaveLength(1);
+    expect(connImports[0]).toContain('connection.interface');
+  });
+
   it('preserves hand-written PHP `use` imports during overwrite', async () => {
     // PHP `use Foo\Bar;` and `use Foo\Bar as Baz;` referenced from inside an
     // @oagen-ignore-start/end block must land alongside the other top-level

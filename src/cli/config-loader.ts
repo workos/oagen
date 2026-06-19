@@ -73,6 +73,13 @@ export interface OagenConfig {
    */
   modelHints?: Record<string, string>;
   /**
+   * Domain-facing field-name overrides, keyed by IR model name then wire field
+   * name: `{ Connection: { connection_type: 'type' } }`. Sets `Field.domainName`
+   * so every emitter can expose the field under a friendlier domain name while
+   * keeping the wire key unchanged.
+   */
+  fieldHints?: Record<string, Record<string, string>>;
+  /**
    * Language-specific emitter options. The CLI passes only the active
    * language's option bag to that emitter.
    */

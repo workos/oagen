@@ -857,6 +857,68 @@ function collectTsImports(lines: string[]): TsImports {
 }
 
 /**
+ * Remove the given symbols from generated `import type` bindings, in place.
+ *
+ * Called when an existing *value* import for the same symbol is being spliced
+ * back into the file. A value import satisfies both runtime and type uses, so
+ * leaving the generated `import type { X }` would re-declare `X` (TS2300
+ * duplicate identifier). Callers guarantee every symbol here is absent from
+ * generated *value* imports, so each occurrence is type-only and safe to drop.
+ *
+ * Handles whole-line `import type { … }` and inline `import { …, type X }`,
+ * single- or multi-line. A statement whose bindings all get stripped is
+ * removed entirely.
+ */
+function dropGeneratedTypeOnlyBindings(resultLines: string[], symbols: Set<string>): void {
+  if (symbols.size === 0) return;
+  const out: string[] = [];
+  for (let i = 0; i < resultLines.length; i++) {
+    const line = resultLines[i];
+    const trimmed = line.trim();
+    // Only named imports (with a brace) can carry the symbols we strip.
+    if (!/^import\b/.test(trimmed) || !trimmed.includes('{')) {
+      out.push(line);
+      continue;
+    }
+    // Gather the full (possibly multi-line) `{ … }` statement.
+    const span = [line];
+    while (!span.join(' ').includes('}') && i + 1 < resultLines.length) {
+      i++;
+      span.push(resultLines[i]);
+    }
+    const normalized = span.join(' ').replace(/\s+/g, ' ').trim().replace(/;\s*$/, '');
+    const m = normalized.match(/^import\s+(type\s+)?(?:(\w+)\s*,\s*)?\{\s*([^}]*)\s*\}\s+from\s+(['"][^'"]+['"])$/);
+    if (!m) {
+      for (const s of span) out.push(s);
+      continue;
+    }
+    const isTypeOnly = !!m[1];
+    const defaultName = m[2];
+    const items = m[3]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const modQuoted = m[4];
+    const kept = items.filter((raw) => {
+      const isTypeBinding = isTypeOnly || raw.startsWith('type ');
+      const bare = raw.replace(/^type\s+/, '');
+      return !(isTypeBinding && symbols.has(bare));
+    });
+    if (kept.length === items.length) {
+      // Nothing stripped — preserve the original lines verbatim.
+      for (const s of span) out.push(s);
+      continue;
+    }
+    if (kept.length === 0 && !defaultName) continue; // statement fully emptied
+    const lead = line.match(/^(\s*)/)?.[1] ?? '';
+    const prefix = isTypeOnly ? 'import type ' : 'import ';
+    const defaultPart = defaultName ? `${defaultName}, ` : '';
+    out.push(`${lead}${prefix}${defaultPart}{ ${kept.join(', ')} } from ${modQuoted};`);
+  }
+  resultLines.splice(0, resultLines.length, ...out);
+}
+
+/**
  * Add imports from the existing file that are absent from the generated
  * result. Handles:
  *
@@ -1023,34 +1085,77 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
   const generatedTs = collectTsImports(resultLines);
   const extraTsLines: string[] = [];
 
+  // Bindings the generated file imports anywhere, split by capability.
+  //
+  // `allGeneratedTsIds` — every binding regardless of module. The generator
+  // frequently imports a symbol from a concrete file
+  // (`./interfaces/connection.interface`) while the existing hand-written file
+  // imported the same symbol from a barrel (`./interfaces`). Splicing the
+  // barrel form back in would re-declare the binding (TS2300 duplicate
+  // identifier), so a symbol already in scope satisfies a *type* use and is
+  // never re-imported as a type even from a different specifier.
+  //
+  // `generatedValueIds` — only runtime-capable bindings (named / default /
+  // namespace, never `import type`). A *value* use is satisfied only by one of
+  // these: an `import type` binding is erased at compile time and cannot back a
+  // runtime reference inside a preserved region. So a generated `import type`
+  // must NOT suppress an existing value import of the same symbol.
+  const allGeneratedTsIds = new Set<string>();
+  const generatedValueIds = new Set<string>();
+  for (const ids of generatedTs.named.values())
+    for (const id of ids) {
+      allGeneratedTsIds.add(id);
+      generatedValueIds.add(id);
+    }
+  for (const ids of generatedTs.typeOnly.values()) for (const id of ids) allGeneratedTsIds.add(id);
+  for (const name of generatedTs.defaults.values()) {
+    allGeneratedTsIds.add(name);
+    generatedValueIds.add(name);
+  }
+  for (const name of generatedTs.namespaces.values()) {
+    allGeneratedTsIds.add(name);
+    generatedValueIds.add(name);
+  }
+
+  // Symbols the generated file imports type-only that we are nonetheless
+  // re-splicing as value imports (because a preserved region needs the runtime
+  // binding). The spliced value import also covers the type use, so the
+  // generated `import type` for the symbol must be dropped or the two collide
+  // (TS2300). Collected during the loops below, applied just before splicing.
+  const reclaimedValueIds = new Set<string>();
+  const generatedHasValue = (id: string): boolean => generatedValueIds.has(id);
+  const generatedHasTypeOnly = (id: string): boolean => allGeneratedTsIds.has(id) && !generatedValueIds.has(id);
+
   for (const mod of existingTs.sideEffects) {
     if (!generatedTs.sideEffects.has(mod)) extraTsLines.push(`import '${mod}';`);
   }
   for (const [mod, name] of existingTs.defaults) {
     if (generatedTs.defaults.has(mod)) continue;
     if (!identifierUsed(ignoreRegionText, name)) continue;
+    if (generatedHasValue(name)) continue;
+    if (generatedHasTypeOnly(name)) reclaimedValueIds.add(name);
     extraTsLines.push(`import ${name} from '${mod}';`);
   }
   for (const [mod, name] of existingTs.namespaces) {
     if (!identifierUsed(ignoreRegionText, name)) continue;
-    if (!generatedTs.namespaces.has(mod)) extraTsLines.push(`import * as ${name} from '${mod}';`);
+    if (generatedHasValue(name)) continue;
+    if (generatedTs.namespaces.has(mod)) continue;
+    if (generatedHasTypeOnly(name)) reclaimedValueIds.add(name);
+    extraTsLines.push(`import * as ${name} from '${mod}';`);
   }
   for (const [mod, existIds] of existingTs.named) {
-    const genIds = generatedTs.named.get(mod) ?? new Set<string>();
-    const genTypeIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
-    const extra = [...existIds].filter(
-      (id) => !genIds.has(id) && !genTypeIds.has(id) && identifierUsed(ignoreRegionText, id),
-    );
+    const extra = [...existIds].filter((id) => !generatedHasValue(id) && identifierUsed(ignoreRegionText, id));
+    for (const id of extra) if (generatedHasTypeOnly(id)) reclaimedValueIds.add(id);
     if (extra.length > 0) extraTsLines.push(`import { ${extra.join(', ')} } from '${mod}';`);
   }
   for (const [mod, existIds] of existingTs.typeOnly) {
-    const genIds = generatedTs.typeOnly.get(mod) ?? new Set<string>();
-    const genNamedIds = generatedTs.named.get(mod) ?? new Set<string>();
-    const extra = [...existIds].filter(
-      (id) => !genIds.has(id) && !genNamedIds.has(id) && identifierUsed(ignoreRegionText, id),
-    );
+    const extra = [...existIds].filter((id) => !allGeneratedTsIds.has(id) && identifierUsed(ignoreRegionText, id));
     if (extra.length > 0) extraTsLines.push(`import type { ${extra.join(', ')} } from '${mod}';`);
   }
+
+  // Drop reclaimed symbols from generated `import type` lines so the value
+  // imports spliced above do not duplicate them.
+  dropGeneratedTypeOnlyBindings(resultLines, reclaimedValueIds);
 
   // PHP `use Foo\Bar;` and `use Foo\Bar as Baz;` — namespace-qualified only
   // (a backslash anywhere in the path) so this doesn't mistakenly hoist
@@ -1113,5 +1218,31 @@ function spliceExtraImports(existingLines: string[], resultLines: string[]): voi
 
   if (lastImportIdx >= 0) {
     resultLines.splice(lastImportIdx + 1, 0, ...allExtra);
+    return;
   }
+
+  // No import survived in the generated file (e.g. its only import was a
+  // type-only line reclaimed above). Insert after any leading comment header
+  // so the spliced imports still land at the top of the file.
+  let insertAt = 0;
+  let inBlockComment = false;
+  for (let i = 0; i < resultLines.length; i++) {
+    const t = resultLines[i].trim();
+    if (inBlockComment) {
+      insertAt = i + 1;
+      if (t.includes('*/')) inBlockComment = false;
+      continue;
+    }
+    if (t.startsWith('//')) {
+      insertAt = i + 1;
+      continue;
+    }
+    if (t.startsWith('/*')) {
+      insertAt = i + 1;
+      inBlockComment = !t.includes('*/');
+      continue;
+    }
+    break; // first blank or code line — stop here
+  }
+  resultLines.splice(insertAt, 0, ...allExtra);
 }
