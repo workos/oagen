@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.7](https://github.com/workos/oagen/compare/v0.22.6...v0.22.7) (2026-06-19)
+
+
+### Bug Fixes
+
+* de-duplicate spliced imports; add fieldHints config ([#112](https://github.com/workos/oagen/issues/112)) ([ca9fb1b](https://github.com/workos/oagen/commit/ca9fb1bfc37376857e42a2f42fa2f5016f6a8ce1))
+
 ## [0.22.6](https://github.com/workos/oagen/compare/v0.22.5...v0.22.6) (2026-06-16)
 
 
