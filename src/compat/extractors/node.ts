@@ -326,7 +326,13 @@ function extractParam(sym: ts.Symbol, checker: ts.TypeChecker): ApiParam {
     passingStyle = 'options_object';
   } else {
     const resolvedType = checker.getTypeOfSymbolAtLocation(sym, decl!);
-    const isObjectLike = resolvedType.isClassOrInterface() || (resolvedType.getFlags() & ts.TypeFlags.Object) !== 0;
+    // An optional param (`options?: Options`) has type `Options | undefined`,
+    // a union — which is neither a class/interface nor a TypeFlags.Object — so
+    // strip the nullable arm before the object-like check. Without this an
+    // all-optional options param reads as 'positional', which makes the next
+    // regeneration drop its baseline and rename the options type.
+    const objectType = checker.getNonNullableType(resolvedType);
+    const isObjectLike = objectType.isClassOrInterface() || (objectType.getFlags() & ts.TypeFlags.Object) !== 0;
     const isPrimitive = [
       'string',
       'number',
