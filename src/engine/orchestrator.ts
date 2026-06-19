@@ -4,9 +4,17 @@ import type { Emitter, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { writeFiles } from './writer.js';
 import { generateFiles } from './generate-files.js';
+import { filterSpecByServices } from './filter-services.js';
 import { integrateGeneratedFiles } from './integrate.js';
 import { formatTargetFiles } from './formatter.js';
-import { computeStalePaths, MANIFEST_FILENAME, pruneStaleFiles, readManifest, writeManifest } from './manifest.js';
+import {
+  computeStalePaths,
+  MANIFEST_FILENAME,
+  mergeScopedManifestRecords,
+  pruneStaleFiles,
+  readManifest,
+  writeManifest,
+} from './manifest.js';
 
 export async function generate(
   spec: ApiSpec,
@@ -24,14 +32,30 @@ export async function generate(
     emitterOptions?: Record<string, unknown>;
     /** When true, skip deletion of files recorded in the previous manifest but not in the current emission. */
     noPrune?: boolean;
+    /**
+     * Post-mount service names to generate (a `--services` run). When non-empty,
+     * the spec is filtered to these services + their mount-siblings + reachable
+     * models, the root client/aggregator is left untouched, pruning is disabled,
+     * and the manifest is merged rather than overwritten.
+     */
+    services?: string[];
   },
 ): Promise<GeneratedFile[]> {
+  // Scoped generation: restrict emission to selected post-mount services without
+  // disturbing the rest of an existing SDK tree.
+  const scoped = (options.services?.length ?? 0) > 0;
+  const workingSpec = scoped ? filterSpecByServices(spec, options.services!, options.mountRules) : spec;
+  // Scoped mode implies no-prune so unselected services' files survive (FR-1.7).
+  const noPrune = options.noPrune === true || scoped;
+
   // Read previous manifests up front so emitters can mark files the prior run
-  // wrote as safe-to-overwrite (vs files a human hand-maintains). Skipped
-  // when --no-prune is set so users opting out of lifecycle tracking also opt
-  // out of overwrite-on-regen behavior.
-  const outputPrevManifestForCtx = options.noPrune ? null : await readManifest(options.outputDir);
-  const targetManifestForCtx = options.target && !options.noPrune ? await readManifest(options.target) : null;
+  // wrote as safe-to-overwrite (vs files a human hand-maintains), and so scoped
+  // runs can merge prior records. Skipped only when --no-prune is set on a
+  // non-scoped run (opting out of lifecycle tracking). Scoped runs always read,
+  // even though they force no-prune, because the merge needs the prior records.
+  const skipManifestRead = options.noPrune === true && !scoped;
+  const outputPrevManifestForCtx = skipManifestRead ? null : await readManifest(options.outputDir);
+  const targetManifestForCtx = options.target && !skipManifestRead ? await readManifest(options.target) : null;
   const priorTargetManifestPaths = targetManifestForCtx
     ? new Set(targetManifestForCtx.files)
     : outputPrevManifestForCtx
@@ -42,9 +66,10 @@ export async function generate(
     files: withHeaders,
     header,
     operations,
-  } = generateFiles(spec, emitter, {
+  } = generateFiles(workingSpec, emitter, {
     ...options,
     priorTargetManifestPaths,
+    scoped,
   });
 
   if (options.dryRun) {
@@ -80,8 +105,9 @@ export async function generate(
     currentPaths: outputEmittedPaths,
     language: emitter.language,
     header,
-    noPrune: options.noPrune,
+    noPrune,
     operations,
+    scoped,
   });
 
   // Format output files so the emitter's formatter runs even without --target.
@@ -120,8 +146,9 @@ export async function generate(
       currentPaths: targetResult.emittedPaths,
       language: emitter.language,
       header,
-      noPrune: options.noPrune,
+      noPrune,
       operations,
+      scoped,
     });
 
     // Run the emitter's formatter on all written/merged/identical files
@@ -147,8 +174,16 @@ async function applyManifestPrune(opts: {
   header: string;
   noPrune?: boolean;
   operations?: Record<string, unknown>;
+  /** When true, union this scoped run's records with the prior manifest (FR-1.9). */
+  scoped?: boolean;
 }): Promise<void> {
-  const manifestOpts = { language: opts.language, files: opts.currentPaths, operations: opts.operations };
+  // A scoped run only emits the selected services' files, so the manifest is
+  // merged with the prior records rather than replaced — otherwise unselected
+  // services would be dropped from the manifest and mis-pruned on the next run.
+  const records = opts.scoped
+    ? mergeScopedManifestRecords(opts.prevManifest, opts.currentPaths, opts.operations)
+    : { files: opts.currentPaths, operations: opts.operations };
+  const manifestOpts = { language: opts.language, files: records.files, operations: records.operations };
   if (opts.noPrune) {
     // Still refresh the manifest so future runs with pruning enabled have a baseline.
     await writeManifest(opts.dir, manifestOpts);

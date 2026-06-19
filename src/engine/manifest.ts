@@ -145,6 +145,34 @@ export function computeStalePaths(prev: Manifest, currentPaths: Iterable<string>
 }
 
 /**
+ * Merge a scoped run's emitted records into the prior manifest's records.
+ *
+ * A scoped (`--services`) run only emits files for the selected services, but it
+ * must NOT discard the prior manifest's record of unselected services' files
+ * (FR-1.9). The result unions prior + scoped file paths and shallow-merges the
+ * operations maps, with scoped operations overriding prior entries for the same
+ * "METHOD /path" key (a re-emission updates that operation's record).
+ *
+ * When `prev` is null (the first-ever run is scoped) there is nothing to
+ * preserve, so the scoped subset is returned unchanged — matching the
+ * first-adoption behavior of a full run.
+ */
+export function mergeScopedManifestRecords(
+  prev: Manifest | null,
+  scopedFiles: Iterable<string>,
+  scopedOperations?: Record<string, unknown>,
+): { files: string[]; operations?: Record<string, unknown> } {
+  const scopedFileList = [...scopedFiles];
+  if (!prev) {
+    return { files: scopedFileList, operations: scopedOperations };
+  }
+  const files = [...new Set([...prev.files, ...scopedFileList])].sort();
+  const priorOps = prev.operations;
+  const operations = priorOps || scopedOperations ? { ...priorOps, ...scopedOperations } : undefined;
+  return { files, operations };
+}
+
+/**
  * Delete stale files from `dir`.
  *
  * When `header` is provided, a file is only deleted if its contents start with

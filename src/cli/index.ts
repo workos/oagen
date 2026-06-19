@@ -99,6 +99,7 @@ program
   .option('--api-surface <path>', 'Path to baseline API surface JSON for compat overlay')
   .option('--no-compat-check', 'Skip compat overlay even if --api-surface is provided')
   .option('--no-prune', 'Skip deletion of stale files recorded in the previous .oagen-manifest.json')
+  .option('--services <list>', 'Comma-separated post-mount service names to generate (default: all)')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
     if (!opts.spec) {

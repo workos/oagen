@@ -126,8 +126,21 @@ function isDiscriminatedModel(model: Model): boolean {
   );
 }
 
-/** Collect all generated files from an emitter (no headers, no path prefixes). */
-export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterContext): GeneratedFile[] {
+/**
+ * Collect all generated files from an emitter (no headers, no path prefixes).
+ *
+ * When `scoped` is true (a `--services` run), the root client / aggregator is
+ * NOT regenerated from the filtered IR: rewriting it from a subset would drop
+ * every unselected service from the SDK's public surface. The existing
+ * aggregator on disk is left untouched (FR-1.6). All other artifacts
+ * (models, enums, resources, tests) are emitted over the filtered spec as usual.
+ */
+export function generateAllFiles(
+  spec: ApiSpec,
+  emitter: Emitter,
+  ctx: EmitterContext,
+  scoped = false,
+): GeneratedFile[] {
   const referenced = collectReferencedNames(spec.services, spec.models);
   const reachableModels = spec.models.filter((m) => referenced.models.has(m.name));
   const reachableEnums = spec.enums.filter((e) => referenced.enums.has(e.name));
@@ -137,7 +150,7 @@ export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterCo
     ...emitter.generateModels(reachableModels, ctx),
     ...emitter.generateEnums(reachableEnums, ctx),
     ...emitter.generateResources(spec.services, ctx),
-    ...emitter.generateClient(spec, ctx),
+    ...(scoped ? [] : emitter.generateClient(spec, ctx)),
     ...emitter.generateErrors(ctx),
     ...(emitter.generateTypeSignatures?.(reachableSpec, ctx) ?? []),
     ...emitter.generateTests(reachableSpec, ctx),
@@ -168,10 +181,12 @@ export function generateFiles(
     emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
+    /** When true (a scoped `--services` run), skip root-client/aggregator emission. */
+    scoped?: boolean;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string; operations?: OperationsMap } {
   const ctx = buildEmitterContext(spec, options);
-  const files = generateAllFiles(spec, emitter, ctx);
+  const files = generateAllFiles(spec, emitter, ctx, options.scoped);
   const operations = emitter.buildOperationsMap?.(spec, ctx);
   const header = emitter.fileHeader();
   return { files: applyFileHeaders(files, header), ctx, header, operations };
