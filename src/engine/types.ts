@@ -33,6 +33,15 @@ export interface EmitterContext {
   /** Absolute path to the integration target directory (when --target is used). */
   targetDir?: string;
   /**
+   * Scoped-generation signal: the set of POST-MOUNT service names a `--services`
+   * run selected. When present and non-empty, emitters must emit ONLY these
+   * services' per-service resource/test files, while still emitting models,
+   * enums, the root client, and all aggregate/barrel files from the FULL spec
+   * (so shared files stay byte-identical and a brand-new selected service is
+   * wired into the client automatically). Absent/empty ⇒ full generation.
+   */
+  scopedServices?: Set<string>;
+  /**
    * Paths (relative to the output/target dir) that the previous run wrote,
    * loaded from that directory's `.oagen-manifest.json`. Emitters can use this
    * to distinguish "file exists because oagen wrote it last time" from "file

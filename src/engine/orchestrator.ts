@@ -4,7 +4,7 @@ import type { Emitter, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { writeFiles } from './writer.js';
 import { generateFiles } from './generate-files.js';
-import { filterSpecByServices } from './filter-services.js';
+import { resolveScopedServices } from './scoped-services.js';
 import { integrateGeneratedFiles } from './integrate.js';
 import { formatTargetFiles } from './formatter.js';
 import {
@@ -34,17 +34,24 @@ export async function generate(
     noPrune?: boolean;
     /**
      * Post-mount service names to generate (a `--services` run). When non-empty,
-     * the spec is filtered to these services + their mount-siblings + reachable
-     * models, the root client/aggregator is left untouched, pruning is disabled,
-     * and the manifest is merged rather than overwritten.
+     * the FULL spec is still emitted for models/enums/client/barrels (so shared
+     * files stay byte-identical and a brand-new selected service is wired into the
+     * client automatically); only per-service resource/test emission is gated to
+     * the selection (via `ctx.scopedServices`). Pruning is disabled and the
+     * manifest is merged so unselected services' records survive.
      */
     services?: string[];
   },
 ): Promise<GeneratedFile[]> {
-  // Scoped generation: restrict emission to selected post-mount services without
-  // disturbing the rest of an existing SDK tree.
-  const scoped = (options.services?.length ?? 0) > 0;
-  const workingSpec = scoped ? filterSpecByServices(spec, options.services!, options.mountRules) : spec;
+  // Scoped generation: validate + expand the selection to POST-MOUNT names. The
+  // spec is NOT filtered — placement/dedup/shared-schemas are computed over the
+  // full spec so shared files stay byte-identical; emitters gate only per-service
+  // resource/test emission on this set.
+  const scopedServices =
+    options.services && options.services.length > 0
+      ? resolveScopedServices(spec, options.services, options.mountRules)
+      : undefined;
+  const scoped = scopedServices !== undefined;
   // Scoped mode implies no-prune so unselected services' files survive (FR-1.7).
   const noPrune = options.noPrune === true || scoped;
 
@@ -66,10 +73,10 @@ export async function generate(
     files: withHeaders,
     header,
     operations,
-  } = generateFiles(workingSpec, emitter, {
+  } = generateFiles(spec, emitter, {
     ...options,
     priorTargetManifestPaths,
-    scoped,
+    scopedServices,
   });
 
   if (options.dryRun) {

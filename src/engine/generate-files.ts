@@ -19,6 +19,7 @@ export function buildEmitterContext(
     emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
+    scopedServices?: Set<string>;
   },
 ): EmitterContext {
   return {
@@ -33,6 +34,7 @@ export function buildEmitterContext(
     emitterOptions: options.emitterOptions,
     targetDir: options.target,
     priorTargetManifestPaths: options.priorTargetManifestPaths,
+    scopedServices: options.scopedServices,
   };
 }
 
@@ -129,18 +131,14 @@ function isDiscriminatedModel(model: Model): boolean {
 /**
  * Collect all generated files from an emitter (no headers, no path prefixes).
  *
- * When `scoped` is true (a `--services` run), the root client / aggregator is
- * NOT regenerated from the filtered IR: rewriting it from a subset would drop
- * every unselected service from the SDK's public surface. The existing
- * aggregator on disk is left untouched (FR-1.6). All other artifacts
- * (models, enums, resources, tests) are emitted over the filtered spec as usual.
+ * In a scoped (`--services`) run the spec is NOT filtered: every generator runs
+ * over the full spec so model placement, dedup, the root client, and all
+ * aggregate/barrel files are byte-identical to a full run (and a brand-new
+ * selected service is wired into the client automatically). The emitters
+ * themselves consult `ctx.scopedServices` to emit only the selected services'
+ * per-service resource/test files.
  */
-export function generateAllFiles(
-  spec: ApiSpec,
-  emitter: Emitter,
-  ctx: EmitterContext,
-  scoped = false,
-): GeneratedFile[] {
+export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterContext): GeneratedFile[] {
   const referenced = collectReferencedNames(spec.services, spec.models);
   const reachableModels = spec.models.filter((m) => referenced.models.has(m.name));
   const reachableEnums = spec.enums.filter((e) => referenced.enums.has(e.name));
@@ -150,7 +148,7 @@ export function generateAllFiles(
     ...emitter.generateModels(reachableModels, ctx),
     ...emitter.generateEnums(reachableEnums, ctx),
     ...emitter.generateResources(spec.services, ctx),
-    ...(scoped ? [] : emitter.generateClient(spec, ctx)),
+    ...emitter.generateClient(spec, ctx),
     ...emitter.generateErrors(ctx),
     ...(emitter.generateTypeSignatures?.(reachableSpec, ctx) ?? []),
     ...emitter.generateTests(reachableSpec, ctx),
@@ -181,12 +179,12 @@ export function generateFiles(
     emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
-    /** When true (a scoped `--services` run), skip root-client/aggregator emission. */
-    scoped?: boolean;
+    /** Scoped-generation signal (POST-MOUNT names); set on ctx for emitters to gate per-service emission. */
+    scopedServices?: Set<string>;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string; operations?: OperationsMap } {
   const ctx = buildEmitterContext(spec, options);
-  const files = generateAllFiles(spec, emitter, ctx, options.scoped);
+  const files = generateAllFiles(spec, emitter, ctx);
   const operations = emitter.buildOperationsMap?.(spec, ctx);
   const header = emitter.fileHeader();
   return { files: applyFileHeaders(files, header), ctx, header, operations };

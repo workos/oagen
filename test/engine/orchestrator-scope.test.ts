@@ -40,17 +40,22 @@ const twoServiceSpec: ApiSpec = {
 };
 
 /**
- * Mock emitter: one resource file per service, plus a root client that lists
- * every service it is handed. A spy records how many times the client is built
- * so tests can assert the aggregator was (or was not) regenerated.
+ * Mock emitter modeling the real emitters under the emitter-aware design:
+ * - generateResources GATES per-service emission on ctx.scopedServices (the spec
+ *   is passed in full; the emitter decides what to emit).
+ * - generateClient always runs over the FULL spec (engine never skips it), so the
+ *   client lists every service and is byte-identical across scoped/full runs.
+ * A spy records client builds so tests can assert it is NOT skipped.
  */
 function scopeEmitter(spy: { clientCalls: number }): Emitter {
   return {
     language: 'mock',
     generateModels: () => [],
     generateEnums: () => [],
-    generateResources: (services) =>
-      services.map((s) => ({ path: `services/${s.name.toLowerCase()}.rb`, content: `class ${s.name}; end` })),
+    generateResources: (services, ctx) =>
+      services
+        .filter((s) => !ctx.scopedServices || ctx.scopedServices.has(s.name))
+        .map((s) => ({ path: `services/${s.name.toLowerCase()}.rb`, content: `class ${s.name}; end` })),
     generateClient: (spec) => {
       spy.clientCalls++;
       return [{ path: 'client.rb', content: `# client: ${spec.services.map((s) => s.name).join(',')}` }];
@@ -76,7 +81,7 @@ async function fileExists(p: string): Promise<boolean> {
 }
 
 describe('orchestrator — scoped (--services) generation', () => {
-  it('regenerates only the selected service, leaving others on disk untouched', async () => {
+  it('emits only the selected service resource, while the client (from the full spec) stays byte-identical', async () => {
     const outputDir = await tmp();
     try {
       const spy = { clientCalls: 0 };
@@ -89,12 +94,12 @@ describe('orchestrator — scoped (--services) generation', () => {
       // Run 2: scoped to Vault only.
       await generate(twoServiceSpec, scopeEmitter(spy), { namespace: 'test', outputDir, services: ['Vault'] });
 
-      // Vault re-emitted, Sso's file survives (no prune), client NOT regenerated.
+      // Vault re-emitted, Sso's file survives (no prune).
       expect(await fileExists(path.join(outputDir, 'services/vault.rb'))).toBe(true);
       expect(await fileExists(path.join(outputDir, 'services/sso.rb'))).toBe(true);
-      expect(spy.clientCalls).toBe(1); // unchanged — generateClient skipped in scoped mode
-
-      // The on-disk aggregator is byte-identical (still lists every service).
+      // The client IS regenerated (engine no longer skips it) — but from the FULL
+      // spec, so it still lists every service and is byte-identical.
+      expect(spy.clientCalls).toBe(2);
       const clientAfterScoped = await fs.readFile(path.join(outputDir, 'client.rb'), 'utf-8');
       expect(clientAfterScoped).toBe(clientAfterFull);
       expect(clientAfterScoped).toContain('Sso,Vault');
@@ -150,6 +155,32 @@ describe('orchestrator — scoped (--services) generation', () => {
       // Both full runs emit the client (no scoping → no skip).
       expect(spy.clientCalls).toBe(2);
       expect(await fileExists(path.join(outputDir, 'client.rb'))).toBe(true);
+    } finally {
+      await fs.rm(outputDir, { recursive: true });
+    }
+  });
+
+  it('passes the resolved post-mount scopedServices set to the emitter context', async () => {
+    const outputDir = await tmp();
+    try {
+      const captured: Array<Set<string> | undefined> = [];
+      const capturingEmitter: Emitter = {
+        ...scopeEmitter({ clientCalls: 0 }),
+        generateResources: (services, ctx) => {
+          captured.push(ctx.scopedServices);
+          return services
+            .filter((s) => !ctx.scopedServices || ctx.scopedServices.has(s.name))
+            .map((s) => ({ path: `services/${s.name.toLowerCase()}.rb`, content: `class ${s.name}; end` }));
+        },
+      };
+
+      // Scoped run → ctx.scopedServices is the resolved set.
+      await generate(twoServiceSpec, capturingEmitter, { namespace: 'test', outputDir, services: ['Vault'] });
+      expect(captured.at(-1)).toEqual(new Set(['Vault']));
+
+      // Full run → ctx.scopedServices is undefined (signal inert).
+      await generate(twoServiceSpec, capturingEmitter, { namespace: 'test', outputDir });
+      expect(captured.at(-1)).toBeUndefined();
     } finally {
       await fs.rm(outputDir, { recursive: true });
     }
