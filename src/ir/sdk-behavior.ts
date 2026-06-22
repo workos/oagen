@@ -50,8 +50,7 @@ export interface ErrorPolicy {
   serverErrorKind: string;
   /** Catch-all error kind for unrecognized status codes. */
   clientErrorKind: string;
-  /** URL template for error documentation. Use {code} as placeholder for the API error code.
-   *  Example: 'https://workos.com/docs/errors/{code}' */
+  /** URL template for error documentation. Use {code} as placeholder for the API error code. */
   errorDocUrlTemplate?: string;
 }
 
@@ -111,7 +110,7 @@ export interface UserAgentPolicy {
   /** Template for the SDK identifier string.
    *  Placeholders: {name} = spec name, {lang} = emitter language, {version} = SDK version.
    *  Each emitter interpolates with its own language string and casing conventions.
-   *  Example: '{name} {lang}/{version}' → 'WorkOS PHP/4.32.0' */
+   *  Example: '{name} {lang}/{version}' → 'Acme PHP/4.32.0' */
   sdkIdentifierTemplate: string;
   /** Whether to append the runtime/language version (e.g. PHP 8.2, Python 3.12). */
   includeRuntimeVersion: boolean;
@@ -144,7 +143,7 @@ export interface RequestGuardPolicy {
 export interface TimeoutPolicy {
   /** Default HTTP request timeout in seconds. */
   defaultTimeoutSeconds: number;
-  /** Environment variable name to override the timeout (e.g. 'WORKOS_REQUEST_TIMEOUT'). */
+  /** Environment variable name to override the timeout (e.g. 'SDK_REQUEST_TIMEOUT'). */
   timeoutEnvVar?: string;
 }
 
@@ -167,9 +166,8 @@ export interface SdkBehavior {
 // ── Defaults ───────────────────────────────────────────────────────
 
 /**
- * Canonical SDK behavior defaults. These match the PHP emitter's current
- * implementation (the most complete). Per-language overrides can be applied
- * via `mergeSdkBehavior()` in each SDK's `oagen.config.ts`.
+ * Canonical SDK behavior defaults. Per-language or per-project overrides can
+ * be applied via `mergeSdkBehavior()` in each SDK's `oagen.config.ts`.
  *
  * - Retry: exponential backoff with jitter, retries on 429/5xx
  * - Errors: standard HTTP status → exception kind mapping
@@ -207,11 +205,10 @@ export function defaultSdkBehavior(): SdkBehavior {
       },
       serverErrorKind: 'Server',
       clientErrorKind: 'Api',
-      errorDocUrlTemplate: 'https://workos.com/docs/errors/{code}',
     },
     telemetry: {
       enabledByDefault: true,
-      headerName: 'X-WorkOS-Client-Telemetry',
+      headerName: 'X-Client-Telemetry',
       requestIdHeader: 'X-Request-ID',
     },
     pagination: {

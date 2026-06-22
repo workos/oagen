@@ -119,7 +119,7 @@ Add the smoke runner path to the plugin bundle export (e.g., `src/plugin.ts`):
 
 ```typescript
 // src/plugin.ts
-export const workosEmittersPlugin = {
+export const acmeEmittersPlugin = {
   smokeRunners: {
     // existing runners...
     {language}: path.join(smokeDir, 'sdk-{language}.ts'),

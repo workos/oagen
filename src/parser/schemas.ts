@@ -1094,7 +1094,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   // Handle $ref → ModelRef or EnumRef.
   // A `$ref` to a top-level component schema needs to preserve whether the
   // target is a model or an enum, because emitters route imports differently
-  // for the two kinds (e.g. com.workos.models.X vs com.workos.types.X). The
+  // for the two kinds (e.g. com.example.models.X vs com.example.types.X). The
   // set of enum names is precomputed by extractSchemas() in a first pass so
   // it's available even when called recursively for nested $refs.
   if (schema.$ref) {

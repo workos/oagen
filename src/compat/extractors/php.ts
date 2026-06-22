@@ -82,7 +82,7 @@ const phpHints: LanguageHints = {
     _candidateSurface: import('../types.js').ApiSurface,
   ): boolean {
     // Tolerate return type differences common in PHP SDK compat:
-    // - mixed ≡ any specific return type (\\WorkOS\\Resource\\Response ≡ void, etc.)
+    // - mixed ≡ any specific return type (resource response ≡ void, etc.)
     // - array ≡ mixed ≡ specific resource type
     const returnOk =
       baseline.returnType === candidate.returnType ||
@@ -92,7 +92,7 @@ const phpHints: LanguageHints = {
       (baseline.returnType === 'array' && candidate.returnType === 'array');
 
     // More lenient: tolerate any return type difference when one side is a
-    // namespace-qualified resource type (\\WorkOS\\Resource\\...)
+    // namespace-qualified resource type.
     const returnTolerated =
       returnOk || baseline.returnType.includes('\\Resource\\') || candidate.returnType.includes('\\Resource\\');
 
@@ -142,7 +142,7 @@ const phpHints: LanguageHints = {
     return false;
   },
 
-  modelBaseClasses: ['BaseWorkOSResource'],
+  modelBaseClasses: [],
   exceptionBaseClasses: ['Exception', '\\Exception'],
 };
 

@@ -2,9 +2,9 @@
  * Runs an SDK smoke test + diff against an existing raw baseline.
  *
  * Usage:
- *   npm run smoke -- --lang node --sdk-path path/to/workos-node
- *   npm run smoke -- --lang ruby --sdk-path path/to/workos-ruby
- *   npm run smoke -- --lang node --sdk-path path/to/workos-node --raw-results custom-baseline.json
+ *   npm run smoke -- --lang node --sdk-path path/to/acme-node
+ *   npm run smoke -- --lang ruby --sdk-path path/to/acme-ruby
+ *   npm run smoke -- --lang node --sdk-path path/to/acme-node --raw-results custom-baseline.json
  *
  * Requires OPENAPI_SPEC_PATH env var (or --spec <path>) pointing to the OpenAPI spec.
  * The --lang flag is required and selects which SDK runner to use

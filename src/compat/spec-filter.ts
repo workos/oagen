@@ -79,7 +79,7 @@ export function specDerivedFieldPaths(spec: ApiSpec, hints: LanguageHints): Set<
 }
 
 /**
- * Compute the set of method paths (e.g., "SSO.authorize") that are defined
+ * Compute the set of method paths (e.g., "Auth.authorize") that are defined
  * as operations in the OpenAPI spec's services. Used by filterSurface to
  * exclude hand-written SDK methods that don't correspond to spec operations.
  */
@@ -94,7 +94,7 @@ export function specDerivedMethodPaths(spec: ApiSpec): Set<string> {
 }
 
 /**
- * Compute the set of HTTP operation keys (e.g., "GET /sso/authorize") that
+ * Compute the set of HTTP operation keys (e.g., "GET /auth/authorize") that
  * exist in the spec. Used for overlay-based method matching.
  */
 export function specDerivedHttpKeys(spec: ApiSpec): Set<string> {
@@ -145,7 +145,7 @@ function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Recor
  *
  * For classes: when methodPaths is provided, only keeps methods whose names
  * appear in the spec-derived method paths. This prevents false positives from
- * hand-written SDK methods (e.g., SSO.authorization_url, Webhooks.construct_event)
+ * hand-written SDK methods (e.g., Auth.authorization_url, Webhooks.construct_event)
  * that don't correspond to spec operations. Properties on service classes are
  * also filtered: only UPPER_CASE constants that are spec-derivable are kept.
  */

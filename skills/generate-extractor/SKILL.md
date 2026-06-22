@@ -13,7 +13,7 @@ Scaffold a language extractor for oagen's compat verification system. An extract
 Live SDK → Extractor → ApiSurface JSON → Differ ← Generated SDK → Violations
 ```
 
-Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface and is exported through the emitter project's plugin bundle (e.g., `workosEmittersPlugin`), which the consumer project's `oagen.config.ts` imports.
+Each language needs its own extractor because public surface detection is language-specific (e.g., TypeScript exports vs. Ruby public methods vs. Python `__all__` vs. Go capitalized identifiers). An extractor implements the `Extractor` interface and is exported through the emitter project's plugin bundle (e.g., `acmeEmittersPlugin`), which the consumer project's `oagen.config.ts` imports.
 
 ## Reference Docs
 
@@ -120,7 +120,7 @@ Add the extractor to the plugin bundle export (e.g., `src/plugin.ts`) and re-exp
 ```typescript
 // src/plugin.ts
 import { {language}Extractor } from './compat/extractors/{language}.js';
-export const workosEmittersPlugin = {
+export const acmeEmittersPlugin = {
   extractors: [/* existing, */ {language}Extractor],
   // ...
 };

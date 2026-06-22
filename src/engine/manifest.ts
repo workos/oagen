@@ -29,7 +29,7 @@ export interface Manifest {
   version: number;
   /** Emitter language (e.g. "python").  Used only as a consistency hint. */
   language: string;
-  /** Human-readable or package-level SDK identity (e.g. "workos-php"). */
+  /** Human-readable or package-level SDK identity (e.g. "acme-php"). */
   sdkName?: string;
   /** ISO-8601 timestamp of the run that produced the current manifest contents. */
   generatedAt: string;
@@ -149,7 +149,7 @@ export function computeStalePaths(prev: Manifest, currentPaths: Iterable<string>
  *
  * A scoped (`--services`) run only emits files for the selected services, but it
  * must NOT discard the prior manifest's record of unselected services' files
- * (FR-1.9). The result unions prior + scoped file paths and shallow-merges the
+ * records. The result unions prior + scoped file paths and shallow-merges the
  * operations maps, with scoped operations overriding prior entries for the same
  * "METHOD /path" key (a re-emission updates that operation's record).
  *

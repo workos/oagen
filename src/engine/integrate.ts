@@ -157,7 +157,7 @@ export function mapFilesForTargetIntegration(files: GeneratedFile[], language: s
  * that would shadow an existing module file (e.g., `api_keys.py`), move the
  * module file's content into `_compat.py` inside the package and add a
  * re-export from `__init__.py`.  This preserves backward-compatible imports
- * (e.g., `from workos.api_keys import ApiKeysModule`) while the package directory
+ * (e.g., `from acme.api_keys import ApiKeysModule`) while the package directory
  * provides the generated models and resource classes.
  */
 async function resolveFileToDirectoryConflicts(
@@ -169,12 +169,12 @@ async function resolveFileToDirectoryConflicts(
 
   for (let i = 0; i < result.length; i++) {
     const file = result[i];
-    // Match package init files: e.g., src/workos/api_keys/__init__.py
+    // Match package init files: e.g., src/acme/api_keys/__init__.py
     const match = file.path.match(/^(.+)\/__init__\.py$/);
     if (!match) continue;
 
-    const dirPath = match[1]; // e.g., src/workos/api_keys
-    const moduleFilePath = `${dirPath}.py`; // e.g., src/workos/api_keys.py
+    const dirPath = match[1]; // e.g., src/acme/api_keys
+    const moduleFilePath = `${dirPath}.py`; // e.g., src/acme/api_keys.py
     const fullModulePath = path.join(targetDir, moduleFilePath);
 
     let moduleContent: string;

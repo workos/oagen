@@ -113,7 +113,7 @@ When `approved` is `false`, the matching engine skips the approval entirely. Whe
 compat: {
   allow: [
     {
-      symbol: 'WorkOS\\Service\\UserManagement::createUser',
+      symbol: 'Acme\\Service\\Users::createUser',
       category: 'parameter_removed',
       match: { parameter: 'passwordHashType' },
       appliesTo: ['php', 'python', 'kotlin', 'dotnet'],

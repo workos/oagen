@@ -14,7 +14,7 @@
 {
   "version": 2,
   "language": "php",
-  "sdkName": "workos-php",
+  "sdkName": "acme-php",
   "generatedAt": "2026-04-18T22:02:14.077Z",
   "specSha": "sha256:abc123...",
   "specPath": "../openapi-spec/spec/open-api-spec.yaml",
@@ -32,7 +32,7 @@
 | --------------------- | ---------- | -------- | -------------------------------------------------------------------- |
 | `version`             | `number`   | yes      | Manifest schema version (currently `2`)                              |
 | `language`            | `string`   | yes      | Emitter target language (e.g., `"php"`)                              |
-| `sdkName`             | `string`   | no       | Human-readable SDK identity (e.g., `"workos-php"`)                   |
+| `sdkName`             | `string`   | no       | Human-readable SDK identity (e.g., `"acme-php"`)                     |
 | `generatedAt`         | `string`   | yes      | ISO-8601 timestamp of the generation run                             |
 | `specSha`             | `string`   | no       | SHA-256 hash of the source OpenAPI spec                              |
 | `specPath`            | `string`   | no       | Path or reference to the source spec                                 |

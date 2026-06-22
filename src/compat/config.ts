@@ -76,7 +76,7 @@ export type CompatFailLevel = 'none' | 'breaking' | 'soft-risk';
 
 /** A single intentional-break approval in `oagen.config.ts`. */
 export interface CompatApproval {
-  /** Fully-qualified symbol (e.g., "WorkOS\\Service\\UserManagement::createUser"). */
+  /** Fully-qualified symbol (e.g., "Acme\\Service\\Users::createUser"). */
   symbol: string;
   /** The kind of change being approved. */
   category: CompatChangeCategory;

@@ -370,7 +370,7 @@
 * add additive merge support for python ([5046def](https://github.com/workos/oagen/commit/5046defd41a6669a0aa2e0acfdeabcbfbba1d70c))
 * add async flag to IR Operation and OperationPlan ([509e266](https://github.com/workos/oagen/commit/509e266a450b21497caeefc83031e88ae1ff66cc))
 * add contractVersion validation and configurable operationId transform ([4df93f2](https://github.com/workos/oagen/commit/4df93f2711f4a2adc0833a616f3cfb353336d095))
-* add PHP 8.1 enum extraction and BaseWorkOSResource model base class ([c477e66](https://github.com/workos/oagen/commit/c477e6650675b8098c89c447744b96a8675284bb))
+* add PHP 8.1 enum extraction and configurable model base class ([c477e66](https://github.com/workos/oagen/commit/c477e6650675b8098c89c447744b96a8675284bb))
 * add readOnly/writeOnly diffing to field comparisons ([15ec058](https://github.com/workos/oagen/commit/15ec0582daf96a7069536310c00902da4b37fb90))
 * add sdk:generate/verify/extract npm scripts to emitter project scaffold ([c81a6f1](https://github.com/workos/oagen/commit/c81a6f1edb3e1037c897c0969f58f13fa705b9a6))
 * add self-correcting overlay retry loop to verify command ([cf6e1d8](https://github.com/workos/oagen/commit/cf6e1d8be5a38609528ea36b1ba290011f411805))

@@ -52,7 +52,7 @@ export async function generate(
       ? resolveScopedServices(spec, options.services, options.mountRules)
       : undefined;
   const scoped = scopedServices !== undefined;
-  // Scoped mode implies no-prune so unselected services' files survive (FR-1.7).
+  // Scoped mode implies no-prune so unselected services' files survive.
   const noPrune = options.noPrune === true || scoped;
 
   // Read previous manifests up front so emitters can mark files the prior run
@@ -181,7 +181,7 @@ async function applyManifestPrune(opts: {
   header: string;
   noPrune?: boolean;
   operations?: Record<string, unknown>;
-  /** When true, union this scoped run's records with the prior manifest (FR-1.9). */
+  /** When true, union this scoped run's records with the prior manifest. */
   scoped?: boolean;
 }): Promise<void> {
   // A scoped run only emits the selected services' files, so the manifest is

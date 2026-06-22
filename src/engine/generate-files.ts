@@ -24,7 +24,7 @@ export function buildEmitterContext(
 ): EmitterContext {
   const resolvedOperations = resolveOperations(spec, options.operationHints, options.mountRules);
 
-  // FR-1.4: in a scoped run, derive the model/enum allow-lists = names reachable
+  // In a scoped run, derive the model/enum allow-lists = names reachable
   // from the SELECTED source services (those whose post-mount target is selected).
   // Emitters write a model/enum FILE only when it is in these sets, so a
   // non-selected service's exclusive models are left untouched (no leak) while

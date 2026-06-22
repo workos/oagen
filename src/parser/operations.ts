@@ -237,11 +237,11 @@ function inferVerb(method: HttpMethod, path: string): string {
  * Uses the last non-param segment (the resource being operated on).
  *
  * Examples:
- *   /user_management/users → "Users"
- *   /user_management/users/{id} → "User" (singular for item operations)
- *   /user_management/users/{id}/auth_factors → "AuthFactors"
+ *   /accounts/users → "Users"
+ *   /accounts/users/{id} → "User" (singular for item operations)
+ *   /accounts/users/{id}/auth_factors → "AuthFactors"
  *   /organizations/{id}/api_keys → "ApiKeys"
- *   /sso/authorize → "Authorize" (action endpoint)
+ *   /auth/authorize → "Authorize" (action endpoint)
  */
 function inferResourceFromPath(path: string): string | null {
   const segments = path.split('/').filter(Boolean);
@@ -501,7 +501,7 @@ function buildOperation(
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 
   // Use the service name as context so inline parameter enums get qualified
-  // names. e.g., service "SSO" + param "provider" → "SSOProvider".
+  // names. e.g., service "Auth" + param "provider" → "AuthProvider".
   const opContext = serviceName;
   const pathParams = extractParams(allParams, 'path', opContext, componentSchemas);
   const queryParams = extractParams(allParams, 'query', opContext, componentSchemas);

@@ -2,7 +2,7 @@ import type { ApiSpec } from '../ir/types.js';
 
 /**
  * Walk all description fields in the IR and expand relative URL paths
- * (e.g. `/reference/authkit/user`) into full URLs using the given base.
+ * (e.g. `/reference/users/user`) into full URLs using the given base.
  *
  * Matches markdown-style links: `[text](/path)` → `[text](https://example.com/path)`
  * and bare parenthetical refs: `(/path)` → `(https://example.com/path)`

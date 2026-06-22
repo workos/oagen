@@ -138,7 +138,7 @@ The `sdk:*` scripts bake in `--lang` and `--output` so you only need to pass the
 
 ```bash
 # Fresh generation
-npm run sdk:generate -- --spec ../openapi.yaml --namespace workos
+npm run sdk:generate -- --spec ../openapi.yaml --namespace acme
 
 # Verify generated output
 npm run sdk:verify -- --spec ../openapi.yaml
@@ -147,13 +147,13 @@ npm run sdk:verify -- --spec ../openapi.yaml
 npm run sdk:extract -- --sdk-path ../path-to-live-sdk
 
 # Generate with compat overlay (Scenario A)
-npm run sdk:generate -- --spec ../openapi.yaml --namespace workos --api-surface ./sdk-{language}-surface.json
+npm run sdk:generate -- --spec ../openapi.yaml --namespace acme --api-surface ./sdk-{language}-surface.json
 
 # Verify with compat check (Scenario A)
 npm run sdk:verify -- --spec ../openapi.yaml --api-surface ./sdk-{language}-surface.json
 
 # Integrate into live SDK (Scenario A)
-npm run sdk:generate -- --spec ../openapi.yaml --namespace workos --api-surface ./sdk-{language}-surface.json --target ../path-to-live-sdk
+npm run sdk:generate -- --spec ../openapi.yaml --namespace acme --api-surface ./sdk-{language}-surface.json --target ../path-to-live-sdk
 ```
 
 The `--spec` flag can be replaced by setting `OPENAPI_SPEC_PATH` in the environment.

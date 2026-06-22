@@ -43,7 +43,7 @@ export interface EmitterContext {
   scopedServices?: Set<string>;
   /**
    * Scoped-generation model/enum allow-lists: names of models/enums reachable
-   * from the selected services (FR-1.4/FR-1.5). When `scopedServices` is active,
+   * from the selected services. When `scopedServices` is active,
    * emitters must write a per-model/per-enum FILE only when its name is in these
    * sets — but must still include EVERY model/enum (the full set passed to
    * generateModels/generateEnums) in barrels/indexes, so on-disk files for

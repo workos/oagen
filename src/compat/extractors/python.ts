@@ -223,7 +223,7 @@ const pythonHints: LanguageHints = {
     if (dictLikePattern.test(baseClean) && dictLikePattern.test(candClean)) return true;
 
     // Named metadata type ≡ dict[str, ...] (custom type alias for dict)
-    const isMapType = (t: string) => dictLikePattern.test(t) || /^(?:Metadata|AuditLog\w*Metadata)$/.test(t);
+    const isMapType = (t: string) => dictLikePattern.test(t) || /^(?:Metadata|\w+Metadata)$/.test(t);
     if (isMapType(baseClean) && isMapType(candClean)) return true;
 
     // Named type alias for a map/dict type ≡ inline dict expression
