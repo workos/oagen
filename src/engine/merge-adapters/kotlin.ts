@@ -116,13 +116,13 @@ function extractKotlinClassMembers(classBody: Parser.SyntaxNode, source: string)
 
 /**
  * KDoc signature that identifies a generator-emitted service accessor inside
- * the WorkOS class. The Kotlin client emitter writes every accessor with this
+ * a Kotlin client class. The Kotlin client emitter writes every accessor with this
  * exact doc preamble — when the existing file carries a member with this doc
  * but the regenerated content omits it, the member is stale (its mount target
  * was remapped or removed) and gets pruned.
  */
 const KOTLIN_MANAGED_ACCESSOR_DOC =
-  /\/\*\*[\s\S]*?Lazily-constructed \[[^\]]+\] accessor for this \[WorkOS\] client\.[\s\S]*?\*\//;
+  /\/\*\*[\s\S]*?Lazily-constructed \[[^\]]+\] accessor for this \[[^\]]+\] client\.[\s\S]*?\*\//;
 
 export const kotlinMergeAdapter: MergeAdapter = {
   language: 'kotlin',

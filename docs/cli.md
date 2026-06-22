@@ -7,19 +7,19 @@ All commands support `--help` for full usage details.
 Generate SDK code from an OpenAPI spec.
 
 ```bash
-oagen generate --spec openapi.yml --lang node --output ./sdk --namespace WorkOS
+oagen generate --spec openapi.yml --lang node --output ./sdk --namespace Acme
 ```
 
-| Argument               | Required | Default                 | Description                                                                                                                                                                                                                                  |
-| ---------------------- | -------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--spec <path>`        | No       | `OPENAPI_SPEC_PATH` env | Path to an OpenAPI 3.x spec file.                                                                                                                                                                                                            |
-| `--lang <language>`    | Yes      |                         | Target language — must have a registered emitter (via `oagen.config.ts`)                                                                                                                                                                     |
-| `--output <dir>`       | Yes      |                         | Directory to write generated files into                                                                                                                                                                                                      |
-| `--namespace <name>`   | No       | Spec's `info.title`     | SDK namespace in PascalCase — used directly for code identifiers (e.g., `WorkOS::Client`) and converted to `snake_case` for file paths (e.g., `lib/work_os/`). Use PascalCase with the exact casing you want (e.g., `WorkOS` not `work_os`). |
-| `--dry-run`            | No       | `false`                 | Print the list of file paths that would be generated, without writing anything to disk                                                                                                                                                       |
-| `--api-surface <path>` | No       |                         | Path to baseline API surface JSON for compat overlay                                                                                                                                                                                         |
-| `--target <dir>`       | No       |                         | Target directory for live SDK integration — generated files are merged into this directory instead of `--output`                                                                                                                             |
-| `--no-compat-check`    | No       | `false`                 | Skip compat overlay even if `--api-surface` is provided                                                                                                                                                                                      |
+| Argument               | Required | Default                 | Description                                                                                                                                                                                              |
+| ---------------------- | -------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--spec <path>`        | No       | `OPENAPI_SPEC_PATH` env | Path to an OpenAPI 3.x spec file.                                                                                                                                                                        |
+| `--lang <language>`    | Yes      |                         | Target language — must have a registered emitter (via `oagen.config.ts`)                                                                                                                                 |
+| `--output <dir>`       | Yes      |                         | Directory to write generated files into                                                                                                                                                                  |
+| `--namespace <name>`   | No       | Spec's `info.title`     | SDK namespace in PascalCase — used directly for code identifiers (e.g., `Acme::Client`) and converted to `snake_case` for file paths (e.g., `lib/acme/`). Use PascalCase with the exact casing you want. |
+| `--dry-run`            | No       | `false`                 | Print the list of file paths that would be generated, without writing anything to disk                                                                                                                   |
+| `--api-surface <path>` | No       |                         | Path to baseline API surface JSON for compat overlay                                                                                                                                                     |
+| `--target <dir>`       | No       |                         | Target directory for live SDK integration — generated files are merged into this directory instead of `--output`                                                                                         |
+| `--no-compat-check`    | No       | `false`                 | Skip compat overlay even if `--api-surface` is provided                                                                                                                                                  |
 
 ## `oagen diff`
 
@@ -244,11 +244,11 @@ The config file belongs to the **consumer project** (the project that owns spec 
 
 ```ts
 import type { OagenConfig } from "@workos/oagen";
-import { workosEmittersPlugin } from "@workos/oagen-emitters";
+import { acmeEmittersPlugin } from "@acme/oagen-emitters";
 
 const config: OagenConfig = {
-  ...workosEmittersPlugin,
-  docUrl: "https://workos.com/docs",
+  ...acmeEmittersPlugin,
+  docUrl: "https://docs.example.com",
   operationIdTransform: (id) => id.replace(/Controller_/, ""),
   operationHints,
   mountRules,
@@ -276,20 +276,20 @@ export default config;
 
 ```ts
 import type { OagenConfig } from "@workos/oagen";
-import { workosEmittersPlugin } from "@workos/oagen-emitters";
+import { acmeEmittersPlugin } from "@acme/oagen-emitters";
 import { experimentalPlugin } from "@workos/oagen-experimental";
 
 const config: OagenConfig = {
   emitters: [
-    ...(workosEmittersPlugin.emitters ?? []),
+    ...(acmeEmittersPlugin.emitters ?? []),
     ...(experimentalPlugin.emitters ?? []),
   ],
   extractors: [
-    ...(workosEmittersPlugin.extractors ?? []),
+    ...(acmeEmittersPlugin.extractors ?? []),
     ...(experimentalPlugin.extractors ?? []),
   ],
   smokeRunners: {
-    ...(workosEmittersPlugin.smokeRunners ?? {}),
+    ...(acmeEmittersPlugin.smokeRunners ?? {}),
     ...(experimentalPlugin.smokeRunners ?? {}),
   },
   operationHints,
@@ -310,7 +310,7 @@ export default config;
 | `operationIdTransform` | `(id: string) => string`                     | Custom transform for operation IDs. Receives the raw `operationId` from the spec; return the desired operation name. No additional casing conversion is applied. When omitted, `operationId` values are converted to `camelCase`.                                                                                             |
 | `schemaNameTransform`  | `(name: string) => string`                   | Custom transform for schema (model/enum) names. Applied after the built-in `cleanSchemaName` normalization. Receives the cleaned PascalCase name; return the desired name.                                                                                                                                                    |
 | `transformSpec`        | `(spec: OpenApiDocument) => OpenApiDocument` | Pre-IR overlay applied to the bundled OpenAPI document before any IR extraction. Use to patch around upstream spec quirks that would otherwise emit a breaking SDK change. See [`transformSpec` — Pre-IR Spec Overlay](advanced/transform-spec.md).                                                                           |
-| `docUrl`               | `string`                                     | Base URL for documentation links. When set, relative markdown paths in descriptions (e.g. `[User](/reference/authkit/user)`) are expanded to full URLs (e.g. `[User](https://workos.com/docs/reference/authkit/user)`).                                                                                                       |
+| `docUrl`               | `string`                                     | Base URL for documentation links. When set, relative markdown paths in descriptions (e.g. `[User](/reference/users/user)`) are expanded to full URLs (e.g. `[User](https://docs.example.com/reference/users/user)`).                                                                                                          |
 | `operationHints`       | `Record<string, OperationHint>`              | Per-operation overrides keyed by `"METHOD /path"`. Override derived method names, remount to a different service, or split union-body operations into typed wrappers. See [Operation Resolution](architecture/ir-types.md#operation-resolution).                                                                              |
 | `mountRules`           | `Record<string, string>`                     | Service-level remounting. Maps IR service name to target service/namespace (PascalCase). All operations in the source service are mounted on the target unless overridden per-operation in `operationHints`.                                                                                                                  |
 | `modelHints`           | `Record<string, string>`                     | Pin specific models to a specific IR service for placement. Maps IR model name (post-`cleanSchemaName`/`schemaNameTransform`) → IR service name (PascalCase). Overrides the default "first service to reference the model wins" assignment. Both names must exist in the parsed spec; unknown names throw at generation time. |

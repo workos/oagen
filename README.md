@@ -165,7 +165,7 @@ export default {
     retry: { backoff: { initialDelay: 0.5, maxDelay: 8.0 } },
     timeout: {
       defaultTimeoutSeconds: 30,
-      timeoutEnvVar: "WORKOS_REQUEST_TIMEOUT",
+      timeoutEnvVar: "SDK_REQUEST_TIMEOUT",
     },
     pagination: { autoPageDelayMs: 0 },
   },

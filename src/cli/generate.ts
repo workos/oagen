@@ -16,6 +16,12 @@ export async function generateCommand(opts: {
   compatCheck?: boolean;
   /** From `--no-prune`. When false, manifest-driven stale-file pruning is skipped. */
   prune?: boolean;
+  /**
+   * Post-mount service names to generate (from `--services`, a CSV string, or an
+   * array via config). When set, only these services + their mount-siblings +
+   * reachable shared models are emitted; the rest of the SDK tree is left intact.
+   */
+  services?: string | string[];
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: (name: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
@@ -37,6 +43,12 @@ export async function generateCommand(opts: {
   }
   const emitter = getEmitter(opts.lang);
   const namespace = opts.namespace ?? ir.name;
+
+  // Normalize the scoped-service selection. Accept a CSV string (CLI) or an
+  // array (config); trim and drop empties so a blank `--services` is treated as
+  // a full generation rather than "match nothing".
+  const rawServices = Array.isArray(opts.services) ? opts.services : opts.services?.split(',');
+  const services = rawServices?.map((s) => s.trim()).filter(Boolean);
 
   // Build overlay from API surface if provided and not disabled
   let apiSurface;
@@ -64,6 +76,7 @@ export async function generateCommand(opts: {
     modelHints: opts.modelHints,
     emitterOptions: opts.emitterOptions,
     noPrune: opts.prune === false,
+    services: services && services.length > 0 ? services : undefined,
   });
 
   if (opts.dryRun) {

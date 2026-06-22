@@ -42,7 +42,7 @@ Collect these values. Use arguments if provided, otherwise ask:
 2. **`spec`** — path to the OpenAPI spec (e.g., `../openapi.yaml`)
 3. **`output`** — path to the generated SDK output directory
 4. **`project`** — path to the emitter project (often the parent of `output`)
-5. **`namespace`** — SDK namespace/package name (e.g., `WorkOS`)
+5. **`namespace`** — SDK namespace/package name (e.g., `Acme`)
 
 Optional (Scenario A only):
 

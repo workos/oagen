@@ -34,7 +34,7 @@ async function main() {
   console.log('Parsing spec...');
   const spec = await parseSpec(specPath);
 
-  // Derive env var namespace from spec name: "WorkOS API" → "WORKOS"
+  // Derive env var namespace from spec name: "Acme API" → "ACME"
   const ns = spec.name
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, '_')

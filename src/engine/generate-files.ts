@@ -19,8 +19,28 @@ export function buildEmitterContext(
     emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
+    scopedServices?: Set<string>;
   },
 ): EmitterContext {
+  const resolvedOperations = resolveOperations(spec, options.operationHints, options.mountRules);
+
+  // In a scoped run, derive the model/enum allow-lists = names reachable
+  // from the SELECTED source services (those whose post-mount target is selected).
+  // Emitters write a model/enum FILE only when it is in these sets, so a
+  // non-selected service's exclusive models are left untouched (no leak) while
+  // shared models reachable from the selection still emit. Barrels stay full.
+  let scopedModelNames: Set<string> | undefined;
+  let scopedEnumNames: Set<string> | undefined;
+  if (options.scopedServices && options.scopedServices.size > 0) {
+    const selected = options.scopedServices;
+    const selectedSourceServices = spec.services.filter((s) =>
+      resolvedOperations.some((r) => r.service.name === s.name && selected.has(r.mountOn)),
+    );
+    const reachable = collectReferencedNames(selectedSourceServices, spec.models, { preserveAllDiscriminated: false });
+    scopedModelNames = reachable.models;
+    scopedEnumNames = reachable.enums;
+  }
+
   return {
     namespace: toSnakeCase(options.namespace),
     namespacePascal: options.namespace,
@@ -28,11 +48,14 @@ export function buildEmitterContext(
     outputDir: options.outputDir,
     apiSurface: options.apiSurface,
     overlayLookup: options.overlayLookup,
-    resolvedOperations: resolveOperations(spec, options.operationHints, options.mountRules),
+    resolvedOperations,
     modelHints: options.modelHints,
     emitterOptions: options.emitterOptions,
     targetDir: options.target,
     priorTargetManifestPaths: options.priorTargetManifestPaths,
+    scopedServices: options.scopedServices,
+    scopedModelNames,
+    scopedEnumNames,
   };
 }
 
@@ -44,7 +67,14 @@ export function buildEmitterContext(
 export function collectReferencedNames(
   services: Service[],
   models: Model[],
+  opts: { preserveAllDiscriminated?: boolean } = {},
 ): { models: Set<string>; enums: Set<string> } {
+  // Default: preserve EVERY discriminated/event model as public surface (full
+  // emission). Strict mode (`preserveAllDiscriminated: false`, used to compute a
+  // scoped run's reachable set) skips that blanket and instead chases the mapping
+  // variants of discriminated models that are actually reached — so a scoped
+  // service doesn't pull in the entire unrelated event tree.
+  const preserveAllDiscriminated = opts.preserveAllDiscriminated !== false;
   const referencedModels = new Set<string>();
   const referencedEnums = new Set<string>();
 
@@ -85,14 +115,16 @@ export function collectReferencedNames(
   // through the operation; without explicitly chasing its mapping, the
   // variant structs would be unreachable and the dispatcher would dangle
   // imports.
-  for (const model of models) {
-    if (isDiscriminatedModel(model)) {
-      referencedModels.add(model.name);
-    }
-    const disc = model.discriminator;
-    if (disc?.mapping) {
-      for (const variantName of Object.values(disc.mapping)) {
-        referencedModels.add(variantName);
+  if (preserveAllDiscriminated) {
+    for (const model of models) {
+      if (isDiscriminatedModel(model)) {
+        referencedModels.add(model.name);
+      }
+      const disc = model.discriminator;
+      if (disc?.mapping) {
+        for (const variantName of Object.values(disc.mapping)) {
+          referencedModels.add(variantName);
+        }
       }
     }
   }
@@ -107,6 +139,18 @@ export function collectReferencedNames(
     visited.add(name);
     const model = modelsByName.get(name);
     if (!model) continue;
+    // A reached discriminated base pulls in its mapping variants (the dispatcher
+    // would otherwise dangle). In full mode this is redundant with the blanket
+    // pass above; in strict mode it is the only path that includes variants.
+    const disc = model.discriminator;
+    if (disc?.mapping) {
+      for (const variantName of Object.values(disc.mapping)) {
+        if (!referencedModels.has(variantName)) {
+          referencedModels.add(variantName);
+          queue.push(variantName);
+        }
+      }
+    }
     for (const field of model.fields) {
       collectFromTypeRef(field.type);
       // If new models were discovered, enqueue them
@@ -126,7 +170,16 @@ function isDiscriminatedModel(model: Model): boolean {
   );
 }
 
-/** Collect all generated files from an emitter (no headers, no path prefixes). */
+/**
+ * Collect all generated files from an emitter (no headers, no path prefixes).
+ *
+ * In a scoped (`--services`) run the spec is NOT filtered: every generator runs
+ * over the full spec so model placement, dedup, the root client, and all
+ * aggregate/barrel files are byte-identical to a full run (and a brand-new
+ * selected service is wired into the client automatically). The emitters
+ * themselves consult `ctx.scopedServices` to emit only the selected services'
+ * per-service resource/test files.
+ */
 export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterContext): GeneratedFile[] {
   const referenced = collectReferencedNames(spec.services, spec.models);
   const reachableModels = spec.models.filter((m) => referenced.models.has(m.name));
@@ -168,6 +221,8 @@ export function generateFiles(
     emitterOptions?: Record<string, unknown>;
     target?: string;
     priorTargetManifestPaths?: Set<string>;
+    /** Scoped-generation signal (POST-MOUNT names); set on ctx for emitters to gate per-service emission. */
+    scopedServices?: Set<string>;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string; operations?: OperationsMap } {
   const ctx = buildEmitterContext(spec, options);

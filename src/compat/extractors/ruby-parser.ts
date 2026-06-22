@@ -183,8 +183,8 @@ export function extractEnumModules(source: string): ApiEnum[] {
     });
   }
 
-  // Also extract enum-shaped *classes*: WorkOS Ruby SDKs emit dedup'd
-  // ordering enums and similar value-set types as
+  // Also extract enum-shaped *classes*: some Ruby SDKs emit deduped ordering
+  // enums and similar value-set types as
   // `class ApplicationsOrder; ASC = "asc"; …; ALL = [...].freeze; end`
   // — a class with only constants (no instance methods, no constructor).
   // Without this branch they fall through to `extractClasses`, become

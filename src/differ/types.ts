@@ -21,7 +21,7 @@ export interface DiffReport {
 
 export interface BehaviorChange {
   kind: 'param-default-changed';
-  /** Service name (e.g. 'authorization', 'user_management'). */
+  /** Service name (e.g. 'authorization', 'accounts'). */
   serviceName: string;
   /** Operation name within the service. */
   operationName: string;

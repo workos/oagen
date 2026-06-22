@@ -99,11 +99,11 @@ Extractors are registered via `oagen.config.ts` in the consumer project. The CLI
 
 ```typescript
 // oagen.config.ts (consumer project)
-import { workosEmittersPlugin } from "@workos/oagen-emitters";
+import { acmeEmittersPlugin } from "@acme/oagen-emitters";
 import type { OagenConfig } from "@workos/oagen";
 
 const config: OagenConfig = {
-  ...workosEmittersPlugin, // includes all extractors
+  ...acmeEmittersPlugin, // includes all extractors
   // spec interpretation policy...
 };
 export default config;

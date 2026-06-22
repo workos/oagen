@@ -746,8 +746,8 @@ export async function mergeIntoExisting(
 
       // Member-level docstrings — second pass: URL fingerprint fallback
       // Match generated members to existing members by URL pattern when
-      // name-based matching fails (e.g., generated "find" vs existing "getOrganization"
-      // both call this.workos.get('/organizations/${id}')).
+      // name-based matching fails (e.g., generated "find" vs existing "getWidget"
+      // both call this.client.get('/widgets/${id}')).
       //
       // Safety: only attempt fingerprint matching when there is exactly ONE
       // unmatched generated member and ONE unmatched existing member for a

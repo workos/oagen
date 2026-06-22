@@ -32,7 +32,7 @@ export interface OagenConfig {
    */
   schemaNameTransform?: (name: string) => string;
   /** Base URL for documentation links. When set, relative paths in descriptions
-   *  (e.g. `/reference/authkit/user`) are expanded to full URLs. */
+   *  (e.g. `/reference/users/user`) are expanded to full URLs. */
   docUrl?: string;
   /**
    * Pre-IR overlay applied to the bundled OpenAPI document before any IR
@@ -47,7 +47,7 @@ export interface OagenConfig {
    */
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   /**
-   * Per-operation overrides keyed by "METHOD /path" (e.g. "POST /sso/token").
+   * Per-operation overrides keyed by "METHOD /path" (e.g. "POST /auth/token").
    * Used by the operation resolver to override derived method names, mount
    * targets, and to split union-body operations into typed wrappers.
    */

@@ -1774,28 +1774,6 @@ export class Webhooks {
     expect(result.content).not.toContain('listWebhooks');
   });
 
-  it('allows deep merge when new members reference this.workos', async () => {
-    // this.workos is the standard constructor-injected client — always valid
-    const existing = `
-export class Webhooks {
-  constructor(private readonly cryptoProvider: any) {}
-  verify() { return true; }
-}
-`;
-    const generated = `
-${header}
-
-export class Webhooks {
-  constructor(private readonly workos: any) {}
-  verify() { return true; }
-  listWebhooks() { return this.workos.get('/webhooks'); }
-}
-`;
-
-    const result = await mergeIntoExisting(existing, generated, 'node', header);
-    expect(result.content).toContain('listWebhooks');
-  });
-
   it('allows deep merge when referenced this.X properties exist', async () => {
     const existing = `
 export class UserService {

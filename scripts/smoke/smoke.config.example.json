@@ -1,0 +1,19 @@
+{
+  "skipOperations": ["createLongRunningExport", "startInteractiveLogin"],
+  "skipServices": ["InternalTools", "ExperimentalFeatures"],
+  "servicePriority": {
+    "Projects": 10,
+    "Users": 20,
+    "Reports": 30
+  },
+  "servicePropertyMap": {
+    "ProjectMembers": "projects",
+    "ReportExports": "reports"
+  },
+  "paramServiceMap": {
+    "projectId": "Projects",
+    "project_id": "Projects",
+    "userId": "Users",
+    "user_id": "Users"
+  }
+}

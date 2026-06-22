@@ -37,13 +37,12 @@ describe('defaultSdkBehavior', () => {
     expect(sdk.errors.statusCodeMap[429]).toBe('RateLimitExceeded');
     expect(sdk.errors.serverErrorKind).toBe('Server');
     expect(sdk.errors.clientErrorKind).toBe('Api');
-    expect(sdk.errors.errorDocUrlTemplate).toBe('https://workos.com/docs/errors/{code}');
   });
 
   it('has expected telemetry defaults', () => {
     const sdk = defaultSdkBehavior();
     expect(sdk.telemetry.enabledByDefault).toBe(true);
-    expect(sdk.telemetry.headerName).toBe('X-WorkOS-Client-Telemetry');
+    expect(sdk.telemetry.headerName).toBe('X-Client-Telemetry');
     expect(sdk.telemetry.requestIdHeader).toBe('X-Request-ID');
   });
 

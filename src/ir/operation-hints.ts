@@ -12,7 +12,7 @@ function toSnake(s: string): string {
 // Hint types — consumer-provided overrides for operation resolution
 // ---------------------------------------------------------------------------
 
-/** Per-operation override keyed by "METHOD /path" (e.g. "POST /sso/token"). */
+/** Per-operation override keyed by "METHOD /path" (e.g. "POST /auth/token"). */
 export interface OperationHint {
   /** Override the algorithm-derived method name. */
   name?: string;
@@ -28,7 +28,7 @@ export interface OperationHint {
    * Marks this operation as a URL builder rather than a real HTTP call. Emitters
    * should generate a method that returns the constructed URL (typically as a
    * string) without performing any I/O. Used for OAuth-style redirect endpoints
-   * such as /sso/authorize and /user_management/sessions/logout.
+   * such as /auth/authorize and /accounts/sessions/logout.
    */
   urlBuilder?: boolean;
 }
@@ -208,7 +208,7 @@ export function deriveMethodName(op: Operation, _service: Service): string {
   // Build resource name from static segments.
   // When path params separate static segments, include the penultimate static
   // segment (singularized) as a parent-context prefix to disambiguate nested paths.
-  // e.g. /authorization/organizations/{id}/roles → "organization_roles"
+  // e.g. /projects/{id}/roles → "project_roles"
   let resource = toSnake(terminal);
   if (staticSegments.length >= 2) {
     const penultimate = staticSegments[staticSegments.length - 2];

@@ -84,7 +84,7 @@ export const nodeExtractor: Extractor = {
     }
 
     // Follow property types on extracted classes to discover resource classes
-    // (e.g., WorkOS.apiKeys: ApiKeys → extract ApiKeys)
+    // (e.g., Client.widgets: Widgets → extract Widgets)
     followPropertyTypeClasses(exportedSymbols, checker, classes, sdkPath);
 
     const exports = buildExportMap(entrySourceFile, checker, sdkPath, program);

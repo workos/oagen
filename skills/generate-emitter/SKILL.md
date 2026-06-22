@@ -11,7 +11,7 @@ Scaffold a complete language emitter for oagen that translates the intermediate 
 
 oagen has a plugin architecture for code generation. Each target language is an **emitter** — a TypeScript module that implements the `Emitter` interface. An emitter receives parsed IR nodes (models, enums, services, etc.) and returns `GeneratedFile[]` — arrays of `{ path, content }` pairs. The engine orchestrator calls each emitter method, prepends a file header, and writes the results to disk.
 
-Emitters live in **external projects** (not inside the oagen core repo). They import all oagen types from `@workos/oagen` and are exported through the emitter project's plugin bundle (e.g., `workosEmittersPlugin`), which the consumer project's `oagen.config.ts` imports.
+Emitters live in **external projects** (not inside the oagen core repo). They import all oagen types from `@workos/oagen` and are exported through the emitter project's plugin bundle (e.g., `acmeEmittersPlugin`), which the consumer project's `oagen.config.ts` imports.
 
 ## Reference Docs
 
@@ -232,7 +232,7 @@ Add the emitter to the plugin bundle export (e.g., `src/plugin.ts`) and re-expor
 ```typescript
 // src/plugin.ts
 import { {language}Emitter } from './{language}/index.js';
-export const workosEmittersPlugin = {
+export const acmeEmittersPlugin = {
   emitters: [/* existing, */ {language}Emitter],
   // ...
 };

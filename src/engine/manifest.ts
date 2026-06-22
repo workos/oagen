@@ -29,7 +29,7 @@ export interface Manifest {
   version: number;
   /** Emitter language (e.g. "python").  Used only as a consistency hint. */
   language: string;
-  /** Human-readable or package-level SDK identity (e.g. "workos-php"). */
+  /** Human-readable or package-level SDK identity (e.g. "acme-php"). */
   sdkName?: string;
   /** ISO-8601 timestamp of the run that produced the current manifest contents. */
   generatedAt: string;
@@ -142,6 +142,34 @@ function sameManifestExceptGeneratedAt(a: Manifest, b: Manifest): boolean {
 export function computeStalePaths(prev: Manifest, currentPaths: Iterable<string>): string[] {
   const current = new Set(currentPaths);
   return prev.files.filter((p) => !current.has(p)).sort();
+}
+
+/**
+ * Merge a scoped run's emitted records into the prior manifest's records.
+ *
+ * A scoped (`--services`) run only emits files for the selected services, but it
+ * must NOT discard the prior manifest's record of unselected services' files
+ * records. The result unions prior + scoped file paths and shallow-merges the
+ * operations maps, with scoped operations overriding prior entries for the same
+ * "METHOD /path" key (a re-emission updates that operation's record).
+ *
+ * When `prev` is null (the first-ever run is scoped) there is nothing to
+ * preserve, so the scoped subset is returned unchanged — matching the
+ * first-adoption behavior of a full run.
+ */
+export function mergeScopedManifestRecords(
+  prev: Manifest | null,
+  scopedFiles: Iterable<string>,
+  scopedOperations?: Record<string, unknown>,
+): { files: string[]; operations?: Record<string, unknown> } {
+  const scopedFileList = [...scopedFiles];
+  if (!prev) {
+    return { files: scopedFileList, operations: scopedOperations };
+  }
+  const files = [...new Set([...prev.files, ...scopedFileList])].sort();
+  const priorOps = prev.operations;
+  const operations = priorOps || scopedOperations ? { ...priorOps, ...scopedOperations } : undefined;
+  return { files, operations };
 }
 
 /**

@@ -20,4 +20,4 @@ Review this checklist before finalizing the emitter, and when debugging failures
 
 9. **Wrong test framework** — If the existing SDK uses Jest, generate Jest tests. If it uses pytest, generate pytest tests. Never substitute a different framework because it seems "better."
 
-10. **Acronym handling in naming** — `toPascalCase('WorkOS')` may produce `WorkOs` instead of `WorkOS`. If the SDK preserves acronym casing, create an `ensurePascal()` wrapper that only capitalizes the first letter without disturbing the rest.
+10. **Acronym handling in naming** — `toPascalCase('XMLAPI')` may produce `Xmlapi` instead of `XMLAPI`. If the SDK preserves acronym casing, create an `ensurePascal()` wrapper that only capitalizes the first letter without disturbing the rest.

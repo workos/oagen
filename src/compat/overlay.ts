@@ -33,7 +33,7 @@ function findClassForProperty(
       return className;
     }
     // Check properties — resolve to the property's type class, not the parent.
-    // This prevents generic parent classes (e.g., WorkOS) from being returned
+    // This prevents generic parent classes (e.g., Client) from being returned
     // when the actual resource class (e.g., ApiKeys) should be used.
     for (const [propName, prop] of Object.entries(cls.properties)) {
       if (propName === sdkResourceProperty) {

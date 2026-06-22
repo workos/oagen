@@ -218,10 +218,8 @@ function parseMethods(classBody: SyntaxNode): { methods: PhpMethod[]; promotedPr
     //   - `simple_parameter`: standard `Type $name = default`
     //   - `property_promotion_parameter`: PHP 8 constructor-promoted
     //     property `public Type $name`. These declare *both* a parameter
-    //     on the constructor AND a property on the class — used by every
-    //     model emitted in the WorkOS PHP SDK (`readonly class Foo {
-    //     function __construct(public Type $field, …) {} }`). Without
-    //     accepting this node type the parser skips the parameter
+    //     on the constructor AND a property on the class. Without accepting
+    //     this node type the parser skips the parameter
     //     entirely, model fields disappear from the surface, and the
     //     compat differ has no field-level signal to pair renamed types.
     const promotedProperties: PhpProperty[] = [];

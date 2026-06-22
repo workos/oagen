@@ -97,10 +97,10 @@ Simple map from language name → `Emitter` instance. Emitters are registered at
 
 ```typescript
 // In oagen.config.ts (consumer project)
-import { workosEmittersPlugin } from "@workos/oagen-emitters";
+import { acmeEmittersPlugin } from "@acme/oagen-emitters";
 
 export default {
-  ...workosEmittersPlugin,
+  ...acmeEmittersPlugin,
   // spec interpretation policy...
 };
 ```
