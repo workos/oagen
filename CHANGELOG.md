@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/workos/oagen/compare/v0.22.7...v0.23.0) (2026-06-22)
+
+
+### Features
+
+* **generate:** scoped SDK generation via `--services` (emitter-aware) ([#114](https://github.com/workos/oagen/issues/114)) ([cd2eac7](https://github.com/workos/oagen/commit/cd2eac71ffd73b88a6ba95c7a7c8644a7f89443c))
+
 ## [0.22.7](https://github.com/workos/oagen/compare/v0.22.6...v0.22.7) (2026-06-19)
 
 
