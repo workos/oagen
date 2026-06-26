@@ -1003,4 +1003,103 @@ describe('extractOperations', () => {
       expect(op.queryParams.some((p) => p.name === 'filter')).toBe(true);
     });
   });
+
+  describe('discriminated-union request bodies', () => {
+    // Models POST /agents/credentials/validate: a `oneOf` of inline objects
+    // pinned by a string-const `type` discriminator (api_key | access_token).
+    const validatePaths = {
+      '/agents/credentials/validate': {
+        post: {
+          operationId: 'AgentAdminController_validateCredential',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  discriminator: { propertyName: 'type' },
+                  oneOf: [
+                    {
+                      type: 'object',
+                      properties: {
+                        type: {
+                          type: 'string',
+                          const: 'api_key',
+                          description: 'The kind of credential being validated.',
+                        },
+                        credential: { type: 'string', minLength: 1 },
+                      },
+                      required: ['type', 'credential'],
+                    },
+                    {
+                      type: 'object',
+                      properties: {
+                        type: { type: 'string', const: 'access_token' },
+                        credential: { type: 'string', minLength: 1 },
+                        audience: { type: 'string', minLength: 1 },
+                      },
+                      required: ['type', 'credential'],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    it('folds an inline-object discriminated union into a spreadable model', () => {
+      const { services, inlineModels } = extractOperations(validatePaths as never);
+      const op = services[0].operations[0];
+
+      // The body is a model (whose fields spread into method args), not a union.
+      expect(op.requestBody?.kind).toBe('model');
+      const model = inlineModels.find((m) => op.requestBody?.kind === 'model' && m.name === op.requestBody.name);
+      expect(model).toBeDefined();
+
+      const byName = Object.fromEntries(model!.fields.map((f) => [f.name, f]));
+      expect(Object.keys(byName).sort()).toEqual(['audience', 'credential', 'type']);
+
+      // The discriminator collapses to an enum of the pinned const values and is
+      // always required.
+      expect(byName.type.required).toBe(true);
+      expect(byName.type.type.kind).toBe('enum');
+      if (byName.type.type.kind === 'enum') {
+        expect(byName.type.type.values).toEqual(['api_key', 'access_token']);
+      }
+
+      // `credential` is required in every variant → required; `audience` is only
+      // present on one variant → optional.
+      expect(byName.credential.required).toBe(true);
+      expect(byName.audience.required).toBe(false);
+    });
+
+    it('leaves an undiscriminated oneOf body as a union', () => {
+      const paths = {
+        '/things': {
+          post: {
+            operationId: 'ThingController_create',
+            requestBody: {
+              required: true,
+              content: {
+                'application/json': {
+                  schema: {
+                    oneOf: [
+                      { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+                      { type: 'object', properties: { b: { type: 'string' } }, required: ['b'] },
+                    ],
+                  },
+                },
+              },
+            },
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      };
+      const { services } = extractOperations(paths as never);
+      // No explicit discriminator → existing union behavior is preserved.
+      expect(services[0].operations[0].requestBody?.kind).toBe('union');
+    });
+  });
 });

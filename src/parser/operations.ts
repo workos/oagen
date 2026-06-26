@@ -699,6 +699,18 @@ function extractRequestBody(
     : 'RequestBody';
   const contextName = cleanSchemaName(rawName);
 
+  // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
+  // compiles to a `oneOf` that code generators can't spread into named method
+  // arguments — the caller is handed an opaque union and the generated snippets
+  // carry no body fields. When every variant is an inline object pinned by a
+  // string-const discriminator, the union is equivalent to a single object, so
+  // fold it into that object and let the normal object path below emit
+  // ergonomic, spread-able arguments. See flattenDiscriminatedUnionBody.
+  if (schema.oneOf && schema.discriminator) {
+    const merged = flattenDiscriminatedUnionBody(schema);
+    if (merged) schema = merged;
+  }
+
   // If the request body is an inline object with properties, extract it as a model
   if (schema.properties && (schema.type === 'object' || !schema.type)) {
     const requiredSet = new Set(schema.required ?? []);
@@ -754,6 +766,89 @@ function extractRequestBody(
   }
 
   return { body: schemaToTypeRef(schema, contextName), encoding };
+}
+
+/**
+ * Fold a discriminated-union request body into the equivalent single object so
+ * its fields can be spread into method arguments instead of forcing callers to
+ * construct an opaque union.
+ *
+ * The result is the union of every variant's properties: the discriminator is
+ * collapsed to an enum of the pinned const values, and any field that isn't
+ * present-and-required in *every* variant becomes optional (it varies by
+ * branch, so it can't be unconditionally required). The discriminator itself is
+ * always required. This mirrors what a spec author would write by hand to model
+ * the same shape as a flat object.
+ *
+ * Returns null — leaving the union intact — unless the body is a clean
+ * inline-object discriminated union: a variant that is a `$ref`, a non-object,
+ * or that doesn't pin the discriminator to a string const can't be safely
+ * merged. Gating on an *explicit* `discriminator` keeps undiscriminated `oneOf`
+ * bodies untouched.
+ */
+function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | null {
+  const discProp = schema.discriminator?.propertyName;
+  if (!discProp || !Array.isArray(schema.oneOf) || schema.oneOf.length === 0) return null;
+
+  const variants = schema.oneOf as SchemaObject[];
+  const discValues: string[] = [];
+  let discPropSchema: SchemaObject | undefined;
+
+  for (const variant of variants) {
+    // Every variant must be an inline object that pins the discriminator to a
+    // string const (or single-value enum); anything else can't be merged.
+    if (variant.$ref || !variant.properties || !(variant.type === 'object' || variant.type === undefined)) {
+      return null;
+    }
+    const dp = variant.properties[discProp] as SchemaObject | undefined;
+    const constVal =
+      typeof dp?.const === 'string'
+        ? dp.const
+        : Array.isArray(dp?.enum) && dp.enum.length === 1 && typeof dp.enum[0] === 'string'
+          ? dp.enum[0]
+          : undefined;
+    if (constVal === undefined) return null;
+    if (!discValues.includes(constVal)) discValues.push(constVal);
+    if (!discPropSchema) discPropSchema = dp;
+  }
+
+  const variantCount = variants.length;
+  const mergedProps: Record<string, SchemaObject> = {};
+  const requiredCounts: Record<string, number> = {};
+  const order: string[] = [discProp]; // discriminator leads the merged object
+
+  for (const variant of variants) {
+    const required = new Set(variant.required ?? []);
+    for (const [name, propSchema] of Object.entries(variant.properties!)) {
+      if (name === discProp || !propSchema) continue;
+      if (!(name in mergedProps)) {
+        mergedProps[name] = propSchema as SchemaObject;
+        order.push(name);
+      }
+      if (required.has(name)) requiredCounts[name] = (requiredCounts[name] ?? 0) + 1;
+    }
+  }
+
+  // The discriminator collapses to an enum of the pinned values.
+  mergedProps[discProp] = {
+    type: 'string',
+    enum: discValues,
+    ...(discPropSchema?.description ? { description: discPropSchema.description } : {}),
+  };
+
+  const properties: Record<string, SchemaObject> = {};
+  for (const name of order) properties[name] = mergedProps[name];
+
+  // Required only when required in every variant; the discriminator is always
+  // required.
+  const requiredFields = order.filter((name) => name === discProp || requiredCounts[name] === variantCount);
+
+  return {
+    type: 'object',
+    properties,
+    required: requiredFields,
+    ...(schema.description ? { description: schema.description } : {}),
+  };
 }
 
 /** Derive a unique variant name for a oneOf inline model. */
