@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/workos/oagen/compare/v0.23.0...v0.24.0) (2026-06-26)
+
+
+### Features
+
+* **parser:** fold discriminated-union request bodies ([8c61f57](https://github.com/workos/oagen/commit/8c61f57a826397f08396900a690e3a62ccfee493))
+
 ## [0.23.0](https://github.com/workos/oagen/compare/v0.22.7...v0.23.0) (2026-06-22)
 
 
