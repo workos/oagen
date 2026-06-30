@@ -9,6 +9,7 @@ import { integrateGeneratedFiles } from './integrate.js';
 import { formatTargetFiles } from './formatter.js';
 import {
   computeStalePaths,
+  manifestServiceKeys,
   MANIFEST_FILENAME,
   mergeScopedManifestRecords,
   pruneStaleFiles,
@@ -63,11 +64,14 @@ export async function generate(
   const skipManifestRead = options.noPrune === true && !scoped;
   const outputPrevManifestForCtx = skipManifestRead ? null : await readManifest(options.outputDir);
   const targetManifestForCtx = options.target && !skipManifestRead ? await readManifest(options.target) : null;
-  const priorTargetManifestPaths = targetManifestForCtx
-    ? new Set(targetManifestForCtx.files)
-    : outputPrevManifestForCtx
-      ? new Set(outputPrevManifestForCtx.files)
-      : undefined;
+  const priorManifestForCtx = targetManifestForCtx ?? outputPrevManifestForCtx;
+  const priorTargetManifestPaths = priorManifestForCtx ? new Set(priorManifestForCtx.files) : undefined;
+  // Services already generated on disk (from the prior manifest's operations).
+  // Only consulted in a scoped run: it keeps already-present services in the
+  // aggregate/barrel/client surface (byte-identical regen) while excluding a
+  // service the spec just added that this SDK has never generated — which would
+  // otherwise be wired into the client/barrels with no implementation behind it.
+  const presentServiceKeys = scoped ? manifestServiceKeys(priorManifestForCtx) : undefined;
 
   const {
     files: withHeaders,
@@ -77,6 +81,7 @@ export async function generate(
     ...options,
     priorTargetManifestPaths,
     scopedServices,
+    presentServiceKeys,
   });
 
   if (options.dryRun) {

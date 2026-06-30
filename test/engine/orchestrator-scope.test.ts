@@ -40,6 +40,17 @@ const twoServiceSpec: ApiSpec = {
 };
 
 /**
+ * Drift spec: the spec has advanced to add a third service (Agents) that the SDK
+ * on disk (generated from `twoServiceSpec`) has never seen. Selecting Vault must
+ * NOT pull Agents into the client/barrels — it has no resource/models on disk
+ * and none are emitted this run, so wiring it in would dangle.
+ */
+const driftServiceSpec: ApiSpec = {
+  ...twoServiceSpec,
+  services: [...twoServiceSpec.services, svc('Agents', [op('get', '/agents')])],
+};
+
+/**
  * Mock emitter modeling the real emitters under the emitter-aware design:
  * - generateResources GATES per-service emission on ctx.scopedServices (the spec
  *   is passed in full; the emitter decides what to emit).
@@ -63,6 +74,18 @@ function scopeEmitter(spy: { clientCalls: number }): Emitter {
     generateErrors: () => [],
     generateTypeSignatures: () => [],
     generateTests: () => [],
+    // Record each emitted service's operations into the manifest. Present-service
+    // detection in a scoped run reads this back from the prior manifest to tell
+    // "already on disk" apart from "spec-only, never generated".
+    buildOperationsMap: (spec) => {
+      const map: Record<string, { sdkMethod: string; service: string }> = {};
+      for (const s of spec.services) {
+        for (const o of s.operations) {
+          map[`${o.httpMethod.toUpperCase()} ${o.path}`] = { sdkMethod: `${s.name.toLowerCase()}_op`, service: s.name };
+        }
+      }
+      return map;
+    },
     fileHeader: () => HEADER,
   };
 }
@@ -103,6 +126,41 @@ describe('orchestrator — scoped (--services) generation', () => {
       const clientAfterScoped = await fs.readFile(path.join(outputDir, 'client.rb'), 'utf-8');
       expect(clientAfterScoped).toBe(clientAfterFull);
       expect(clientAfterScoped).toContain('Sso,Vault');
+    } finally {
+      await fs.rm(outputDir, { recursive: true });
+    }
+  });
+
+  it('does not wire a spec-only, never-generated service into the client/barrels in a scoped run', async () => {
+    const outputDir = await tmp();
+    try {
+      // Run 1 (full) generates the SDK from the two-service spec → Sso + Vault on disk.
+      await generate(twoServiceSpec, scopeEmitter({ clientCalls: 0 }), { namespace: 'test', outputDir });
+
+      // The spec has since added Agents. Run 2 scoped to Vault against the drifted spec.
+      await generate(driftServiceSpec, scopeEmitter({ clientCalls: 0 }), {
+        namespace: 'test',
+        outputDir,
+        services: ['Vault'],
+      });
+
+      // Vault re-emitted; Sso preserved; Agents NOT emitted (out of scope).
+      expect(await fileExists(path.join(outputDir, 'services/vault.rb'))).toBe(true);
+      expect(await fileExists(path.join(outputDir, 'services/sso.rb'))).toBe(true);
+      expect(await fileExists(path.join(outputDir, 'services/agents.rb'))).toBe(false);
+
+      // The client lists only the services on disk + the selection — never the
+      // brand-new out-of-scope Agents (which would be an orphaned import).
+      const client = await fs.readFile(path.join(outputDir, 'client.rb'), 'utf-8');
+      expect(client).toContain('Sso');
+      expect(client).toContain('Vault');
+      expect(client).not.toContain('Agents');
+
+      // And the manifest must not record Agents — otherwise a follow-up scoped
+      // run would treat it as already-present and wire it in.
+      const manifest = await readManifest(outputDir);
+      const services = Object.values(manifest!.operations ?? {}).map((v) => (v as { service: string }).service);
+      expect(services).not.toContain('Agents');
     } finally {
       await fs.rm(outputDir, { recursive: true });
     }

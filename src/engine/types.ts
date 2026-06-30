@@ -36,11 +36,26 @@ export interface EmitterContext {
    * Scoped-generation signal: the set of POST-MOUNT service names a `--services`
    * run selected. When present and non-empty, emitters must emit ONLY these
    * services' per-service resource/test files, while still emitting models,
-   * enums, the root client, and all aggregate/barrel files from the FULL spec
-   * (so shared files stay byte-identical and a brand-new selected service is
-   * wired into the client automatically). Absent/empty ⇒ full generation.
+   * enums, the root client, and all aggregate/barrel files for the surface the
+   * engine hands them (so shared files stay byte-identical and a brand-new
+   * selected service is wired into the client automatically). Absent/empty ⇒
+   * full generation.
+   *
+   * NOTE: the engine narrows the spec it passes to the aggregate generators to
+   * `selected ∪ already-on-disk` services (see `presentServiceKeys`), so the
+   * "full spec" an emitter sees in a scoped run excludes services the spec just
+   * added that this SDK has never generated — they would otherwise be wired into
+   * barrels/the client with no implementation behind them (orphaned imports).
    */
   scopedServices?: Set<string>;
+  /**
+   * Canonical (casing/separator-insensitive) keys of services the prior manifest
+   * recorded as already generated on disk. Populated only in a scoped run, from
+   * the output/target `.oagen-manifest.json` operations map. The engine uses it
+   * to keep an already-present service in the aggregate surface (byte-identical
+   * regen) while dropping a spec-only, never-generated, out-of-scope service.
+   */
+  presentServiceKeys?: Set<string>;
   /**
    * Scoped-generation model/enum allow-lists: names of models/enums reachable
    * from the selected services. When `scopedServices` is active,
