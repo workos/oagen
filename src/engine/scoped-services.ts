@@ -26,6 +26,18 @@ import type { ApiSpec } from '../ir/types.js';
  * @throws A `ConfigError` listing valid post-mount names when a selection is
  *   unknown — scoped generation never silently emits the wrong set.
  */
+/**
+ * Canonicalize a service name to a casing/separator-insensitive key so that
+ * `MultiFactorAuth` (post-mount IR name), `multi_factor_auth` (snake-cased
+ * manifest record), and `multiFactorAuth` (camel-cased manifest record) all
+ * collapse to `multifactorauth`. Used to match a spec service against the
+ * services a prior manifest recorded as already on disk, where the casing of
+ * the recorded `service` field varies per emitter.
+ */
+export function canonicalServiceKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 export function resolveScopedServices(
   spec: ApiSpec,
   selected: string[],

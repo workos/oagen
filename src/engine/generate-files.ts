@@ -5,6 +5,7 @@ import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { toSnakeCase } from '../utils/naming.js';
+import { canonicalServiceKey } from './scoped-services.js';
 
 export function buildEmitterContext(
   spec: ApiSpec,
@@ -20,6 +21,7 @@ export function buildEmitterContext(
     target?: string;
     priorTargetManifestPaths?: Set<string>;
     scopedServices?: Set<string>;
+    presentServiceKeys?: Set<string>;
   },
 ): EmitterContext {
   const resolvedOperations = resolveOperations(spec, options.operationHints, options.mountRules);
@@ -54,9 +56,32 @@ export function buildEmitterContext(
     targetDir: options.target,
     priorTargetManifestPaths: options.priorTargetManifestPaths,
     scopedServices: options.scopedServices,
+    presentServiceKeys: options.presentServiceKeys,
     scopedModelNames,
     scopedEnumNames,
   };
+}
+
+/**
+ * The services an aggregate (barrel/client/test) generator may reference in a
+ * scoped run: the selected services plus every service the prior manifest
+ * recorded as already on disk. A service the spec just added that is neither
+ * selected nor already generated is excluded — otherwise the client/barrels
+ * would import a resource/model whose file this run does not emit (the orphaned
+ * `agents/__init__.py → ._resource` class of build break).
+ *
+ * Outside a scoped run (full generation), every service is in surface.
+ */
+export function aggregateSurfaceServices(spec: ApiSpec, ctx: EmitterContext): Service[] {
+  const scope = ctx.scopedServices;
+  if (!scope || scope.size === 0) return spec.services;
+  const present = ctx.presentServiceKeys ?? new Set<string>();
+  const postMountOf = (service: Service): string =>
+    ctx.resolvedOperations?.find((r) => r.service.name === service.name)?.mountOn ?? service.name;
+  return spec.services.filter((s) => {
+    const postMount = postMountOf(s);
+    return scope.has(postMount) || present.has(canonicalServiceKey(postMount));
+  });
 }
 
 /**
@@ -173,24 +198,38 @@ function isDiscriminatedModel(model: Model): boolean {
 /**
  * Collect all generated files from an emitter (no headers, no path prefixes).
  *
- * In a scoped (`--services`) run the spec is NOT filtered: every generator runs
- * over the full spec so model placement, dedup, the root client, and all
- * aggregate/barrel files are byte-identical to a full run (and a brand-new
- * selected service is wired into the client automatically). The emitters
- * themselves consult `ctx.scopedServices` to emit only the selected services'
- * per-service resource/test files.
+ * A full run emits over the whole spec. A scoped (`--services`) run still emits
+ * model placement, dedup, the root client, and aggregate/barrel files
+ * byte-identically for every service ALREADY on disk (plus the brand-new
+ * selected service, which is wired into the client automatically) — but it
+ * narrows that surface to `selected ∪ already-on-disk` services
+ * (`aggregateSurfaceServices`). A service the spec just added that is neither
+ * selected nor already generated is dropped from the surface entirely, so its
+ * models/discriminators are not pulled into reachability and barrels/the client
+ * never import a resource this run does not emit. The emitters additionally
+ * consult `ctx.scopedServices` to emit only the selected services' per-service
+ * resource/test files.
  */
 export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterContext): GeneratedFile[] {
-  const referenced = collectReferencedNames(spec.services, spec.models);
+  const scoped = !!ctx.scopedServices && ctx.scopedServices.size > 0;
+  const surfaceServices = aggregateSurfaceServices(spec, ctx);
+  // In a scoped run, restrict the blanket discriminated/event preservation to
+  // models reachable from the in-surface services; otherwise an out-of-scope,
+  // never-generated service's discriminated models (e.g. AgentRegistration*)
+  // would still be force-included and emit orphaned converters/variants.
+  const referenced = collectReferencedNames(surfaceServices, spec.models, {
+    preserveAllDiscriminated: !scoped,
+  });
   const reachableModels = spec.models.filter((m) => referenced.models.has(m.name));
   const reachableEnums = spec.enums.filter((e) => referenced.enums.has(e.name));
-  const reachableSpec: ApiSpec = { ...spec, models: reachableModels, enums: reachableEnums };
+  const surfaceSpec: ApiSpec = { ...spec, services: surfaceServices };
+  const reachableSpec: ApiSpec = { ...surfaceSpec, models: reachableModels, enums: reachableEnums };
 
   return [
     ...emitter.generateModels(reachableModels, ctx),
     ...emitter.generateEnums(reachableEnums, ctx),
-    ...emitter.generateResources(spec.services, ctx),
-    ...emitter.generateClient(spec, ctx),
+    ...emitter.generateResources(surfaceServices, ctx),
+    ...emitter.generateClient(surfaceSpec, ctx),
     ...emitter.generateErrors(ctx),
     ...(emitter.generateTypeSignatures?.(reachableSpec, ctx) ?? []),
     ...emitter.generateTests(reachableSpec, ctx),
@@ -223,11 +262,19 @@ export function generateFiles(
     priorTargetManifestPaths?: Set<string>;
     /** Scoped-generation signal (POST-MOUNT names); set on ctx for emitters to gate per-service emission. */
     scopedServices?: Set<string>;
+    /** Canonical keys of services already on disk (prior manifest); narrows the scoped aggregate surface. */
+    presentServiceKeys?: Set<string>;
   },
 ): { files: GeneratedFile[]; ctx: EmitterContext; header: string; operations?: OperationsMap } {
   const ctx = buildEmitterContext(spec, options);
   const files = generateAllFiles(spec, emitter, ctx);
-  const operations = emitter.buildOperationsMap?.(spec, ctx);
+  // Record operations for the SAME surface generateAllFiles emitted (scope ∪
+  // already-on-disk in a scoped run; the full spec otherwise). Recording a
+  // never-generated, out-of-scope service here would persist it into the merged
+  // manifest and make the next scoped run treat it as present — re-opening the
+  // orphan it was just kept out of.
+  const surfaceSpec: ApiSpec = { ...spec, services: aggregateSurfaceServices(spec, ctx) };
+  const operations = emitter.buildOperationsMap?.(surfaceSpec, ctx);
   const header = emitter.fileHeader();
   return { files: applyFileHeaders(files, header), ctx, header, operations };
 }

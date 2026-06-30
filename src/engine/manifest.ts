@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { canonicalServiceKey } from './scoped-services.js';
 
 /**
  * Prune-manifest support for `oagen generate`.
@@ -170,6 +171,38 @@ export function mergeScopedManifestRecords(
   const priorOps = prev.operations;
   const operations = priorOps || scopedOperations ? { ...priorOps, ...scopedOperations } : undefined;
   return { files, operations };
+}
+
+/**
+ * Extract the set of services a prior manifest records as already generated on
+ * disk, as canonical (casing/separator-insensitive) keys.
+ *
+ * The manifest's `operations` map carries each operation's owning `service`
+ * (snake_case for most emitters, camelCase for Kotlin). A scoped (`--services`)
+ * run uses this to tell "service in the spec that is already on disk" apart from
+ * "service the spec just added that this SDK has never generated" — only the
+ * former may be wired into aggregate/barrel/client files alongside the
+ * selection, so a brand-new out-of-scope service is never referenced by files
+ * whose implementation this run does not emit.
+ *
+ * Returns an empty set when the manifest is null or carries no operations
+ * (a legacy manifest with no operations data); callers treat that as "present
+ * set unknown" and fall back to not narrowing the surface.
+ */
+export function manifestServiceKeys(manifest: Manifest | null): Set<string> {
+  const keys = new Set<string>();
+  const ops = manifest?.operations;
+  if (!ops) return keys;
+  for (const value of Object.values(ops)) {
+    const entries = Array.isArray(value) ? value : [value];
+    for (const entry of entries) {
+      const service = (entry as { service?: unknown } | null)?.service;
+      if (typeof service === 'string' && service.length > 0) {
+        keys.add(canonicalServiceKey(service));
+      }
+    }
+  }
+  return keys;
 }
 
 /**
