@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/workos/oagen/compare/v0.24.0...v0.24.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **engine:** scope aggregate surface to selected + on-disk services ([#117](https://github.com/workos/oagen/issues/117)) ([e4500fe](https://github.com/workos/oagen/commit/e4500fe356d34794fe0be31bfcf05cbe087a3a89))
+
 ## [0.24.0](https://github.com/workos/oagen/compare/v0.23.0...v0.24.0) (2026-06-26)
 
 
