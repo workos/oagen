@@ -26,19 +26,32 @@ export function buildEmitterContext(
 ): EmitterContext {
   const resolvedOperations = resolveOperations(spec, options.operationHints, options.mountRules);
 
-  // In a scoped run, derive the model/enum allow-lists = names reachable
-  // from the SELECTED source services (those whose post-mount target is selected).
-  // Emitters write a model/enum FILE only when it is in these sets, so a
-  // non-selected service's exclusive models are left untouched (no leak) while
-  // shared models reachable from the selection still emit. Barrels stay full.
+  // In a scoped run, derive the model/enum allow-lists = names reachable from the
+  // emit SURFACE (selected ∪ already-on-disk services) — the SAME set
+  // generateAllFiles emits over (aggregateSurfaceServices). Emitters write a
+  // model/enum FILE only when it is in these sets.
+  //
+  // This must match the surface, NOT the selection alone: a scoped run
+  // regenerates every on-disk service's fixtures and the (wholesale) round-trip
+  // test from the current spec. If the model/enum FILES were gated to the
+  // selection only, a present service whose spec drifted (new field) kept a stale
+  // model class while its regenerated fixture + round-trip test asserted the new
+  // field — a guaranteed round-trip test failure. Gating on the surface
+  // regenerates the present service's model in lockstep, keeping the tree
+  // consistent. A service the spec has but this SDK never generated is still
+  // excluded (not selected, not present), so no orphaned files leak in.
   let scopedModelNames: Set<string> | undefined;
   let scopedEnumNames: Set<string> | undefined;
   if (options.scopedServices && options.scopedServices.size > 0) {
-    const selected = options.scopedServices;
-    const selectedSourceServices = spec.services.filter((s) =>
-      resolvedOperations.some((r) => r.service.name === s.name && selected.has(r.mountOn)),
-    );
-    const reachable = collectReferencedNames(selectedSourceServices, spec.models, { preserveAllDiscriminated: false });
+    const scope = options.scopedServices;
+    const present = options.presentServiceKeys ?? new Set<string>();
+    const postMountOf = (service: Service): string =>
+      resolvedOperations.find((r) => r.service.name === service.name)?.mountOn ?? service.name;
+    const surfaceSourceServices = spec.services.filter((s) => {
+      const postMount = postMountOf(s);
+      return scope.has(postMount) || present.has(canonicalServiceKey(postMount));
+    });
+    const reachable = collectReferencedNames(surfaceSourceServices, spec.models, { preserveAllDiscriminated: false });
     scopedModelNames = reachable.models;
     scopedEnumNames = reachable.enums;
   }
