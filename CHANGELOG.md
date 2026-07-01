@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.2](https://github.com/workos/oagen/compare/v0.24.1...v0.24.2) (2026-07-01)
+
+
+### Bug Fixes
+
+* **engine:** scope model/enum files to emit surface, not selection ([#119](https://github.com/workos/oagen/issues/119)) ([f765517](https://github.com/workos/oagen/commit/f765517dccd8530662e0367792bcb938cfc0b0da))
+
 ## [0.24.1](https://github.com/workos/oagen/compare/v0.24.0...v0.24.1) (2026-06-30)
 
 
