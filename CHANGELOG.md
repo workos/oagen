@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.3](https://github.com/workos/oagen/compare/v0.24.2...v0.24.3) (2026-07-01)
+
+
+### Bug Fixes
+
+* **engine:** minimal scoped generation — model/enum scope to selected operations ([#121](https://github.com/workos/oagen/issues/121)) ([4859ff1](https://github.com/workos/oagen/commit/4859ff1da8bbd3f64256089c7e053be337b2f13f))
+
 ## [0.24.2](https://github.com/workos/oagen/compare/v0.24.1...v0.24.2) (2026-07-01)
 
 
