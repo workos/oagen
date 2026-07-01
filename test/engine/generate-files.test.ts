@@ -58,7 +58,7 @@ describe('collectReferencedNames', () => {
   });
 });
 
-describe('buildEmitterContext scopedModelNames (surface, not selection-only)', () => {
+describe('buildEmitterContext scopedModelNames (selected-only, minimal scope)', () => {
   const opTo = (name: string, path: string, model: string) => ({
     name,
     httpMethod: 'get' as const,
@@ -93,18 +93,46 @@ describe('buildEmitterContext scopedModelNames (surface, not selection-only)', (
       presentServiceKeys: present,
     });
 
-  it('includes an already-on-disk (present) service’s models, so they regenerate with their fixtures/tests', () => {
+  it('scopes models to the SELECTED service only — an on-disk (present) service’s models are left untouched', () => {
     const ctx = build(new Set([canonicalServiceKey('Radar')]));
-    expect(ctx.scopedModelNames?.has('PipeModel')).toBe(true); // selected
-    // Regressed before the fix: gated to selection-only, so Radar's model file
-    // wasn't rewritten while its fixture + round-trip test asserted new fields.
-    expect(ctx.scopedModelNames?.has('RadarModel')).toBe(true); // present-on-disk
+    expect(ctx.scopedModelNames?.has('PipeModel')).toBe(true); // selected → regenerated
+    // Minimal scope: Radar is present on disk but NOT selected, so its model
+    // file is left byte-for-byte alone (the emitters correspondingly skip its
+    // fixtures + the wholesale round-trip test in a scoped run). This is the
+    // deliberate revert of the surface-wide "expand" behaviour.
+    expect(ctx.scopedModelNames?.has('RadarModel')).toBe(false); // present but not selected
   });
 
-  it('still excludes a never-generated service’s models (not selected, not present) — no orphan', () => {
+  it('a never-generated service’s models stay excluded regardless (not selected, not present)', () => {
     const ctx = build(new Set());
     expect(ctx.scopedModelNames?.has('PipeModel')).toBe(true);
     expect(ctx.scopedModelNames?.has('RadarModel')).toBe(false);
+  });
+
+  it('scopes reachability to the selected OPERATIONS, not the whole source service (per-op mountOn)', () => {
+    // One source service whose two operations mount to different targets via
+    // per-op hints. Scoping to one target must pull in ONLY that operation's
+    // models — not the sibling operation's (mounted elsewhere).
+    const split: ApiSpec = {
+      name: 'T',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [svc('Multi', [opTo('a', '/alpha', 'AlphaModel'), opTo('b', '/beta', 'BetaModel')])],
+      models: [
+        { name: 'AlphaModel', fields: [] },
+        { name: 'BetaModel', fields: [] },
+      ],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+    const ctx = buildEmitterContext(split, {
+      namespace: 'workos',
+      outputDir: '/tmp/x',
+      scopedServices: new Set(['Alpha']),
+      operationHints: { 'GET /alpha': { mountOn: 'Alpha' }, 'GET /beta': { mountOn: 'Beta' } },
+    });
+    expect(ctx.scopedModelNames?.has('AlphaModel')).toBe(true); // selected op's model
+    expect(ctx.scopedModelNames?.has('BetaModel')).toBe(false); // sibling op mounts to Beta — excluded
   });
 });
 

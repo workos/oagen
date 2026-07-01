@@ -1,4 +1,4 @@
-import type { ApiSpec, Model, TypeRef, Service } from '../ir/types.js';
+import type { ApiSpec, Model, TypeRef, Service, Operation } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
@@ -27,31 +27,42 @@ export function buildEmitterContext(
   const resolvedOperations = resolveOperations(spec, options.operationHints, options.mountRules);
 
   // In a scoped run, derive the model/enum allow-lists = names reachable from the
-  // emit SURFACE (selected ∪ already-on-disk services) — the SAME set
-  // generateAllFiles emits over (aggregateSurfaceServices). Emitters write a
-  // model/enum FILE only when it is in these sets.
+  // SELECTED source services only (those whose post-mount target is selected).
+  // Emitters write a model/enum FILE only when it is in these sets, so a
+  // non-selected service's models/enums are left byte-for-byte untouched — even
+  // when their spec drifted. Barrels/clients still reference every on-disk
+  // service (aggregateSurfaceServices), so those untouched files stay importable.
   //
-  // This must match the surface, NOT the selection alone: a scoped run
-  // regenerates every on-disk service's fixtures and the (wholesale) round-trip
-  // test from the current spec. If the model/enum FILES were gated to the
-  // selection only, a present service whose spec drifted (new field) kept a stale
-  // model class while its regenerated fixture + round-trip test asserted the new
-  // field — a guaranteed round-trip test failure. Gating on the surface
-  // regenerates the present service's model in lockstep, keeping the tree
-  // consistent. A service the spec has but this SDK never generated is still
-  // excluded (not selected, not present), so no orphaned files leak in.
+  // This is the MINIMAL-scope contract: a scoped `--services X` run touches only
+  // X's own files. It relies on the emitters correspondingly NOT regenerating
+  // present services' fixtures and skipping the wholesale round-trip test in a
+  // scoped run — otherwise a fresh fixture would assert a field the (untouched)
+  // present model lacks. The three must move together; keeping the whole surface
+  // consistent instead (the prior behaviour) is the trade-off we chose against:
+  // it made every scoped run flush all on-disk drift, defeating the point of
+  // scoping. The SDK may lag on non-selected services until they're regenerated.
   let scopedModelNames: Set<string> | undefined;
   let scopedEnumNames: Set<string> | undefined;
   if (options.scopedServices && options.scopedServices.size > 0) {
-    const scope = options.scopedServices;
-    const present = options.presentServiceKeys ?? new Set<string>();
-    const postMountOf = (service: Service): string =>
-      resolvedOperations.find((r) => r.service.name === service.name)?.mountOn ?? service.name;
-    const surfaceSourceServices = spec.services.filter((s) => {
-      const postMount = postMountOf(s);
-      return scope.has(postMount) || present.has(canonicalServiceKey(postMount));
-    });
-    const reachable = collectReferencedNames(surfaceSourceServices, spec.models, { preserveAllDiscriminated: false });
+    const selected = options.scopedServices;
+    // Seed reachability from ONLY the operations that mount to a selected target
+    // — not from every operation of a source service that has one op mounted
+    // there. `resolveOperations` honours per-operation `mountOn` hints, so a
+    // single source service can split across targets; collecting the whole
+    // service would pull its sibling operations' models (mounted elsewhere) into
+    // scope and regenerate non-selected model files, breaking the selected-only
+    // contract. Build temp services carrying just the selected operations.
+    const selectedOpsByService = new Map<string, Operation[]>();
+    for (const r of resolvedOperations) {
+      if (!selected.has(r.mountOn)) continue;
+      const ops = selectedOpsByService.get(r.service.name) ?? [];
+      ops.push(r.operation);
+      selectedOpsByService.set(r.service.name, ops);
+    }
+    const selectedSourceServices = spec.services
+      .filter((s) => selectedOpsByService.has(s.name))
+      .map((s) => ({ ...s, operations: selectedOpsByService.get(s.name)! }));
+    const reachable = collectReferencedNames(selectedSourceServices, spec.models, { preserveAllDiscriminated: false });
     scopedModelNames = reachable.models;
     scopedEnumNames = reachable.enums;
   }
