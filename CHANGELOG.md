@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.4](https://github.com/workos/oagen/compare/v0.24.3...v0.24.4) (2026-07-02)
+
+
+### Bug Fixes
+
+* **engine:** validate modelHints against full spec ([#123](https://github.com/workos/oagen/issues/123)) ([e694e80](https://github.com/workos/oagen/commit/e694e80e4430077a97905eaaa59a67276d60ad29))
+
 ## [0.24.3](https://github.com/workos/oagen/compare/v0.24.2...v0.24.3) (2026-07-01)
 
 
