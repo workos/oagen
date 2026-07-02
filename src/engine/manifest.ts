@@ -32,8 +32,12 @@ export interface Manifest {
   language: string;
   /** Human-readable or package-level SDK identity (e.g. "acme-php"). */
   sdkName?: string;
-  /** ISO-8601 timestamp of the run that produced the current manifest contents. */
-  generatedAt: string;
+  /**
+   * @deprecated No longer written. A wall-clock timestamp churned the manifest
+   * on every regen for no functional gain (nothing reads it), so it is now
+   * omitted. Retained as optional purely so legacy on-disk manifests still parse.
+   */
+  generatedAt?: string;
   /** SHA-256 hash of the source OpenAPI spec used for generation. */
   specSha?: string;
   /** Path or reference to the source spec. */
@@ -75,7 +79,6 @@ export async function readManifest(dir: string): Promise<Manifest | null> {
     if (
       typeof parsed.version !== 'number' ||
       typeof parsed.language !== 'string' ||
-      typeof parsed.generatedAt !== 'string' ||
       !Array.isArray(parsed.files) ||
       !parsed.files.every((p): p is string => typeof p === 'string')
     ) {
@@ -115,7 +118,6 @@ export async function writeManifest(dir: string, opts: WriteManifestOpts): Promi
     version: MANIFEST_VERSION,
     language: opts.language,
     ...(opts.sdkName !== undefined ? { sdkName: opts.sdkName } : {}),
-    generatedAt: new Date().toISOString(),
     ...(opts.specSha !== undefined ? { specSha: opts.specSha } : {}),
     ...(opts.specPath !== undefined ? { specPath: opts.specPath } : {}),
     ...(opts.emitterSha !== undefined ? { emitterSha: opts.emitterSha } : {}),
@@ -125,18 +127,8 @@ export async function writeManifest(dir: string, opts: WriteManifestOpts): Promi
     files: [...new Set(opts.files)].sort(),
     ...(opts.operations !== undefined ? { operations: opts.operations } : {}),
   };
-  const previous = await readManifest(dir);
-  if (previous && sameManifestExceptGeneratedAt(previous, manifest)) {
-    manifest.generatedAt = previous.generatedAt;
-  }
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
-}
-
-function sameManifestExceptGeneratedAt(a: Manifest, b: Manifest): boolean {
-  const { generatedAt: _aGeneratedAt, ...aComparable } = a;
-  const { generatedAt: _bGeneratedAt, ...bComparable } = b;
-  return JSON.stringify(aComparable) === JSON.stringify(bComparable);
 }
 
 /** Return the set of previous paths no longer present in the current emission. */
