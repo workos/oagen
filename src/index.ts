@@ -37,6 +37,7 @@ export {
   collectEnumRefs,
   collectFieldDependencies,
   assignModelsToServices,
+  validateModelHints,
   collectRequestBodyModels,
 } from './ir/types.js';
 

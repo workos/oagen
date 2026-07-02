@@ -18,6 +18,7 @@ import {
   collectEnumRefs,
   collectFieldDependencies,
   assignModelsToServices,
+  validateModelHints,
   collectRequestBodyModels,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -420,16 +421,44 @@ describe('assignModelsToServices', () => {
     );
   });
 
-  it('throws when modelHints names an unknown model', () => {
+  it('skips a hint whose model is outside this slice (partial models)', () => {
+    // Placement is handed a partial slice that lacks `User`; the hint for `User`
+    // must be skipped, not treated as a typo (it is a real model elsewhere).
+    const models: Model[] = [{ name: 'Org', fields: [] }];
+    const services = [
+      {
+        name: 'Orgs',
+        operations: [
+          {
+            name: 'getOrg',
+            httpMethod: 'get' as const,
+            path: '/orgs/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'Org' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services, { User: 'UserManagementUsers' });
+    expect(map.has('User')).toBe(false);
+  });
+
+  it('applies a hint whose target service is outside this slice (partial services)', () => {
+    // The model is in the slice but the target service is not listed here; the
+    // pin is still applied because placement resolves by service name.
     const models: Model[] = [{ name: 'User', fields: [] }];
     const services = [
       {
-        name: 'Users',
+        name: 'Pipes',
         operations: [
           {
-            name: 'getUser',
+            name: 'getPipe',
             httpMethod: 'get' as const,
-            path: '/users/{id}',
+            path: '/pipes/{id}',
             pathParams: [],
             queryParams: [],
             headerParams: [],
@@ -440,30 +469,42 @@ describe('assignModelsToServices', () => {
         ],
       },
     ];
-    expect(() => assignModelsToServices(models, services, { Userrr: 'Users' })).toThrow(/unknown model "Userrr"/);
+    const map = assignModelsToServices(models, services, { User: 'UserManagementUsers' });
+    expect(map.get('User')).toBe('UserManagementUsers');
+  });
+});
+
+describe('validateModelHints', () => {
+  const models: Model[] = [{ name: 'User', fields: [] }];
+  const services = [
+    {
+      name: 'Users',
+      operations: [
+        {
+          name: 'getUser',
+          httpMethod: 'get' as const,
+          path: '/users/{id}',
+          pathParams: [],
+          queryParams: [],
+          headerParams: [],
+          response: { kind: 'model' as const, name: 'User' },
+          errors: [],
+          injectIdempotencyKey: false,
+        },
+      ],
+    },
+  ];
+
+  it('throws when modelHints names an unknown model', () => {
+    expect(() => validateModelHints(models, services, { Userrr: 'Users' })).toThrow(/unknown model "Userrr"/);
   });
 
   it('throws when modelHints names an unknown service', () => {
-    const models: Model[] = [{ name: 'User', fields: [] }];
-    const services = [
-      {
-        name: 'Users',
-        operations: [
-          {
-            name: 'getUser',
-            httpMethod: 'get' as const,
-            path: '/users/{id}',
-            pathParams: [],
-            queryParams: [],
-            headerParams: [],
-            response: { kind: 'model' as const, name: 'User' },
-            errors: [],
-            injectIdempotencyKey: false,
-          },
-        ],
-      },
-    ];
-    expect(() => assignModelsToServices(models, services, { User: 'Userzzz' })).toThrow(/unknown service "Userzzz"/);
+    expect(() => validateModelHints(models, services, { User: 'Userzzz' })).toThrow(/unknown service "Userzzz"/);
+  });
+
+  it('accepts hints whose model and service both exist in the full spec', () => {
+    expect(() => validateModelHints(models, services, { User: 'Users' })).not.toThrow();
   });
 });
 
