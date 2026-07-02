@@ -5,7 +5,6 @@ function manifest(files: string[], operations?: Record<string, unknown>): Manife
   return {
     version: 2,
     language: 'mock',
-    generatedAt: '2026-01-01T00:00:00.000Z',
     files,
     ...(operations ? { operations } : {}),
   };

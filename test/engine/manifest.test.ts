@@ -125,9 +125,10 @@ describe('manifest read/write', () => {
     try {
       await writeManifest(dir, { language: 'node', files: ['a.ts'] });
       await writeManifest(dir, { language: 'node', files: ['a.ts', 'b.ts'] });
+      const raw = await fs.readFile(path.join(dir, MANIFEST_FILENAME), 'utf-8');
       const got = await readManifest(dir);
 
-      expect(got!.generatedAt).toBeUndefined();
+      expect(raw).not.toContain('generatedAt');
       expect(got!.files).toEqual(['a.ts', 'b.ts']);
     } finally {
       await fs.rm(dir, { recursive: true });
@@ -165,7 +166,6 @@ describe('computeStalePaths', () => {
     const prev = {
       version: 1,
       language: 'python',
-      generatedAt: '2026-01-01T00:00:00.000Z',
       files: ['a.py', 'b.py', 'c.py'],
     };
     expect(computeStalePaths(prev, ['a.py', 'c.py', 'd.py'])).toEqual(['b.py']);
@@ -175,7 +175,6 @@ describe('computeStalePaths', () => {
     const prev = {
       version: 1,
       language: 'python',
-      generatedAt: '2026-01-01T00:00:00.000Z',
       files: ['a.py'],
     };
     expect(computeStalePaths(prev, ['a.py', 'b.py'])).toEqual([]);
@@ -185,7 +184,6 @@ describe('computeStalePaths', () => {
     const prev = {
       version: 1,
       language: 'python',
-      generatedAt: '2026-01-01T00:00:00.000Z',
       files: ['zeta.py', 'alpha.py', 'mu.py'],
     };
     expect(computeStalePaths(prev, [])).toEqual(['alpha.py', 'mu.py', 'zeta.py']);

@@ -32,12 +32,6 @@ export interface Manifest {
   language: string;
   /** Human-readable or package-level SDK identity (e.g. "acme-php"). */
   sdkName?: string;
-  /**
-   * @deprecated No longer written. A wall-clock timestamp churned the manifest
-   * on every regen for no functional gain (nothing reads it), so it is now
-   * omitted. Retained as optional purely so legacy on-disk manifests still parse.
-   */
-  generatedAt?: string;
   /** SHA-256 hash of the source OpenAPI spec used for generation. */
   specSha?: string;
   /** Path or reference to the source spec. */
