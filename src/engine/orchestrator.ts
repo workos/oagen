@@ -1,4 +1,5 @@
 import type { ApiSpec } from '../ir/types.js';
+import { validateModelHints } from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import type { Emitter, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
@@ -44,6 +45,14 @@ export async function generate(
     services?: string[];
   },
 ): Promise<GeneratedFile[]> {
+  // Fail loud on modelHints typos up front, against the FULL spec. Placement
+  // (assignModelsToServices) is intentionally lenient because it runs over
+  // partial model/service slices; this single check is where typos are caught,
+  // and it stays correct in scoped runs because the spec is not filtered.
+  if (options.modelHints) {
+    validateModelHints(spec.models, spec.services, options.modelHints);
+  }
+
   // Scoped generation: validate + expand the selection to POST-MOUNT names. The
   // spec is NOT filtered — placement/dedup/shared-schemas are computed over the
   // full spec so shared files stay byte-identical; emitters gate only per-service

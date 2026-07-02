@@ -404,9 +404,13 @@ export function collectFieldDependencies(model: Model): {
  * Models not referenced by any service are unassigned (absent from the map).
  *
  * @param hints - Optional pin overrides keyed by IR model name → IR service
- *   name. Applied after the natural assignment loop. Both names must exist in
- *   the spec; unknown keys/values throw a config-style error so typos fail
- *   loud at generation time.
+ *   name. Applied after the natural assignment loop. A hint only pins a model
+ *   present in THIS `models` slice; the target service is resolved by name
+ *   downstream, so a hint pointing at a service outside `services` still lands
+ *   the model in the right directory. Callers may pass a PARTIAL slice (e.g.
+ *   discriminated-union planning, per-service barrels, or a `--services`-scoped
+ *   run), so this function never rejects a hint — typo validation lives in
+ *   {@link validateModelHints}, which runs once against the full spec.
  */
 export function assignModelsToServices(
   models: Model[],
@@ -464,27 +468,44 @@ export function assignModelsToServices(
   }
 
   if (hints) {
-    const serviceNames = new Set(services.map((s) => s.name));
     for (const [modelName, serviceName] of Object.entries(hints)) {
-      if (!modelNames.has(modelName)) {
-        const err = new Error(
-          `modelHints: unknown model "${modelName}". Hint keys must match an IR model name (post-cleanSchemaName/schemaNameTransform).`,
-        );
-        err.name = 'ConfigError';
-        throw err;
-      }
-      if (!serviceNames.has(serviceName)) {
-        const err = new Error(
-          `modelHints: unknown service "${serviceName}" for model "${modelName}". Hint values must match an IR service name (PascalCase, derived from the operation's first tag).`,
-        );
-        err.name = 'ConfigError';
-        throw err;
-      }
+      // Only pin models present in THIS slice; an out-of-slice hint is applied
+      // where its own slice is processed. The target service resolves by name
+      // downstream, so it need not appear in this slice's `services`. Genuine
+      // typos are caught up front by validateModelHints against the full spec.
+      if (!modelNames.has(modelName)) continue;
       modelToService.set(modelName, serviceName);
     }
   }
 
   return modelToService;
+}
+
+/**
+ * Validate model-placement hints against the FULL spec. Run once at the start of
+ * generation — where the complete model/service universe is known — so typos in
+ * `modelHints` fail loud even though {@link assignModelsToServices} is
+ * intentionally lenient about the partial slices it may be handed.
+ */
+export function validateModelHints(models: Model[], services: Service[], hints: Record<string, string>): void {
+  const modelNames = new Set(models.map((m) => m.name));
+  const serviceNames = new Set(services.map((s) => s.name));
+  for (const [modelName, serviceName] of Object.entries(hints)) {
+    if (!modelNames.has(modelName)) {
+      const err = new Error(
+        `modelHints: unknown model "${modelName}". Hint keys must match an IR model name (post-cleanSchemaName/schemaNameTransform).`,
+      );
+      err.name = 'ConfigError';
+      throw err;
+    }
+    if (!serviceNames.has(serviceName)) {
+      const err = new Error(
+        `modelHints: unknown service "${serviceName}" for model "${modelName}". Hint values must match an IR service name (PascalCase, derived from the operation's first tag).`,
+      );
+      err.name = 'ConfigError';
+      throw err;
+    }
+  }
 }
 
 /**
