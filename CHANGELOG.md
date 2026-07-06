@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.5](https://github.com/workos/oagen/compare/v0.24.4...v0.24.5) (2026-07-06)
+
+
+### Bug Fixes
+
+* **parser:** resolve $ref branches in response allOf merge ([#127](https://github.com/workos/oagen/issues/127)) ([a1874b1](https://github.com/workos/oagen/commit/a1874b194e4c39511cdcabea5cca48e063b0e159))
+
 ## [0.24.4](https://github.com/workos/oagen/compare/v0.24.3...v0.24.4) (2026-07-02)
 
 
