@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.6](https://github.com/workos/oagen/compare/v0.24.5...v0.24.6) (2026-07-06)
+
+
+### Bug Fixes
+
+* **engine:** stop writing volatile manifest timestamp ([#126](https://github.com/workos/oagen/issues/126)) ([f847bc4](https://github.com/workos/oagen/commit/f847bc4410f2f4a174bcccd86f60fb2a04ddd93d))
+
 ## [0.24.5](https://github.com/workos/oagen/compare/v0.24.4...v0.24.5) (2026-07-06)
 
 
