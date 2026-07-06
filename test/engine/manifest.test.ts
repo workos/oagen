@@ -24,7 +24,9 @@ describe('manifest read/write', () => {
       expect(parsed.files).toEqual(['a.py', 'b.py', 'c.py']);
       expect(parsed.language).toBe('python');
       expect(parsed.version).toBe(2);
-      expect(typeof parsed.generatedAt).toBe('string');
+      // generatedAt is intentionally never written — a wall-clock timestamp
+      // churned the manifest on every regen without any functional payoff.
+      expect(parsed.generatedAt).toBeUndefined();
     } finally {
       await fs.rm(dir, { recursive: true });
     }
@@ -100,7 +102,40 @@ describe('manifest read/write', () => {
     }
   });
 
-  it('preserves generatedAt when manifest content is unchanged', async () => {
+  it('produces byte-identical output when content is unchanged (no churn)', async () => {
+    const dir = await tmp();
+    try {
+      await writeManifest(dir, { language: 'node', files: ['b.ts', 'a.ts'] });
+      const first = await fs.readFile(path.join(dir, MANIFEST_FILENAME), 'utf-8');
+
+      // Re-emit the same content (order-insensitive) — the file must not change,
+      // so a no-op regen never shows up as a git diff.
+      await writeManifest(dir, { language: 'node', files: ['a.ts', 'b.ts'] });
+      const second = await fs.readFile(path.join(dir, MANIFEST_FILENAME), 'utf-8');
+
+      expect(second).toBe(first);
+      expect(first).not.toContain('generatedAt');
+    } finally {
+      await fs.rm(dir, { recursive: true });
+    }
+  });
+
+  it('never writes a generatedAt field, even when content changes', async () => {
+    const dir = await tmp();
+    try {
+      await writeManifest(dir, { language: 'node', files: ['a.ts'] });
+      await writeManifest(dir, { language: 'node', files: ['a.ts', 'b.ts'] });
+      const raw = await fs.readFile(path.join(dir, MANIFEST_FILENAME), 'utf-8');
+      const got = await readManifest(dir);
+
+      expect(raw).not.toContain('generatedAt');
+      expect(got!.files).toEqual(['a.ts', 'b.ts']);
+    } finally {
+      await fs.rm(dir, { recursive: true });
+    }
+  });
+
+  it('parses legacy manifests that still carry a generatedAt field', async () => {
     const dir = await tmp();
     try {
       await fs.writeFile(
@@ -117,37 +152,8 @@ describe('manifest read/write', () => {
         ) + '\n',
       );
 
-      await writeManifest(dir, { language: 'node', files: ['b.ts', 'a.ts'] });
       const got = await readManifest(dir);
-
-      expect(got!.generatedAt).toBe('2026-01-01T00:00:00.000Z');
-      expect(got!.files).toEqual(['a.ts', 'b.ts']);
-    } finally {
-      await fs.rm(dir, { recursive: true });
-    }
-  });
-
-  it('refreshes generatedAt when manifest content changes', async () => {
-    const dir = await tmp();
-    try {
-      await fs.writeFile(
-        path.join(dir, MANIFEST_FILENAME),
-        JSON.stringify(
-          {
-            version: 2,
-            language: 'node',
-            generatedAt: '2026-01-01T00:00:00.000Z',
-            files: ['a.ts'],
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      await writeManifest(dir, { language: 'node', files: ['a.ts', 'b.ts'] });
-      const got = await readManifest(dir);
-
-      expect(got!.generatedAt).not.toBe('2026-01-01T00:00:00.000Z');
+      expect(got).not.toBeNull();
       expect(got!.files).toEqual(['a.ts', 'b.ts']);
     } finally {
       await fs.rm(dir, { recursive: true });
@@ -160,7 +166,6 @@ describe('computeStalePaths', () => {
     const prev = {
       version: 1,
       language: 'python',
-      generatedAt: '2026-01-01T00:00:00.000Z',
       files: ['a.py', 'b.py', 'c.py'],
     };
     expect(computeStalePaths(prev, ['a.py', 'c.py', 'd.py'])).toEqual(['b.py']);
@@ -170,7 +175,6 @@ describe('computeStalePaths', () => {
     const prev = {
       version: 1,
       language: 'python',
-      generatedAt: '2026-01-01T00:00:00.000Z',
       files: ['a.py'],
     };
     expect(computeStalePaths(prev, ['a.py', 'b.py'])).toEqual([]);
@@ -180,7 +184,6 @@ describe('computeStalePaths', () => {
     const prev = {
       version: 1,
       language: 'python',
-      generatedAt: '2026-01-01T00:00:00.000Z',
       files: ['zeta.py', 'alpha.py', 'mu.py'],
     };
     expect(computeStalePaths(prev, [])).toEqual(['alpha.py', 'mu.py', 'zeta.py']);
