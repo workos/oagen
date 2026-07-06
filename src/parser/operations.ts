@@ -520,7 +520,7 @@ function buildOperation(
     isPaginated,
     dataPath: responseDataPath,
     itemType: responseItemType,
-  } = extractResponses(op.responses, op, path, method);
+  } = extractResponses(op.responses, op, path, method, componentSchemas);
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -886,6 +886,7 @@ function extractResponses(
   op?: OperationObject,
   path?: string,
   method?: HttpMethod,
+  componentSchemas?: Record<string, SchemaObject>,
 ): {
   response: TypeRef;
   successResponses?: SuccessResponse[];
@@ -914,7 +915,7 @@ function extractResponses(
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
         const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
-        const result = classifyAndExtractResponse(jsonContent.schema, contextName);
+        const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
         extractedType = result.response;
         // Keep track of inline models and pagination from the latest 2xx with a schema
         inlineModels = result.inlineModels;
