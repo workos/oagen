@@ -188,6 +188,119 @@ describe('classifyAndExtractResponse', () => {
     });
   });
 
+  describe('allOf with $ref branches', () => {
+    const magicAuthComponent = {
+      type: 'object',
+      properties: {
+        object: { type: 'string', const: 'magic_auth' },
+        id: { type: 'string' },
+        user_id: { type: 'string' },
+        email: { type: 'string' },
+        code: { type: 'string' },
+      },
+      required: ['object', 'id', 'user_id', 'email', 'code'],
+    };
+
+    it('merges $ref model fields with inline augmentation (radar_auth_attempt_id regression)', () => {
+      const schema = {
+        allOf: [
+          { $ref: '#/components/schemas/MagicAuth' },
+          {
+            type: 'object',
+            properties: {
+              radar_auth_attempt_id: { type: 'string' },
+            },
+          },
+        ],
+      };
+
+      const result = classifyAndExtractResponse(schema, 'SendMagicAuthCodeResponse', {
+        MagicAuth: magicAuthComponent,
+      });
+
+      // Named from context, NOT from the merged object const — that would
+      // collide with the MagicAuth component model.
+      expect(result.response).toEqual({ kind: 'model', name: 'SendMagicAuthCodeResponse' });
+      expect(result.inlineModels).toHaveLength(1);
+
+      const model = result.inlineModels[0];
+      expect(model.name).toBe('SendMagicAuthCodeResponse');
+      const fieldNames = model.fields.map((f) => f.name);
+      expect(fieldNames).toEqual(['object', 'id', 'user_id', 'email', 'code', 'radar_auth_attempt_id']);
+      expect(model.fields.find((f) => f.name === 'code')?.required).toBe(true);
+      expect(model.fields.find((f) => f.name === 'radar_auth_attempt_id')?.required).toBe(false);
+    });
+
+    it('recursively merges a $ref target that is itself an allOf', () => {
+      const schema = {
+        allOf: [
+          { $ref: '#/components/schemas/ExtendedThing' },
+          { type: 'object', properties: { extra: { type: 'string' } } },
+        ],
+      };
+      const componentSchemas = {
+        ExtendedThing: {
+          allOf: [
+            { $ref: '#/components/schemas/BaseThing' },
+            { type: 'object', properties: { level: { type: 'integer' } } },
+          ],
+        },
+        BaseThing: {
+          type: 'object',
+          properties: { id: { type: 'string' } },
+          required: ['id'],
+        },
+      };
+
+      const result = classifyAndExtractResponse(schema, 'GetThingResponse', componentSchemas);
+
+      expect(result.response).toEqual({ kind: 'model', name: 'GetThingResponse' });
+      const fieldNames = result.inlineModels[0].fields.map((f) => f.name);
+      expect(fieldNames).toEqual(['id', 'level', 'extra']);
+      expect(result.inlineModels[0].fields.find((f) => f.name === 'id')?.required).toBe(true);
+    });
+
+    it('falls back to the $ref model when component schemas are unavailable', () => {
+      const schema = {
+        allOf: [
+          { $ref: '#/components/schemas/MagicAuth' },
+          {
+            type: 'object',
+            properties: {
+              radar_auth_attempt_id: { type: 'string' },
+            },
+          },
+        ],
+      };
+
+      // Without a schema map the base model must win — a merge of only the
+      // inline branch would silently drop every MagicAuth field.
+      const result = classifyAndExtractResponse(schema, 'SendMagicAuthCodeResponse');
+      expect(result.response).toEqual({ kind: 'model', name: 'MagicAuth' });
+      expect(result.inlineModels).toEqual([]);
+    });
+
+    it('keeps const-derived naming for inline-only allOf merges', () => {
+      const schema = {
+        allOf: [
+          {
+            type: 'object',
+            properties: {
+              object: { type: 'string', const: 'widget' },
+              id: { type: 'string' },
+            },
+            required: ['object', 'id'],
+          },
+          { type: 'object', properties: { name: { type: 'string' } } },
+        ],
+      };
+
+      const result = classifyAndExtractResponse(schema, 'GetWidgetResponse', {});
+      expect(result.response).toEqual({ kind: 'model', name: 'Widget' });
+      expect(result.inlineModels[0].fields.map((f) => f.name)).toEqual(['object', 'id', 'name']);
+    });
+  });
+
   describe('direct resource objects', () => {
     it('creates named model from inline object schema', () => {
       const schema = {

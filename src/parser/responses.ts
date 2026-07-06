@@ -16,7 +16,11 @@ export interface ResponseExtractionResult {
   itemType?: TypeRef;
 }
 
-export function classifyAndExtractResponse(schema: SchemaObject, contextName: string): ResponseExtractionResult {
+export function classifyAndExtractResponse(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): ResponseExtractionResult {
   // 1. If schema is a $ref, resolve to model name (Phase 1)
   if (schema.$ref) {
     return { response: schemaToTypeRef(schema, contextName), inlineModels: [], isPaginated: false };
@@ -34,7 +38,7 @@ export function classifyAndExtractResponse(schema: SchemaObject, contextName: st
   }
 
   // 4. Direct resource or plain inline object
-  return extractDirectResource(schema, contextName);
+  return extractDirectResource(schema, contextName, componentSchemas);
 }
 
 interface ListEnvelopeResult {
@@ -254,7 +258,11 @@ function extractWrappedResource(schema: SchemaObject, contextName: string): Resp
   };
 }
 
-function extractDirectResource(schema: SchemaObject, contextName: string): ResponseExtractionResult {
+function extractDirectResource(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): ResponseExtractionResult {
   const inlineModels: Model[] = [];
 
   // Direct object with properties (with or without explicit type: 'object')
@@ -268,21 +276,56 @@ function extractDirectResource(schema: SchemaObject, contextName: string): Respo
     };
   }
 
-  // allOf with properties — merge into a single model
+  // allOf — merge into a single model. $ref branches are resolved against
+  // component schemas so the referenced model's fields are merged rather
+  // than silently dropped.
   if (schema.allOf) {
     const mergedProperties: Record<string, SchemaObject | undefined> = {};
     const mergedRequired: string[] = [];
-    for (const sub of schema.allOf) {
-      if (sub.properties) {
-        Object.assign(mergedProperties, sub.properties);
+    const unresolvedRefs: string[] = [];
+    const seenRefs = new Set<string>();
+    let mergedRefFields = false;
+
+    const mergeSubSchemas = (subs: SchemaObject[]) => {
+      for (const sub of subs) {
+        let resolved: SchemaObject = sub;
+        if (sub.$ref) {
+          if (seenRefs.has(sub.$ref)) continue;
+          seenRefs.add(sub.$ref);
+          const segments = sub.$ref.split('/');
+          const refName = segments[segments.length - 1];
+          const refSchema = refName ? componentSchemas?.[refName] : undefined;
+          if (!refSchema) {
+            unresolvedRefs.push(sub.$ref);
+            continue;
+          }
+          resolved = refSchema;
+          mergedRefFields = true;
+        }
+        if (resolved.allOf) mergeSubSchemas(resolved.allOf);
+        if (resolved.properties) Object.assign(mergedProperties, resolved.properties);
+        if (resolved.required) mergedRequired.push(...resolved.required);
       }
-      if (sub.required) {
-        mergedRequired.push(...sub.required);
-      }
+    };
+    mergeSubSchemas(schema.allOf);
+
+    // An unresolvable $ref branch (no component schema map) would drop the
+    // referenced model's fields entirely — prefer the referenced model as
+    // the response type over a merge that silently guts it.
+    if (unresolvedRefs.length === 1 && !mergedRefFields) {
+      return {
+        response: schemaToTypeRef({ $ref: unresolvedRefs[0] }, contextName),
+        inlineModels,
+        isPaginated: false,
+      };
     }
+
     if (Object.keys(mergedProperties).length > 0) {
       const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
-      const modelName = deriveModelName(merged, contextName);
+      // Fields merged from a $ref carry the referenced model's const
+      // discriminant (e.g. object: 'magic_auth'); deriving the name from it
+      // would collide with the component model, so keep the context name.
+      const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(merged, contextName);
       inlineModels.push(...extractInlineModel(modelName, merged));
       return {
         response: { kind: 'model', name: modelName },
