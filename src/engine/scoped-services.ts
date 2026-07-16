@@ -1,3 +1,4 @@
+import { resolveMountTarget } from '../ir/operation-hints.js';
 import type { ApiSpec } from '../ir/types.js';
 
 /**
@@ -12,16 +13,18 @@ import type { ApiSpec } from '../ir/types.js';
  *
  * Matching is on the POST-MOUNT name. Mount resolution never mutates
  * `spec.services` — the post-mount target lives on `ResolvedOperation.mountOn`
- * (`mountOn = hint?.mountOn ?? mountRules[service.name] ?? service.name`) — so the
- * post-mount name of a source service is derived here as
- * `mountRules[service.name] ?? service.name`. Selecting a target (e.g.
+ * (`mountOn = hint?.mountOn ?? resolveMountTarget(service.name, mountRules)`) — so
+ * the post-mount name of a source service is derived here with the same
+ * `resolveMountTarget` (exact rules and trailing-`*` prefix rules, longest
+ * prefix wins). Selecting a target (e.g.
  * `DirectorySync`) is valid because every source tag that mounts into it
  * (`DirectoryUsers`, `DirectoryGroups`, …) shares that post-mount name, and the
  * emitters group resources by mount, so all siblings emit together.
  *
  * @param spec - The parsed API spec (never mutated; never filtered).
  * @param selected - Post-mount service names from `--services` (normalized/trimmed).
- * @param mountRules - Source-service-name → post-mount-target mappings.
+ * @param mountRules - Source-service-name (exact or trailing-`*` prefix pattern)
+ *   → post-mount-target mappings.
  * @returns The validated selection as a `Set` of post-mount names.
  * @throws A `ConfigError` listing valid post-mount names when a selection is
  *   unknown — scoped generation never silently emits the wrong set.
@@ -44,8 +47,7 @@ export function resolveScopedServices(
   mountRules?: Record<string, string>,
 ): Set<string> {
   const mounts = mountRules ?? {};
-  const postMountName = (name: string): string => mounts[name] ?? name;
-  const validPostMount = new Set(spec.services.map((s) => postMountName(s.name)));
+  const validPostMount = new Set(spec.services.map((s) => resolveMountTarget(s.name, mounts)));
   const selectedSet = new Set(selected);
 
   const unknown = [...selectedSet].filter((s) => !validPostMount.has(s));

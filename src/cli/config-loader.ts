@@ -54,8 +54,10 @@ export interface OagenConfig {
   operationHints?: Record<string, OperationHint>;
   /**
    * Service-level mount rules: maps an IR service name to a target
-   * service/namespace (PascalCase). All operations in the source service
-   * are mounted on the target. Per-operation mountOn in operationHints
+   * service/namespace (PascalCase). Keys may be exact names or trailing-`*`
+   * prefix patterns (e.g. `UserManagement*`); an exact key beats any wildcard,
+   * and among wildcards the longest prefix wins. All operations in the source
+   * service are mounted on the target. Per-operation mountOn in operationHints
    * takes priority.
    */
   mountRules?: Record<string, string>;

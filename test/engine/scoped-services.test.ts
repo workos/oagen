@@ -59,6 +59,22 @@ describe('resolveScopedServices', () => {
     expect(out).toEqual(new Set(['Vault']));
   });
 
+  it('derives post-mount names through trailing-* wildcard rules', () => {
+    const wildcardMounts = {
+      'UserManagement*': 'UserManagement',
+      'UserManagementOrganizationMembership*': 'OrganizationMembership',
+    };
+    const services = ['UserManagementUsers', 'UserManagementOrganizationMembershipGroups', 'Vault'];
+
+    const out = resolveScopedServices(spec(services), ['UserManagement', 'OrganizationMembership'], wildcardMounts);
+    expect(out).toEqual(new Set(['UserManagement', 'OrganizationMembership']));
+
+    // Source tag names are masked by the wildcard, same as exact rules.
+    expect(() => resolveScopedServices(spec(services), ['UserManagementUsers'], wildcardMounts)).toThrow(
+      /Unknown --services/,
+    );
+  });
+
   it('throws a ConfigError listing valid post-mount names for an unknown service', () => {
     let caught: Error | undefined;
     try {

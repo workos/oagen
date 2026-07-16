@@ -237,11 +237,46 @@ export function deriveMethodName(op: Operation, _service: Service): string {
 }
 
 /**
+ * Resolve a service name to its mount target.
+ *
+ * Rule keys are either exact service names or trailing-`*` prefix patterns
+ * (e.g. `UserManagement*`). Precedence:
+ *
+ *   1. An exact key always wins.
+ *   2. Otherwise the wildcard with the longest prefix wins, so
+ *      `UserManagementOrganizationMembership*` beats `UserManagement*`.
+ *
+ * Matching is plain string comparison (`startsWith`) — `*` is only recognised
+ * as the final character and no regex is ever built from rule keys.
+ *
+ * @param name - The IR service name to resolve.
+ * @param mounts - Exact-name or trailing-`*` pattern → target service mappings.
+ * @returns The mount target, or `name` unchanged when no rule matches.
+ */
+export function resolveMountTarget(name: string, mounts: Record<string, string>): string {
+  const exact = mounts[name];
+  if (exact !== undefined) return exact;
+
+  let best: string | undefined;
+  let bestLen = -1;
+  for (const [pattern, target] of Object.entries(mounts)) {
+    if (!pattern.endsWith('*')) continue;
+    const prefix = pattern.slice(0, -1);
+    if (name.startsWith(prefix) && prefix.length > bestLen) {
+      best = target;
+      bestLen = prefix.length;
+    }
+  }
+  return best ?? name;
+}
+
+/**
  * Resolve all operations in the spec, applying hints and mount rules.
  *
  * @param spec - The parsed API spec
  * @param hints - Per-operation overrides keyed by "METHOD /path"
- * @param mountRules - Service name → target service mappings
+ * @param mountRules - Service name → target service mappings; keys may be
+ *   exact names or trailing-`*` prefix patterns (see {@link resolveMountTarget})
  * @returns Resolved operations ready for emitter consumption
  */
 export function resolveOperations(
@@ -262,7 +297,7 @@ export function resolveOperations(
       const methodName = hint?.name ?? deriveMethodName(op, service);
 
       // Resolve mount target: per-op hint > service mount rule > original service
-      const mountOn = hint?.mountOn ?? mounts[service.name] ?? service.name;
+      const mountOn = hint?.mountOn ?? resolveMountTarget(service.name, mounts);
 
       // Build wrappers for split operations
       let wrappers: ResolvedWrapper[] | undefined;

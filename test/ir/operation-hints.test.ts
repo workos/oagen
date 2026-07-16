@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveMethodName, resolveOperations } from '../../src/ir/operation-hints.js';
+import { deriveMethodName, resolveMountTarget, resolveOperations } from '../../src/ir/operation-hints.js';
 import type { OperationHint } from '../../src/ir/operation-hints.js';
 import type { ApiSpec, Service, Operation, HttpMethod } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -246,6 +246,37 @@ describe('resolveOperations', () => {
     expect(resolved[1].mountOn).toBe('CustomTarget'); // per-op override
   });
 
+  it('applies trailing-* wildcard mount rules with longest-prefix and exact precedence', () => {
+    const s = spec([
+      svc('UserManagementUsers', [op('get', '/user_management/users')]),
+      svc('UserManagementOrganizationMembershipGroups', [op('get', '/user_management/om/groups')]),
+      svc('UserManagementDataProviders', [op('get', '/user_management/data_providers')]),
+      svc('Vault', [op('get', '/vault/kv')]),
+    ]);
+    const mountRules = {
+      'UserManagement*': 'UserManagement',
+      'UserManagementOrganizationMembership*': 'OrganizationMembership',
+      UserManagementDataProviders: 'Pipes',
+    };
+
+    const resolved = resolveOperations(s, {}, mountRules);
+    expect(resolved[0].mountOn).toBe('UserManagement'); // wildcard
+    expect(resolved[1].mountOn).toBe('OrganizationMembership'); // longer prefix wins
+    expect(resolved[2].mountOn).toBe('Pipes'); // exact wins over wildcard
+    expect(resolved[3].mountOn).toBe('Vault'); // no rule matches
+  });
+
+  it('per-operation mountOn hint overrides wildcard mount rule', () => {
+    const s = spec([svc('UserManagementUsers', [op('get', '/user_management/users')])]);
+    const hints: Record<string, OperationHint> = {
+      'GET /user_management/users': { mountOn: 'CustomTarget' },
+    };
+    const mountRules = { 'UserManagement*': 'UserManagement' };
+
+    const resolved = resolveOperations(s, hints, mountRules);
+    expect(resolved[0].mountOn).toBe('CustomTarget');
+  });
+
   it('builds wrappers for split hints', () => {
     const authOp = op('post', '/user_management/authenticate');
     authOp.response = { kind: 'model', name: 'AuthResponse' } as any;
@@ -354,5 +385,66 @@ describe('resolveOperations', () => {
     const resolved = resolveOperations(s);
     expect(resolved[0].defaults).toEqual({});
     expect(resolved[0].inferFromClient).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveMountTarget — mount rule matching unit tests
+// ---------------------------------------------------------------------------
+
+describe('resolveMountTarget', () => {
+  it('returns the name unchanged when no rule matches', () => {
+    expect(resolveMountTarget('Vault', { Connections: 'SSO' })).toBe('Vault');
+    expect(resolveMountTarget('Vault', {})).toBe('Vault');
+  });
+
+  it('applies an exact rule', () => {
+    expect(resolveMountTarget('Connections', { Connections: 'SSO' })).toBe('SSO');
+  });
+
+  it('applies a trailing-* prefix rule', () => {
+    const mounts = { 'UserManagement*': 'UserManagement' };
+    expect(resolveMountTarget('UserManagementUsers', mounts)).toBe('UserManagement');
+    expect(resolveMountTarget('UserManagementSessionTokens', mounts)).toBe('UserManagement');
+  });
+
+  it('a wildcard prefix matches its own bare name', () => {
+    expect(resolveMountTarget('UserManagement', { 'UserManagement*': 'UserManagement' })).toBe('UserManagement');
+  });
+
+  it('exact rule wins over a matching wildcard', () => {
+    const mounts = {
+      'UserManagement*': 'UserManagement',
+      UserManagementDataProviders: 'Pipes',
+    };
+    expect(resolveMountTarget('UserManagementDataProviders', mounts)).toBe('Pipes');
+    expect(resolveMountTarget('UserManagementUsers', mounts)).toBe('UserManagement');
+  });
+
+  it('longest wildcard prefix wins regardless of key order', () => {
+    const shortFirst = {
+      'UserManagement*': 'UserManagement',
+      'UserManagementOrganizationMembership*': 'OrganizationMembership',
+    };
+    const longFirst = {
+      'UserManagementOrganizationMembership*': 'OrganizationMembership',
+      'UserManagement*': 'UserManagement',
+    };
+    for (const mounts of [shortFirst, longFirst]) {
+      expect(resolveMountTarget('UserManagementOrganizationMembershipGroups', mounts)).toBe('OrganizationMembership');
+      expect(resolveMountTarget('UserManagementInvitations', mounts)).toBe('UserManagement');
+    }
+  });
+
+  it('does not treat * as a mid-pattern wildcard', () => {
+    // Only a trailing * is recognised; this key is neither an exact match for
+    // any real service name nor a prefix pattern.
+    expect(resolveMountTarget('UserManagementUsers', { 'User*Users': 'Nope' })).toBe('UserManagementUsers');
+  });
+
+  it('a bare * rule acts as a catch-all', () => {
+    const mounts = { '*': 'Everything', Vault: 'Secrets' };
+    expect(resolveMountTarget('Anything', mounts)).toBe('Everything');
+    expect(resolveMountTarget('Vault', mounts)).toBe('Secrets'); // exact still wins
   });
 });

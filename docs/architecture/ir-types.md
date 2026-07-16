@@ -335,6 +335,18 @@ interface ResolvedOperation {
 
 Service-level remounting maps an IR service name to a target namespace. All operations in the source service are mounted on the target unless overridden per-operation. Per-operation `mountOn` hints take precedence over service-level rules.
 
+Rule keys may be exact service names or trailing-`*` prefix patterns. Precedence: an exact key always wins; otherwise the wildcard with the longest prefix wins. Matching is plain `startsWith` string comparison — `*` is only meaningful as the final character, and no regex is involved. This lets a family of tags collapse to a few rules:
+
+```typescript
+{
+  "UserManagement*": "UserManagement",                          // catch-all for the family
+  "UserManagementOrganizationMembership*": "OrganizationMembership", // longer prefix wins
+  "UserManagementDataProviders": "Pipes",                       // exact wins over wildcard
+}
+```
+
+Note that a catch-all also absorbs future tags added to the spec under that prefix — a new `UserManagementFoo` tag mounts silently instead of surfacing as a new top-level service, so review `oagen diff` output (or run `/oagen:review-operations`) when the spec adds tags.
+
 ### CLI
 
 `oagen resolve --spec <path> --format table|json` outputs the full resolution table for review. Use `--format json` for programmatic consumption.
