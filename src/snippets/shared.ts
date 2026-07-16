@@ -1,4 +1,5 @@
 import type { EmitterContext } from '../engine/types.js';
+import { ConfigError } from '../errors.js';
 import type { ResolvedOperation, ResolvedWrapper } from '../ir/operation-hints.js';
 import type { Field, Model, Parameter } from '../ir/types.js';
 import { toSnakeCase } from '../utils/naming.js';
@@ -121,8 +122,23 @@ export function collectWrapperArgs(
   ctx: EmitterContext,
   examples: ExampleBuilder,
 ): SnippetArg[] {
-  const variantModel = ctx.spec.models.find((m) => m.name === wrapper.targetVariant);
-  const variantFields = variantModel?.fields ?? [];
+  const exactVariantModel = ctx.spec.models.find((m) => m.name === wrapper.targetVariant);
+  // Policies may preserve an SDK acronym such as `MFA` while the parser's
+  // canonical IR name uses `Mfa`. Accept a unique case-only difference, but
+  // never guess when multiple models collide under case folding.
+  const caseInsensitiveMatches = exactVariantModel
+    ? []
+    : ctx.spec.models.filter((m) => m.name.toLowerCase() === wrapper.targetVariant.toLowerCase());
+  const variantModel =
+    exactVariantModel ?? (caseInsensitiveMatches.length === 1 ? caseInsensitiveMatches[0] : undefined);
+  if (!variantModel) {
+    throw new ConfigError(
+      `Snippet wrapper "${wrapper.name}" targets unknown model "${wrapper.targetVariant}".`,
+      'Set targetVariant to an IR model name after cleanSchemaName/schemaNameTransform has been applied.',
+    );
+  }
+
+  const variantFields = variantModel.fields;
   const optionalSet = new Set(wrapper.optionalParams);
   const args: SnippetArg[] = [];
 
@@ -131,10 +147,16 @@ export function collectWrapperArgs(
       variantFields.find((f) => f.name === paramName || toSnakeCase(f.name) === toSnakeCase(paramName)) ?? null;
     const isOptional = optionalSet.has(paramName) ? true : field ? !field.required : false;
     if (isOptional) continue;
+    if (!field) {
+      throw new ConfigError(
+        `Snippet wrapper "${wrapper.name}" exposes unknown field "${paramName}" on model "${variantModel.name}".`,
+        'Remove the field from exposedParams or update it to match a field on the targetVariant model.',
+      );
+    }
     args.push({
       source: 'body',
       wireName: paramName,
-      value: field ? examples.forField(field) : 'string_example',
+      value: examples.forField(field),
       parameter: null,
       field,
     });

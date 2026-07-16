@@ -14,7 +14,7 @@ import type {
 } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema } from './schemas.js';
+import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName } from './schemas.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 
@@ -857,16 +857,22 @@ function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existin
   if (variant.properties) {
     for (const [, propSchema] of Object.entries(variant.properties)) {
       if (propSchema?.const && typeof propSchema.const === 'string') {
-        return toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
+        const derivedName = toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
+        // Const-derived request variants are IR models too, so they must use
+        // the same project-level naming policy as component schemas.
+        return resolveSchemaName(derivedName);
       }
     }
   }
   // Fallback: append a numeric suffix
   const existingNames = new Set(existingModels.map((m) => m.name));
-  let name = baseName;
+  // Apply the transform before suffixing so every fallback candidate stays in
+  // the same post-schemaNameTransform namespace as the rest of the IR.
+  const transformedBaseName = resolveSchemaName(baseName);
+  let name = transformedBaseName;
   let suffix = 2;
   while (existingNames.has(name)) {
-    name = `${baseName}${suffix}`;
+    name = `${transformedBaseName}${suffix}`;
     suffix++;
   }
   return name;

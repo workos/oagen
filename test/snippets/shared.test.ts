@@ -271,6 +271,7 @@ describe('snippets/shared: collectWrapperArgs', () => {
     };
     const args = collectWrapperArgs(wrapper, ctx, examples);
     expect(args.map((a) => a.wireName)).toEqual(['email', 'password']);
+    expect(args.map((a) => a.value)).toEqual(['u@e.co', 'pw']);
   });
 
   it('drops wrapper params marked optional via optionalParams', () => {
@@ -306,5 +307,85 @@ describe('snippets/shared: collectWrapperArgs', () => {
     };
     const args = collectWrapperArgs(wrapper, ctx, examples);
     expect(args.map((a) => a.wireName)).toEqual(['email']);
+  });
+
+  it('matches a target variant with a unique case-only acronym difference', () => {
+    const op = makeOp({ requestBody: { kind: 'model', name: 'MfaTotpRequest' } });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec(
+      [service],
+      [
+        {
+          name: 'MfaTotpRequest',
+          fields: [{ name: 'code', type: { kind: 'primitive', type: 'string' }, required: true, example: '123456' }],
+        },
+      ],
+    );
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const examples = createExampleBuilder(spec);
+    const wrapper: ResolvedWrapper = {
+      name: 'authenticate_with_totp',
+      targetVariant: 'MFATotpRequest',
+      defaults: {},
+      inferFromClient: [],
+      exposedParams: ['code'],
+      optionalParams: [],
+      responseModelName: null,
+    };
+
+    expect(collectWrapperArgs(wrapper, ctx, examples).map((arg) => arg.value)).toEqual(['123456']);
+  });
+
+  it('rejects a wrapper whose target variant is not in the IR', () => {
+    const op = makeOp({ requestBody: { kind: 'model', name: 'PwReq' } });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec([service]);
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const examples = createExampleBuilder(spec);
+    const wrapper: ResolvedWrapper = {
+      name: 'authenticate_with_password',
+      targetVariant: 'MissingRequest',
+      defaults: {},
+      inferFromClient: [],
+      exposedParams: ['email'],
+      optionalParams: [],
+      responseModelName: null,
+    };
+
+    expect(() => collectWrapperArgs(wrapper, ctx, examples)).toThrow(/targets unknown model "MissingRequest"/);
+  });
+
+  it('rejects a required exposed param that is missing from the target variant', () => {
+    const op = makeOp({ requestBody: { kind: 'model', name: 'PwReq' } });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec([service], [{ name: 'PwReq', fields: [] }]);
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const examples = createExampleBuilder(spec);
+    const wrapper: ResolvedWrapper = {
+      name: 'authenticate_with_password',
+      targetVariant: 'PwReq',
+      defaults: {},
+      inferFromClient: [],
+      exposedParams: ['email'],
+      optionalParams: [],
+      responseModelName: null,
+    };
+
+    expect(() => collectWrapperArgs(wrapper, ctx, examples)).toThrow(/exposes unknown field "email"/);
   });
 });

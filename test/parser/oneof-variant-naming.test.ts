@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseSpec } from '../../src/parser/parse.js';
+import { parseSpec, type ParseOptions } from '../../src/parser/parse.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -8,12 +8,16 @@ import * as path from 'node:path';
  * Helper: write a spec to a temp file, parse it, return the IR. Cleans up
  * the temp dir on completion.
  */
-async function parseInline<T>(specYaml: string, fn: (ir: Awaited<ReturnType<typeof parseSpec>>) => T): Promise<T> {
+async function parseInline<T>(
+  specYaml: string,
+  fn: (ir: Awaited<ReturnType<typeof parseSpec>>) => T,
+  options?: ParseOptions,
+): Promise<T> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-oneof-naming-'));
   const specFile = path.join(tmpDir, 'spec.yml');
   try {
     await fs.writeFile(specFile, specYaml, 'utf-8');
-    const ir = await parseSpec(specFile);
+    const ir = await parseSpec(specFile, options);
     return fn(ir);
   } finally {
     await fs.rm(tmpDir, { recursive: true });
@@ -21,6 +25,55 @@ async function parseInline<T>(specYaml: string, fn: (ir: Awaited<ReturnType<type
 }
 
 describe('oneOf variant naming', () => {
+  it('applies schemaNameTransform to const-derived request-body variant names', async () => {
+    await parseInline(
+      `
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /authenticate:
+    post:
+      operationId: SessionController_authenticate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [grant_type, code, radar_challenge_id]
+                  properties:
+                    grant_type:
+                      type: string
+                      const: urn:workos:oauth:grant-type:radar-email-challenge:code
+                    code:
+                      type: string
+                      example: '123456'
+                    radar_challenge_id:
+                      type: string
+                      example: radar_challenge_123
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    Placeholder: { type: object }
+`,
+      (ir) => {
+        const variantName = 'RadarEmailChallengeCodeSessionAuthenticateRequest';
+        const variant = ir.models.find((model) => model.name === variantName);
+        expect(variant).toBeDefined();
+        expect(ir.models.some((model) => model.name === `UrnWorkosOAuthGrantType${variantName}`)).toBe(false);
+        expect(variant?.fields.find((field) => field.name === 'code')?.example).toBe('123456');
+        expect(variant?.fields.find((field) => field.name === 'radar_challenge_id')?.example).toBe(
+          'radar_challenge_123',
+        );
+      },
+      {
+        schemaNameTransform: (name) => name.replace(/^UrnWorkosOAuthGrantType/, ''),
+      },
+    );
+  });
+
   it('derives names from a const-property discriminator instead of using a numeric suffix', async () => {
     // Mirrors the workos/openapi-spec ApiKey.owner shape: an inline oneOf
     // whose object variants pin the same `type` property to distinct const
