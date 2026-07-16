@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.0](https://github.com/workos/oagen/compare/v0.24.6...v0.25.0) (2026-07-16)
+
+
+### Features
+
+* **ir:** support trailing-* wildcard keys in mount rules ([a74a353](https://github.com/workos/oagen/commit/a74a3532157a269007c265c525521cd66dfb71c1))
+
+
+### Bug Fixes
+
+* fmt ([0ab83d0](https://github.com/workos/oagen/commit/0ab83d0c44944eb419ee6307c7f2bce76a5dc0c1))
+
 ## [0.24.6](https://github.com/workos/oagen/compare/v0.24.5...v0.24.6) (2026-07-06)
 
 
