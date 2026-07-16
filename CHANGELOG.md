@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/workos/oagen/compare/v0.25.0...v0.25.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* Respect naming policy in variant names and snippet wrappers ([#131](https://github.com/workos/oagen/issues/131)) ([d54caae](https://github.com/workos/oagen/commit/d54caae60f6f9c0c6a0617eb06391975df3d0430))
+
 ## [0.25.0](https://github.com/workos/oagen/compare/v0.24.6...v0.25.0) (2026-07-16)
 
 
