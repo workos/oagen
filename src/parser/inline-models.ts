@@ -45,7 +45,7 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
   return inlineModels;
 }
 
-function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[], parentName?: string): void {
+export function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[], parentName?: string): void {
   const properties = schema.properties ?? {};
   const allOfSchemas = schema.allOf ?? [];
 
