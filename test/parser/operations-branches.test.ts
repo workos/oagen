@@ -481,4 +481,133 @@ paths:
     expect(qParam).toBeDefined();
     expect(qParam!.type).toEqual({ kind: 'primitive', type: 'string' });
   });
+
+  it('emits nested inline models referenced by an inline request body', async () => {
+    // Regression: an inline request-body object whose property is itself an
+    // inline object referenced a nested model that was never generated,
+    // producing a dangling model ref (undefined type in statically-typed SDKs).
+    const specContent = `
+openapi: '3.1.0'
+info:
+  title: Test API
+  version: '1.0.0'
+servers:
+  - url: https://api.example.com
+paths:
+  /agents/claims/attempts:
+    patch:
+      operationId: AgentAdminController_linkClaimAttemptToExternalUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                claim_attempt_token:
+                  type: string
+                user:
+                  type: object
+                  properties:
+                    email:
+                      type: string
+                    external_id:
+                      type: string
+                    address:
+                      type: object
+                      properties:
+                        city:
+                          type: string
+                  required:
+                    - email
+                    - external_id
+              required:
+                - claim_attempt_token
+                - user
+      responses:
+        '200':
+          description: OK
+`;
+    const specPath = resolve(tmpDir, 'nested-inline-request-body.yml');
+    writeFileSync(specPath, specContent);
+
+    const result = await parseSpec(specPath);
+    const modelNames = new Set(result.models.map((m) => m.name));
+
+    // The request body model and its `user` field ref
+    const requestModel = result.models.find((m) => m.name === 'AgentAdminLinkClaimAttemptToExternalUserRequest');
+    expect(requestModel).toBeDefined();
+    const userField = requestModel!.fields.find((f) => f.name === 'user');
+    expect(userField!.type).toEqual({ kind: 'model', name: 'AgentAdminLinkClaimAttemptToExternalUserRequestUser' });
+
+    // The nested inline model must actually be emitted (not just referenced)
+    expect(modelNames.has('AgentAdminLinkClaimAttemptToExternalUserRequestUser')).toBe(true);
+    const userModel = result.models.find((m) => m.name === 'AgentAdminLinkClaimAttemptToExternalUserRequestUser');
+    expect(userModel!.fields.map((f) => f.name).sort()).toEqual(['address', 'email', 'external_id']);
+
+    // Recursion continues: the doubly-nested `address` object is emitted too
+    expect(modelNames.has('AgentAdminLinkClaimAttemptToExternalUserRequestUserAddress')).toBe(true);
+
+    // Every model ref in the request model resolves to an emitted model
+    for (const field of requestModel!.fields) {
+      if (field.type.kind === 'model') {
+        expect(modelNames.has(field.type.name)).toBe(true);
+      }
+    }
+  });
+
+  it('emits models for inline request-body properties expressed via allOf', async () => {
+    // Regression: schemaToTypeRef collapses an `allOf` inline-object property
+    // into a merged model ref, but the ref was never materialized — same
+    // dangling-model bug as a direct inline object, reached via allOf.
+    const specContent = `
+openapi: '3.1.0'
+info:
+  title: Test API
+  version: '1.0.0'
+servers:
+  - url: https://api.example.com
+paths:
+  /things:
+    post:
+      operationId: Thing_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                profile:
+                  allOf:
+                    - type: object
+                      properties:
+                        bio:
+                          type: string
+                        age:
+                          type: integer
+              required:
+                - name
+      responses:
+        '200':
+          description: OK
+`;
+    const specPath = resolve(tmpDir, 'allof-request-body.yml');
+    writeFileSync(specPath, specContent);
+
+    const result = await parseSpec(specPath);
+    const modelNames = new Set(result.models.map((m) => m.name));
+
+    const requestModel = result.models.find((m) => m.name === 'ThingCreateRequest');
+    expect(requestModel).toBeDefined();
+    const profileField = requestModel!.fields.find((f) => f.name === 'profile');
+    expect(profileField!.type).toEqual({ kind: 'model', name: 'ThingCreateRequestProfile' });
+
+    // The allOf-merged model must be emitted with the merged properties
+    expect(modelNames.has('ThingCreateRequestProfile')).toBe(true);
+    const profileModel = result.models.find((m) => m.name === 'ThingCreateRequestProfile');
+    expect(profileModel!.fields.map((f) => f.name).sort()).toEqual(['age', 'bio']);
+  });
 });
