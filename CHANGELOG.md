@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/workos/oagen/compare/v0.25.1...v0.26.0) (2026-07-21)
+
+
+### Features
+
+* **ir:** export resolveMountTarget from the package root ([#133](https://github.com/workos/oagen/issues/133)) ([e0c72dd](https://github.com/workos/oagen/commit/e0c72dde26226a35a41412eab6fea0107bdc35d2))
+
 ## [0.25.1](https://github.com/workos/oagen/compare/v0.25.0...v0.25.1) (2026-07-16)
 
 
