@@ -555,4 +555,59 @@ paths:
       }
     }
   });
+
+  it('emits models for inline request-body properties expressed via allOf', async () => {
+    // Regression: schemaToTypeRef collapses an `allOf` inline-object property
+    // into a merged model ref, but the ref was never materialized — same
+    // dangling-model bug as a direct inline object, reached via allOf.
+    const specContent = `
+openapi: '3.1.0'
+info:
+  title: Test API
+  version: '1.0.0'
+servers:
+  - url: https://api.example.com
+paths:
+  /things:
+    post:
+      operationId: Thing_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                profile:
+                  allOf:
+                    - type: object
+                      properties:
+                        bio:
+                          type: string
+                        age:
+                          type: integer
+              required:
+                - name
+      responses:
+        '200':
+          description: OK
+`;
+    const specPath = resolve(tmpDir, 'allof-request-body.yml');
+    writeFileSync(specPath, specContent);
+
+    const result = await parseSpec(specPath);
+    const modelNames = new Set(result.models.map((m) => m.name));
+
+    const requestModel = result.models.find((m) => m.name === 'ThingCreateRequest');
+    expect(requestModel).toBeDefined();
+    const profileField = requestModel!.fields.find((f) => f.name === 'profile');
+    expect(profileField!.type).toEqual({ kind: 'model', name: 'ThingCreateRequestProfile' });
+
+    // The allOf-merged model must be emitted with the merged properties
+    expect(modelNames.has('ThingCreateRequestProfile')).toBe(true);
+    const profileModel = result.models.find((m) => m.name === 'ThingCreateRequestProfile');
+    expect(profileModel!.fields.map((f) => f.name).sort()).toEqual(['age', 'bio']);
+  });
 });
