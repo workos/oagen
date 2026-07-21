@@ -44,7 +44,7 @@ export {
 // Operation resolution
 export type { OperationHint, SplitHint, ResolvedOperation, ResolvedWrapper } from './ir/operation-hints.js';
 
-export { resolveOperations, deriveMethodName } from './ir/operation-hints.js';
+export { resolveOperations, deriveMethodName, resolveMountTarget } from './ir/operation-hints.js';
 
 // SDK Behavior IR
 export type {
