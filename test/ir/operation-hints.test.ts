@@ -447,4 +447,16 @@ describe('resolveMountTarget', () => {
     expect(resolveMountTarget('Anything', mounts)).toBe('Everything');
     expect(resolveMountTarget('Vault', mounts)).toBe('Secrets'); // exact still wins
   });
+
+  it('is re-exported from the package entry point', async () => {
+    // Downstream tooling (e.g. openapi-spec's build-spec-changes, which maps an
+    // oagen-diff report's pre-mount service names to post-mount targets) must be
+    // able to import the canonical resolver instead of re-deriving it — a private
+    // copy silently diverges when the mount-rules shape changes (exact → wildcard).
+    const pkg = await import('../../src/index.js');
+    expect(pkg.resolveMountTarget).toBe(resolveMountTarget);
+    expect(pkg.resolveMountTarget('UserManagementRedirectUris', { 'UserManagement*': 'UserManagement' })).toBe(
+      'UserManagement',
+    );
+  });
 });
