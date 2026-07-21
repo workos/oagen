@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.1](https://github.com/workos/oagen/compare/v0.26.0...v0.26.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* emit nested inline models for inline request bodies ([#135](https://github.com/workos/oagen/issues/135)) ([2f19c70](https://github.com/workos/oagen/commit/2f19c7085cabf27b65b11d0817f3c84b8a03cf1a))
+
 ## [0.26.0](https://github.com/workos/oagen/compare/v0.25.1...v0.26.0) (2026-07-21)
 
 
