@@ -1,9 +1,13 @@
 import type { ApiSpec, GeneratedFile, EmitterContext } from '@workos/oagen';
+import { sanitizeIdentifier } from '@workos/oagen';
 import { tsClassName } from '../naming.js';
 
 export function generateClient(spec: ApiSpec, ctx: EmitterContext): GeneratedFile[] {
   const lines: string[] = [];
-  const className = `${ctx.namespacePascal}Client`;
+  // `namespacePascal` defaults to the spec's `info.title` when no explicit
+  // namespace is given — attacker-influenceable free-text flowing into an
+  // identifier position. Sanitize it so it cannot break out of the class name.
+  const className = `${sanitizeIdentifier(ctx.namespacePascal)}Client`;
 
   // Import resources
   for (const service of spec.services) {

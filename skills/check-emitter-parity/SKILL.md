@@ -148,6 +148,17 @@ Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.d
 
 If the emitter source contains comments like `// @oagen-ignore: <field>` or similar documented justifications for skipping a field, mark those fields as "intentionally skipped" rather than "missing." These are acceptable gaps — not every field applies to every language.
 
+### 3d: Free-Text Escaping (security)
+
+Spec free-text fields (`description` on model/field/operation/parameter/enum-value, and `info.title` when it becomes the namespace) are attacker-influenceable. An emitter that interpolates them verbatim into output can be made to emit arbitrary source — a code-execution vector during `oagen generate` → `oagen verify` and in published SDKs.
+
+For every covered free-text field, check that the emitter escapes it at the interpolation site:
+
+- **Doc comments** — the field must be wrapped so a comment terminator cannot break out. The core exports `escapeBlockComment` for JS/TS-style `/** */` comments; it is **specific to languages whose block comments end at `*/`** (JS, TS, Java, C#, Kotlin, Go). Emitters for other comment syntaxes need their own escaping: Python `"""` docstrings, Ruby `#`/`=begin` and other line-comment styles (where an embedded newline starts a new source line), etc.
+- **Identifier positions** — free-text flowing into a class/variable name (notably `info.title` → namespace → client class) must be run through `sanitizeIdentifier` (or an equivalent) so it cannot break out of the declaration.
+
+Report a covered-but-unescaped free-text field as a **HIGH-priority security gap**, distinct from a missing-coverage gap: the field is handled, but unsafely.
+
 ## Step 4: Produce Gap Analysis
 
 Output a structured report grouped by priority tier:

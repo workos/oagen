@@ -170,13 +170,68 @@ describe('reference emitter', () => {
     const modelFiles = typescriptEmitter.generateModels(models, minimalCtx);
     const resourceFiles = typescriptEmitter.generateResources(services, minimalCtx);
 
-    // The only `*/` in each file must be the doc-comment's own terminator,
-    // never one supplied by the description payload.
+    const countOccurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
+
+    // Invariant: the ONLY `*/` sequences in each file are the doc-comment
+    // terminators the emitter itself writes — one per emitted description.
+    // models.ts emits two (model + field); the resource file emits one (op).
+    // A `*/` leaking from the payload would push these counts higher.
+    expect(countOccurrences(modelFiles[0].content, '*/')).toBe(2);
+    expect(countOccurrences(resourceFiles[0].content, '*/')).toBe(1);
+
+    // The payload's terminator must be neutralized (present as `*\/`), not
+    // silently dropped, and its breakout must not survive verbatim.
     for (const content of [modelFiles[0].content, resourceFiles[0].content]) {
       expect(content).not.toContain(`*/ import`);
       expect(content).toContain('*\\/');
     }
     expect(modelFiles[0].content).toContain('export interface User');
+  });
+
+  it('escapes comment terminators embedded mid-description', () => {
+    const midPayload = `Legit text. */ import { execSync } from 'node:child_process'; execSync('id'); /* more`;
+    const models: Model[] = [{ name: 'Widget', description: midPayload, fields: [] }];
+
+    const content = typescriptEmitter.generateModels(models, minimalCtx)[0].content;
+
+    // Exactly one `*/` — the doc comment's own terminator, not the one buried
+    // in the middle of the description.
+    expect(content.split('*/').length - 1).toBe(1);
+    expect(content).toContain('*\\/');
+    expect(content).not.toContain(`*/ import`);
+    expect(content).toContain('export interface Widget');
+  });
+
+  it('sanitizes a spec-controlled namespace so it cannot break out of the client class name', () => {
+    const spec: ApiSpec = {
+      name: 'Evil API',
+      version: '1.0.0',
+      baseUrl: 'https://api.example.com/v1',
+      services: [],
+      models: [],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+    // `namespacePascal` defaults to `info.title` when no `--namespace` is given.
+    const ctx: EmitterContext = {
+      ...minimalCtx,
+      namespacePascal: `X {}; import { execSync } from 'node:child_process'; execSync('id'); class Y`,
+      spec,
+    };
+
+    const content = typescriptEmitter.generateClient(spec, ctx)[0].content;
+
+    // The declaration must stay a single class whose name contains no injected
+    // source — no stray braces, semicolons, or import statements escaped it.
+    expect(content).not.toContain('import { execSync }');
+    expect(content).not.toContain('};');
+    expect(/export class [A-Za-z0-9_$]+Client \{/.test(content)).toBe(true);
+  });
+
+  it('leaves an already-valid namespace untouched in the client class name', () => {
+    const spec: ApiSpec = { ...minimalCtx.spec, services: [] };
+    const content = typescriptEmitter.generateClient(spec, minimalCtx)[0].content;
+    expect(content).toContain('class GitHubClient');
   });
 
   it('returns empty models file for empty input', () => {
