@@ -64,6 +64,16 @@ describe('iosExtractor', () => {
     expect(surface.classes.Organizations.methods.internalHelper).toBeUndefined();
   });
 
+  it('survives interpolations containing nested string literals', async () => {
+    // templatePath's body interpolates `escapeSegment("{")` — if the scanner
+    // mis-terminated the outer string at the nested quote, the stray `{`
+    // would corrupt brace matching and swallow every later declaration.
+    const surface = await iosExtractor.extract(fixturePath);
+    expect(surface.classes.Organizations.methods.templatePath).toBeUndefined();
+    expect(Object.keys(surface.classes.Organizations.methods)).toContain('getOrganization');
+    expect(Object.keys(surface.classes.Organizations.methods)).toContain('deleteOrganization');
+  });
+
   it('extracts dictionary param types intact', async () => {
     const surface = await iosExtractor.extract(fixturePath);
     const createOrg = surface.classes.Organizations.methods.createOrganization[0];

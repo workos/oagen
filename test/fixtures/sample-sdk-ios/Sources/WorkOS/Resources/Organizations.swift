@@ -6,6 +6,12 @@ import Foundation
 public struct Organizations: Sendable {
     let transport: Transport
 
+    private func templatePath(for id: String) -> String {
+        // Interpolation whose expression holds a nested literal with an
+        // unbalanced brace — exercises string-aware interpolation skipping.
+        return "organizations/\(escapeSegment("{"))/\(id)"
+    }
+
     /// Get an Organization
     ///
     /// - Parameter id: The unique ID of the Organization.
@@ -34,7 +40,7 @@ public struct Organizations: Sendable {
         return try await transport.request(
             method: "GET",
             path: path,
-            query: [("limit", limit), ("before", before)],
+            query: [("limit", limit), ("before", before), ("domains", domains)],
             options: requestOptions,
             as: Page<Organization>.self
         )

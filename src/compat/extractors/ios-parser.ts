@@ -109,8 +109,9 @@ export function walkSwiftFiles(dir: string): string[] {
 // ---------------------------------------------------------------------------
 
 /** Advance past a string literal starting at `idx` (which must point at `"`).
- *  Handles escapes and multi-line `"""` literals. Returns the index just past
- *  the closing quote(s). */
+ *  Handles escapes, multi-line `"""` literals, and `\(...)` interpolations —
+ *  whose expressions may contain nested string literals and braces. Returns
+ *  the index just past the closing quote(s). */
 function skipString(source: string, idx: number): number {
   const n = source.length;
   if (source.startsWith('"""', idx)) {
@@ -119,7 +120,27 @@ function skipString(source: string, idx: number): number {
   }
   let i = idx + 1;
   while (i < n && source[i] !== '"') {
-    if (source[i] === '\\') i++;
+    if (source[i] === '\\') {
+      if (source[i + 1] === '(') {
+        // Interpolation: skip to the matching `)`, recursing into nested
+        // string literals so an inner `"` doesn't terminate the outer string.
+        let depth = 1;
+        let j = i + 2;
+        while (j < n && depth > 0) {
+          const ch = source[j];
+          if (ch === '"') {
+            j = skipString(source, j);
+            continue;
+          }
+          if (ch === '(') depth++;
+          else if (ch === ')') depth--;
+          j++;
+        }
+        i = j;
+        continue;
+      }
+      i++;
+    }
     i++;
   }
   return Math.min(i + 1, n);
@@ -412,12 +433,6 @@ function parseEnumBody(name: string, body: string, sourceFile: string): SwiftEnu
 // Full file parser
 // ---------------------------------------------------------------------------
 
-const TYPE_DECL_REGEX =
-  /((?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|open|package|internal|fileprivate|private|final|indirect)\s+)*)(struct|class|actor|enum)\s+(\w+)(?:<[^>]*>)?(?:\s*:\s*[^{]+?)?\s*\{/g;
-
-const EXTENSION_REGEX =
-  /(^|\n)\s*((?:public|package|internal|fileprivate|private)\s+)?extension\s+(\w+)(?:\s*:\s*[^{]+?)?\s*\{/g;
-
 /** Parse a single Swift source file and return all extracted symbols.
  *  Files marked `@oagen-ignore-file` are hand-maintained and yield nothing. */
 export function parseSwiftFile(filePath: string, sdkPath: string): ParsedSwiftFile {
@@ -428,12 +443,19 @@ export function parseSwiftFile(filePath: string, sdkPath: string): ParsedSwiftFi
   if (source.includes('@oagen-ignore-file')) return empty;
 
   const cleaned = stripComments(source);
+
+  // Function-local so `g`-flag `lastIndex` state can never leak between files
+  // (an exception mid-scan would leave a module-level regex mid-file).
+  const typeDeclRegex =
+    /((?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|open|package|internal|fileprivate|private|final|indirect)\s+)*)(struct|class|actor|enum)\s+(\w+)(?:<[^>]*>)?(?:\s*:\s*[^{]+?)?\s*\{/g;
+  const extensionRegex =
+    /(^|\n)\s*((?:public|package|internal|fileprivate|private)\s+)?extension\s+(\w+)(?:\s*:\s*[^{]+?)?\s*\{/g;
   const types: SwiftTypeDecl[] = [];
   const enums: SwiftEnum[] = [];
   const typeAliases: SwiftTypeAlias[] = [];
 
   let match;
-  while ((match = TYPE_DECL_REGEX.exec(cleaned)) !== null) {
+  while ((match = typeDeclRegex.exec(cleaned)) !== null) {
     const modifiers = match[1] || '';
     const kind = match[2] as 'struct' | 'class' | 'actor' | 'enum';
     const name = match[3];
@@ -460,7 +482,7 @@ export function parseSwiftFile(filePath: string, sdkPath: string): ParsedSwiftFi
     });
   }
 
-  while ((match = EXTENSION_REGEX.exec(cleaned)) !== null) {
+  while ((match = extensionRegex.exec(cleaned)) !== null) {
     const isPublicExtension = (match[2] || '').trim() === 'public';
     const name = match[3];
     const braceIdx = match.index + match[0].length - 1;
