@@ -34,6 +34,23 @@ Language-specific extras already exist in some emitters:
 
 IR names use PascalCase. Each emitter is responsible for converting names through its local `naming.ts`.
 
+## Escaping Spec-Controlled Free-Text
+
+Free-text spec fields (schema/field/operation `description`, and `info.title`, which becomes the default namespace) are **attacker-influenceable data**. Interpolating them verbatim into generated source lets a crafted spec break out of the syntactic context and emit arbitrary top-level code — which then runs when the generated files are imported during `oagen generate` → `oagen verify`, and ships to consumers if published.
+
+The core package exports two helpers for this. Apply them at **every** site where spec free-text is interpolated into output:
+
+- `escapeBlockComment(text)` — neutralizes `*/` before it goes inside a `/** ... */` doc comment.
+- `sanitizeIdentifier(text)` — strips characters that would break out of an identifier position (e.g. a class name built from the namespace). Already-valid identifiers pass through unchanged.
+
+Both helpers are **JS/TS-block-comment / JS-identifier specific**. Emitters for other languages must apply language-appropriate escaping instead of, or in addition to, these:
+
+- Python docstrings (`"""`) — escape/neutralize an embedded `"""`.
+- Ruby (`=begin`/`=end`, `#`) and other line-comment styles — a newline in the text can start a new source line; escape newlines or emit one comment marker per line.
+- Kotlin/Java KDoc/Javadoc (`/** */`) — same terminator hazard as `escapeBlockComment`.
+
+When adding a new interpolation site, treat "does this field originate from the spec?" as the trigger for escaping — not "is this field usually a description?".
+
 ## Verifying Backwards Compatibility
 
 When regenerating an SDK for a language that already has a published SDK, verify that the generated output preserves the existing public API surface.

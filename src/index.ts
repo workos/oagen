@@ -137,6 +137,13 @@ export {
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';
 
+// Escape spec-controlled free-text before interpolating it into generated
+// source. `escapeBlockComment` neutralizes block-comment terminators so
+// descriptions cannot break out of doc comments; `sanitizeIdentifier` strips
+// characters that would let free-text (e.g. `info.title`) break out of an
+// identifier position such as a generated class name.
+export { escapeBlockComment, sanitizeIdentifier } from './utils/escape.js';
+
 // Config typing for emitter projects
 export type { OagenConfig } from './cli/config-loader.js';
 
