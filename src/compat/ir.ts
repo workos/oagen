@@ -9,7 +9,7 @@
 import type { CompatPolicyHints } from './policy.js';
 
 /** Language identifier for emitter targets. */
-export type LanguageId = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'kotlin' | 'dotnet' | 'elixir' | 'rust';
+export type LanguageId = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'kotlin' | 'dotnet' | 'elixir' | 'rust' | 'ios';
 
 /** A full compatibility snapshot of an SDK's public API surface. */
 export interface CompatSnapshot {
@@ -328,6 +328,9 @@ function inferPassingStyle(language: LanguageId): CompatPassingStyle {
       return 'named';
     case 'node':
       return 'options_object';
+    // Swift argument labels are mandatory at the call site and fixed in
+    // declaration order, so parameters behave like labeled positional args.
+    case 'ios':
     default:
       return 'positional';
   }
