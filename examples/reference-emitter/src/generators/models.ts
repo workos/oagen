@@ -1,4 +1,5 @@
 import type { Model, GeneratedFile, EmitterContext } from '@workos/oagen';
+import { escapeBlockComment } from '@workos/oagen';
 import { tsTypeName, tsPropertyName } from '../naming.js';
 import { toTsType } from '../type-mapper.js';
 
@@ -9,7 +10,7 @@ export function generateModels(models: Model[], _ctx: EmitterContext): Generated
 
   for (const model of models) {
     if (model.description) {
-      lines.push(`/** ${model.description} */`);
+      lines.push(`/** ${escapeBlockComment(model.description)} */`);
     }
     lines.push(`export interface ${tsTypeName(model.name)} {`);
     for (const field of model.fields) {
@@ -17,7 +18,7 @@ export function generateModels(models: Model[], _ctx: EmitterContext): Generated
       const tsType = toTsType(field.type);
       const optional = field.required ? '' : '?';
       if (field.description) {
-        lines.push(`  /** ${field.description} */`);
+        lines.push(`  /** ${escapeBlockComment(field.description)} */`);
       }
       lines.push(`  ${tsName}${optional}: ${tsType};`);
     }

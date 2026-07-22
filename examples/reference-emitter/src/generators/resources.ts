@@ -1,5 +1,5 @@
 import type { Service, GeneratedFile, EmitterContext } from '@workos/oagen';
-import { planOperation } from '@workos/oagen';
+import { planOperation, escapeBlockComment } from '@workos/oagen';
 import { tsClassName, tsMethodName } from '../naming.js';
 import { toTsType } from '../type-mapper.js';
 
@@ -39,7 +39,7 @@ export function generateResources(services: Service[], _ctx: EmitterContext): Ge
       const asyncPrefix = plan.isAsync ? 'async ' : '';
 
       if (op.description) {
-        lines.push(`  /** ${op.description} */`);
+        lines.push(`  /** ${escapeBlockComment(op.description)} */`);
       }
       lines.push(`  ${asyncPrefix}${method}(${paramStr}): Promise<${returnType}> {`);
       lines.push(`    // Production emitters generate real HTTP calls here`);

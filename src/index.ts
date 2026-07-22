@@ -137,6 +137,11 @@ export {
 export { planOperation } from './engine/operation-plan.js';
 export type { OperationPlan } from './engine/operation-plan.js';
 
+// Escape spec-controlled free-text before interpolating it into generated
+// source. Emitters must neutralize block-comment terminators so descriptions
+// (and other free-text spec fields) cannot break out of doc comments.
+export { escapeBlockComment } from './utils/escape.js';
+
 // Config typing for emitter projects
 export type { OagenConfig } from './cli/config-loader.js';
 

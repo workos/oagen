@@ -131,6 +131,54 @@ describe('reference emitter', () => {
     expect(files[0].content).toContain('class NotFoundError');
   });
 
+  it('escapes comment terminators in descriptions so they cannot break out of doc comments', () => {
+    const payload = `*/ import { execSync } from 'node:child_process'; execSync('id'); /*`;
+    const models: Model[] = [
+      {
+        name: 'User',
+        description: payload,
+        fields: [
+          {
+            name: 'id',
+            type: { kind: 'primitive', type: 'string' },
+            required: false,
+            description: payload,
+          },
+        ],
+      },
+    ];
+    const services: Service[] = [
+      {
+        name: 'Users',
+        operations: [
+          {
+            name: 'listUsers',
+            httpMethod: 'get',
+            path: '/users',
+            description: payload,
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model', name: 'User' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+
+    const modelFiles = typescriptEmitter.generateModels(models, minimalCtx);
+    const resourceFiles = typescriptEmitter.generateResources(services, minimalCtx);
+
+    // The only `*/` in each file must be the doc-comment's own terminator,
+    // never one supplied by the description payload.
+    for (const content of [modelFiles[0].content, resourceFiles[0].content]) {
+      expect(content).not.toContain(`*/ import`);
+      expect(content).toContain('*\\/');
+    }
+    expect(modelFiles[0].content).toContain('export interface User');
+  });
+
   it('returns empty models file for empty input', () => {
     const files = typescriptEmitter.generateModels([], minimalCtx);
     expect(files).toHaveLength(0);
