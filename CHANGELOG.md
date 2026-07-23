@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.27.0](https://github.com/workos/oagen/compare/v0.26.1...v0.27.0) (2026-07-23)
+
+
+### Features
+
+* **compat:** add Swift (iOS) API surface extractor ([#139](https://github.com/workos/oagen/issues/139)) ([e7e82f4](https://github.com/workos/oagen/commit/e7e82f4cfe921afb0f4669e85b3bdc944df18e33))
+
+
+### Bug Fixes
+
+* escape block-comment terminators in generated doc comments ([#137](https://github.com/workos/oagen/issues/137)) ([15114ec](https://github.com/workos/oagen/commit/15114ec7f50a0ec5e8051d02becfb5f5124fdec9))
+
 ## [0.26.1](https://github.com/workos/oagen/compare/v0.26.0...v0.26.1) (2026-07-21)
 
 
