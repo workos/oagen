@@ -117,6 +117,25 @@ export function classifySymbolChanges(
     );
   }
 
+  // Static ↔ instance flips (for callables). Compared only when both
+  // snapshots record staticness — extractors that don't capture it and
+  // snapshots written before the field existed never produce this change.
+  if (baseline.isStatic !== undefined && candidate.isStatic !== undefined && baseline.isStatic !== candidate.isStatic) {
+    changes.push(
+      makeChange({
+        category: 'staticness_changed',
+        symbol: baseline.fqName,
+        old: { static: String(baseline.isStatic) },
+        new: { static: String(candidate.isStatic) },
+        message:
+          `"${baseline.displayName}" changed from ${baseline.isStatic ? 'static' : 'instance'} ` +
+          `to ${candidate.isStatic ? 'static' : 'instance'} — call sites must migrate`,
+        policy,
+        specRef,
+      }),
+    );
+  }
+
   // Field/property type changes
   if (baseline.typeRef && candidate.typeRef && baseline.typeRef.name !== candidate.typeRef.name) {
     changes.push(

@@ -9,7 +9,7 @@
 import type { CompatPolicyHints } from './policy.js';
 
 /** Language identifier for emitter targets. */
-export type LanguageId = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'kotlin' | 'dotnet' | 'elixir' | 'rust';
+export type LanguageId = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'kotlin' | 'dotnet' | 'elixir' | 'rust' | 'ios';
 
 /** A full compatibility snapshot of an SDK's public API surface. */
 export interface CompatSnapshot {
@@ -69,6 +69,10 @@ export interface CompatSymbol {
   typeRef?: CompatTypeRef;
   /** Value for enum member symbols. */
   value?: string | number;
+  /** Whether a callable is a static/type-level method. Absent when the
+   *  extractor does not capture staticness; the classifier only compares
+   *  it when both snapshots define it, so older snapshots never diff. */
+  isStatic?: boolean;
   /** Relative path to the source file where this symbol is defined. */
   sourceFile?: string;
 }
@@ -174,6 +178,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
           sourceKind: 'generated_service_wrapper',
           parameters: method.params.map((p, i) => apiParamToCompatParam(p, i, language)),
           returns: { name: method.returnType },
+          ...(method.isStatic !== undefined ? { isStatic: method.isStatic } : {}),
           ...(cls.sourceFile ? { sourceFile: cls.sourceFile } : {}),
         });
       }
@@ -328,6 +333,9 @@ function inferPassingStyle(language: LanguageId): CompatPassingStyle {
       return 'named';
     case 'node':
       return 'options_object';
+    // Swift argument labels are mandatory at the call site and fixed in
+    // declaration order, so parameters behave like labeled positional args.
+    case 'ios':
     default:
       return 'positional';
   }

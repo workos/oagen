@@ -99,8 +99,8 @@ describe('mergePolicy', () => {
 });
 
 describe('ALL_LANGUAGE_IDS', () => {
-  it('contains all 9 supported languages', () => {
-    expect(ALL_LANGUAGE_IDS).toHaveLength(9);
+  it('contains all 10 supported languages', () => {
+    expect(ALL_LANGUAGE_IDS).toHaveLength(10);
     expect(ALL_LANGUAGE_IDS).toContain('php');
     expect(ALL_LANGUAGE_IDS).toContain('python');
     expect(ALL_LANGUAGE_IDS).toContain('ruby');
@@ -110,5 +110,6 @@ describe('ALL_LANGUAGE_IDS', () => {
     expect(ALL_LANGUAGE_IDS).toContain('elixir');
     expect(ALL_LANGUAGE_IDS).toContain('rust');
     expect(ALL_LANGUAGE_IDS).toContain('node');
+    expect(ALL_LANGUAGE_IDS).toContain('ios');
   });
 });

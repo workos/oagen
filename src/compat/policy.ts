@@ -90,6 +90,16 @@ const LANGUAGE_DEFAULTS: Record<LanguageId, CompatPolicyHints> = {
     overloadsArePublicApi: false,
     arityIsPublicApi: true,
   },
+  // Swift: argument labels are mandatory and order-sensitive at the call
+  // site, so both names and positions are public API. Overloading is legal.
+  ios: {
+    callerUsesParamNames: true,
+    constructorOrderMatters: true,
+    methodParameterNamesArePublicApi: true,
+    constructorParameterNamesArePublicApi: true,
+    overloadsArePublicApi: true,
+    arityIsPublicApi: false,
+  },
   node: {
     callerUsesParamNames: false,
     constructorOrderMatters: false,

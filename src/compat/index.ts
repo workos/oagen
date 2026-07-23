@@ -98,4 +98,5 @@ export { rustExtractor } from './extractors/rust.js';
 export { kotlinExtractor } from './extractors/kotlin.js';
 export { dotnetExtractor } from './extractors/dotnet.js';
 export { elixirExtractor } from './extractors/elixir.js';
+export { iosExtractor } from './extractors/ios.js';
 export { nodeHints, resolveHints } from './language-hints.js';
