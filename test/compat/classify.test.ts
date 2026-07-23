@@ -28,6 +28,33 @@ describe('classifySymbolChanges', () => {
     });
   });
 
+  describe('staticness changes', () => {
+    it('classifies a static ↔ instance flip as breaking when both sides record it', () => {
+      const baseline = makeSymbol({ fqName: 'Sso.authorizationUrl', isStatic: true });
+      const candidate = makeSymbol({ fqName: 'Sso.authorizationUrl', isStatic: false });
+      const changes = classifySymbolChanges(baseline, candidate, getDefaultPolicy('ios'));
+      expect(changes).toHaveLength(1);
+      expect(changes[0].category).toBe('staticness_changed');
+      expect(changes[0].severity).toBe('breaking');
+    });
+
+    it('emits nothing when staticness is unchanged', () => {
+      const baseline = makeSymbol({ fqName: 'Sso.authorizationUrl', isStatic: true });
+      const candidate = makeSymbol({ fqName: 'Sso.authorizationUrl', isStatic: true });
+      const changes = classifySymbolChanges(baseline, candidate, getDefaultPolicy('ios'));
+      expect(changes).toHaveLength(0);
+    });
+
+    it('ignores staticness when either snapshot does not record it', () => {
+      // Older snapshots and extractors that don't capture staticness leave
+      // the field absent — comparing absent vs defined must never diff.
+      const withField = makeSymbol({ fqName: 'Sso.authorizationUrl', isStatic: true });
+      const withoutField = makeSymbol({ fqName: 'Sso.authorizationUrl' });
+      expect(classifySymbolChanges(withoutField, withField, getDefaultPolicy('ios'))).toHaveLength(0);
+      expect(classifySymbolChanges(withField, withoutField, getDefaultPolicy('ios'))).toHaveLength(0);
+    });
+  });
+
   describe('parameter changes', () => {
     it('classifies parameter removal as breaking', () => {
       const baseline = makeSymbol({

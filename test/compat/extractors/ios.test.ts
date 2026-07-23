@@ -64,6 +64,20 @@ describe('iosExtractor', () => {
     expect(surface.classes.Organizations.methods.internalHelper).toBeUndefined();
   });
 
+  it('marks static funcs and instance methods via isStatic', async () => {
+    const surface = await iosExtractor.extract(fixturePath);
+    expect(surface.classes.Sso.methods.authorizationUrl[0].isStatic).toBe(true);
+    expect(surface.classes.Sso.methods.getConnection[0].isStatic).toBe(false);
+  });
+
+  it('carries staticness into the compat snapshot', async () => {
+    const snapshot = await iosExtractor.extractSnapshot(fixturePath);
+    const staticSym = snapshot.symbols.find((s) => s.fqName === 'Sso.authorizationUrl');
+    expect(staticSym?.isStatic).toBe(true);
+    const instanceSym = snapshot.symbols.find((s) => s.fqName === 'Sso.getConnection');
+    expect(instanceSym?.isStatic).toBe(false);
+  });
+
   it('survives interpolations containing nested string literals', async () => {
     // templatePath's body interpolates `escapeSegment("{")` — if the scanner
     // mis-terminated the outer string at the nested quote, the stray `{`

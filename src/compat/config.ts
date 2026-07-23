@@ -29,7 +29,8 @@ export type BreakingChangeCategory =
   | 'union_wrapper_migration_without_compat_alias'
   | 'field_type_changed'
   | 'return_type_changed'
-  | 'enum_member_value_changed';
+  | 'enum_member_value_changed'
+  | 'staticness_changed';
 
 /** Soft-risk change categories — may affect callers depending on usage. */
 export type SoftRiskChangeCategory =
@@ -141,6 +142,7 @@ const BREAKING_CATEGORIES: ReadonlySet<BreakingChangeCategory> = new Set<Breakin
   'field_type_changed',
   'return_type_changed',
   'enum_member_value_changed',
+  'staticness_changed',
 ]);
 
 const SOFT_RISK_CATEGORIES: ReadonlySet<SoftRiskChangeCategory> = new Set<SoftRiskChangeCategory>([

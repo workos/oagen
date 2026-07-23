@@ -21,6 +21,14 @@ public struct Sso: Sendable {
         )
     }
 
+    /// Build an authorization URL for the hosted SSO flow.
+    public static func authorizationUrl(
+        clientId: String,
+        redirectUri: String
+    ) -> String {
+        return "https://api.workos.com/sso/authorize?client_id=\(clientId)&redirect_uri=\(redirectUri)"
+    }
+
     /// Get a Profile
     public func getProfile(
         accessToken: String,

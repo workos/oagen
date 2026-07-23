@@ -69,6 +69,10 @@ export interface CompatSymbol {
   typeRef?: CompatTypeRef;
   /** Value for enum member symbols. */
   value?: string | number;
+  /** Whether a callable is a static/type-level method. Absent when the
+   *  extractor does not capture staticness; the classifier only compares
+   *  it when both snapshots define it, so older snapshots never diff. */
+  isStatic?: boolean;
   /** Relative path to the source file where this symbol is defined. */
   sourceFile?: string;
 }
@@ -174,6 +178,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
           sourceKind: 'generated_service_wrapper',
           parameters: method.params.map((p, i) => apiParamToCompatParam(p, i, language)),
           returns: { name: method.returnType },
+          ...(method.isStatic !== undefined ? { isStatic: method.isStatic } : {}),
           ...(cls.sourceFile ? { sourceFile: cls.sourceFile } : {}),
         });
       }

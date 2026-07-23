@@ -27,6 +27,10 @@ export interface ApiMethod {
   params: ApiParam[];
   returnType: string;
   async: boolean;
+  /** Whether this is a static/type-level method. Absent when the extractor
+   *  does not capture staticness; the differ only compares it when both
+   *  sides define it. */
+  isStatic?: boolean;
 }
 
 export interface ApiParam {

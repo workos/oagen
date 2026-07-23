@@ -38,6 +38,8 @@ export interface SwiftMethod {
   params: SwiftParam[];
   returnType: string;
   async: boolean;
+  /** `static func` or `class func` — a type-level method. */
+  isStatic: boolean;
 }
 
 export interface SwiftTypeDecl {
@@ -357,7 +359,13 @@ function parseMethods(surfaceText: string, defaultPublic: boolean): SwiftMethod[
     const whereIdx = returnType.indexOf(' where ');
     if (whereIdx !== -1) returnType = returnType.slice(0, whereIdx).trim();
 
-    methods.push({ name, params, returnType, async: tailMatch?.[1] === 'async' });
+    methods.push({
+      name,
+      params,
+      returnType,
+      async: tailMatch?.[1] === 'async',
+      isStatic: /\b(?:static|class)\b/.test(modifiers),
+    });
     funcRegex.lastIndex = parenClose;
   }
   return methods;

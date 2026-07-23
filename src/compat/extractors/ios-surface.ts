@@ -127,6 +127,7 @@ export function buildSurface(
         params,
         returnType: method.returnType,
         async: method.async,
+        isStatic: method.isStatic,
       });
     }
 
