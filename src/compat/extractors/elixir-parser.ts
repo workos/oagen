@@ -90,8 +90,10 @@ export function walkElixirFiles(dir: string): string[] {
 function stripCommentsAndHeredocs(source: string): string {
   // Replace triple-quoted heredocs (@moduledoc """, @doc """, etc.)
   let result = source.replace(/"""[\s\S]*?"""/g, '""""""');
-  // Remove single-line comments
-  result = result.replace(/#[^\n]*/g, '');
+  // Remove single-line comments — but never `#{` interpolation markers:
+  // truncating `"/orgs/#{URI.encode(id)}"` would leave an unterminated string
+  // literal that derails the do/end scanner for the rest of the module.
+  result = result.replace(/#(?!\{)[^\n]*/g, '');
   return result;
 }
 
@@ -350,6 +352,26 @@ function extractTypeSpecs(modules: ExtractedModule[], sourceFile: string): Elixi
 // Enum module extraction
 // ---------------------------------------------------------------------------
 
+/** Named escapes Elixir recognizes inside double-quoted strings/atoms. */
+const ELIXIR_STRING_ESCAPES: Record<string, string> = {
+  '0': '\0',
+  a: '\x07',
+  b: '\b',
+  d: '\x7f',
+  e: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  s: ' ',
+  t: '\t',
+  v: '\v',
+};
+
+/** Undo backslash escapes inside a double-quoted Elixir string/atom. */
+function unescapeElixirString(s: string): string {
+  return s.replace(/\\(.)/g, (_, ch: string) => ELIXIR_STRING_ESCAPES[ch] ?? ch);
+}
+
 function extractEnumModules(modules: ExtractedModule[], sourceFile: string): ElixirEnumModule[] {
   const enumModules: ElixirEnumModule[] = [];
 
@@ -362,7 +384,7 @@ function extractEnumModules(modules: ExtractedModule[], sourceFile: string): Eli
 
     const members: Record<string, string> = {};
 
-    // Extract individual value functions: def name, do: "value"
+    // Tier 1 — hand-written style: zero-arg value functions `def name, do: "value"`.
     const valueFuncRegex = /def\s+(\w+),\s*do:\s*"([^"]+)"/g;
     let valueFuncMatch;
     while ((valueFuncMatch = valueFuncRegex.exec(moduleBody)) !== null) {
@@ -370,6 +392,43 @@ function extractEnumModules(modules: ExtractedModule[], sourceFile: string): Eli
       const funcValue = valueFuncMatch[2];
       if (funcName === 'values') continue;
       members[funcName] = funcValue;
+    }
+
+    // Tier 2 — generated style: `def values, do: [...]` literal list. Entries
+    // may be atoms (:dns), quoted atoms (:"urn:x"), strings, or numbers, and
+    // mix format may wrap the list across lines. Atom entries always name a
+    // member; bare string/number entries only count when Tier 1 named nothing
+    // (hand-written SDKs list wire strings that Tier 1 already named).
+    // Quoted entries may themselves contain `]`, so the list body must skip
+    // over double-quoted segments rather than stop at the first `]`.
+    const hadNamedMembers = Object.keys(members).length > 0;
+    const valuesList = moduleBody.match(/def\s+values,\s*do:\s*\[((?:"(?:[^"\\]|\\.)*"|[^\]"])*)\]/);
+    if (valuesList) {
+      const tokenRegex = /:"((?:[^"\\]|\\.)*)"|:([a-zA-Z_][a-zA-Z0-9_@]*[?!]?)|"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?)/g;
+      let token;
+      while ((token = tokenRegex.exec(valuesList[1])) !== null) {
+        const isAtom = token[1] != null || token[2] != null;
+        if (!isAtom && hadNamedMembers) continue;
+        const text = token[1] ?? token[2] ?? token[3] ?? token[4];
+        const name = token[2] ?? unescapeElixirString(text);
+        if (!(name in members)) {
+          members[name] = unescapeElixirString(text);
+        }
+      }
+    }
+
+    // Tier 3 — generated `dump/1` clauses carry the exact wire value per atom
+    // (`def dump(:urn_grant), do: "urn:..."`), refining the wire values of
+    // members Tiers 1–2 already found. Atoms that appear only in `dump/1`
+    // (e.g. legacy clauses for values dropped from `values/0`) are not members.
+    const dumpRegex =
+      /def\s+dump\(:(?:"((?:[^"\\]|\\.)*)"|([a-zA-Z_][a-zA-Z0-9_@]*[?!]?))\),\s*do:\s*"((?:[^"\\]|\\.)*)"/g;
+    let dumpMatch;
+    while ((dumpMatch = dumpRegex.exec(moduleBody)) !== null) {
+      const atomName = dumpMatch[1] != null ? unescapeElixirString(dumpMatch[1]) : dumpMatch[2];
+      if (atomName in members) {
+        members[atomName] = unescapeElixirString(dumpMatch[3]);
+      }
     }
 
     if (Object.keys(members).length > 0) {
