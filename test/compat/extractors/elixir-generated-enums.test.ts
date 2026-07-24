@@ -43,6 +43,27 @@ describe('elixirExtractor — generated-style enums', () => {
     expect(surface.classes.Priority).toBeUndefined();
   });
 
+  it('reads the full values/0 list when quoted atoms contain `]`', async () => {
+    // The list-body match must skip over quoted segments — a `]` inside a
+    // quoted atom must not terminate the list and drop later members.
+    const surface = await elixirExtractor.extract(fixturePath);
+    expect(surface.enums.Scope.members['scope:[read]']).toBe('scope:[read]');
+    expect(surface.enums.Scope.members.plain).toBe('plain');
+  });
+
+  it('maps named escapes in quoted atoms to their real characters', async () => {
+    const surface = await elixirExtractor.extract(fixturePath);
+    expect(surface.enums.Scope.members['tab\tseparated']).toBe('tab\tseparated');
+  });
+
+  it('ignores dump/1 clauses for atoms absent from values/0', async () => {
+    // Legacy dump clauses for deprecated values must not leak into the
+    // extracted member set.
+    const surface = await elixirExtractor.extract(fixturePath);
+    expect(surface.enums.Scope.members.legacy_removed).toBeUndefined();
+    expect(Object.keys(surface.enums.Scope.members).sort()).toEqual(['plain', 'scope:[read]', 'tab\tseparated']);
+  });
+
   it('extracts resource modules whose paths use string interpolation', async () => {
     // `#{URI.encode(...)}` must not be stripped as a comment — doing so leaves
     // an unterminated string and the whole module silently disappears.

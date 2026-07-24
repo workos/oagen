@@ -352,9 +352,24 @@ function extractTypeSpecs(modules: ExtractedModule[], sourceFile: string): Elixi
 // Enum module extraction
 // ---------------------------------------------------------------------------
 
-/** Undo simple backslash escapes inside a double-quoted Elixir string/atom. */
+/** Named escapes Elixir recognizes inside double-quoted strings/atoms. */
+const ELIXIR_STRING_ESCAPES: Record<string, string> = {
+  '0': '\0',
+  a: '\x07',
+  b: '\b',
+  d: '\x7f',
+  e: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  s: ' ',
+  t: '\t',
+  v: '\v',
+};
+
+/** Undo backslash escapes inside a double-quoted Elixir string/atom. */
 function unescapeElixirString(s: string): string {
-  return s.replace(/\\(.)/g, '$1');
+  return s.replace(/\\(.)/g, (_, ch: string) => ELIXIR_STRING_ESCAPES[ch] ?? ch);
 }
 
 function extractEnumModules(modules: ExtractedModule[], sourceFile: string): ElixirEnumModule[] {
@@ -384,8 +399,10 @@ function extractEnumModules(modules: ExtractedModule[], sourceFile: string): Eli
     // mix format may wrap the list across lines. Atom entries always name a
     // member; bare string/number entries only count when Tier 1 named nothing
     // (hand-written SDKs list wire strings that Tier 1 already named).
+    // Quoted entries may themselves contain `]`, so the list body must skip
+    // over double-quoted segments rather than stop at the first `]`.
     const hadNamedMembers = Object.keys(members).length > 0;
-    const valuesList = moduleBody.match(/def\s+values,\s*do:\s*\[([\s\S]*?)\]/);
+    const valuesList = moduleBody.match(/def\s+values,\s*do:\s*\[((?:"(?:[^"\\]|\\.)*"|[^\]"])*)\]/);
     if (valuesList) {
       const tokenRegex = /:"((?:[^"\\]|\\.)*)"|:([a-zA-Z_][a-zA-Z0-9_@]*[?!]?)|"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?)/g;
       let token;
@@ -401,13 +418,17 @@ function extractEnumModules(modules: ExtractedModule[], sourceFile: string): Eli
     }
 
     // Tier 3 — generated `dump/1` clauses carry the exact wire value per atom
-    // (`def dump(:urn_grant), do: "urn:..."`), refining Tier 2's atom names.
+    // (`def dump(:urn_grant), do: "urn:..."`), refining the wire values of
+    // members Tiers 1–2 already found. Atoms that appear only in `dump/1`
+    // (e.g. legacy clauses for values dropped from `values/0`) are not members.
     const dumpRegex =
       /def\s+dump\(:(?:"((?:[^"\\]|\\.)*)"|([a-zA-Z_][a-zA-Z0-9_@]*[?!]?))\),\s*do:\s*"((?:[^"\\]|\\.)*)"/g;
     let dumpMatch;
     while ((dumpMatch = dumpRegex.exec(moduleBody)) !== null) {
       const atomName = dumpMatch[1] != null ? unescapeElixirString(dumpMatch[1]) : dumpMatch[2];
-      members[atomName] = unescapeElixirString(dumpMatch[3]);
+      if (atomName in members) {
+        members[atomName] = unescapeElixirString(dumpMatch[3]);
+      }
     }
 
     if (Object.keys(members).length > 0) {
