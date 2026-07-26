@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/workos/oagen/compare/v0.27.0...v0.28.0) (2026-07-26)
+
+
+### Features
+
+* **compat:** read Elixir enum members from values/0 and dump/1 ([#141](https://github.com/workos/oagen/issues/141)) ([5e52f43](https://github.com/workos/oagen/commit/5e52f434720d36da574775a8c17b0542f9c7d793))
+
 ## [0.27.0](https://github.com/workos/oagen/compare/v0.26.1...v0.27.0) (2026-07-23)
 
 
