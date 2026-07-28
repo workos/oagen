@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/workos/oagen/compare/v0.28.0...v0.28.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **differ:** classify required response-only fields as additive ([#144](https://github.com/workos/oagen/issues/144)) ([b3b0faa](https://github.com/workos/oagen/commit/b3b0faa189c16fd4dd6b3cec230c30bda1a0d98b))
+
 ## [0.28.0](https://github.com/workos/oagen/compare/v0.27.0...v0.28.0) (2026-07-26)
 
 
