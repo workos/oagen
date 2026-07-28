@@ -2,8 +2,15 @@ import type { Model, TypeRef } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
 import type { Change, FieldChange } from './types.js';
 import { classifyFieldChange } from './classify.js';
+import type { DirectionIndex, ModelDirection } from './direction.js';
+import { directionOf } from './direction.js';
 
-export function diffModels(oldModels: Model[], newModels: Model[]): Change[] {
+/**
+ * `directions` (from `buildDirectionIndex`) lets requiredness changes be judged
+ * against the side of the wire each model is used on. Omit it and every model is
+ * treated as unknown-direction, i.e. the conservative classification.
+ */
+export function diffModels(oldModels: Model[], newModels: Model[], directions?: DirectionIndex): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldModels.map((m) => [m.name, m]));
   const newByName = new Map(newModels.map((m) => [m.name, m]));
@@ -24,7 +31,7 @@ export function diffModels(oldModels: Model[], newModels: Model[]): Change[] {
     const oldModel = oldByName.get(name);
     if (!oldModel) continue;
 
-    const fieldChanges = diffFields(oldModel, newModel);
+    const fieldChanges = diffFields(oldModel, newModel, directionOf(directions, name));
     if (fieldChanges.length > 0) {
       const hasBreaking = fieldChanges.some((fc) => fc.classification === 'breaking');
       changes.push({
@@ -39,14 +46,18 @@ export function diffModels(oldModels: Model[], newModels: Model[]): Change[] {
   return changes;
 }
 
-function diffFields(oldModel: Model, newModel: Model): FieldChange[] {
+function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection = 'unknown'): FieldChange[] {
   const changes: FieldChange[] = [];
   const oldByName = new Map(oldModel.fields.map((f) => [f.name, f]));
   const newByName = new Map(newModel.fields.map((f) => [f.name, f]));
 
   for (const [name, field] of newByName) {
     if (!oldByName.has(name)) {
-      changes.push(classifyFieldChange('field-added', name, field.required));
+      // Only `field-added` consults direction today. `field-required-changed`
+      // deliberately stays direction-blind: downstream changelog tooling reads
+      // its `breaking` classification as "made required", so downgrading it
+      // would invert the wording rather than just soften the severity.
+      changes.push(classifyFieldChange('field-added', name, field.required, direction));
     }
   }
 

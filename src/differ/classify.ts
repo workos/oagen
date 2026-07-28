@@ -1,8 +1,31 @@
+import type { ModelDirection } from './direction.js';
 import type { FieldChange, ParamChange } from './types.js';
 
-export function classifyFieldChange(kind: FieldChange['kind'], fieldName: string, isRequired?: boolean): FieldChange {
+export function classifyFieldChange(
+  kind: FieldChange['kind'],
+  fieldName: string,
+  isRequired?: boolean,
+  // Which side of the wire the owning model is used on. Defaults to `unknown`,
+  // which keeps the conservative direction-blind classification for callers that
+  // have no model-usage index to hand.
+  direction: ModelDirection = 'unknown',
+): FieldChange {
   switch (kind) {
     case 'field-added':
+      // Requiredness binds callers on the request side only: they must supply
+      // every required request field, but they only *read* responses. So a new
+      // required field on a response-only model is additive — the server simply
+      // always sends it, and existing caller code keeps compiling and
+      // deserializing. Request-facing, both-facing, and unknown-direction models
+      // keep the breaking classification.
+      if (isRequired && direction === 'response') {
+        return {
+          kind,
+          fieldName,
+          classification: 'additive',
+          details: 'required on a response-only model',
+        };
+      }
       return {
         kind,
         fieldName,

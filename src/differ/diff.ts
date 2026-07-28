@@ -1,11 +1,16 @@
 import type { ApiSpec, Enum } from '../ir/types.js';
 import type { BehaviorChange, Change, DiffReport, EnumValueChange } from './types.js';
+import { buildDirectionIndex } from './direction.js';
 import { diffModels } from './models.js';
 import { diffServices } from './services.js';
 
 export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
+  // Both specs seed the index so a model that was request-facing in either one
+  // is still judged as request-facing here.
+  const directions = buildDirectionIndex(oldSpec, newSpec);
+
   const changes: Change[] = [
-    ...diffModels(oldSpec.models, newSpec.models),
+    ...diffModels(oldSpec.models, newSpec.models, directions),
     ...diffEnums(oldSpec.enums, newSpec.enums),
     ...diffServices(oldSpec.services, newSpec.services),
   ];

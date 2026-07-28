@@ -95,6 +95,72 @@ describe('diffSpecs', () => {
     expect(diff.summary.breaking).toBeGreaterThan(0);
   });
 
+  it('classifies a required field added to a response-only model as additive', () => {
+    // The Pipes `config` regression: the model gains a field *and* the field
+    // lands in the schema's required list. `User` is only ever returned by
+    // `listUsers`, so callers keep compiling — no major bump warranted.
+    const v2: ApiSpec = {
+      ...v1,
+      version: '2.0.0',
+      models: [
+        {
+          ...v1.models[0],
+          fields: [
+            ...v1.models[0].fields,
+            { name: 'config', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const diff = diffSpecs(v1, v2);
+    expect(diff.summary.breaking).toBe(0);
+    expect(diff.changes).toHaveLength(1);
+    expect(diff.changes[0]).toMatchObject({ kind: 'model-modified', name: 'User', classification: 'additive' });
+  });
+
+  it('still classifies a required field added to a request-facing model as breaking', () => {
+    const withCreate: ApiSpec = {
+      ...v1,
+      services: [
+        {
+          ...v1.services[0],
+          operations: [
+            ...v1.services[0].operations,
+            {
+              name: 'createUser',
+              httpMethod: 'post' as const,
+              path: '/users',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              requestBody: { kind: 'model' as const, name: 'User' },
+              response: { kind: 'model' as const, name: 'User' },
+              errors: [],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+    };
+    const v2: ApiSpec = {
+      ...withCreate,
+      version: '2.0.0',
+      models: [
+        {
+          ...withCreate.models[0],
+          fields: [
+            ...withCreate.models[0].fields,
+            { name: 'config', type: { kind: 'primitive', type: 'string' }, required: true },
+          ],
+        },
+      ],
+    };
+
+    const diff = diffSpecs(withCreate, v2);
+    expect(diff.summary.breaking).toBeGreaterThan(0);
+  });
+
   it('detects mixed changes', () => {
     const v2: ApiSpec = {
       ...v1,

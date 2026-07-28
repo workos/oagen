@@ -66,6 +66,36 @@ describe('diffModels', () => {
     expect(changes[0]).toMatchObject({ kind: 'model-modified', classification: 'breaking' });
   });
 
+  it('downgrades a required field added to a response-only model to additive', () => {
+    // Mirrors the Pipes `config` case: the field is added to a response model
+    // *and* to its required list. Callers only read the model, so nothing breaks.
+    const modified: Model = {
+      ...userModel,
+      fields: [...userModel.fields, { name: 'config', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    const changes = diffModels([userModel], [modified], new Map([['User', 'response']]));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'model-modified', name: 'User', classification: 'additive' });
+    if (changes[0].kind === 'model-modified') {
+      expect(changes[0].fieldChanges[0]).toMatchObject({
+        kind: 'field-added',
+        fieldName: 'config',
+        classification: 'additive',
+      });
+    }
+  });
+
+  it('keeps a required field added to a request-facing model breaking', () => {
+    const modified: Model = {
+      ...userModel,
+      fields: [...userModel.fields, { name: 'config', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    for (const direction of ['request', 'both'] as const) {
+      const changes = diffModels([userModel], [modified], new Map([['User', direction]]));
+      expect(changes[0]).toMatchObject({ kind: 'model-modified', classification: 'breaking' });
+    }
+  });
+
   it('detects field removed (breaking)', () => {
     const modified: Model = {
       ...userModel,

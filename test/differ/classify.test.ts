@@ -14,6 +14,24 @@ describe('classifyFieldChange', () => {
     });
   });
 
+  it('field-added required on a response-only model is additive', () => {
+    const result = classifyFieldChange('field-added', 'config', true, 'response');
+    expect(result.classification).toBe('additive');
+    expect(result.details).toBe('required on a response-only model');
+  });
+
+  it('field-added required stays breaking on request-facing and both-facing models', () => {
+    expect(classifyFieldChange('field-added', 'config', true, 'request').classification).toBe('breaking');
+    expect(classifyFieldChange('field-added', 'config', true, 'both').classification).toBe('breaking');
+    expect(classifyFieldChange('field-added', 'config', true, 'unknown').classification).toBe('breaking');
+  });
+
+  it('field-added optional is additive regardless of direction', () => {
+    for (const direction of ['request', 'response', 'both', 'unknown'] as const) {
+      expect(classifyFieldChange('field-added', 'config', false, direction).classification).toBe('additive');
+    }
+  });
+
   it('field-removed is always breaking', () => {
     expect(classifyFieldChange('field-removed', 'email')).toMatchObject({
       classification: 'breaking',

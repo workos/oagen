@@ -122,6 +122,8 @@ export {
 export { integrateGeneratedFiles, mapFilesForTargetIntegration, treeShakeFiles } from './engine/integrate.js';
 export { getEmitter, registerEmitter } from './engine/registry.js';
 export { diffSpecs } from './differ/diff.js';
+export { buildDirectionIndex, directionOf } from './differ/direction.js';
+export type { DirectionIndex, ModelDirection } from './differ/direction.js';
 
 // Utilities
 export {
