@@ -34,6 +34,8 @@ interface PathItem {
 interface ParameterGroupExtension {
   optional: boolean;
   variants: Record<string, string[]>;
+  /** Per-variant names that may be omitted when the variant is used. */
+  optionalFields?: Record<string, string[]>;
 }
 
 interface OperationObject {
@@ -475,7 +477,23 @@ function extractBodyParameterGroups(op: OperationObject, operationContext: strin
           description: fieldSchema?.description,
         };
       });
-      return { name: variantName, parameters };
+
+      // Optional variant membership: fields the caller may omit when using
+      // this variant. Only names that actually belong to the variant count —
+      // anything else in the extension is ignored rather than fatal.
+      const rawOptionalFields =
+        groupDef.optionalFields && typeof groupDef.optionalFields === 'object'
+          ? groupDef.optionalFields[variantName]
+          : undefined;
+      const optionalParameters = Array.isArray(rawOptionalFields)
+        ? rawOptionalFields.filter((name): name is string => typeof name === 'string' && paramNames.includes(name))
+        : [];
+
+      return {
+        name: variantName,
+        parameters,
+        ...(optionalParameters.length > 0 ? { optionalParameters } : {}),
+      };
     });
 
     groups.push({

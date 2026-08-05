@@ -1102,4 +1102,99 @@ describe('extractOperations', () => {
       expect(services[0].operations[0].requestBody?.kind).toBe('union');
     });
   });
+
+  describe('x-mutually-exclusive-body-groups', () => {
+    const buildPaths = (extension: Record<string, unknown>) => ({
+      '/users': {
+        post: {
+          operationId: 'createUser',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  allOf: [
+                    {
+                      type: 'object',
+                      properties: { email: { type: 'string' } },
+                      required: ['email'],
+                    },
+                    {
+                      oneOf: [
+                        { type: 'object' },
+                        {
+                          type: 'object',
+                          properties: { password: { type: 'string' } },
+                          required: ['password'],
+                        },
+                        {
+                          type: 'object',
+                          properties: {
+                            password_hash: { type: 'string' },
+                            password_hash_type: { type: 'string', enum: ['bcrypt', 'ssha256'] },
+                            password_salt_position: { type: 'string', enum: ['prefix', 'suffix'] },
+                          },
+                          required: ['password_hash', 'password_hash_type'],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+          'x-mutually-exclusive-body-groups': extension,
+        } as Record<string, unknown>,
+      },
+    });
+
+    it('parses optionalFields into variant optionalParameters', () => {
+      const paths = buildPaths({
+        password: {
+          optional: true,
+          variants: {
+            plaintext: ['password'],
+            hashed: ['password_hash', 'password_hash_type', 'password_salt_position'],
+          },
+          optionalFields: {
+            hashed: ['password_salt_position'],
+          },
+        },
+      });
+
+      const { services } = extractOperations(paths as never);
+      const group = services[0].operations[0].parameterGroups![0];
+
+      const plaintext = group.variants[0];
+      expect(plaintext.name).toBe('plaintext');
+      expect(plaintext.optionalParameters).toBeUndefined();
+
+      const hashed = group.variants[1];
+      expect(hashed.name).toBe('hashed');
+      expect(hashed.parameters.map((p) => p.name)).toEqual([
+        'password_hash',
+        'password_hash_type',
+        'password_salt_position',
+      ]);
+      expect(hashed.optionalParameters).toEqual(['password_salt_position']);
+    });
+
+    it('ignores optionalFields entries that are not variant members', () => {
+      const paths = buildPaths({
+        password: {
+          optional: true,
+          variants: {
+            plaintext: ['password'],
+            hashed: ['password_hash', 'password_hash_type'],
+          },
+          optionalFields: { hashed: ['not_a_member'], plaintext: 'bogus' },
+        },
+      });
+
+      const { services } = extractOperations(paths as never);
+      const group = services[0].operations[0].parameterGroups![0];
+      expect(group.variants[0].optionalParameters).toBeUndefined();
+      expect(group.variants[1].optionalParameters).toBeUndefined();
+    });
+  });
 });

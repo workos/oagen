@@ -97,6 +97,13 @@ export interface ParameterGroupVariant {
    * shared by identity, not duplicated.
    */
   parameters: Parameter[];
+  /**
+   * Names of parameters that may be omitted when this variant is used —
+   * optional modifiers of the variant's required fields, from the
+   * extension's `optionalFields`. Absent means every parameter in the
+   * variant is required with it.
+   */
+  optionalParameters?: string[];
 }
 
 /** Structured pagination metadata for auto-paging iterator generation */
