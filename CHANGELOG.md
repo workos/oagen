@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/workos/oagen/compare/v0.28.1...v0.29.0) (2026-08-05)
+
+
+### Features
+
+* **parser:** support optionalFields in mutually-exclusive body groups ([#147](https://github.com/workos/oagen/issues/147)) ([be2e140](https://github.com/workos/oagen/commit/be2e140d46a89121cd5976c0cf1fe90ec3e27a39))
+
 ## [0.28.1](https://github.com/workos/oagen/compare/v0.28.0...v0.28.1) (2026-07-28)
 
 
