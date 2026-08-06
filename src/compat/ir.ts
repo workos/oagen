@@ -17,6 +17,9 @@ export interface CompatSnapshot {
   source: {
     specSha?: string;
     extractedAt: string;
+    /** Language the snapshot was extracted for. Older snapshots omit this;
+     *  the differ falls back to no type-form normalization when absent. */
+    language?: LanguageId;
   };
   policies: CompatPolicyHints;
   symbols: CompatSymbol[];
@@ -290,7 +293,7 @@ export function apiSurfaceToSnapshot(surface: ApiSurface): CompatSnapshot {
 
   return {
     schemaVersion: COMPAT_SCHEMA_VERSION,
-    source: { extractedAt: surface.extractedAt },
+    source: { extractedAt: surface.extractedAt, language },
     policies: getDefaultPolicy(language),
     symbols,
   };

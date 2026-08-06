@@ -365,6 +365,69 @@ describe('classifyAddedSymbol', () => {
   });
 });
 
+describe('Python type-form normalization', () => {
+  // Emitters evolve Python annotation style across releases (PEP 604 `X | None`,
+  // PEP 585 lowercase generics, unquoted forward refs). These are cosmetic and
+  // must not register as breaking type changes.
+  const py = getDefaultPolicy('python');
+
+  it('treats Optional[X] and X | None as equivalent', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Optional[str]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'str | None' } });
+    expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+  });
+
+  it('treats quoted and unquoted forward refs as equivalent', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: '"Foo"' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Foo' } });
+    expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+  });
+
+  it('treats Union[A, B] and A | B as equivalent', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Union[A, B]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'A | B' } });
+    expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+  });
+
+  it('treats List[str] and list[str] as equivalent (PEP 585)', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'List[str]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'list[str]' } });
+    expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+  });
+
+  it('treats Optional[List[str]] and list[str] | None as equivalent (nested)', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Optional[List[str]]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'list[str] | None' } });
+    expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+  });
+
+  it('treats Union[A, B,] (trailing comma) and (A | B) (parenthesized) as equivalent', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Union[\n  A,\n  B,\n]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: '(\n  A\n  | B\n)' } });
+    expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+  });
+
+  it('still flags a real optionality change (str -> str | None)', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'str' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'str | None' } });
+    const changes = classifySymbolChanges(baseline, candidate, py, 'python');
+    expect(changes).toHaveLength(1);
+    expect(changes[0].category).toBe('field_type_changed');
+  });
+
+  it('does not normalize when language is absent (older snapshots)', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Optional[str]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'str | None' } });
+    expect(classifySymbolChanges(baseline, candidate, py)).toHaveLength(1);
+  });
+
+  it('does not normalize for non-Python languages', () => {
+    const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Optional[str]' } });
+    const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'str | None' } });
+    expect(classifySymbolChanges(baseline, candidate, getDefaultPolicy('ruby'), 'ruby')).toHaveLength(1);
+  });
+});
+
 describe('summarizeChanges', () => {
   it('counts by severity', () => {
     const changes = [

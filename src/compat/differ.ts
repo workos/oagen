@@ -75,7 +75,7 @@ export function diffSnapshots(
   for (const baseSym of baseline.symbols) {
     if (isServiceWrapperConstructor(baseSym, serviceAccessors)) continue;
     const candSym = candById.get(baseSym.id) ?? candByFqName.get(baseSym.fqName);
-    changes.push(...classifySymbolChanges(baseSym, candSym, effectivePolicy));
+    changes.push(...classifySymbolChanges(baseSym, candSym, effectivePolicy, baseline.source.language));
   }
 
   // Detect added symbols

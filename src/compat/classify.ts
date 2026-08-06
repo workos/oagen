@@ -5,7 +5,7 @@
  * classifies each change into a specific category with policy-aware severity.
  */
 
-import type { CompatSymbol, CompatParameter } from './ir.js';
+import type { CompatSymbol, CompatParameter, LanguageId } from './ir.js';
 import type { CompatPolicyHints } from './policy.js';
 import type { CompatChangeCategory, CompatChangeSeverity, CompatProvenance } from './config.js';
 import { defaultSeverityForCategory } from './config.js';
@@ -48,6 +48,97 @@ export interface ClassificationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Type-form normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a type annotation string to a canonical form before equality
+ * comparison. Emitters evolve their annotation style across releases (e.g.
+ * Python's PEP 604 `X | None` replacing `Optional[X]`, or dropping quotes from
+ * forward refs); such changes are cosmetic and must not register as breaking
+ * type changes. Only Python needs this today — other languages use distinct
+ * nullable syntax (`*Foo`, `Foo?`, `T.nilable(Foo)`) that `bareTypeName` in
+ * differ.ts already handles where relevant. When `language` is absent (older
+ * snapshots) no normalization is applied, preserving prior behaviour.
+ */
+function normalizeType(type: string, language?: LanguageId): string {
+  if (!type) return type;
+  if (language !== 'python') return type.replace(/\s+/g, ' ').trim();
+  return canonicalizePythonType(type.replace(/"/g, '')).replace(/\s+/g, ' ').trim();
+}
+
+/** Recursively canonicalize a quote-stripped Python annotation. */
+const PEP585_BUILTINS: Record<string, string> = {
+  List: 'list',
+  Dict: 'dict',
+  Tuple: 'tuple',
+  Set: 'set',
+  FrozenSet: 'frozenset',
+  Type: 'type',
+};
+
+function canonicalizePythonType(s: string): string {
+  const t = s.trim();
+  // Strip a wrapping pair of parentheses — the emitter sometimes groups
+  // multi-line unions as `(A | B)`. Recurse in case of nested wrapping.
+  if (t.startsWith('(') && t.endsWith(')')) {
+    return canonicalizePythonType(t.slice(1, -1));
+  }
+  if (t.startsWith('Optional[') && t.endsWith(']')) {
+    return `${canonicalizePythonType(t.slice('Optional['.length, -1))} | None`;
+  }
+  if (t.startsWith('Union[') && t.endsWith(']')) {
+    return splitTopLevel(t.slice('Union['.length, -1), ',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map(canonicalizePythonType)
+      .join(' | ');
+  }
+  // PEP 604 union at top level: split on `|` and canonicalize each arm.
+  if (t.includes('|')) {
+    const arms = splitTopLevel(t, '|')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (arms.length > 1) return arms.map(canonicalizePythonType).join(' | ');
+  }
+  // Other generic (Dict[str, Any], list[Foo], Literal["x"]): preserve the
+  // outer constructor but canonicalize each comma-separated type argument.
+  // Lowercase PEP 585 capitalized builtins (`List`->`list`, `Dict`->`dict`)
+  // so the modern lowercase spelling compares equal to the legacy one.
+  const open = t.indexOf('[');
+  if (open !== -1 && t.endsWith(']')) {
+    const outer = t.slice(0, open).trim();
+    const inner = t.slice(open + 1, -1);
+    const canonicalOuter = PEP585_BUILTINS[outer] ?? outer;
+    return `${canonicalOuter}[${splitTopLevel(inner, ',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map(canonicalizePythonType)
+      .join(', ')}]`;
+  }
+  return PEP585_BUILTINS[t] ?? t;
+}
+
+/** Split on a separator that sits at bracket-depth 0 (ignoring commas/pipes
+ *  nested inside `[...]`). */
+function splitTopLevel(s: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '[') depth++;
+    else if (c === ']') depth--;
+    else if (c === sep && depth === 0) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+// ---------------------------------------------------------------------------
 // Classification engine
 // ---------------------------------------------------------------------------
 
@@ -59,6 +150,7 @@ export function classifySymbolChanges(
   baseline: CompatSymbol,
   candidate: CompatSymbol | undefined,
   policy: CompatPolicyHints,
+  language?: LanguageId,
 ): ClassifiedChange[] {
   const changes: ClassifiedChange[] = [];
 
@@ -99,11 +191,15 @@ export function classifySymbolChanges(
 
   // Parameter-level changes (for callables and constructors)
   if (baseline.parameters && candidate.parameters) {
-    changes.push(...classifyParameterChanges(baseline, candidate, policy, specRef));
+    changes.push(...classifyParameterChanges(baseline, candidate, policy, specRef, language));
   }
 
   // Return type changes (for callables)
-  if (baseline.returns && candidate.returns && baseline.returns.name !== candidate.returns.name) {
+  if (
+    baseline.returns &&
+    candidate.returns &&
+    normalizeType(baseline.returns.name, language) !== normalizeType(candidate.returns.name, language)
+  ) {
     changes.push(
       makeChange({
         category: 'return_type_changed',
@@ -137,7 +233,11 @@ export function classifySymbolChanges(
   }
 
   // Field/property type changes
-  if (baseline.typeRef && candidate.typeRef && baseline.typeRef.name !== candidate.typeRef.name) {
+  if (
+    baseline.typeRef &&
+    candidate.typeRef &&
+    normalizeType(baseline.typeRef.name, language) !== normalizeType(candidate.typeRef.name, language)
+  ) {
     changes.push(
       makeChange({
         category: 'field_type_changed',
@@ -182,6 +282,7 @@ function classifyParameterChanges(
   candidate: CompatSymbol,
   policy: CompatPolicyHints,
   specRef?: string,
+  language?: LanguageId,
 ): ClassifiedChange[] {
   const changes: ClassifiedChange[] = [];
   const baseParams = baseline.parameters ?? [];
@@ -246,7 +347,7 @@ function classifyParameterChanges(
     }
 
     // Type narrowed
-    if (baseParam.type.name !== candParam.type.name) {
+    if (normalizeType(baseParam.type.name, language) !== normalizeType(candParam.type.name, language)) {
       changes.push(
         makeChange({
           category: 'parameter_type_narrowed',
