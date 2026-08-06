@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.2](https://github.com/workos/oagen/compare/v0.29.1...v0.29.2) (2026-08-06)
+
+
+### Bug Fixes
+
+* **compat:** normalize Python type forms before diffing ([#151](https://github.com/workos/oagen/issues/151)) ([f0729ff](https://github.com/workos/oagen/commit/f0729ff9a5a17d05400e011542b7d3e75b07d863))
+
 ## [0.29.1](https://github.com/workos/oagen/compare/v0.29.0...v0.29.1) (2026-08-06)
 
 
