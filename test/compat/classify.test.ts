@@ -495,6 +495,27 @@ describe('Python type-form normalization', () => {
       expect(changes).toHaveLength(1);
       expect(changes[0].category).toBe('field_type_changed');
     });
+
+    it('treats an embedded double quote across quote styles as equivalent', () => {
+      // Literal['say "hi"'] (single-quoted, unescaped inner ") ≡ Literal["say \"hi\""] (double-quoted, escaped)
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal[\'say "hi"\']' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["say \\\"hi\\\""]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('treats an embedded single quote across quote styles as equivalent', () => {
+      // Literal["it's"] (double-quoted, unescaped ') ≡ Literal['it\'s'] (single-quoted, escaped)
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["it\'s"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: "Literal['it\\'s']" } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('treats a backslash escape across quote styles as equivalent', () => {
+      // Literal['a\\b'] ≡ Literal["a\\b"] (both decode to a\b)
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: "Literal['a\\\\b']" } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a\\\\b"]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
   });
 });
 

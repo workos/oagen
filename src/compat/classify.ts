@@ -149,16 +149,50 @@ function canonicalizePythonType(s: string): string {
   return PEP585_BUILTINS[t] ?? t;
 }
 
-/** Canonicalize one `Literal[...]` argument: normalize the quote character
- *  (single ↔ double, picking double as canonical) while preserving the inner
- *  value byte-for-byte. Bare (unquoted) arguments — e.g. an enum name or a
- *  number — are returned unchanged. */
+/** Canonicalize one `Literal[...]` argument so semantically identical string
+ *  values compare equal regardless of quote style or escape form. The value
+ *  is decoded (backslash escapes processed) then re-encoded in a canonical
+ *  double-quoted form, so `Literal['say "hi"']` and `Literal["say \\"hi\\""]`
+ *  both canonicalize to `"say \"hi\""`. Bare (unquoted) arguments — e.g. an
+ *  enum name or a number — are returned unchanged. */
 function canonicalizeLiteralArg(arg: string): string {
   const a = arg.trim();
-  if (a.length >= 2 && a.startsWith("'") && a.endsWith("'")) {
-    return `"${a.slice(1, -1)}"`;
+  if (a.length < 2) return a;
+  let quote: '"' | "'" | null = null;
+  if (a.startsWith('"') && a.endsWith('"')) quote = '"';
+  else if (a.startsWith("'") && a.endsWith("'")) quote = "'";
+  if (!quote) return a; // bare arg (type ref / number) — not a string literal
+  const value = decodeStringLiteral(a.slice(1, -1));
+  return `"${encodeDoubleQuoted(value)}"`;
+}
+
+/** Decode the backslash escapes inside a Python string literal's content.
+ *  Only the delimiter-relevant escapes (`\\`, `\'`, `\"`) are processed;
+ *  other sequences (`\n`, `\t`, `\u…`) are kept verbatim since they're
+ *  written identically regardless of quote style and so compare equal already. */
+function decodeStringLiteral(content: string): string {
+  let out = '';
+  for (let i = 0; i < content.length; i++) {
+    const c = content[i];
+    if (c === '\\' && i + 1 < content.length) {
+      const next = content[i + 1];
+      if (next === '\\' || next === '"' || next === "'") {
+        out += next;
+        i++;
+        continue;
+      }
+      out += c + next; // preserve unknown escape verbatim
+      i++;
+      continue;
+    }
+    out += c;
   }
-  return a;
+  return out;
+}
+
+/** Re-encode a decoded value as a canonical double-quoted Python string. */
+function encodeDoubleQuoted(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 /** Split on a separator that sits at bracket-depth 0 and outside string
