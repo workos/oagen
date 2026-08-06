@@ -426,6 +426,56 @@ describe('Python type-form normalization', () => {
     const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'str | None' } });
     expect(classifySymbolChanges(baseline, candidate, getDefaultPolicy('ruby'), 'ruby')).toHaveLength(1);
   });
+
+  describe('Literal value preservation', () => {
+    it('treats Literal["x"] and Literal["x"] as equivalent', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["event"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["event"]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('treats Literal["a", "b"] and Literal["a","b"] as equivalent (spacing only)', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a", "b"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a","b"]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('preserves inner whitespace so Literal["a b"] and Literal["a  b"] are NOT equal', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a b"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a  b"]' } });
+      const changes = classifySymbolChanges(baseline, candidate, py, 'python');
+      expect(changes).toHaveLength(1);
+      expect(changes[0].category).toBe('field_type_changed');
+    });
+
+    it('preserves quotes so Literal["a"] and Literal[a] are NOT equal', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal[a]' } });
+      const changes = classifySymbolChanges(baseline, candidate, py, 'python');
+      expect(changes).toHaveLength(1);
+      expect(changes[0].category).toBe('field_type_changed');
+    });
+
+    it('flags a real literal value change ("a" -> "b")', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["b"]' } });
+      const changes = classifySymbolChanges(baseline, candidate, py, 'python');
+      expect(changes).toHaveLength(1);
+      expect(changes[0].category).toBe('field_type_changed');
+    });
+
+    it('does not split on a comma inside a string literal', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a,b"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a,b"]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('normalizes Literal inside a union: Union[Literal["x"], "Foo"] ≡ Literal["x"] | Foo', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Union[Literal["x"], "Foo"]' } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["x"] | Foo' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+  });
 });
 
 describe('summarizeChanges', () => {

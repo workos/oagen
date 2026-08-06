@@ -54,20 +54,23 @@ export interface ClassificationResult {
 /**
  * Normalize a type annotation string to a canonical form before equality
  * comparison. Emitters evolve their annotation style across releases (e.g.
- * Python's PEP 604 `X | None` replacing `Optional[X]`, or dropping quotes from
- * forward refs); such changes are cosmetic and must not register as breaking
- * type changes. Only Python needs this today — other languages use distinct
- * nullable syntax (`*Foo`, `Foo?`, `T.nilable(Foo)`) that `bareTypeName` in
- * differ.ts already handles where relevant. When `language` is absent (older
- * snapshots) no normalization is applied, preserving prior behaviour.
+ * Python's PEP 604 `X | None` replacing `Optional[X]`, PEP 585 lowercase
+ * generics, or dropping quotes from forward refs); such changes are cosmetic
+ * and must not register as breaking type changes. Only Python needs this
+ * today — other languages encode optionality with a single stable spelling
+ * (`*Foo`, `Option<T>`, `T?`, `T.nilable(Foo)`) so they use exact comparison.
+ * String-literal *values* inside `Literal[...]` are preserved verbatim so a
+ * genuine change to a wire value stays visible. When `language` is absent
+ * (older snapshots) no normalization is applied, preserving prior behaviour.
  */
 function normalizeType(type: string, language?: LanguageId): string {
   if (!type) return type;
-  if (language !== 'python') return type.replace(/\s+/g, ' ').trim();
-  return canonicalizePythonType(type.replace(/"/g, '')).replace(/\s+/g, ' ').trim();
+  if (language !== 'python') return type;
+  return canonicalizePythonType(type);
 }
 
-/** Recursively canonicalize a quote-stripped Python annotation. */
+/** PEP 585 capitalized builtins that map to their lowercase spellings, so
+ *  `List[str]` and `list[str]` compare equal. */
 const PEP585_BUILTINS: Record<string, string> = {
   List: 'list',
   Dict: 'dict',
@@ -77,12 +80,28 @@ const PEP585_BUILTINS: Record<string, string> = {
   Type: 'type',
 };
 
+/** Recursively canonicalize a Python annotation. Structural forms are
+ *  normalized (`Optional[X]`→`X | None`, `Union[...]`→` | ` joins, PEP 585
+ *  builtins, quoted forward refs, parenthesized unions), but `Literal[...]`
+ *  arguments are preserved verbatim — their quotes and inner whitespace are
+ *  part of the wire value, not cosmetic. */
 function canonicalizePythonType(s: string): string {
   const t = s.trim();
+  if (t.length === 0) return t;
   // Strip a wrapping pair of parentheses — the emitter sometimes groups
   // multi-line unions as `(A | B)`. Recurse in case of nested wrapping.
   if (t.startsWith('(') && t.endsWith(')')) {
     return canonicalizePythonType(t.slice(1, -1));
+  }
+  // Literal[...] holds *values*, not types. Preserve each argument's quotes
+  // and inner whitespace verbatim so a real change to a wire value (e.g.
+  // `"a b"` → `"a  b"`) stays visible; only normalize spacing between args.
+  if (t.startsWith('Literal[') && t.endsWith(']')) {
+    const inner = t.slice('Literal['.length, -1);
+    return `Literal[${splitTopLevel(inner, ',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .join(', ')}]`;
   }
   if (t.startsWith('Optional[') && t.endsWith(']')) {
     return `${canonicalizePythonType(t.slice('Optional['.length, -1))} | None`;
@@ -101,10 +120,8 @@ function canonicalizePythonType(s: string): string {
       .filter((p) => p.length > 0);
     if (arms.length > 1) return arms.map(canonicalizePythonType).join(' | ');
   }
-  // Other generic (Dict[str, Any], list[Foo], Literal["x"]): preserve the
-  // outer constructor but canonicalize each comma-separated type argument.
-  // Lowercase PEP 585 capitalized builtins (`List`->`list`, `Dict`->`dict`)
-  // so the modern lowercase spelling compares equal to the legacy one.
+  // Other generic (Dict[str, Any], list[Foo]): preserve the outer constructor,
+  // lowercase PEP 585 builtins, and canonicalize each type argument.
   const open = t.indexOf('[');
   if (open !== -1 && t.endsWith(']')) {
     const outer = t.slice(0, open).trim();
@@ -116,17 +133,36 @@ function canonicalizePythonType(s: string): string {
       .map(canonicalizePythonType)
       .join(', ')}]`;
   }
+  // Quoted forward ref: "Foo" / 'Foo' → Foo. The emitter quotes type names
+  // defined later in the file; the quotes are cosmetic. String-literal values
+  // are preserved by the Literal branch above, so this only strips quotes from
+  // bare type-name references.
+  if (
+    (t.startsWith('"') && t.endsWith('"') && t.length >= 2) ||
+    (t.startsWith("'") && t.endsWith("'") && t.length >= 2)
+  ) {
+    return t.slice(1, -1);
+  }
   return PEP585_BUILTINS[t] ?? t;
 }
 
-/** Split on a separator that sits at bracket-depth 0 (ignoring commas/pipes
- *  nested inside `[...]`). */
+/** Split on a separator that sits at bracket-depth 0 and outside string
+ *  literals, so commas/pipes inside `Literal["a,b"]` or `"x|y"` are not split. */
 function splitTopLevel(s: string, sep: string): string[] {
   const parts: string[] = [];
   let depth = 0;
+  let inStr: string | null = null;
   let start = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
+    if (inStr) {
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inStr = c;
+      continue;
+    }
     if (c === '[') depth++;
     else if (c === ']') depth--;
     else if (c === sep && depth === 0) {
