@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/workos/oagen/compare/v0.29.0...v0.29.1) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** bump @redocly/openapi-core for js-yaml ^5 support ([#149](https://github.com/workos/oagen/issues/149)) ([6616230](https://github.com/workos/oagen/commit/6616230dec95cad2bf166c0aa94428278df1f2d3))
+
 ## [0.29.0](https://github.com/workos/oagen/compare/v0.28.1...v0.29.0) (2026-08-05)
 
 
