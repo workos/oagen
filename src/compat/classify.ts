@@ -196,7 +196,10 @@ function encodeDoubleQuoted(value: string): string {
 }
 
 /** Split on a separator that sits at bracket-depth 0 and outside string
- *  literals, so commas/pipes inside `Literal["a,b"]` or `"x|y"` are not split. */
+ *  literals, so commas/pipes inside `Literal["a,b"]` or `"x|y"` are not split.
+ *  An escaped matching quote (`\"` inside a double-quoted string) does not
+ *  close the string: only a quote preceded by an even number of backslashes
+ *  (zero counts) is a real closing delimiter. */
 function splitTopLevel(s: string, sep: string): string[] {
   const parts: string[] = [];
   let depth = 0;
@@ -205,7 +208,11 @@ function splitTopLevel(s: string, sep: string): string[] {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (inStr) {
-      if (c === inStr) inStr = null;
+      if (c === inStr) {
+        let precedingBackslashes = 0;
+        for (let j = i - 1; j >= 0 && s[j] === '\\'; j--) precedingBackslashes++;
+        if (precedingBackslashes % 2 === 0) inStr = null;
+      }
       continue;
     }
     if (c === '"' || c === "'") {

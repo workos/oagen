@@ -516,6 +516,29 @@ describe('Python type-form normalization', () => {
       const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a\\\\b"]' } });
       expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
     });
+
+    it('does not split on a comma after an escaped quote (single value across quote styles)', () => {
+      // Literal["a\",b"] (one value a",b with escaped quote) ≡ Literal['a",b'] (same value, no escape)
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: `Literal["a\\",b"]` } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: `Literal['a",b']` } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('does not split on a pipe after an escaped quote', () => {
+      // Literal["a\"|b"] (one value a"|b) ≡ Literal['a"|b']
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: `Literal["a\\"|b"]` } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: `Literal['a"|b']` } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('treats an escaped-backslash-then-quote as a real closing quote', () => {
+      // Literal["a\\"] (one value a\) ≠ Literal["a\\", "b"] (two values: a\ and b)
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: `Literal["a\\\\"]` } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: `Literal["a\\\\", "b"]` } });
+      const changes = classifySymbolChanges(baseline, candidate, py, 'python');
+      expect(changes).toHaveLength(1);
+      expect(changes[0].category).toBe('field_type_changed');
+    });
   });
 });
 
