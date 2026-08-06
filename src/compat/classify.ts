@@ -93,14 +93,17 @@ function canonicalizePythonType(s: string): string {
   if (t.startsWith('(') && t.endsWith(')')) {
     return canonicalizePythonType(t.slice(1, -1));
   }
-  // Literal[...] holds *values*, not types. Preserve each argument's quotes
-  // and inner whitespace verbatim so a real change to a wire value (e.g.
-  // `"a b"` → `"a  b"`) stays visible; only normalize spacing between args.
+  // Literal[...] holds *values*, not types. Normalize the quote *character*
+  // (single ↔ double) so a cosmetic emitter quote-style flip doesn't register
+  // as a change, but preserve each argument's inner content verbatim so a
+  // real change to a wire value (e.g. `"a b"` → `"a  b"`) stays visible.
+  // Only spacing between arguments is normalized.
   if (t.startsWith('Literal[') && t.endsWith(']')) {
     const inner = t.slice('Literal['.length, -1);
     return `Literal[${splitTopLevel(inner, ',')
       .map((p) => p.trim())
       .filter((p) => p.length > 0)
+      .map(canonicalizeLiteralArg)
       .join(', ')}]`;
   }
   if (t.startsWith('Optional[') && t.endsWith(']')) {
@@ -144,6 +147,18 @@ function canonicalizePythonType(s: string): string {
     return t.slice(1, -1);
   }
   return PEP585_BUILTINS[t] ?? t;
+}
+
+/** Canonicalize one `Literal[...]` argument: normalize the quote character
+ *  (single ↔ double, picking double as canonical) while preserving the inner
+ *  value byte-for-byte. Bare (unquoted) arguments — e.g. an enum name or a
+ *  number — are returned unchanged. */
+function canonicalizeLiteralArg(arg: string): string {
+  const a = arg.trim();
+  if (a.length >= 2 && a.startsWith("'") && a.endsWith("'")) {
+    return `"${a.slice(1, -1)}"`;
+  }
+  return a;
 }
 
 /** Split on a separator that sits at bracket-depth 0 and outside string

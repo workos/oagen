@@ -475,6 +475,26 @@ describe('Python type-form normalization', () => {
       const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["x"] | Foo' } });
       expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
     });
+
+    it('treats single- and double-quoted Literal values as equivalent', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: "Literal['event']" } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["event"]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('treats mixed quote styles across multiple Literal args as equivalent', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: "Literal['a', 'b']" } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["a", "b"]' } });
+      expect(classifySymbolChanges(baseline, candidate, py, 'python')).toHaveLength(0);
+    });
+
+    it('still flags a real value change across quote styles (\'a\' -> "b")', () => {
+      const baseline = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: "Literal['a']" } });
+      const candidate = makeSymbol({ fqName: 'M.f', kind: 'field', typeRef: { name: 'Literal["b"]' } });
+      const changes = classifySymbolChanges(baseline, candidate, py, 'python');
+      expect(changes).toHaveLength(1);
+      expect(changes[0].category).toBe('field_type_changed');
+    });
   });
 });
 
