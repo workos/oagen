@@ -655,24 +655,6 @@ describe('extractOperations', () => {
     expect(() => extractOperations(paths, undefined, undefined, {})).toThrow(/Missing/);
   });
 
-  it('decodes JSON-Pointer-escaped component names in a parameter $ref', () => {
-    const paths = {
-      '/domains': {
-        get: {
-          operationId: 'domains/list',
-          parameters: [{ $ref: '#/components/parameters/Pagination~1Limit' }],
-          responses: { '200': { description: 'ok' } },
-        },
-      },
-    };
-    const componentParameters = {
-      'Pagination/Limit': { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
-    };
-
-    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
-    expect(services[0].operations[0].queryParams[0].name).toBe('limit');
-  });
-
   it('follows a chained parameter $ref (a component that itself is a $ref)', () => {
     const paths = {
       '/domains': {

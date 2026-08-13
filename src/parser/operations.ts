@@ -75,17 +75,11 @@ interface ParameterObject {
  */
 type RawParameterObject = ParameterObject | { $ref: string };
 
-/** Decode a JSON Pointer reference token (RFC 6901 section 4): `~1` -> `/`, then `~0` -> `~`, in that order. */
-function decodeJsonPointerToken(token: string): string {
-  return token.replace(/~1/g, '/').replace(/~0/g, '~');
-}
-
 /**
  * Resolve a raw parameter entry to a concrete Parameter Object, following
- * `$ref`s into `components/parameters` when present. Handles component
- * names that are JSON-Pointer-escaped (e.g. `a~1b` for a component literally
- * named `a/b`) and chains of refs (a component that itself is a `$ref` to
- * another component), with a cycle guard for a spec that refs itself.
+ * `$ref`s into `components/parameters` when present. Follows chains of refs
+ * (a component that itself is a `$ref` to another component), with a cycle
+ * guard for a spec that refs itself.
  *
  * Throws when a `$ref` can't be resolved so a malformed spec fails loudly at
  * parse time instead of silently losing the parameter (see `extractParams`,
@@ -106,9 +100,9 @@ function resolveParameterRef(
     }
     seenRefs.add(current.$ref);
 
-    const match = /^#\/components\/parameters\/(.+)$/.exec(current.$ref);
-    const key = match ? decodeJsonPointerToken(match[1]) : undefined;
-    const resolved = key !== undefined ? componentParameters?.[key] : undefined;
+    const segments = current.$ref.split('/');
+    const refName = segments[segments.length - 1];
+    const resolved = refName ? componentParameters?.[refName] : undefined;
     if (!resolved) {
       throw new Error(
         `Unresolved parameter $ref "${current.$ref}" in ${operationContext}: no matching entry under components/parameters.`,
