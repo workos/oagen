@@ -75,28 +75,49 @@ interface ParameterObject {
  */
 type RawParameterObject = ParameterObject | { $ref: string };
 
+/** Decode a JSON Pointer reference token (RFC 6901 section 4): `~1` -> `/`, then `~0` -> `~`, in that order. */
+function decodeJsonPointerToken(token: string): string {
+  return token.replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
 /**
- * Resolve a raw parameter entry to a concrete Parameter Object, following a
- * `$ref` into `components/parameters` when present. Throws when a `$ref`
- * can't be resolved so a malformed spec fails loudly at parse time instead
- * of silently losing the parameter (see `extractParams`, which used to drop
- * any entry with no `in` field — every `$ref` object has none).
+ * Resolve a raw parameter entry to a concrete Parameter Object, following
+ * `$ref`s into `components/parameters` when present. Handles component
+ * names that are JSON-Pointer-escaped (e.g. `a~1b` for a component literally
+ * named `a/b`) and chains of refs (a component that itself is a `$ref` to
+ * another component), with a cycle guard for a spec that refs itself.
+ *
+ * Throws when a `$ref` can't be resolved so a malformed spec fails loudly at
+ * parse time instead of silently losing the parameter (see `extractParams`,
+ * which used to drop any entry with no `in` field — every `$ref` object has
+ * none).
  */
 function resolveParameterRef(
   raw: RawParameterObject,
   componentParameters: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
 ): ParameterObject {
-  if (!('$ref' in raw)) return raw;
+  const seenRefs = new Set<string>();
+  let current: RawParameterObject = raw;
 
-  const match = /^#\/components\/parameters\/(.+)$/.exec(raw.$ref);
-  const resolved = match ? componentParameters?.[match[1]] : undefined;
-  if (!resolved) {
-    throw new Error(
-      `Unresolved parameter $ref "${raw.$ref}" in ${operationContext}: no matching entry under components/parameters.`,
-    );
+  while ('$ref' in current) {
+    if (seenRefs.has(current.$ref)) {
+      throw new Error(`Circular parameter $ref chain starting at "${current.$ref}" in ${operationContext}.`);
+    }
+    seenRefs.add(current.$ref);
+
+    const match = /^#\/components\/parameters\/(.+)$/.exec(current.$ref);
+    const key = match ? decodeJsonPointerToken(match[1]) : undefined;
+    const resolved = key !== undefined ? componentParameters?.[key] : undefined;
+    if (!resolved) {
+      throw new Error(
+        `Unresolved parameter $ref "${current.$ref}" in ${operationContext}: no matching entry under components/parameters.`,
+      );
+    }
+    current = resolved as unknown as RawParameterObject;
   }
-  return resolved as unknown as ParameterObject;
+
+  return current;
 }
 
 interface RequestBodyObject {
