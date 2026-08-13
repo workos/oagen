@@ -28,7 +28,7 @@ interface PathItem {
   head?: OperationObject;
   options?: OperationObject;
   trace?: OperationObject;
-  parameters?: ParameterObject[];
+  parameters?: RawParameterObject[];
 }
 
 interface ParameterGroupExtension {
@@ -43,7 +43,7 @@ interface OperationObject {
   summary?: string;
   description?: string;
   tags?: string[];
-  parameters?: ParameterObject[];
+  parameters?: RawParameterObject[];
   requestBody?: RequestBodyObject;
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
@@ -63,6 +63,40 @@ interface ParameterObject {
   example?: unknown;
   style?: string;
   explode?: boolean;
+}
+
+/**
+ * A parameter entry as it appears in an operation's (or path item's) raw
+ * `parameters` array: either an inline Parameter Object, or a Reference
+ * Object (`{ $ref: '#/components/parameters/X' }`). The bundler
+ * (`refs.ts`) runs with `dereference: false`, so refs to
+ * `components/parameters` are never inlined — they arrive here exactly as
+ * written in the spec and must be resolved before use.
+ */
+type RawParameterObject = ParameterObject | { $ref: string };
+
+/**
+ * Resolve a raw parameter entry to a concrete Parameter Object, following a
+ * `$ref` into `components/parameters` when present. Throws when a `$ref`
+ * can't be resolved so a malformed spec fails loudly at parse time instead
+ * of silently losing the parameter (see `extractParams`, which used to drop
+ * any entry with no `in` field — every `$ref` object has none).
+ */
+function resolveParameterRef(
+  raw: RawParameterObject,
+  componentParameters: Record<string, Record<string, unknown>> | undefined,
+  operationContext: string,
+): ParameterObject {
+  if (!('$ref' in raw)) return raw;
+
+  const match = /^#\/components\/parameters\/(.+)$/.exec(raw.$ref);
+  const resolved = match ? componentParameters?.[match[1]] : undefined;
+  if (!resolved) {
+    throw new Error(
+      `Unresolved parameter $ref "${raw.$ref}" in ${operationContext}: no matching entry under components/parameters.`,
+    );
+  }
+  return resolved as unknown as ParameterObject;
 }
 
 interface RequestBodyObject {
@@ -86,6 +120,7 @@ export function extractOperations(
   paths: Record<string, PathItem> | undefined,
   operationIdTransform?: (id: string) => string,
   componentSchemas?: Record<string, SchemaObject>,
+  componentParameters?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -109,6 +144,7 @@ export function extractOperations(
         operationIdTransform,
         serviceName,
         componentSchemas,
+        componentParameters,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
@@ -510,12 +546,16 @@ function buildOperation(
   method: HttpMethod,
   path: string,
   op: OperationObject,
-  pathLevelParams: ParameterObject[],
+  pathLevelParams: RawParameterObject[],
   operationIdTransform?: (id: string) => string,
   serviceName?: string,
   componentSchemas?: Record<string, SchemaObject>,
+  componentParameters?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[] } {
-  const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
+  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  const allParams = [...pathLevelParams, ...(op.parameters ?? [])].map((p) =>
+    resolveParameterRef(p, componentParameters, opLabel),
+  );
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 
@@ -563,7 +603,6 @@ function buildOperation(
 
   // Extract mutually-exclusive parameter groups (query/path/header/cookie)
   const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
-  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
   const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel);
 
   // Extract mutually-exclusive body parameter groups

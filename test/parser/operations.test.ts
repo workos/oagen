@@ -591,6 +591,70 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
   });
 
+  it('resolves an operation-level parameter $ref into components/parameters', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/PaginationLimit' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      PaginationLimit: {
+        in: 'query',
+        name: 'limit',
+        required: false,
+        schema: { type: 'integer', minimum: 1, maximum: 100 },
+        description: 'Number of items to return.',
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    const queryParams = services[0].operations[0].queryParams;
+    expect(queryParams).toHaveLength(1);
+    expect(queryParams[0].name).toBe('limit');
+    expect(queryParams[0].description).toBe('Number of items to return.');
+  });
+
+  it('resolves a path-level parameter $ref shared across an operation', () => {
+    const paths = {
+      '/logs': {
+        parameters: [
+          { $ref: '#/components/parameters/PaginationAfter' },
+          { $ref: '#/components/parameters/PaginationBefore' },
+        ],
+        get: {
+          operationId: 'logs/list',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      PaginationAfter: { in: 'query', name: 'after', required: false, schema: { type: 'string' } },
+      PaginationBefore: { in: 'query', name: 'before', required: false, schema: { type: 'string' } },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    const queryParamNames = services[0].operations[0].queryParams.map((p) => p.name);
+    expect(queryParamNames).toEqual(['after', 'before']);
+  });
+
+  it('throws when a parameter $ref cannot be resolved against components/parameters', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/Missing' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    expect(() => extractOperations(paths, undefined, undefined, {})).toThrow(/Missing/);
+  });
+
   it('extracts cookie parameters', () => {
     const paths = {
       '/users': {
