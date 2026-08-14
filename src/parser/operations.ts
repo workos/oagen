@@ -568,9 +568,16 @@ function buildOperation(
   componentParameters?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[] } {
   const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
-  const allParams = [...pathLevelParams, ...(op.parameters ?? [])].map((p) =>
-    resolveParameterRef(p, componentParameters, opLabel),
-  );
+  // An operation-level parameter overrides a path-level one with the same
+  // (name, in) identity rather than adding a second entry. Operation params come
+  // last, so last-write-wins; Map.set keeps the original insertion position, so
+  // path-level parameter ordering is preserved.
+  const paramsByIdentity = new Map<string, ParameterObject>();
+  for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
+    const param = resolveParameterRef(raw, componentParameters, opLabel);
+    paramsByIdentity.set(`${param.in}:${param.name}`, param);
+  }
+  const allParams = [...paramsByIdentity.values()];
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 

@@ -641,6 +641,40 @@ describe('extractOperations', () => {
     expect(queryParamNames).toEqual(['after', 'before']);
   });
 
+  it('lets an operation-level parameter override a path-level one with the same name and location', () => {
+    const paths = {
+      '/logs': {
+        parameters: [
+          { $ref: '#/components/parameters/PaginationLimit' },
+          { in: 'query' as const, name: 'order', required: false, schema: { type: 'string' } },
+        ],
+        get: {
+          operationId: 'logs/list',
+          parameters: [
+            {
+              in: 'query' as const,
+              name: 'limit',
+              required: true,
+              schema: { type: 'integer' },
+              description: 'Overridden.',
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      PaginationLimit: { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    const queryParams = services[0].operations[0].queryParams;
+    // One `limit`, not two, and the operation-level definition wins.
+    expect(queryParams.map((p) => p.name)).toEqual(['limit', 'order']);
+    expect(queryParams[0].required).toBe(true);
+    expect(queryParams[0].description).toBe('Overridden.');
+  });
+
   it('throws when a parameter $ref cannot be resolved against components/parameters', () => {
     const paths = {
       '/domains': {
