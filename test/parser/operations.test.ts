@@ -707,6 +707,25 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].name).toBe('limit');
   });
 
+  it('rejects a parameter $ref that points outside components/parameters', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/schemas/Limit' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      Limit: { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
+    };
+
+    expect(() => extractOperations(paths, undefined, undefined, componentParameters)).toThrow(
+      /Unresolved parameter \$ref/,
+    );
+  });
+
   it('follows a chained parameter $ref (a component that itself is a $ref)', () => {
     const paths = {
       '/domains': {

@@ -100,9 +100,11 @@ function resolveParameterRef(
     }
     seenRefs.add(current.$ref);
 
-    const segments = current.$ref.split('/');
+    // Match the whole pointer, not just its last token: a ref into any other
+    // section must not resolve off a same-named parameter component.
+    const match = /^#\/components\/parameters\/(.+)$/.exec(current.$ref);
     // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-    const refName = segments[segments.length - 1]?.replace(/~1/g, '/').replace(/~0/g, '~');
+    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
     const resolved = refName ? componentParameters?.[refName] : undefined;
     if (!resolved) {
       throw new Error(
