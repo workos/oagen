@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.3](https://github.com/workos/oagen/compare/v0.29.2...v0.29.3) (2026-08-17)
+
+
+### Bug Fixes
+
+* resolve $ref parameters in operation parameters arrays ([#154](https://github.com/workos/oagen/issues/154)) ([020bc76](https://github.com/workos/oagen/commit/020bc76bf4234ff2e65a1e4efe8f00387ebffc02))
+
 ## [0.29.2](https://github.com/workos/oagen/compare/v0.29.1...v0.29.2) (2026-08-06)
 
 
