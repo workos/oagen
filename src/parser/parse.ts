@@ -60,6 +60,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     paths?: Record<string, unknown>;
     components?: {
       schemas?: Record<string, unknown>;
+      parameters?: Record<string, unknown>;
       securitySchemes?: Record<
         string,
         { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
@@ -85,6 +86,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);

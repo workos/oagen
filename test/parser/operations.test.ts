@@ -591,6 +591,178 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
   });
 
+  it('resolves an operation-level parameter $ref into components/parameters', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/PaginationLimit' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      PaginationLimit: {
+        in: 'query',
+        name: 'limit',
+        required: false,
+        schema: { type: 'integer', minimum: 1, maximum: 100 },
+        description: 'Number of items to return.',
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    const queryParams = services[0].operations[0].queryParams;
+    expect(queryParams).toHaveLength(1);
+    expect(queryParams[0].name).toBe('limit');
+    expect(queryParams[0].description).toBe('Number of items to return.');
+  });
+
+  it('resolves a path-level parameter $ref shared across an operation', () => {
+    const paths = {
+      '/logs': {
+        parameters: [
+          { $ref: '#/components/parameters/PaginationAfter' },
+          { $ref: '#/components/parameters/PaginationBefore' },
+        ],
+        get: {
+          operationId: 'logs/list',
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      PaginationAfter: { in: 'query', name: 'after', required: false, schema: { type: 'string' } },
+      PaginationBefore: { in: 'query', name: 'before', required: false, schema: { type: 'string' } },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    const queryParamNames = services[0].operations[0].queryParams.map((p) => p.name);
+    expect(queryParamNames).toEqual(['after', 'before']);
+  });
+
+  it('lets an operation-level parameter override a path-level one with the same name and location', () => {
+    const paths = {
+      '/logs': {
+        parameters: [
+          { $ref: '#/components/parameters/PaginationLimit' },
+          { in: 'query' as const, name: 'order', required: false, schema: { type: 'string' } },
+        ],
+        get: {
+          operationId: 'logs/list',
+          parameters: [
+            {
+              in: 'query' as const,
+              name: 'limit',
+              required: true,
+              schema: { type: 'integer' },
+              description: 'Overridden.',
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      PaginationLimit: { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    const queryParams = services[0].operations[0].queryParams;
+    // One `limit`, not two, and the operation-level definition wins.
+    expect(queryParams.map((p) => p.name)).toEqual(['limit', 'order']);
+    expect(queryParams[0].required).toBe(true);
+    expect(queryParams[0].description).toBe('Overridden.');
+  });
+
+  it('throws when a parameter $ref cannot be resolved against components/parameters', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/Missing' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    expect(() => extractOperations(paths, undefined, undefined, {})).toThrow(/Missing/);
+  });
+
+  it('decodes JSON-Pointer-escaped component names in a parameter $ref', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/Pagination~1Limit' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      'Pagination/Limit': { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    expect(services[0].operations[0].queryParams[0].name).toBe('limit');
+  });
+
+  it('rejects a parameter $ref that points outside components/parameters', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/schemas/Limit' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      Limit: { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
+    };
+
+    expect(() => extractOperations(paths, undefined, undefined, componentParameters)).toThrow(
+      /Unresolved parameter \$ref/,
+    );
+  });
+
+  it('follows a chained parameter $ref (a component that itself is a $ref)', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/LimitAlias' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      LimitAlias: { $ref: '#/components/parameters/PaginationLimit' },
+      PaginationLimit: { in: 'query', name: 'limit', required: false, schema: { type: 'integer' } },
+    };
+
+    const { services } = extractOperations(paths, undefined, undefined, componentParameters);
+    expect(services[0].operations[0].queryParams[0].name).toBe('limit');
+  });
+
+  it('throws on a circular parameter $ref chain', () => {
+    const paths = {
+      '/domains': {
+        get: {
+          operationId: 'domains/list',
+          parameters: [{ $ref: '#/components/parameters/A' }],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentParameters = {
+      A: { $ref: '#/components/parameters/B' },
+      B: { $ref: '#/components/parameters/A' },
+    };
+
+    expect(() => extractOperations(paths, undefined, undefined, componentParameters)).toThrow(/Circular/);
+  });
+
   it('extracts cookie parameters', () => {
     const paths = {
       '/users': {

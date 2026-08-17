@@ -28,7 +28,7 @@ interface PathItem {
   head?: OperationObject;
   options?: OperationObject;
   trace?: OperationObject;
-  parameters?: ParameterObject[];
+  parameters?: RawParameterObject[];
 }
 
 interface ParameterGroupExtension {
@@ -43,7 +43,7 @@ interface OperationObject {
   summary?: string;
   description?: string;
   tags?: string[];
-  parameters?: ParameterObject[];
+  parameters?: RawParameterObject[];
   requestBody?: RequestBodyObject;
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
@@ -63,6 +63,58 @@ interface ParameterObject {
   example?: unknown;
   style?: string;
   explode?: boolean;
+}
+
+/**
+ * A parameter entry as it appears in an operation's (or path item's) raw
+ * `parameters` array: either an inline Parameter Object, or a Reference
+ * Object (`{ $ref: '#/components/parameters/X' }`). The bundler
+ * (`refs.ts`) runs with `dereference: false`, so refs to
+ * `components/parameters` are never inlined — they arrive here exactly as
+ * written in the spec and must be resolved before use.
+ */
+type RawParameterObject = ParameterObject | { $ref: string };
+
+/**
+ * Resolve a raw parameter entry to a concrete Parameter Object, following
+ * `$ref`s into `components/parameters` when present. Follows chains of refs
+ * (a component that itself is a `$ref` to another component), with a cycle
+ * guard for a spec that refs itself.
+ *
+ * Throws when a `$ref` can't be resolved so a malformed spec fails loudly at
+ * parse time instead of silently losing the parameter (see `extractParams`,
+ * which used to drop any entry with no `in` field — every `$ref` object has
+ * none).
+ */
+function resolveParameterRef(
+  raw: RawParameterObject,
+  componentParameters: Record<string, Record<string, unknown>> | undefined,
+  operationContext: string,
+): ParameterObject {
+  const seenRefs = new Set<string>();
+  let current: RawParameterObject = raw;
+
+  while ('$ref' in current) {
+    if (seenRefs.has(current.$ref)) {
+      throw new Error(`Circular parameter $ref chain starting at "${current.$ref}" in ${operationContext}.`);
+    }
+    seenRefs.add(current.$ref);
+
+    // Match the whole pointer, not just its last token: a ref into any other
+    // section must not resolve off a same-named parameter component.
+    const match = /^#\/components\/parameters\/(.+)$/.exec(current.$ref);
+    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
+    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    const resolved = refName ? componentParameters?.[refName] : undefined;
+    if (!resolved) {
+      throw new Error(
+        `Unresolved parameter $ref "${current.$ref}" in ${operationContext}: no matching entry under components/parameters.`,
+      );
+    }
+    current = resolved as unknown as RawParameterObject;
+  }
+
+  return current;
 }
 
 interface RequestBodyObject {
@@ -86,6 +138,7 @@ export function extractOperations(
   paths: Record<string, PathItem> | undefined,
   operationIdTransform?: (id: string) => string,
   componentSchemas?: Record<string, SchemaObject>,
+  componentParameters?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -109,6 +162,7 @@ export function extractOperations(
         operationIdTransform,
         serviceName,
         componentSchemas,
+        componentParameters,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
@@ -510,12 +564,23 @@ function buildOperation(
   method: HttpMethod,
   path: string,
   op: OperationObject,
-  pathLevelParams: ParameterObject[],
+  pathLevelParams: RawParameterObject[],
   operationIdTransform?: (id: string) => string,
   serviceName?: string,
   componentSchemas?: Record<string, SchemaObject>,
+  componentParameters?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[] } {
-  const allParams = [...pathLevelParams, ...(op.parameters ?? [])];
+  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  // An operation-level parameter overrides a path-level one with the same
+  // (name, in) identity rather than adding a second entry. Operation params come
+  // last, so last-write-wins; Map.set keeps the original insertion position, so
+  // path-level parameter ordering is preserved.
+  const paramsByIdentity = new Map<string, ParameterObject>();
+  for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
+    const param = resolveParameterRef(raw, componentParameters, opLabel);
+    paramsByIdentity.set(`${param.in}:${param.name}`, param);
+  }
+  const allParams = [...paramsByIdentity.values()];
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 
@@ -563,7 +628,6 @@ function buildOperation(
 
   // Extract mutually-exclusive parameter groups (query/path/header/cookie)
   const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
-  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
   const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel);
 
   // Extract mutually-exclusive body parameter groups
