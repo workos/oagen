@@ -219,6 +219,52 @@ describe('assignParameterGroupWrapperNames', () => {
     ]);
   });
 
+  it('separates by structure when service and method are both identical', () => {
+    // normalizeOperationIdForNaming strips the `[N]` suffix, so one NestJS
+    // controller method bound to several routes derives one name for all of
+    // them — same service, same method, different paths. No operation
+    // attribute is left to escalate with.
+    const s = spec([
+      service('resources', [
+        opAt('update', 'patch', '/resources/{id}', [group('parent', [param('id')])]),
+        opAt('update', 'patch', '/resources', [group('parent', [param('id'), param('external_id')])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual([
+      'patch_resources_update_parent',
+      'patch_resources_update_parent_2',
+    ]);
+  });
+
+  it('never leaves one wrapper name covering two different structures', () => {
+    // The invariant every emitter relies on, asserted directly rather than via
+    // any particular naming scheme.
+    const s = spec([
+      service('resources', [
+        opAt('update', 'patch', '/a', [group('parent', [param('id')])]),
+        opAt('update', 'patch', '/b', [group('parent', [param('id'), param('external_id')])]),
+        opAt('update', 'patch', '/c', [group('parent', [param('id'), param('slug')])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    const byName = new Map<string, string[]>();
+    for (const g of groupsOf(s)) {
+      const members = g.variants.flatMap((v) => v.parameters.map((p) => p.name)).join(',');
+      const seen = byName.get(g.wrapperName!) ?? [];
+      if (!seen.includes(members)) seen.push(members);
+      byName.set(g.wrapperName!, seen);
+    }
+    for (const [name, structures] of byName) {
+      expect(structures, `wrapper ${name} covers >1 structure`).toHaveLength(1);
+    }
+    expect(new Set(groupsOf(s).map((g) => g.wrapperName)).size).toBe(3);
+  });
+
   it('does not method-qualify same-path operations whose groups agree', () => {
     const s = spec([
       service('resources', [

@@ -107,6 +107,67 @@ function qualifyResidualCollisions(occurrences: Occurrence[]): void {
       }
     }
   }
+
+  separateRemainingByStructure(occurrences);
+}
+
+/**
+ * Terminal round: separate whatever the operation attributes could not.
+ *
+ * No combination of operation attributes is unique by construction. Two
+ * operations in one service can share a name, a method *and* differ only by
+ * path — `normalizeOperationIdForNaming` strips the `[N]` suffix, so a NestJS
+ * controller method bound to several routes derives one name for all of them.
+ * The WorkOS spec already contains such a pair (`Authorization`'s
+ * `listRoleAssignments` on two paths); it declares no parameter groups today,
+ * so nothing is wrong in the SDKs, but the shape is present rather than
+ * hypothetical. Adding `path` as a fourth qualifier would only move the
+ * boundary again.
+ *
+ * So stop enumerating attributes and separate by the thing that actually
+ * matters: a name still fusing distinct structures gets one wrapper per
+ * distinct fingerprint. That makes "same `wrapperName` implies same structure"
+ * hold unconditionally, which is the invariant every emitter relies on.
+ *
+ * Suffixes are keyed on the fingerprint, not on a per-occurrence counter, so
+ * declarations that agree keep sharing a wrapper.
+ *
+ * Ordering is by first appearance, not by sorted fingerprint: the structure
+ * declared first keeps the unsuffixed name. Sorting by fingerprint would be
+ * equally deterministic but less stable in the way that matters — adding a
+ * member to one operation changes its fingerprint and could swap which of two
+ * published wrappers holds the bare name. Under first-appearance order only
+ * reordering the operations themselves can shift a name, which is both rarer
+ * and visible in the spec diff.
+ *
+ * Either way this is a no-op wherever an earlier round already sufficed —
+ * including the WorkOS spec, which never reaches this round at all.
+ */
+function separateRemainingByStructure(occurrences: Occurrence[]): void {
+  const taken = new Set(occurrences.map((o) => o.group.wrapperName ?? o.group.name));
+
+  for (const sharers of collidingCandidates(occurrences)) {
+    const base = sharers[0].group.wrapperName ?? sharers[0].group.name;
+
+    // First fingerprint seen keeps `base`; each new one takes the next free
+    // `base_N`, skipping any name already spoken for elsewhere in the spec.
+    const nameFor = new Map<string, string>();
+    let n = 2;
+    for (const o of sharers) {
+      if (nameFor.has(o.fingerprint)) continue;
+      if (nameFor.size === 0) {
+        nameFor.set(o.fingerprint, base);
+        continue;
+      }
+      while (taken.has(`${base}_${n}`)) n++;
+      const name = `${base}_${n}`;
+      taken.add(name);
+      nameFor.set(o.fingerprint, name);
+      n++;
+    }
+
+    for (const o of sharers) o.group.wrapperName = nameFor.get(o.fingerprint)!;
+  }
 }
 
 /**
