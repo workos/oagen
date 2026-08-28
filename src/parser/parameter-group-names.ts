@@ -6,6 +6,7 @@ import type {
   Parameter,
   ParameterGroup,
   ParameterGroupVariant,
+  Service,
   TypeRef,
 } from '../ir/types.js';
 
@@ -31,7 +32,7 @@ export function assignParameterGroupWrapperNames(spec: ApiSpec): void {
 
   // group name -> the distinct structural fingerprints seen for it
   const fingerprints = new Map<string, Set<string>>();
-  const occurrences: { op: Operation; group: ParameterGroup }[] = [];
+  const occurrences: Occurrence[] = [];
 
   for (const service of spec.services) {
     for (const op of service.operations) {
@@ -43,7 +44,7 @@ export function assignParameterGroupWrapperNames(spec: ApiSpec): void {
           fingerprints.set(group.name, seen);
         }
         seen.add(fp);
-        occurrences.push({ op, group });
+        occurrences.push({ service, op, group, fingerprint: fp });
       }
     }
   }
@@ -53,7 +54,50 @@ export function assignParameterGroupWrapperNames(spec: ApiSpec): void {
     group.wrapperName = diverges ? `${op.name}_${group.name}` : group.name;
   }
 
+  qualifyResidualCollisions(occurrences);
   reconcileSharedGroups(occurrences.map((o) => o.group));
+}
+
+interface Occurrence {
+  service: Service;
+  op: Operation;
+  group: ParameterGroup;
+  fingerprint: string;
+}
+
+/**
+ * Break the collisions the operation-qualified name can still leave behind.
+ *
+ * `disambiguateOperationNames` makes operation names unique only *within* a
+ * service, so `${op.name}_${group.name}` is not a unique key: two services that
+ * each own an operation named `create`, both declaring a `password` group with
+ * different members, both land on `create_password`. That is the same failure
+ * this pass exists to prevent, one level up — `reconcileSharedGroups` would then
+ * force the two incompatible declarations into a single type.
+ *
+ * Escalate only those names to a service-qualified form. A name whose sharers
+ * all fingerprint identically is left alone: sharing one wrapper is exactly
+ * what should happen there, and renaming it would move a type the SDKs already
+ * publish. On a spec where no qualified name collides — the WorkOS spec today —
+ * this pass is a no-op.
+ */
+function qualifyResidualCollisions(occurrences: Occurrence[]): void {
+  const byCandidate = new Map<string, Occurrence[]>();
+  for (const o of occurrences) {
+    const key = o.group.wrapperName ?? o.group.name;
+    const list = byCandidate.get(key);
+    if (list) list.push(o);
+    else byCandidate.set(key, [o]);
+  }
+
+  for (const sharers of byCandidate.values()) {
+    if (sharers.length < 2) continue;
+    // Sharers that agree structurally are meant to share one wrapper.
+    if (new Set(sharers.map((o) => o.fingerprint)).size < 2) continue;
+    for (const o of sharers) {
+      o.group.wrapperName = `${o.service.name}_${o.group.wrapperName ?? o.group.name}`;
+    }
+  }
 }
 
 /**
@@ -196,8 +240,11 @@ function fingerprintType(
       const e = enumMap.get(ref.name);
       if (!e) return `e:${ref.name}`;
       // Values, not the synthesized name — two inline copies of one enum are
-      // the same type for wrapper-sharing purposes.
-      return `e<${e.values.map((v) => String(v.value)).join(',')}>`;
+      // the same type for wrapper-sharing purposes. The value's primitive type
+      // is part of the fingerprint (as it is for `literal`): the IR keeps
+      // numeric `5` and string `"5"` distinct, and so do the emitters, so two
+      // enums that stringify alike are still different types.
+      return `e<${e.values.map((v) => `${typeof v.value}:${String(v.value)}`).join(',')}>`;
     }
     case 'model': {
       const m = modelMap.get(ref.name);
