@@ -10,6 +10,7 @@ import {
   mergeFieldInlineModels,
 } from './normalize-inline-models.js';
 import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
+import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 
 /**
@@ -123,6 +124,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     auth,
     sdk: defaultSdkBehavior(),
   };
+
+  // Needs the finished models and enums: divergence is decided on member
+  // shape, so this can only run once every referenced type is resolvable.
+  assignParameterGroupWrapperNames(result);
 
   validateModelRefs(result);
 
