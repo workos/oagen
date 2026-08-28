@@ -239,6 +239,19 @@ describe('assignParameterGroupWrapperNames', () => {
     ]);
   });
 
+  it('ignores union branch order when comparing members', () => {
+    const s = spec([
+      service('users', [
+        op('create', [group('password', [param('hash', { kind: 'union', variants: [str, int] })])]),
+        op('update', [group('password', [param('hash', { kind: 'union', variants: [int, str] })])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual(['password', 'password']);
+  });
+
   it('does not rename a group dragged in by another group escalating onto its name', () => {
     // `update` + `parent` qualifies to `update_parent`, which is also the
     // literal name of an unrelated, internally-consistent group. That group is

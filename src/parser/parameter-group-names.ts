@@ -337,7 +337,14 @@ function fingerprintType(
     case 'map':
       return `m<${fingerprintType(ref.valueType, modelMap, enumMap, visiting)}>`;
     case 'union':
-      return `u<${ref.variants.map((v) => fingerprintType(v, modelMap, enumMap, visiting)).join(',')}>`;
+      // Sorted, like enum values and model fields: a union accepts the same set
+      // of types whichever order the branches are written in, so two operations
+      // listing equivalent branches differently describe the same type and must
+      // keep sharing a wrapper rather than renaming a published one apart.
+      return `u<${ref.variants
+        .map((v) => fingerprintType(v, modelMap, enumMap, visiting))
+        .sort()
+        .join(',')}>`;
     case 'enum': {
       const e = enumMap.get(ref.name);
       if (!e) return `e:${ref.name}`;
