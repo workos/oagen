@@ -68,20 +68,52 @@ interface Occurrence {
 /**
  * Break the collisions the operation-qualified name can still leave behind.
  *
- * `disambiguateOperationNames` makes operation names unique only *within* a
- * service, so `${op.name}_${group.name}` is not a unique key: two services that
- * each own an operation named `create`, both declaring a `password` group with
- * different members, both land on `create_password`. That is the same failure
- * this pass exists to prevent, one level up — `reconcileSharedGroups` would then
- * force the two incompatible declarations into a single type.
+ * `${op.name}_${group.name}` is not a unique key, for two separate reasons:
  *
- * Escalate only those names to a service-qualified form. A name whose sharers
- * all fingerprint identically is left alone: sharing one wrapper is exactly
- * what should happen there, and renaming it would move a type the SDKs already
+ *  - `disambiguateOperationNames` makes operation names unique only *within* a
+ *    service, so two services that each own an operation named `create`, both
+ *    declaring a `password` group with different members, both land on
+ *    `create_password`.
+ *  - Within one service it deliberately leaves same-name operations alone when
+ *    they share a path (see the `uniquePaths.size <= 1` guard — "same path,
+ *    different methods"), so `PUT` and `PATCH` on one path both stay `update`
+ *    and a service prefix alone still produces one name for both.
+ *
+ * Either way `reconcileSharedGroups` would then fuse two incompatible
+ * declarations into a single type — the exact failure this pass exists to
+ * prevent — and it does not drop the surplus member, so the wrapper would
+ * expose a field one of the operations rejects.
+ *
+ * So escalate in rounds, adding a qualifier at a time and re-testing what still
+ * collides. `(service, path, method)` identifies an operation uniquely, and a
+ * same-name collision within a service implies a shared path, so service then
+ * method is sufficient to separate every case.
+ *
+ * Each round only touches names that *still* group differing fingerprints, so a
+ * name whose sharers agree is never renamed: sharing one wrapper is exactly what
+ * should happen there, and renaming it would move a type the SDKs already
  * publish. On a spec where no qualified name collides — the WorkOS spec today —
- * this pass is a no-op.
+ * the whole pass is a no-op.
  */
 function qualifyResidualCollisions(occurrences: Occurrence[]): void {
+  // Prepended in order, matching how the operation and group names already
+  // compose, so a fully-escalated name reads `<method>_<service>_<op>_<group>`.
+  const qualifiers: ((o: Occurrence) => string)[] = [(o) => o.service.name, (o) => o.op.httpMethod];
+
+  for (const qualify of qualifiers) {
+    for (const sharers of collidingCandidates(occurrences)) {
+      for (const o of sharers) {
+        o.group.wrapperName = `${qualify(o)}_${o.group.wrapperName ?? o.group.name}`;
+      }
+    }
+  }
+}
+
+/**
+ * Candidate wrapper names shared by declarations that do not agree — the only
+ * ones an escalation round may rename.
+ */
+function collidingCandidates(occurrences: Occurrence[]): Occurrence[][] {
   const byCandidate = new Map<string, Occurrence[]>();
   for (const o of occurrences) {
     const key = o.group.wrapperName ?? o.group.name;
@@ -89,15 +121,9 @@ function qualifyResidualCollisions(occurrences: Occurrence[]): void {
     if (list) list.push(o);
     else byCandidate.set(key, [o]);
   }
-
-  for (const sharers of byCandidate.values()) {
-    if (sharers.length < 2) continue;
-    // Sharers that agree structurally are meant to share one wrapper.
-    if (new Set(sharers.map((o) => o.fingerprint)).size < 2) continue;
-    for (const o of sharers) {
-      o.group.wrapperName = `${o.service.name}_${o.group.wrapperName ?? o.group.name}`;
-    }
-  }
+  return [...byCandidate.values()].filter(
+    (sharers) => sharers.length > 1 && new Set(sharers.map((o) => o.fingerprint)).size > 1,
+  );
 }
 
 /**

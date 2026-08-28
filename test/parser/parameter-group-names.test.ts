@@ -42,6 +42,15 @@ function op(name: string, parameterGroups: ParameterGroup[]): Operation {
   };
 }
 
+/**
+ * An operation pinned to an explicit method and path — for the case where
+ * `disambiguateOperationNames` leaves two same-name operations alone because
+ * they share a path (PUT + PATCH), so `op.name` alone cannot separate them.
+ */
+function opAt(name: string, httpMethod: string, path: string, parameterGroups: ParameterGroup[]): Operation {
+  return { ...op(name, parameterGroups), httpMethod: httpMethod as Operation['httpMethod'], path };
+}
+
 function service(name: string, operations: Operation[]): Service {
   return { name, operations };
 }
@@ -189,6 +198,38 @@ describe('assignParameterGroupWrapperNames', () => {
     assignParameterGroupWrapperNames(s);
 
     expect(groupsOf(s).map((g) => g.wrapperName)).toEqual(['users_create_password', 'admins_create_password']);
+  });
+
+  it('method-qualifies two same-path operations a service prefix cannot separate', () => {
+    // disambiguateOperationNames deliberately leaves same-name operations alone
+    // when they share a path ("same path, different methods"), so PUT and PATCH
+    // both stay `update` and the service prefix yields one name for both.
+    const s = spec([
+      service('resources', [
+        opAt('update', 'put', '/resources/{id}', [group('parent', [param('id')])]),
+        opAt('update', 'patch', '/resources/{id}', [group('parent', [param('id'), param('external_id')])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual([
+      'put_resources_update_parent',
+      'patch_resources_update_parent',
+    ]);
+  });
+
+  it('does not method-qualify same-path operations whose groups agree', () => {
+    const s = spec([
+      service('resources', [
+        opAt('update', 'put', '/resources/{id}', [group('parent', [param('id')])]),
+        opAt('update', 'patch', '/resources/{id}', [group('parent', [param('id')])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual(['parent', 'parent']);
   });
 
   it('leaves a shared name alone when two services agree, even sharing an operation name', () => {
