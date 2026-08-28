@@ -244,7 +244,15 @@ function fingerprintType(
       // is part of the fingerprint (as it is for `literal`): the IR keeps
       // numeric `5` and string `"5"` distinct, and so do the emitters, so two
       // enums that stringify alike are still different types.
-      return `e<${e.values.map((v) => `${typeof v.value}:${String(v.value)}`).join(',')}>`;
+      //
+      // Sorted, like model fields and group members above: declaration order of
+      // enum values does not change which values the member accepts, so two
+      // inline enums listing one set in different orders must keep sharing a
+      // wrapper rather than renaming an already-published type apart.
+      return `e<${e.values
+        .map((v) => `${typeof v.value}:${String(v.value)}`)
+        .sort()
+        .join(',')}>`;
     }
     case 'model': {
       const m = modelMap.get(ref.name);

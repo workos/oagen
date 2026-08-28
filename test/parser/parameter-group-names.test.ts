@@ -146,6 +146,38 @@ describe('assignParameterGroupWrapperNames', () => {
     expect(groupsOf(s).map((g) => g.wrapperName)).toEqual(['create_retry', 'update_retry']);
   });
 
+  it('ignores enum value declaration order when comparing enums', () => {
+    const enums: Enum[] = [
+      {
+        name: 'CreateHashType',
+        values: [
+          { name: 'bcrypt', value: 'bcrypt' },
+          { name: 'ssha', value: 'ssha' },
+        ],
+      },
+      {
+        name: 'UpdateHashType',
+        values: [
+          { name: 'ssha', value: 'ssha' },
+          { name: 'bcrypt', value: 'bcrypt' },
+        ],
+      },
+    ];
+    const s = spec(
+      [
+        service('users', [
+          op('create', [group('password', [param('hash', { kind: 'enum', name: 'CreateHashType' })])]),
+          op('update', [group('password', [param('hash', { kind: 'enum', name: 'UpdateHashType' })])]),
+        ]),
+      ],
+      { enums },
+    );
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual(['password', 'password']);
+  });
+
   it('service-qualifies when two services share an operation name and the groups diverge', () => {
     // Operation names are unique only within a service, so `create_password`
     // alone is not a unique wrapper key.
