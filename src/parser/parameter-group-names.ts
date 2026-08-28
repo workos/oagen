@@ -102,7 +102,22 @@ function qualifyResidualCollisions(occurrences: Occurrence[]): void {
 
   for (const qualify of qualifiers) {
     for (const sharers of collidingCandidates(occurrences)) {
-      for (const o of sharers) {
+      // A declaration still holding its group's own bare name owns that name.
+      // A qualified name can land on some *other* group's literal name — an
+      // `update` operation's `parent` group qualifies to `update_parent`, which
+      // may already be a group called `update_parent` — and that group is
+      // internally consistent, never diverged, and already published under it.
+      // Move only the declarations that have already been escalated; anything
+      // left fused falls through to the terminal round.
+      //
+      // This cannot strand a collision. Two groups sharing a literal name with
+      // differing structures always diverge on that name and are both qualified
+      // in the first assignment, so at most one member of a colliding set can
+      // still be bare. When one is, moving the rest separates them; in the
+      // degenerate case where none are movable, nothing moves here and the
+      // terminal round separates by structure regardless.
+      const movable = sharers.filter((o) => o.group.wrapperName !== o.group.name);
+      for (const o of movable) {
         o.group.wrapperName = `${qualify(o)}_${o.group.wrapperName ?? o.group.name}`;
       }
     }

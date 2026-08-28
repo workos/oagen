@@ -239,6 +239,45 @@ describe('assignParameterGroupWrapperNames', () => {
     ]);
   });
 
+  it('does not rename a group dragged in by another group escalating onto its name', () => {
+    // `update` + `parent` qualifies to `update_parent`, which is also the
+    // literal name of an unrelated, internally-consistent group. That group is
+    // already published under the bare name and must not move to settle
+    // someone else's collision.
+    const s = spec([
+      service('resources', [
+        opAt('update', 'patch', '/resources/{id}', [group('parent', [param('id')])]),
+        opAt('create', 'post', '/resources', [group('parent', [param('id'), param('external_id')])]),
+        opAt('list', 'get', '/resources', [group('update_parent', [param('cursor')])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual([
+      'resources_update_parent',
+      'create_parent',
+      'update_parent',
+    ]);
+  });
+
+  it('skips a structural suffix already used as another group name', () => {
+    // The terminal round wants `<base>_2`, but a real group is already called
+    // that, so it has to take `_3`.
+    const base = 'patch_resources_update_parent';
+    const s = spec([
+      service('resources', [
+        opAt('update', 'patch', '/resources/{id}', [group('parent', [param('id')])]),
+        opAt('update', 'patch', '/resources', [group('parent', [param('id'), param('external_id')])]),
+        opAt('list', 'get', '/other', [group(`${base}_2`, [param('cursor')])]),
+      ]),
+    ]);
+
+    assignParameterGroupWrapperNames(s);
+
+    expect(groupsOf(s).map((g) => g.wrapperName)).toEqual([base, `${base}_3`, `${base}_2`]);
+  });
+
   it('never leaves one wrapper name covering two different structures', () => {
     // The invariant every emitter relies on, asserted directly rather than via
     // any particular naming scheme.
