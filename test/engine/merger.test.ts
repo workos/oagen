@@ -2068,6 +2068,55 @@ open class WorkOS`,
     expect(result.content).toContain('Superseded [Agents]');
   });
 
+  it('drops the import when only a string literal names the pruned class', async () => {
+    // Same reasoning as the KDoc case, for the other flavour of non-code text —
+    // including a raw `"""…"""` string, which the grammar also reports as
+    // `string_literal`.
+    const existing = client(
+      [
+        { prop: 'adminPortal', cls: 'AdminPortal' },
+        { prop: 'agents', cls: 'Agents' },
+      ],
+      ['import com.workos.agents.Agents'],
+    ).replace(
+      '  }\n',
+      `    val note: String = "Agents was removed"
+    val longNote: String = """Agents was removed"""
+  }
+`,
+    );
+    const generated = generatedClient(
+      [{ prop: 'adminPortal', cls: 'AdminPortal' }],
+      ['import com.workos.adminportal.AdminPortal'],
+    );
+
+    const result = await mergeIntoExisting(existing, generated, 'kotlin', header);
+
+    expect(result.content).not.toContain('import com.workos.agents.Agents');
+    expect(result.content).toContain('"Agents was removed"');
+  });
+
+  it('keeps the import when a string interpolation still uses the pruned class', async () => {
+    // `${Agents.NAME}` is code that happens to live inside a string literal —
+    // masking the whole literal would drop an import the file really uses.
+    const existing = client(
+      [
+        { prop: 'adminPortal', cls: 'AdminPortal' },
+        { prop: 'agents', cls: 'Agents' },
+      ],
+      ['import com.workos.agents.Agents'],
+    ).replace('  }\n', '    val label: String = "service=${Agents.NAME}"\n  }\n');
+    const generated = generatedClient(
+      [{ prop: 'adminPortal', cls: 'AdminPortal' }],
+      ['import com.workos.adminportal.AdminPortal'],
+    );
+
+    const result = await mergeIntoExisting(existing, generated, 'kotlin', header);
+
+    expect(result.content).not.toContain('val agents: Agents');
+    expect(result.content).toContain('import com.workos.agents.Agents');
+  });
+
   it('prunes cleanly through CRLF line endings', async () => {
     // `agents` sits mid-block: a prune that only recognizes `\n` as the line
     // terminator leaves the member's `\r\n` behind and doubles the blank line.

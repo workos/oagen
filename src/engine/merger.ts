@@ -11,7 +11,7 @@
 
 import Parser from 'tree-sitter';
 import { getMergeAdapter } from './merge-adapters/index.js';
-import type { MergeImport, ParsedMergeFile, SymbolDocstrings } from './merge-adapters/types.js';
+import type { MergeImport, ParsedMergeFile, SymbolDocstrings, UrlFingerprintConfig } from './merge-adapters/types.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
@@ -176,19 +176,54 @@ function referencesIdentifier(source: string, name: string): boolean {
 }
 
 /**
- * Blank out comments and string literals, preserving offsets and line structure.
+ * Blank out comments and string text, preserving offsets and line structure.
  *
  * An identifier lookup over raw source can't tell a live reference from a name
  * that merely survives in prose. That distinction decides whether an import
  * stays: keeping one whose only remaining mention is a KDoc leaves an import of
  * a class the generator no longer emits, which doesn't compile — the very
  * failure the prune exists to prevent.
+ *
+ * Interpolated expressions are the exception: `"${Agents.NAME}"` is code that
+ * sits inside a string literal, and masking it would drop an import the file
+ * genuinely uses. String extents are masked around those holes, not over them.
+ *
+ * Grammar node names come from the adapter's `urlFingerprintConfig`, which
+ * already inventories exactly these three categories per language. Comments are
+ * matched structurally instead — every grammar we support names them `*comment`.
  */
-function maskNonCode(tree: Parser.Tree, source: string, stringNodeTypes: Set<string>): string {
+function maskNonCode(tree: Parser.Tree, source: string, config: UrlFingerprintConfig | undefined): string {
+  const stringNodeTypes = new Set(config?.stringNodeTypes ?? []);
+  const interpolationNodeTypes = new Set(config?.interpolationNodeTypes ?? []);
+
   const spans: [number, number][] = [];
+  const collectStringSpans = (node: Parser.SyntaxNode): void => {
+    // Everything in the literal is prose except the interpolation holes.
+    const holes: [number, number][] = [];
+    const findHoles = (n: Parser.SyntaxNode): void => {
+      if (interpolationNodeTypes.has(n.type)) {
+        holes.push([n.startIndex, n.endIndex]);
+        return;
+      }
+      for (const child of n.children) findHoles(child);
+    };
+    findHoles(node);
+
+    let cursor = node.startIndex;
+    for (const [holeStart, holeEnd] of holes) {
+      if (holeStart > cursor) spans.push([cursor, holeStart]);
+      cursor = holeEnd;
+    }
+    if (cursor < node.endIndex) spans.push([cursor, node.endIndex]);
+  };
+
   const walk = (node: Parser.SyntaxNode): void => {
-    if (node.type.includes('comment') || stringNodeTypes.has(node.type)) {
+    if (node.type.includes('comment')) {
       spans.push([node.startIndex, node.endIndex]);
+      return;
+    }
+    if (stringNodeTypes.has(node.type)) {
+      collectStringSpans(node);
       return;
     }
     for (const child of node.children) walk(child);
@@ -765,11 +800,7 @@ export async function mergeIntoExisting(
     // Survival is judged against code only — a class name left behind in a KDoc
     // is not a use, and treating it as one keeps an unresolvable import.
     const parser = await getParser(language);
-    const codeOnly = maskNonCode(
-      safeParse(parser, result),
-      result,
-      new Set(adapter.urlFingerprintConfig?.stringNodeTypes ?? []),
-    );
+    const codeOnly = maskNonCode(safeParse(parser, result), result, adapter.urlFingerprintConfig);
     const orphaned = new Set<string>();
     for (const imp of existingStatements.imports) {
       const names = adapter.importedNames(imp);
