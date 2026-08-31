@@ -474,7 +474,11 @@ function extractParameterGroups(
  * the request body. Emitters use the group's presence to generate sum-type
  * interfaces and custom JSON marshalling instead of flat optional fields.
  */
-function extractBodyParameterGroups(op: OperationObject, operationContext: string): ParameterGroup[] | undefined {
+function extractBodyParameterGroups(
+  op: OperationObject,
+  operationContext: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): ParameterGroup[] | undefined {
   const raw = op['x-mutually-exclusive-body-groups'];
   if (!raw || typeof raw !== 'object') return undefined;
 
@@ -482,28 +486,7 @@ function extractBodyParameterGroups(op: OperationObject, operationContext: strin
   // The body schema has been structurally rewritten to allOf: [base, { oneOf: [...] }]
   // by the spec generator; the variant properties live inside oneOf branches.
   const bodySchema = op.requestBody?.content?.['application/json']?.schema;
-  const variantFieldSchemas = new Map<string, SchemaObject>();
-
-  if (bodySchema) {
-    // Walk allOf → oneOf → variant.properties to find all variant fields
-    for (const sub of bodySchema.allOf ?? []) {
-      for (const variant of sub.oneOf ?? []) {
-        if (variant.properties) {
-          for (const [name, fieldSchema] of Object.entries(variant.properties)) {
-            if (fieldSchema) variantFieldSchemas.set(name, fieldSchema);
-          }
-        }
-      }
-    }
-    // Also check top-level oneOf (for inline schemas that aren't wrapped in allOf)
-    for (const variant of bodySchema.oneOf ?? []) {
-      if (variant.properties) {
-        for (const [name, fieldSchema] of Object.entries(variant.properties)) {
-          if (fieldSchema) variantFieldSchemas.set(name, fieldSchema);
-        }
-      }
-    }
-  }
+  const variantFieldSchemas = collectVariantFieldSchemas(bodySchema, componentSchemas);
 
   const groups: ParameterGroup[] = [];
 
@@ -520,9 +503,21 @@ function extractBodyParameterGroups(op: OperationObject, operationContext: strin
         );
       }
       const parameters: Parameter[] = paramNames.map((pName) => {
-        const fieldSchema = variantFieldSchemas.get(pName);
+        const entry = variantFieldSchemas.get(pName);
+        const fieldSchema = entry?.schema;
+        // No schema found means the body's oneOf branches don't declare this
+        // member. Falling back to `string` silently produces an SDK that
+        // type-checks against itself but misrepresents the wire contract
+        // (object-valued members become plain strings), so say so loudly.
+        if (!fieldSchema) {
+          console.warn(
+            `[oagen] Warning: x-mutually-exclusive-body-groups.${groupName}.variants.${variantName} ` +
+              `references "${pName}" in ${operationContext}, but no oneOf branch of the request body ` +
+              `declares that property. Falling back to type: string.`,
+          );
+        }
         const fieldType: TypeRef = fieldSchema
-          ? schemaToTypeRef(fieldSchema, toPascalCase(pName))
+          ? schemaToTypeRef(fieldSchema, toPascalCase(pName), entry?.owner)
           : { kind: 'primitive', type: 'string' };
         return {
           name: pName,
@@ -631,7 +626,7 @@ function buildOperation(
   const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel);
 
   // Extract mutually-exclusive body parameter groups
-  const bodyParamGroups = extractBodyParameterGroups(op, opLabel);
+  const bodyParamGroups = extractBodyParameterGroups(op, opLabel, componentSchemas);
 
   // Merge both sources into a single parameterGroups array
   const parameterGroups =
@@ -727,6 +722,82 @@ function extractParams(
  * spec-mandated default value in generated method signatures.
  */
 function resolveParamSchemaRef(
+  schema: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  if (!schema || !componentSchemas) return undefined;
+  const ref = (schema as { $ref?: string }).$ref;
+  if (!ref) return undefined;
+  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
+  if (!match) return undefined;
+  return componentSchemas[match[1]];
+}
+
+/**
+ * Collect the property schemas of every `oneOf` branch reachable from a request
+ * body schema, keyed by property name. These are the candidate members of a
+ * mutually-exclusive body group.
+ *
+ * The bundler runs with `dereference: false`, so the body schema is very often
+ * a bare `{ $ref: '#/components/schemas/XDto' }` and the `allOf`/`oneOf`
+ * composition that actually declares the variant properties lives on the
+ * component. Walking without resolving refs finds nothing, and every group
+ * member then falls back to `string` — an SDK that compiles but types
+ * object-valued members (e.g. a connection's `saml_options`) as plain strings.
+ *
+ * Composition keywords nest and may themselves be refs, so resolve and recurse
+ * at each level. `seen` guards against a schema that (directly or transitively)
+ * refs itself.
+ */
+function collectVariantFieldSchemas(
+  schema: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  owner: string | undefined = undefined,
+  out: Map<string, VariantFieldSchema> = new Map(),
+  seen: Set<string> = new Set(),
+): Map<string, VariantFieldSchema> {
+  if (!schema) return out;
+
+  const ref = (schema as { $ref?: string }).$ref;
+  if (ref) {
+    if (seen.has(ref)) return out;
+    seen.add(ref);
+    const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
+    const target = match && componentSchemas ? componentSchemas[match[1]] : undefined;
+    // Descending into a component makes it the owner of everything below, so
+    // inline members get the same synthesized names the model emitter gives
+    // them (`CreateUser` + `password_hash_type` -> CreateUserPasswordHashType).
+    const nextOwner = match ? resolveSchemaName(match[1]) : owner;
+    return collectVariantFieldSchemas(target, componentSchemas, nextOwner, out, seen);
+  }
+
+  // A `oneOf` branch is the group-variant carrier: its properties are the
+  // members. Record them, then keep descending — branches nest in real specs.
+  for (const variant of schema.oneOf ?? []) {
+    const variantRef = (variant as { $ref?: string }).$ref;
+    const refMatch = variantRef ? /^#\/components\/schemas\/(.+)$/.exec(variantRef) : null;
+    const resolved = resolveSchemaRefObject(variant, componentSchemas) ?? variant;
+    const variantOwner = refMatch ? resolveSchemaName(refMatch[1]) : owner;
+    for (const [name, fieldSchema] of Object.entries(resolved.properties ?? {})) {
+      if (fieldSchema) out.set(name, { schema: fieldSchema, owner: variantOwner });
+    }
+    collectVariantFieldSchemas(variant, componentSchemas, owner, out, seen);
+  }
+
+  for (const sub of schema.allOf ?? []) collectVariantFieldSchemas(sub, componentSchemas, owner, out, seen);
+  for (const sub of schema.anyOf ?? []) collectVariantFieldSchemas(sub, componentSchemas, owner, out, seen);
+
+  return out;
+}
+
+/** A group member's schema plus the component that owns it, for inline naming. */
+interface VariantFieldSchema {
+  schema: SchemaObject;
+  owner: string | undefined;
+}
+
+/** Resolve `{ $ref: '#/components/schemas/X' }` to its component, else undefined. */
+function resolveSchemaRefObject(
   schema: SchemaObject | undefined,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): SchemaObject | undefined {

@@ -83,6 +83,26 @@ export interface ParameterGroup {
   optional: boolean;
   /** Ordered variants (insertion order matches the spec). */
   variants: ParameterGroupVariant[];
+  /**
+   * Base name emitters must use for this group's generated wrapper type, in
+   * place of `name`.
+   *
+   * Two operations commonly share one group name — create and update both
+   * declare `protocol_options` — and emitters name the wrapper from the group
+   * name alone, so both operations collapse onto one type. That is correct
+   * only while their members agree. When they disagree (create's
+   * `saml_options` is a `CreateConnectionSAMLOptions`, update's is a
+   * `PatchConnectionSAMLOptions`) one wrapper silently forces one operation to
+   * use the other operation's type.
+   *
+   * The parser therefore fingerprints each group's members across every
+   * operation declaring it and qualifies this with the operation name
+   * (`update_connection_protocol_options`) only where they genuinely diverge.
+   * Groups that agree — including ones differing only by nullability, or by
+   * duplicate inline enums carrying identical values — keep the bare group
+   * name, so already-published wrapper types are never renamed.
+   */
+  wrapperName?: string;
 }
 
 /**
