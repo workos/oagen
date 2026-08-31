@@ -67,6 +67,11 @@ function extractKotlinClassMembers(classBody: Parser.SyntaxNode, source: string)
 
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
+    // The getter/setter fold below advances `i` past sibling accessor nodes, so
+    // remember where the declaration itself sits — the KDoc scan walks backwards
+    // from here and would otherwise start on the declaration (or its getter) and
+    // never reach the doc comment.
+    const declIndex = i;
     let memberName: string | null = null;
 
     if (child.type === 'property_declaration') {
@@ -97,7 +102,7 @@ function extractKotlinClassMembers(classBody: Parser.SyntaxNode, source: string)
     // Include preceding KDoc comment in the text span so deep merge
     // inserts the member with its documentation intact.
     let startIdx = child.startIndex;
-    for (let k = i - 1; k >= 0; k--) {
+    for (let k = declIndex - 1; k >= 0; k--) {
       const prev = children[k];
       if (prev.type === 'multiline_comment') {
         const text = source.slice(prev.startIndex, prev.endIndex);
@@ -167,6 +172,14 @@ export const kotlinMergeAdapter: MergeAdapter = {
   },
   isManagedMember(member) {
     return KOTLIN_MANAGED_ACCESSOR_DOC.test(member.text);
+  },
+  importedNames(imp) {
+    const path = imp.text.replace(/^import\s+/, '').trim();
+    const alias = path.match(/\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (alias) return [alias[1]];
+    const last = path.split('.').pop();
+    // Star imports bind every name in the package — nothing single to track.
+    return last && last !== '*' ? [last] : [];
   },
   shouldSkipDeepMerge(_symbolName, existingMemberKeys, newMembers) {
     // Skip if new members reference instance properties that don't exist in the target

@@ -11,7 +11,7 @@
 
 import Parser from 'tree-sitter';
 import { getMergeAdapter } from './merge-adapters/index.js';
-import type { MergeImport, ParsedMergeFile, SymbolDocstrings } from './merge-adapters/types.js';
+import type { MergeImport, ParsedMergeFile, SymbolDocstrings, UrlFingerprintConfig } from './merge-adapters/types.js';
 
 // Cache parser instances per language
 const parserCache = new Map<string, Parser>();
@@ -109,6 +109,143 @@ function declarationLineStart(content: string, declStartIndex: number): number {
   const idx = clampIndex(declStartIndex, content.length);
   const prevNewline = content.lastIndexOf('\n', Math.max(0, idx - 1));
   return prevNewline === -1 ? 0 : prevNewline + 1;
+}
+
+// --- stale managed-member pruning helpers ---
+
+/**
+ * Widen a member's byte range so deleting it removes whole lines.
+ *
+ * The raw range starts at the declaration (or its docstring), which sits after
+ * the member's indentation — splicing it out verbatim leaves that indentation
+ * glued to the following line. Extends backwards over the indentation and
+ * forwards over the trailing newline, then absorbs the blank line the removal
+ * would otherwise duplicate (or strand in front of the block's closing brace).
+ */
+function expandPruneRange(source: string, rawStart: number, rawEnd: number): { start: number; end: number } {
+  let start = rawStart;
+  while (start > 0 && (source[start - 1] === ' ' || source[start - 1] === '\t')) start--;
+
+  let end = rawEnd;
+  while (end < source.length && (source[end] === ' ' || source[end] === '\t')) end++;
+  end = skipLineBreak(source, end);
+
+  if (precededByBlankLine(source, start)) {
+    if (startsWithLineBreak(source, end)) {
+      // Blank line on both sides — keep one.
+      end = skipLineBreak(source, end);
+    } else if (/^[ \t]*\}/.test(source.slice(end, end + 40))) {
+      // Last member in the block — don't leave the closing brace on its own
+      // after a blank line.
+      start = backOverLineBreak(source, start);
+    }
+  }
+
+  return { start, end };
+}
+
+// Line-break helpers below treat CRLF as one terminator: an SDK checked out with
+// `core.autocrlf` on would otherwise leave a stray `\r` line behind every prune.
+
+function startsWithLineBreak(source: string, idx: number): boolean {
+  return source[idx] === '\n' || (source[idx] === '\r' && source[idx + 1] === '\n');
+}
+
+function skipLineBreak(source: string, idx: number): number {
+  let i = idx;
+  if (source[i] === '\r') i++;
+  return source[i] === '\n' ? i + 1 : i;
+}
+
+function backOverLineBreak(source: string, idx: number): number {
+  let i = idx;
+  if (source[i - 1] === '\n') i--;
+  if (source[i - 1] === '\r') i--;
+  return i;
+}
+
+/** Whether the line ending immediately before `idx` (a line start) is empty. */
+function precededByBlankLine(source: string, idx: number): boolean {
+  if (idx === 0 || source[idx - 1] !== '\n') return false;
+  const priorLineEnd = backOverLineBreak(source, idx);
+  return priorLineEnd > 0 && source[priorLineEnd - 1] === '\n';
+}
+
+function referencesIdentifier(source: string, name: string): boolean {
+  return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(source);
+}
+
+/**
+ * Blank out comments and string text, preserving offsets and line structure.
+ *
+ * An identifier lookup over raw source can't tell a live reference from a name
+ * that merely survives in prose. That distinction decides whether an import
+ * stays: keeping one whose only remaining mention is a KDoc leaves an import of
+ * a class the generator no longer emits, which doesn't compile — the very
+ * failure the prune exists to prevent.
+ *
+ * Interpolated expressions are the exception: `"${Agents.NAME}"` is code that
+ * sits inside a string literal, and masking it would drop an import the file
+ * genuinely uses. String extents are masked around those holes, not over them.
+ *
+ * Grammar node names come from the adapter's `urlFingerprintConfig`, which
+ * already inventories exactly these three categories per language. Comments are
+ * matched structurally instead — every grammar we support names them `*comment`.
+ */
+function maskNonCode(tree: Parser.Tree, source: string, config: UrlFingerprintConfig | undefined): string {
+  const stringNodeTypes = new Set(config?.stringNodeTypes ?? []);
+  const interpolationNodeTypes = new Set(config?.interpolationNodeTypes ?? []);
+
+  const spans: [number, number][] = [];
+  const collectStringSpans = (node: Parser.SyntaxNode): void => {
+    // Everything in the literal is prose except the interpolation holes.
+    const holes: [number, number][] = [];
+    const findHoles = (n: Parser.SyntaxNode): void => {
+      if (interpolationNodeTypes.has(n.type)) {
+        holes.push([n.startIndex, n.endIndex]);
+        return;
+      }
+      for (const child of n.children) findHoles(child);
+    };
+    findHoles(node);
+
+    let cursor = node.startIndex;
+    for (const [holeStart, holeEnd] of holes) {
+      if (holeStart > cursor) spans.push([cursor, holeStart]);
+      cursor = holeEnd;
+    }
+    if (cursor < node.endIndex) spans.push([cursor, node.endIndex]);
+  };
+
+  const walk = (node: Parser.SyntaxNode): void => {
+    if (node.type.includes('comment')) {
+      spans.push([node.startIndex, node.endIndex]);
+      return;
+    }
+    if (stringNodeTypes.has(node.type)) {
+      collectStringSpans(node);
+      return;
+    }
+    for (const child of node.children) walk(child);
+  };
+  walk(tree.rootNode);
+  if (spans.length === 0) return source;
+
+  let masked = '';
+  let cursor = 0;
+  for (const [spanStart, spanEnd] of spans) {
+    if (spanStart < cursor) continue;
+    masked += source.slice(cursor, spanStart) + source.slice(spanStart, spanEnd).replace(/[^\r\n]/g, ' ');
+    cursor = spanEnd;
+  }
+  return masked + source.slice(cursor);
+}
+
+function removeLines(source: string, lines: Set<string>): string {
+  return source
+    .split('\n')
+    .filter((line) => !lines.has(line.trim()))
+    .join('\n');
 }
 
 /**
@@ -505,6 +642,7 @@ export async function mergeIntoExisting(
   let deepAdded = 0;
   let deepPruned = 0;
   const insertions: { line: number; text: string }[] = [];
+  const prunedTexts: string[] = [];
   if (adapter.extractMembers) {
     const parser = await getParser(language);
     const resultTree = safeParse(parser, result);
@@ -540,10 +678,9 @@ export async function mergeIntoExisting(
       if (pruneEdits.length > 0) {
         pruneEdits.sort((a, b) => b.start - a.start);
         for (const edit of pruneEdits) {
-          let end = edit.end;
-          while (end < result.length && (result[end] === ' ' || result[end] === '\t')) end++;
-          if (result[end] === '\n') end++;
-          result = result.slice(0, edit.start) + result.slice(end);
+          const { start, end } = expandPruneRange(result, edit.start, edit.end);
+          prunedTexts.push(result.slice(start, end));
+          result = result.slice(0, start) + result.slice(end);
         }
         deepPruned = pruneEdits.length;
         // Re-extract since byte offsets and line numbers shifted.
@@ -651,6 +788,30 @@ export async function mergeIntoExisting(
       lines.splice(insertIdx, 0, ...renderedImports);
       result = lines.join('\n');
     }
+  }
+
+  // Drop imports the pruned managed members were the last users of. A managed
+  // accessor that leaves the spec takes its service class with it, so keeping
+  // the import is a compile error rather than merely dead code. Runs last so it
+  // sees every insertion — both new members and new imports — and so removing
+  // lines can't shift the line numbers those insertions were computed against.
+  if (prunedTexts.length > 0 && adapter.importedNames) {
+    const prunedText = prunedTexts.join('\n');
+    // Survival is judged against code only — a class name left behind in a KDoc
+    // is not a use, and treating it as one keeps an unresolvable import.
+    const parser = await getParser(language);
+    const codeOnly = maskNonCode(safeParse(parser, result), result, adapter.urlFingerprintConfig);
+    const orphaned = new Set<string>();
+    for (const imp of existingStatements.imports) {
+      const names = adapter.importedNames(imp);
+      if (names.length === 0) continue;
+      if (!names.some((n) => referencesIdentifier(prunedText, n))) continue;
+      const line = imp.text.trim();
+      const withoutImport = removeLines(codeOnly, new Set([line]));
+      if (names.some((n) => referencesIdentifier(withoutImport, n))) continue;
+      orphaned.add(line);
+    }
+    if (orphaned.size > 0) result = removeLines(result, orphaned);
   }
 
   // Docstring refresh pass: update existing docstrings to match generated content

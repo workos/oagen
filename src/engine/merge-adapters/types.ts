@@ -101,6 +101,16 @@ export interface MergeAdapter {
    * and `endIndex` on the returned `MergeMember`s.
    */
   isManagedMember?(member: MergeMember): boolean;
+  /**
+   * Return the local identifiers an import statement binds (e.g. `Agents` for
+   * `import com.workos.agents.Agents`). Used after managed-member pruning to
+   * drop imports the pruned members were the last users of — a stale import of
+   * a class the generator no longer emits doesn't compile.
+   *
+   * Return an empty array for imports with no single binding to track (wildcard
+   * imports, side-effect imports).
+   */
+  importedNames?(imp: MergeImport): string[];
   /** Configuration for generic URL fingerprint extraction from method bodies. */
   urlFingerprintConfig?: UrlFingerprintConfig;
 }
