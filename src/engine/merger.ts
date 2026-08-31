@@ -111,6 +111,51 @@ function declarationLineStart(content: string, declStartIndex: number): number {
   return prevNewline === -1 ? 0 : prevNewline + 1;
 }
 
+// --- stale managed-member pruning helpers ---
+
+/**
+ * Widen a member's byte range so deleting it removes whole lines.
+ *
+ * The raw range starts at the declaration (or its docstring), which sits after
+ * the member's indentation — splicing it out verbatim leaves that indentation
+ * glued to the following line. Extends backwards over the indentation and
+ * forwards over the trailing newline, then absorbs the blank line the removal
+ * would otherwise duplicate (or strand in front of the block's closing brace).
+ */
+function expandPruneRange(source: string, rawStart: number, rawEnd: number): { start: number; end: number } {
+  let start = rawStart;
+  while (start > 0 && (source[start - 1] === ' ' || source[start - 1] === '\t')) start--;
+
+  let end = rawEnd;
+  while (end < source.length && (source[end] === ' ' || source[end] === '\t')) end++;
+  if (source[end] === '\n') end++;
+
+  const followsBlankLine = start >= 2 && source[start - 1] === '\n' && source[start - 2] === '\n';
+  if (followsBlankLine) {
+    if (source[end] === '\n') {
+      // Blank line on both sides — keep one.
+      end++;
+    } else if (/^[ \t]*\}/.test(source.slice(end, end + 40))) {
+      // Last member in the block — don't leave the closing brace on its own
+      // after a blank line.
+      start--;
+    }
+  }
+
+  return { start, end };
+}
+
+function referencesIdentifier(source: string, name: string): boolean {
+  return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(source);
+}
+
+function removeLines(source: string, lines: Set<string>): string {
+  return source
+    .split('\n')
+    .filter((line) => !lines.has(line.trim()))
+    .join('\n');
+}
+
 /**
  * Resolve a docstring range by searching for the nearest matching text before
  * the declaration start. Falls back to parser-provided offsets when search fails.
@@ -505,6 +550,7 @@ export async function mergeIntoExisting(
   let deepAdded = 0;
   let deepPruned = 0;
   const insertions: { line: number; text: string }[] = [];
+  const prunedTexts: string[] = [];
   if (adapter.extractMembers) {
     const parser = await getParser(language);
     const resultTree = safeParse(parser, result);
@@ -540,10 +586,9 @@ export async function mergeIntoExisting(
       if (pruneEdits.length > 0) {
         pruneEdits.sort((a, b) => b.start - a.start);
         for (const edit of pruneEdits) {
-          let end = edit.end;
-          while (end < result.length && (result[end] === ' ' || result[end] === '\t')) end++;
-          if (result[end] === '\n') end++;
-          result = result.slice(0, edit.start) + result.slice(end);
+          const { start, end } = expandPruneRange(result, edit.start, edit.end);
+          prunedTexts.push(result.slice(start, end));
+          result = result.slice(0, start) + result.slice(end);
         }
         deepPruned = pruneEdits.length;
         // Re-extract since byte offsets and line numbers shifted.
@@ -651,6 +696,26 @@ export async function mergeIntoExisting(
       lines.splice(insertIdx, 0, ...renderedImports);
       result = lines.join('\n');
     }
+  }
+
+  // Drop imports the pruned managed members were the last users of. A managed
+  // accessor that leaves the spec takes its service class with it, so keeping
+  // the import is a compile error rather than merely dead code. Runs last so it
+  // sees every insertion — both new members and new imports — and so removing
+  // lines can't shift the line numbers those insertions were computed against.
+  if (prunedTexts.length > 0 && adapter.importedNames) {
+    const prunedText = prunedTexts.join('\n');
+    const orphaned = new Set<string>();
+    for (const imp of existingStatements.imports) {
+      const names = adapter.importedNames(imp);
+      if (names.length === 0) continue;
+      if (!names.some((n) => referencesIdentifier(prunedText, n))) continue;
+      const line = imp.text.trim();
+      const withoutImport = removeLines(result, new Set([line]));
+      if (names.some((n) => referencesIdentifier(withoutImport, n))) continue;
+      orphaned.add(line);
+    }
+    if (orphaned.size > 0) result = removeLines(result, orphaned);
   }
 
   // Docstring refresh pass: update existing docstrings to match generated content
