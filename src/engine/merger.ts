@@ -128,25 +128,82 @@ function expandPruneRange(source: string, rawStart: number, rawEnd: number): { s
 
   let end = rawEnd;
   while (end < source.length && (source[end] === ' ' || source[end] === '\t')) end++;
-  if (source[end] === '\n') end++;
+  end = skipLineBreak(source, end);
 
-  const followsBlankLine = start >= 2 && source[start - 1] === '\n' && source[start - 2] === '\n';
-  if (followsBlankLine) {
-    if (source[end] === '\n') {
+  if (precededByBlankLine(source, start)) {
+    if (startsWithLineBreak(source, end)) {
       // Blank line on both sides — keep one.
-      end++;
+      end = skipLineBreak(source, end);
     } else if (/^[ \t]*\}/.test(source.slice(end, end + 40))) {
       // Last member in the block — don't leave the closing brace on its own
       // after a blank line.
-      start--;
+      start = backOverLineBreak(source, start);
     }
   }
 
   return { start, end };
 }
 
+// Line-break helpers below treat CRLF as one terminator: an SDK checked out with
+// `core.autocrlf` on would otherwise leave a stray `\r` line behind every prune.
+
+function startsWithLineBreak(source: string, idx: number): boolean {
+  return source[idx] === '\n' || (source[idx] === '\r' && source[idx + 1] === '\n');
+}
+
+function skipLineBreak(source: string, idx: number): number {
+  let i = idx;
+  if (source[i] === '\r') i++;
+  return source[i] === '\n' ? i + 1 : i;
+}
+
+function backOverLineBreak(source: string, idx: number): number {
+  let i = idx;
+  if (source[i - 1] === '\n') i--;
+  if (source[i - 1] === '\r') i--;
+  return i;
+}
+
+/** Whether the line ending immediately before `idx` (a line start) is empty. */
+function precededByBlankLine(source: string, idx: number): boolean {
+  if (idx === 0 || source[idx - 1] !== '\n') return false;
+  const priorLineEnd = backOverLineBreak(source, idx);
+  return priorLineEnd > 0 && source[priorLineEnd - 1] === '\n';
+}
+
 function referencesIdentifier(source: string, name: string): boolean {
   return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(source);
+}
+
+/**
+ * Blank out comments and string literals, preserving offsets and line structure.
+ *
+ * An identifier lookup over raw source can't tell a live reference from a name
+ * that merely survives in prose. That distinction decides whether an import
+ * stays: keeping one whose only remaining mention is a KDoc leaves an import of
+ * a class the generator no longer emits, which doesn't compile — the very
+ * failure the prune exists to prevent.
+ */
+function maskNonCode(tree: Parser.Tree, source: string, stringNodeTypes: Set<string>): string {
+  const spans: [number, number][] = [];
+  const walk = (node: Parser.SyntaxNode): void => {
+    if (node.type.includes('comment') || stringNodeTypes.has(node.type)) {
+      spans.push([node.startIndex, node.endIndex]);
+      return;
+    }
+    for (const child of node.children) walk(child);
+  };
+  walk(tree.rootNode);
+  if (spans.length === 0) return source;
+
+  let masked = '';
+  let cursor = 0;
+  for (const [spanStart, spanEnd] of spans) {
+    if (spanStart < cursor) continue;
+    masked += source.slice(cursor, spanStart) + source.slice(spanStart, spanEnd).replace(/[^\r\n]/g, ' ');
+    cursor = spanEnd;
+  }
+  return masked + source.slice(cursor);
 }
 
 function removeLines(source: string, lines: Set<string>): string {
@@ -705,13 +762,21 @@ export async function mergeIntoExisting(
   // lines can't shift the line numbers those insertions were computed against.
   if (prunedTexts.length > 0 && adapter.importedNames) {
     const prunedText = prunedTexts.join('\n');
+    // Survival is judged against code only — a class name left behind in a KDoc
+    // is not a use, and treating it as one keeps an unresolvable import.
+    const parser = await getParser(language);
+    const codeOnly = maskNonCode(
+      safeParse(parser, result),
+      result,
+      new Set(adapter.urlFingerprintConfig?.stringNodeTypes ?? []),
+    );
     const orphaned = new Set<string>();
     for (const imp of existingStatements.imports) {
       const names = adapter.importedNames(imp);
       if (names.length === 0) continue;
       if (!names.some((n) => referencesIdentifier(prunedText, n))) continue;
       const line = imp.text.trim();
-      const withoutImport = removeLines(result, new Set([line]));
+      const withoutImport = removeLines(codeOnly, new Set([line]));
       if (names.some((n) => referencesIdentifier(withoutImport, n))) continue;
       orphaned.add(line);
     }

@@ -2041,6 +2041,79 @@ ${body}
     expect(result.content).toContain('val actions: Actions');
   });
 
+  it('drops the import when only prose still names the pruned class', async () => {
+    // A KDoc mentioning `Agents` is not a use. Keeping the import on its
+    // account leaves an unresolvable reference to a class oagen no longer
+    // emits — the exact failure the prune exists to prevent.
+    const existing = client(
+      [
+        { prop: 'adminPortal', cls: 'AdminPortal' },
+        { prop: 'agents', cls: 'Agents' },
+      ],
+      ['import com.workos.agents.Agents'],
+    ).replace(
+      'open class WorkOS',
+      `/** Client entry point. Superseded [Agents]; see the migration notes. */
+open class WorkOS`,
+    );
+    const generated = generatedClient(
+      [{ prop: 'adminPortal', cls: 'AdminPortal' }],
+      ['import com.workos.adminportal.AdminPortal'],
+    );
+
+    const result = await mergeIntoExisting(existing, generated, 'kotlin', header);
+
+    expect(result.content).not.toContain('import com.workos.agents.Agents');
+    // The prose itself is left alone — only the import goes.
+    expect(result.content).toContain('Superseded [Agents]');
+  });
+
+  it('prunes cleanly through CRLF line endings', async () => {
+    // `agents` sits mid-block: a prune that only recognizes `\n` as the line
+    // terminator leaves the member's `\r\n` behind and doubles the blank line.
+    const existing = client(
+      [
+        { prop: 'agents', cls: 'Agents' },
+        { prop: 'adminPortal', cls: 'AdminPortal' },
+      ],
+      ['import com.workos.agents.Agents'],
+    ).replace(/\n/g, '\r\n');
+    const generated = generatedClient(
+      [{ prop: 'adminPortal', cls: 'AdminPortal' }],
+      ['import com.workos.adminportal.AdminPortal'],
+    );
+
+    const result = await mergeIntoExisting(existing, generated, 'kotlin', header);
+
+    expect(result.content).not.toContain('val agents: Agents');
+    expect(result.content).not.toContain('import com.workos.agents.Agents');
+    expect(result.content).not.toContain('\r\n\r\n\r\n');
+    // No stray `\r` orphaned from its `\n`.
+    expect(result.content).not.toMatch(/\r(?!\n)/);
+  });
+
+  it('prunes a trailing member cleanly through CRLF line endings', async () => {
+    const existing = client(
+      [
+        { prop: 'adminPortal', cls: 'AdminPortal' },
+        { prop: 'agents', cls: 'Agents' },
+      ],
+      ['import com.workos.agents.Agents'],
+    ).replace(/\n/g, '\r\n');
+    const generated = generatedClient(
+      [{ prop: 'adminPortal', cls: 'AdminPortal' }],
+      ['import com.workos.adminportal.AdminPortal'],
+    );
+
+    const result = await mergeIntoExisting(existing, generated, 'kotlin', header);
+    const lines = result.content.trimEnd().split('\r\n');
+
+    expect(result.content).not.toContain('val agents: Agents');
+    expect(lines.at(-1)).toBe('  }');
+    expect(lines.at(-2)).toBe('        }');
+    expect(result.content).not.toMatch(/\r(?!\n)/);
+  });
+
   it('keeps an import the pruned accessor shared with surviving code', async () => {
     const existing = client(
       [
