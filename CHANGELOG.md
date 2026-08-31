@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.4](https://github.com/workos/oagen/compare/v0.29.3...v0.29.4) (2026-08-31)
+
+
+### Bug Fixes
+
+* **merger:** make Kotlin managed-accessor pruning actually fire ([#159](https://github.com/workos/oagen/issues/159)) ([7526fa8](https://github.com/workos/oagen/commit/7526fa89eb27352c0c165537170a2071aae39390))
+
 ## [0.29.3](https://github.com/workos/oagen/compare/v0.29.2...v0.29.3) (2026-08-31)
 
 
