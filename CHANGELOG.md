@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.3](https://github.com/workos/oagen/compare/v0.29.2...v0.29.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **parser:** type mutually-exclusive body group members correctly ([#158](https://github.com/workos/oagen/issues/158)) ([efd597e](https://github.com/workos/oagen/commit/efd597edc44f5ffa8bcb850ad8127a5f660e3fc6))
+* resolve $ref parameters in operation parameters arrays ([#154](https://github.com/workos/oagen/issues/154)) ([020bc76](https://github.com/workos/oagen/commit/020bc76bf4234ff2e65a1e4efe8f00387ebffc02))
+
 ## [0.29.2](https://github.com/workos/oagen/compare/v0.29.1...v0.29.2) (2026-08-06)
 
 
