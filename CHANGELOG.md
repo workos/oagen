@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/workos/oagen/compare/v0.29.4...v0.30.0) (2026-09-01)
+
+
+### Features
+
+* **resolve:** detect method-name collisions before the build matrix ([#161](https://github.com/workos/oagen/issues/161)) ([10d2f6d](https://github.com/workos/oagen/commit/10d2f6d282438710abed99e6fa876467863e883b))
+
 ## [0.29.4](https://github.com/workos/oagen/compare/v0.29.3...v0.29.4) (2026-08-31)
 
 
