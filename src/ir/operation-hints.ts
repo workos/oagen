@@ -370,9 +370,12 @@ export function findResolvedMethodCollisions(resolved: ResolvedOperation[]): Res
     const current = { httpMethod: r.operation.httpMethod.toUpperCase(), path: r.operation.path };
     const existing = seen.get(key);
 
-    // Same path twice is the same operation seen through two services, not a
-    // collision — only distinct paths competing for one name are.
-    if (existing && existing.path !== current.path) {
+    // The same path AND method twice is one operation seen through two
+    // services, not a collision. Both have to match: two *different* methods
+    // on one path (`GET /x` and `POST /x` hinted to the same name) are
+    // distinct operations competing for a single SDK method, and a path-only
+    // comparison accepts them silently.
+    if (existing && (existing.path !== current.path || existing.httpMethod !== current.httpMethod)) {
       collisions.push({ key, first: existing, second: current });
       continue;
     }

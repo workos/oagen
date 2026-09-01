@@ -519,4 +519,26 @@ describe('findResolvedMethodCollisions', () => {
     const clean = spec([svc('Agents', [op('post', '/agents/credentials/validate'), op('get', '/agents')])]);
     expect(findResolvedMethodCollisions(resolveOperations(clean, undefined, mountRules))).toEqual([]);
   });
+
+  // Two verbs on one path are two distinct operations. Hinting both to the
+  // same name is a genuine collision, and comparing paths alone accepts it.
+  it('catches two HTTP methods on the same path resolving to one name', () => {
+    const sameDifferentVerbs = spec([svc('Agents', [op('get', '/agents/status'), op('post', '/agents/status')])]);
+    const hints: Record<string, OperationHint> = {
+      'GET /agents/status': { name: 'status' },
+      'POST /agents/status': { name: 'status' },
+    };
+    const collisions = findResolvedMethodCollisions(resolveOperations(sameDifferentVerbs, hints, mountRules));
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0].key).toBe('Agents.status');
+    expect([collisions[0].first.httpMethod, collisions[0].second.httpMethod].sort()).toEqual(['GET', 'POST']);
+  });
+
+  // The dedupe the path comparison was there for: one operation reachable
+  // through two services must stay a single entry, not become a collision.
+  it('does not flag one operation mounted from two services', () => {
+    const shared = op('get', '/agents/status');
+    const twoServices = spec([svc('AgentsAlpha', [shared]), svc('AgentsBeta', [shared])]);
+    expect(findResolvedMethodCollisions(resolveOperations(twoServices, undefined, mountRules))).toEqual([]);
+  });
 });
