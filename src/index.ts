@@ -42,9 +42,20 @@ export {
 } from './ir/types.js';
 
 // Operation resolution
-export type { OperationHint, SplitHint, ResolvedOperation, ResolvedWrapper } from './ir/operation-hints.js';
+export type {
+  OperationHint,
+  SplitHint,
+  ResolvedOperation,
+  ResolvedWrapper,
+  ResolvedMethodCollision,
+} from './ir/operation-hints.js';
 
-export { resolveOperations, deriveMethodName, resolveMountTarget } from './ir/operation-hints.js';
+export {
+  resolveOperations,
+  deriveMethodName,
+  resolveMountTarget,
+  findResolvedMethodCollisions,
+} from './ir/operation-hints.js';
 
 // SDK Behavior IR
 export type {

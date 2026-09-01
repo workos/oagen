@@ -17,7 +17,14 @@ import { CommandError } from '../errors.js';
 function handleError(err: unknown): never {
   const exitCode = err instanceof CommandError ? err.exitCode : 1;
   const message = err instanceof Error ? err.message : String(err);
-  if (message) console.error(message);
+  if (message) {
+    // A CommandError message is deliberately composed CLI output — print it as
+    // written. Anything else is an unexpected throw and has to *look* like one:
+    // printed bare, an aborted run reads as an informational log line in CI,
+    // which is how an emitter collision abort got mistaken for a clean run.
+    const label = err instanceof CommandError ? '' : `${err instanceof Error ? err.name : 'Error'}: `;
+    console.error(`${label}${message}`);
+  }
   process.exit(exitCode);
 }
 
