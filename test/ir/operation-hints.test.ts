@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { deriveMethodName, resolveMountTarget, resolveOperations } from '../../src/ir/operation-hints.js';
+import {
+  deriveMethodName,
+  findResolvedMethodCollisions,
+  resolveMountTarget,
+  resolveOperations,
+} from '../../src/ir/operation-hints.js';
 import type { OperationHint } from '../../src/ir/operation-hints.js';
 import type { ApiSpec, Service, Operation, HttpMethod } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -458,5 +463,60 @@ describe('resolveMountTarget', () => {
     expect(pkg.resolveMountTarget('UserManagementRedirectUris', { 'UserManagement*': 'UserManagement' })).toBe(
       'UserManagement',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findResolvedMethodCollisions
+// ---------------------------------------------------------------------------
+
+describe('findResolvedMethodCollisions', () => {
+  // The real case: mount rules fold `agents.blueprints.tokens` and
+  // `agents.credentials` onto one Agents service, so both `.../validate` POSTs
+  // derive `create_validate`. Emitters abort on this, but only inside the
+  // per-language matrix — `resolve` has to catch it first.
+  const mountRules = { 'Agents*': 'Agents' };
+  const collidingSpec = () =>
+    spec([
+      svc('AgentsBlueprintsTokens', [op('post', '/agents/blueprints/{agent_blueprint_id}/tokens/validate')]),
+      svc('AgentsCredentials', [op('post', '/agents/credentials/validate')]),
+    ]);
+
+  it('reports two distinct paths that resolve to the same mounted method', () => {
+    const collisions = findResolvedMethodCollisions(resolveOperations(collidingSpec(), undefined, mountRules));
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0].key).toBe('Agents.create_validate');
+    expect([collisions[0].first.path, collisions[0].second.path].sort()).toEqual([
+      '/agents/blueprints/{agent_blueprint_id}/tokens/validate',
+      '/agents/credentials/validate',
+    ]);
+  });
+
+  it('reports nothing once a hint disambiguates the new path', () => {
+    const hints: Record<string, OperationHint> = {
+      'POST /agents/blueprints/{agent_blueprint_id}/tokens/validate': { name: 'validate_blueprint_token' },
+    };
+    expect(findResolvedMethodCollisions(resolveOperations(collidingSpec(), hints, mountRules))).toEqual([]);
+  });
+
+  // Every collision in one pass — fixing them one CI round-trip at a time is
+  // the whack-a-mole this check exists to avoid.
+  it('reports every colliding pair, not just the first', () => {
+    const twoCollisions = spec([
+      svc('AgentsBlueprintsTokens', [
+        op('post', '/agents/blueprints/{id}/tokens/validate'),
+        op('get', '/agents/blueprints/{id}/tokens/status'),
+      ]),
+      svc('AgentsCredentials', [op('post', '/agents/credentials/validate'), op('get', '/agents/credentials/status')]),
+    ]);
+    const keys = findResolvedMethodCollisions(resolveOperations(twoCollisions, undefined, mountRules))
+      .map((c) => c.key)
+      .sort();
+    expect(keys).toEqual(['Agents.create_validate', 'Agents.list_status']);
+  });
+
+  it('is quiet on a spec with no collisions', () => {
+    const clean = spec([svc('Agents', [op('post', '/agents/credentials/validate'), op('get', '/agents')])]);
+    expect(findResolvedMethodCollisions(resolveOperations(clean, undefined, mountRules))).toEqual([]);
   });
 });

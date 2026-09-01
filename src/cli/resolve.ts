@@ -1,7 +1,8 @@
 import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
-import { resolveOperations } from '../ir/operation-hints.js';
+import { resolveOperations, findResolvedMethodCollisions } from '../ir/operation-hints.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
 import type { OperationHint, ResolvedOperation } from '../ir/operation-hints.js';
+import { CommandError } from '../errors.js';
 
 export async function resolveCommand(opts: {
   spec: string;
@@ -23,6 +24,26 @@ export async function resolveCommand(opts: {
   }
 
   const resolved = resolveOperations(ir, opts.operationHints, opts.mountRules);
+
+  // Fail before printing anything. Emitters refuse to generate on a name
+  // collision, but they only run inside the per-language build matrix, so
+  // without this check a colliding spec addition passes `resolve` and then
+  // fails every matrix job several minutes later. This is the cheap gate.
+  const collisions = findResolvedMethodCollisions(resolved);
+  if (collisions.length > 0) {
+    const detail = collisions
+      .map(
+        (c) =>
+          `  ${c.key}: ${c.first.httpMethod} ${c.first.path} conflicts with ${c.second.httpMethod} ${c.second.path}`,
+      )
+      .join('\n');
+    throw new CommandError(
+      `Resolved operation name collision${collisions.length > 1 ? 's' : ''}:\n${detail}`,
+      'Give one of each pair an explicit `name` in operationHints. Rename the NEW path — renaming an already-shipped method breaks released SDKs.',
+      1,
+    );
+  }
+
   const format = opts.format ?? 'table';
 
   if (format === 'json') {

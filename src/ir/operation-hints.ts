@@ -337,3 +337,47 @@ function resolveResponseModelName(op: Operation): string | null {
   if (ref.kind === 'nullable' && ref.inner.kind === 'model') return ref.inner.name;
   return null;
 }
+
+/** One pair of distinct paths that resolved to the same `mountOn.methodName`. */
+export interface ResolvedMethodCollision {
+  /** The shared `Service.method_name` key both paths resolved to. */
+  key: string;
+  first: { httpMethod: string; path: string };
+  second: { httpMethod: string; path: string };
+}
+
+/**
+ * Find every pair of distinct paths that resolve to the same SDK method name.
+ *
+ * Emitters already refuse to generate on a collision, but they only run inside
+ * the per-language build matrix — so a spec addition that collides fails every
+ * matrix job minutes in, with no cheap way to catch it first. Surfacing the same
+ * check from `oagen resolve` turns that into a seconds-long precheck.
+ *
+ * Returns every collision rather than throwing on the first, so a spec that
+ * introduces several is fixed in one pass instead of one CI round-trip each.
+ *
+ * Callers that generate a subset of services must filter to the operations they
+ * will actually emit before calling this: a collision between two out-of-scope
+ * paths is not that run's problem.
+ */
+export function findResolvedMethodCollisions(resolved: ResolvedOperation[]): ResolvedMethodCollision[] {
+  const seen = new Map<string, { httpMethod: string; path: string }>();
+  const collisions: ResolvedMethodCollision[] = [];
+
+  for (const r of resolved) {
+    const key = `${r.mountOn}.${r.methodName}`;
+    const current = { httpMethod: r.operation.httpMethod.toUpperCase(), path: r.operation.path };
+    const existing = seen.get(key);
+
+    // Same path twice is the same operation seen through two services, not a
+    // collision — only distinct paths competing for one name are.
+    if (existing && existing.path !== current.path) {
+      collisions.push({ key, first: existing, second: current });
+      continue;
+    }
+    if (!existing) seen.set(key, current);
+  }
+
+  return collisions;
+}
