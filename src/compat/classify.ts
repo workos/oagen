@@ -529,6 +529,9 @@ function classifyParameterChanges(
       );
       if (isRename) continue;
 
+      // Record where the parameter landed: a non-terminal insertion displaces
+      // every later positional parameter, and consumers reconcile those
+      // order-sensitive position changes against the insertion point.
       const isTerminal = candParam.position === candParams.length - 1;
       const category: CompatChangeCategory = candParam.required
         ? 'parameter_requiredness_increased'
@@ -542,7 +545,7 @@ function classifyParameterChanges(
             category,
             symbol: baseline.fqName,
             old: { parameter: '(absent)' },
-            new: { parameter: candParam.publicName, required: 'true' },
+            new: { parameter: candParam.publicName, required: 'true', position: String(candParam.position) },
             message: `Required parameter "${candParam.publicName}" added to "${baseline.displayName}"`,
             policy,
             specRef,
@@ -554,7 +557,7 @@ function classifyParameterChanges(
             category,
             symbol: baseline.fqName,
             old: { parameter: '(absent)' },
-            new: { parameter: candParam.publicName },
+            new: { parameter: candParam.publicName, position: String(candParam.position) },
             message: `Optional parameter "${candParam.publicName}" added to "${baseline.displayName}"`,
             policy,
             specRef,

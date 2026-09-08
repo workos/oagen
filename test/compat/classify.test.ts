@@ -352,6 +352,78 @@ describe('classifySymbolChanges', () => {
       const added = changes.find((c) => c.category === 'parameter_added_optional_terminal');
       expect(added).toBeDefined();
       expect(added!.severity).toBe('additive');
+      expect(added!.new.position).toBe('1');
+    });
+
+    it('records where an added parameter landed so displaced positions can be reconciled', () => {
+      const baseline = makeSymbol({
+        fqName: 'Svc.doIt',
+        parameters: [
+          {
+            publicName: 'x',
+            position: 0,
+            required: true,
+            nullable: false,
+            hasDefault: false,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+          {
+            publicName: 'opts',
+            position: 1,
+            required: false,
+            nullable: false,
+            hasDefault: true,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+        ],
+      });
+      const candidate = makeSymbol({
+        fqName: 'Svc.doIt',
+        parameters: [
+          {
+            publicName: 'x',
+            position: 0,
+            required: true,
+            nullable: false,
+            hasDefault: false,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+          {
+            publicName: 'y',
+            position: 1,
+            required: false,
+            nullable: false,
+            hasDefault: true,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+          {
+            publicName: 'opts',
+            position: 2,
+            required: false,
+            nullable: false,
+            hasDefault: true,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+        ],
+      });
+      const changes = classifySymbolChanges(baseline, candidate, getDefaultPolicy('go'));
+      const added = changes.find((c) => c.category === 'parameter_added_non_terminal_optional');
+      expect(added).toBeDefined();
+      expect(added!.new.position).toBe('1');
+      const displaced = changes.find((c) => c.category === 'parameter_position_changed_order_sensitive');
+      expect(displaced).toBeDefined();
+      expect(displaced!.old.position).toBe('1');
+      expect(displaced!.new.position).toBe('2');
     });
   });
 });
