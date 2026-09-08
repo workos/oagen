@@ -425,6 +425,54 @@ describe('classifySymbolChanges', () => {
       expect(displaced!.old.position).toBe('1');
       expect(displaced!.new.position).toBe('2');
     });
+
+    it('records the position of an added required parameter as well', () => {
+      const baseline = makeSymbol({
+        fqName: 'Svc.doIt',
+        parameters: [
+          {
+            publicName: 'x',
+            position: 0,
+            required: true,
+            nullable: false,
+            hasDefault: false,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+        ],
+      });
+      const candidate = makeSymbol({
+        fqName: 'Svc.doIt',
+        parameters: [
+          {
+            publicName: 'x',
+            position: 0,
+            required: true,
+            nullable: false,
+            hasDefault: false,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+          {
+            publicName: 'y',
+            position: 1,
+            required: true,
+            nullable: false,
+            hasDefault: false,
+            passing: 'positional',
+            type: { name: 'string' },
+            sensitivity: { order: true, publicName: false, requiredness: true, type: true },
+          },
+        ],
+      });
+      const changes = classifySymbolChanges(baseline, candidate, getDefaultPolicy('go'));
+      const added = changes.find((c) => c.category === 'parameter_requiredness_increased');
+      expect(added).toBeDefined();
+      expect(added!.new.required).toBe('true');
+      expect(added!.new.position).toBe('1');
+    });
   });
 });
 
