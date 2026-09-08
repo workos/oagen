@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/workos/oagen/compare/v0.30.0...v0.30.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **compat:** record where an added parameter landed ([#165](https://github.com/workos/oagen/issues/165)) ([9424d55](https://github.com/workos/oagen/commit/9424d55698985636db1dbb2c1774215f706744e5))
+
 ## [0.30.0](https://github.com/workos/oagen/compare/v0.29.4...v0.30.0) (2026-09-01)
 
 
