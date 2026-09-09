@@ -579,15 +579,41 @@ function buildOperation(
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
 
+  // A parameter the spec declares both as `in: query` and as a request-body
+  // property is one value with two wire locations. On a body-carrying method
+  // it travels in the body only: duplicating it into the URL puts body-grade
+  // material (OAuth codes, client secrets) into access logs and exception
+  // traces, and emitters that surface both copies grow a second public
+  // parameter for the same field. RFC 6749 §4.1.3 puts token-request
+  // parameters in the body for the same reason. GET/DELETE keep every
+  // declared query parameter — they have no body to prefer.
+  const bodyOwnedNames = BODY_CARRYING_METHODS.has(method)
+    ? collectBodyPropertyNames(selectRequestBodyContent(op.requestBody).schema, componentSchemas)
+    : new Set<string>();
+  const wireParams =
+    bodyOwnedNames.size > 0 ? allParams.filter((p) => !(p.in === 'query' && bodyOwnedNames.has(p.name))) : allParams;
+
   // Use the service name as context so inline parameter enums get qualified
   // names. e.g., service "Auth" + param "provider" → "AuthProvider".
   const opContext = serviceName;
-  const pathParams = extractParams(allParams, 'path', opContext, componentSchemas);
-  const queryParams = extractParams(allParams, 'query', opContext, componentSchemas);
-  const headerParams = extractParams(allParams, 'header', opContext, componentSchemas).filter(
+  const pathParams = extractParams(wireParams, 'path', opContext, componentSchemas);
+  const queryParams = extractParams(wireParams, 'query', opContext, componentSchemas);
+  const headerParams = extractParams(wireParams, 'header', opContext, componentSchemas).filter(
     (p) => p.name.toLowerCase() !== 'idempotency-key',
   );
-  const cookieParams = extractParams(allParams, 'cookie', opContext, componentSchemas);
+  const cookieParams = extractParams(wireParams, 'cookie', opContext, componentSchemas);
+  // Keep the body-owned declarations on the operation so downstream passes
+  // (inline-enum collection, the compat surface) still see what the spec
+  // declared, even though no emitter serializes them to the URL.
+  const bodyOwnedQueryParams =
+    bodyOwnedNames.size > 0
+      ? extractParams(
+          allParams.filter((p) => p.in === 'query' && bodyOwnedNames.has(p.name)),
+          'query',
+          opContext,
+          componentSchemas,
+        )
+      : [];
 
   const reqBodyModels: Model[] = [];
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
@@ -640,6 +666,7 @@ function buildOperation(
       path,
       pathParams,
       queryParams,
+      bodyOwnedQueryParams: bodyOwnedQueryParams.length > 0 ? bodyOwnedQueryParams : undefined,
       headerParams,
       cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
       requestBody,
@@ -809,33 +836,77 @@ function resolveSchemaRefObject(
   return componentSchemas[match[1]];
 }
 
+type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+
+/** HTTP methods whose request body is the primary parameter carrier. */
+const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['post', 'put', 'patch']);
+
+/**
+ * Pick the request body's schema and wire encoding from its content map, in
+ * priority order. JSON wins over form encodings; binary and text bodies may
+ * legitimately carry no schema at all.
+ */
+function selectRequestBodyContent(body: RequestBodyObject | undefined): {
+  encoding: RequestBodyEncoding;
+  schema?: SchemaObject;
+} {
+  const content = body?.content;
+  if (!content) return { encoding: 'json' };
+  if (content['application/json']?.schema) {
+    return { encoding: 'json', schema: content['application/json'].schema };
+  }
+  if (content['multipart/form-data']?.schema) {
+    return { encoding: 'form-data', schema: content['multipart/form-data'].schema };
+  }
+  if (content['application/x-www-form-urlencoded']?.schema) {
+    return { encoding: 'form-urlencoded', schema: content['application/x-www-form-urlencoded'].schema };
+  }
+  if (content['application/octet-stream']) {
+    return { encoding: 'binary', schema: content['application/octet-stream'].schema };
+  }
+  if (content['text/plain']) {
+    return { encoding: 'text', schema: content['text/plain'].schema };
+  }
+  return { encoding: 'json' };
+}
+
+/**
+ * Every property name a request-body schema declares, following `$ref`s and
+ * descending through `allOf` / `oneOf` / `anyOf` composition. Used to decide
+ * which `in: query` declarations are body-owned duplicates.
+ */
+function collectBodyPropertyNames(
+  schema: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  out: Set<string> = new Set(),
+  seen: Set<string> = new Set(),
+): Set<string> {
+  if (!schema) return out;
+
+  const ref = (schema as { $ref?: string }).$ref;
+  if (ref) {
+    if (seen.has(ref)) return out;
+    seen.add(ref);
+    return collectBodyPropertyNames(resolveSchemaRefObject(schema, componentSchemas), componentSchemas, out, seen);
+  }
+
+  for (const name of Object.keys(schema.properties ?? {})) out.add(name);
+  for (const sub of [...(schema.allOf ?? []), ...(schema.oneOf ?? []), ...(schema.anyOf ?? [])]) {
+    collectBodyPropertyNames(sub, componentSchemas, out, seen);
+  }
+  return out;
+}
+
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
   inlineModels: Model[],
-): { body?: TypeRef; encoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text' } {
+): { body?: TypeRef; encoding?: RequestBodyEncoding } {
   if (!body?.content) return {};
 
-  // Detect encoding and find schema from content type in priority order
-  let encoding: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text' = 'json';
-  let schema: SchemaObject | undefined;
-
-  if (body.content['application/json']?.schema) {
-    encoding = 'json';
-    schema = body.content['application/json']!.schema;
-  } else if (body.content['multipart/form-data']?.schema) {
-    encoding = 'form-data';
-    schema = body.content['multipart/form-data']!.schema;
-  } else if (body.content['application/x-www-form-urlencoded']?.schema) {
-    encoding = 'form-urlencoded';
-    schema = body.content['application/x-www-form-urlencoded']!.schema;
-  } else if (body.content['application/octet-stream']) {
-    encoding = 'binary';
-    schema = body.content['application/octet-stream']!.schema;
-  } else if (body.content['text/plain']) {
-    encoding = 'text';
-    schema = body.content['text/plain']!.schema;
-  }
+  const selected = selectRequestBodyContent(body);
+  const encoding = selected.encoding;
+  let schema = selected.schema;
 
   if (!schema) {
     // For binary/text, a schema is optional — produce a primitive TypeRef
