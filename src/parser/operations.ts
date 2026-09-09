@@ -44,7 +44,7 @@ interface OperationObject {
   description?: string;
   tags?: string[];
   parameters?: RawParameterObject[];
-  requestBody?: RequestBodyObject;
+  requestBody?: RawRequestBodyObject;
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
@@ -122,6 +122,50 @@ interface RequestBodyObject {
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
+/**
+ * A request body as written in the spec: an inline Request Body Object or a
+ * Reference Object into `components/requestBodies`. The bundler never inlines
+ * those refs (`dereference: false`), so they must be resolved before use.
+ */
+type RawRequestBodyObject = RequestBodyObject | { $ref: string };
+
+/**
+ * Resolve a raw request body to a concrete Request Body Object, following
+ * `$ref` chains into `components/requestBodies` with a cycle guard. Throws on
+ * an unresolvable ref so a malformed spec fails at parse time instead of
+ * silently losing the body — and with it the body-ownership rule that keeps
+ * duplicated secrets out of the query string.
+ */
+function resolveRequestBodyRef(
+  raw: RawRequestBodyObject | undefined,
+  componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
+  operationContext: string,
+): RequestBodyObject | undefined {
+  if (!raw) return undefined;
+  const seenRefs = new Set<string>();
+  let current: RawRequestBodyObject = raw;
+
+  while ('$ref' in current) {
+    if (seenRefs.has(current.$ref)) {
+      throw new Error(`Circular request body $ref chain starting at "${current.$ref}" in ${operationContext}.`);
+    }
+    seenRefs.add(current.$ref);
+
+    const match = /^#\/components\/requestBodies\/(.+)$/.exec(current.$ref);
+    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
+    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    const resolved = refName ? componentRequestBodies?.[refName] : undefined;
+    if (!resolved) {
+      throw new Error(
+        `Unresolved request body $ref "${current.$ref}" in ${operationContext}: no matching entry under components/requestBodies.`,
+      );
+    }
+    current = resolved as unknown as RawRequestBodyObject;
+  }
+
+  return current;
+}
+
 interface ResponseObject {
   description?: string;
   content?: Record<string, { schema?: SchemaObject }>;
@@ -139,6 +183,7 @@ export function extractOperations(
   operationIdTransform?: (id: string) => string,
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
+  componentRequestBodies?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -163,6 +208,7 @@ export function extractOperations(
         serviceName,
         componentSchemas,
         componentParameters,
+        componentRequestBodies,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
@@ -476,6 +522,7 @@ function extractParameterGroups(
  */
 function extractBodyParameterGroups(
   op: OperationObject,
+  requestBody: RequestBodyObject | undefined,
   operationContext: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): ParameterGroup[] | undefined {
@@ -485,7 +532,7 @@ function extractBodyParameterGroups(
   // Collect the body schema's oneOf variant fields so we can resolve types.
   // The body schema has been structurally rewritten to allOf: [base, { oneOf: [...] }]
   // by the spec generator; the variant properties live inside oneOf branches.
-  const bodySchema = op.requestBody?.content?.['application/json']?.schema;
+  const bodySchema = requestBody?.content?.['application/json']?.schema;
   const variantFieldSchemas = collectVariantFieldSchemas(bodySchema, componentSchemas);
 
   const groups: ParameterGroup[] = [];
@@ -564,8 +611,12 @@ function buildOperation(
   serviceName?: string,
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
+  componentRequestBodies?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[] } {
   const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  // Resolve a `components/requestBodies` ref up front so body extraction, body
+  // parameter groups, and the body-ownership rule below all read one object.
+  const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
   // An operation-level parameter overrides a path-level one with the same
   // (name, in) identity rather than adding a second entry. Operation params come
   // last, so last-write-wins; Map.set keeps the original insertion position, so
@@ -587,9 +638,19 @@ function buildOperation(
   // parameter for the same field. RFC 6749 §4.1.3 puts token-request
   // parameters in the body for the same reason. GET/DELETE keep every
   // declared query parameter — they have no body to prefer.
-  const bodyOwnedNames = BODY_CARRYING_METHODS.has(method)
-    ? collectBodyPropertyNames(selectRequestBodyContent(op.requestBody).schema, componentSchemas)
-    : new Set<string>();
+  //
+  // One carve-out: a query parameter named by `x-mutually-exclusive-parameter-groups`
+  // stays a parameter. The extension models it as one, the group resolver
+  // below looks it up in the parameter arrays, and emitters already route
+  // groups into the body on body-carrying methods, so nothing reaches the URL.
+  const groupedQueryNames = collectParameterGroupMemberNames(op);
+  const bodyOwnedNames = new Set<string>();
+  if (BODY_CARRYING_METHODS.has(method)) {
+    const bodySchema = selectRequestBodyContent(requestBodyObject).schema;
+    for (const name of collectBodyPropertyNames(bodySchema, componentSchemas)) {
+      if (!groupedQueryNames.has(name)) bodyOwnedNames.add(name);
+    }
+  }
   const wireParams =
     bodyOwnedNames.size > 0 ? allParams.filter((p) => !(p.in === 'query' && bodyOwnedNames.has(p.name))) : allParams;
 
@@ -616,7 +677,7 @@ function buildOperation(
       : [];
 
   const reqBodyModels: Model[] = [];
-  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
+  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(requestBodyObject, op, reqBodyModels);
   const {
     response,
     successResponses,
@@ -652,7 +713,7 @@ function buildOperation(
   const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel);
 
   // Extract mutually-exclusive body parameter groups
-  const bodyParamGroups = extractBodyParameterGroups(op, opLabel, componentSchemas);
+  const bodyParamGroups = extractBodyParameterGroups(op, requestBodyObject, opLabel, componentSchemas);
 
   // Merge both sources into a single parameterGroups array
   const parameterGroups =
@@ -870,31 +931,65 @@ function selectRequestBodyContent(body: RequestBodyObject | undefined): {
   return { encoding: 'json' };
 }
 
+/** Parameter names referenced by any `x-mutually-exclusive-parameter-groups` variant. */
+function collectParameterGroupMemberNames(op: OperationObject): Set<string> {
+  const names = new Set<string>();
+  const raw = op['x-mutually-exclusive-parameter-groups'];
+  if (!raw || typeof raw !== 'object') return names;
+  // Malformed shapes are left for extractParameterGroups to report.
+  for (const groupDef of Object.values(raw)) {
+    const variants = groupDef && typeof groupDef === 'object' ? groupDef.variants : undefined;
+    if (!variants || typeof variants !== 'object') continue;
+    for (const members of Object.values(variants)) {
+      if (!Array.isArray(members)) continue;
+      for (const member of members) if (typeof member === 'string') names.add(member);
+    }
+  }
+  return names;
+}
+
 /**
- * Every property name a request-body schema declares, following `$ref`s and
- * descending through `allOf` / `oneOf` / `anyOf` composition. Used to decide
- * which `in: query` declarations are body-owned duplicates.
+ * Every property name a request body is guaranteed to accept, following
+ * `$ref`s and descending through composition. `allOf` members all apply, so
+ * their properties union. `oneOf` / `anyOf` alternatives are choices, so only
+ * a property every non-null alternative declares counts — otherwise a caller
+ * on another branch would have no slot for the value in either the body or
+ * the query. Used to decide which `in: query` declarations are body-owned.
  */
 function collectBodyPropertyNames(
   schema: SchemaObject | undefined,
   componentSchemas: Record<string, SchemaObject> | undefined,
-  out: Set<string> = new Set(),
-  seen: Set<string> = new Set(),
+  seen: ReadonlySet<string> = new Set(),
 ): Set<string> {
-  if (!schema) return out;
+  if (!schema) return new Set();
 
   const ref = (schema as { $ref?: string }).$ref;
   if (ref) {
-    if (seen.has(ref)) return out;
-    seen.add(ref);
-    return collectBodyPropertyNames(resolveSchemaRefObject(schema, componentSchemas), componentSchemas, out, seen);
+    // Cycle guard is per path: the same component may legitimately appear in
+    // sibling branches and must count for each of them.
+    if (seen.has(ref)) return new Set();
+    return collectBodyPropertyNames(
+      resolveSchemaRefObject(schema, componentSchemas),
+      componentSchemas,
+      new Set([...seen, ref]),
+    );
   }
 
-  for (const name of Object.keys(schema.properties ?? {})) out.add(name);
-  for (const sub of [...(schema.allOf ?? []), ...(schema.oneOf ?? []), ...(schema.anyOf ?? [])]) {
-    collectBodyPropertyNames(sub, componentSchemas, out, seen);
+  const names = new Set(Object.keys(schema.properties ?? {}));
+  for (const sub of schema.allOf ?? []) {
+    for (const name of collectBodyPropertyNames(sub, componentSchemas, seen)) names.add(name);
   }
-  return out;
+  for (const alternatives of [schema.oneOf, schema.anyOf]) {
+    const branches = (alternatives ?? []).filter((alt) => alt.type !== 'null');
+    if (branches.length === 0) continue;
+    let common: Set<string> | undefined;
+    for (const branch of branches) {
+      const branchNames = collectBodyPropertyNames(branch, componentSchemas, seen);
+      common = common ? new Set([...common].filter((name) => branchNames.has(name))) : branchNames;
+    }
+    for (const name of common ?? []) names.add(name);
+  }
+  return names;
 }
 
 function extractRequestBody(

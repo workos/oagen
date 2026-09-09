@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import type { Enum } from '../../src/ir/types.js';
+import type { SchemaObject } from '../../src/parser/schemas.js';
 
 describe('extractOperations', () => {
   it('groups operations by first path segment', () => {
@@ -1557,5 +1558,116 @@ describe('body-owned query parameters keep their inline enums', () => {
       'authorization_code',
       'urn:ietf:params:oauth:grant-type:token-exchange',
     ]);
+  });
+});
+
+describe('body-owned query parameters: composition, groups, and body refs', () => {
+  const ok = { '200': { description: 'ok' } };
+  const q = (name: string) => ({ name, in: 'query' as const, required: false, schema: { type: 'string' } });
+  const obj = (...names: string[]): SchemaObject => ({
+    type: 'object',
+    properties: Object.fromEntries(names.map((n) => [n, { type: 'string' }])),
+  });
+  const jsonBody = (schema: SchemaObject) => ({ required: true, content: { 'application/json': { schema } } });
+
+  it('only treats properties every oneOf alternative declares as body-owned', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [q('client_id'), q('code'), q('subject_token')],
+          requestBody: jsonBody({
+            oneOf: [obj('client_id', 'code'), obj('client_id', 'subject_token'), { type: 'null' }],
+          }),
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    // `code` and `subject_token` each live on one branch only; a caller on the
+    // other branch would have nowhere to send them, so they stay in the query.
+    expect(op.queryParams.map((p) => p.name)).toEqual(['code', 'subject_token']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id']);
+  });
+
+  it('unions allOf members and intersects anyOf alternatives', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [q('client_id'), q('code'), q('subject_token')],
+          requestBody: jsonBody({ allOf: [obj('client_id'), { anyOf: [obj('code'), obj('code', 'subject_token')] }] }),
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['subject_token']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id', 'code']);
+  });
+
+  it('leaves x-mutually-exclusive-parameter-groups members as query parameters', () => {
+    const paths = {
+      '/authorization/resources': {
+        post: {
+          operationId: 'AuthorizationController_create',
+          parameters: [q('parent_resource_id'), q('parent_external_id')],
+          requestBody: jsonBody(obj('parent_resource_id', 'name')),
+          'x-mutually-exclusive-parameter-groups': {
+            parent: {
+              optional: true,
+              variants: { by_id: ['parent_resource_id'], by_external_id: ['parent_external_id'] },
+            },
+          },
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['parent_resource_id', 'parent_external_id']);
+    expect(op.bodyOwnedQueryParams).toBeUndefined();
+    expect(op.parameterGroups).toHaveLength(1);
+    expect(op.parameterGroups![0].variants.map((v) => v.parameters.map((p) => p.name))).toEqual([
+      ['parent_resource_id'],
+      ['parent_external_id'],
+    ]);
+  });
+
+  it('resolves components/requestBodies refs before deciding ownership', () => {
+    const componentRequestBodies = { TokenBody: jsonBody(obj('client_id', 'code')) };
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [q('client_id'), q('code'), q('trace')],
+          requestBody: { $ref: '#/components/requestBodies/TokenBody' },
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths, undefined, undefined, undefined, componentRequestBodies).services[0]
+      .operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['trace']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id', 'code']);
+    // The referenced body is extracted too — previously a $ref body was dropped.
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'SSOTokenRequest' });
+  });
+
+  it('fails loudly on an unresolvable components/requestBodies ref', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          requestBody: { $ref: '#/components/requestBodies/Missing' },
+          responses: ok,
+        },
+      },
+    };
+
+    expect(() => extractOperations(paths)).toThrow(/Unresolved request body \$ref/);
   });
 });
