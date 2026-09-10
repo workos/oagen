@@ -30,6 +30,8 @@ jobs:
 
       - name: Install Dependencies
         run: npm install
+        env:
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: npmjs
 
       - name: Tear down Socket Firewall
         uses: workos/setup-socket-firewall/teardown@ca93dd8aa351f54f4729fe3377a9be23c631c25d

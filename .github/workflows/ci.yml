@@ -28,5 +28,7 @@ jobs:
           allow-external-fork-fallback: true
 
       - run: npm install
+        env:
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: npmjs
       - run: npm run typecheck
       - run: npm test
