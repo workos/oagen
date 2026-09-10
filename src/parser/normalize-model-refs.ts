@@ -24,7 +24,7 @@ export function validateModelRefs(spec: ApiSpec): void {
 
   for (const service of spec.services) {
     for (const op of service.operations) {
-      for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams]) {
+      for (const p of [...op.pathParams, ...op.queryParams, ...(op.bodyOwnedQueryParams ?? []), ...op.headerParams]) {
         walkRef(p.type, `${service.name}.${op.name}.${p.name}`);
       }
       if (op.requestBody) walkRef(op.requestBody, `${service.name}.${op.name}.requestBody`);

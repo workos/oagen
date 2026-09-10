@@ -188,7 +188,12 @@ interface Operation {
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   pathParams: Parameter[];
+  // Excludes `in: query` params that a POST/PUT/PATCH request body also declares;
+  // those travel body-only and are kept in bodyOwnedQueryParams instead.
   queryParams: Parameter[];
+  // Query declarations the body owns (see above). Emitters never serialize
+  // these to the URL; enum collection and the compat surface still walk them.
+  bodyOwnedQueryParams?: Parameter[];
   headerParams: Parameter[];
   cookieParams?: Parameter[]; // Present only when cookie params exist
   requestBody?: TypeRef;

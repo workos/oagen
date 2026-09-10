@@ -49,6 +49,14 @@ export interface Operation {
   path: string;
   pathParams: Parameter[];
   queryParams: Parameter[];
+  /**
+   * Query parameters the spec also declares as request-body properties on a
+   * body-carrying method (POST/PUT/PATCH). They travel in the body only, so
+   * they are excluded from `queryParams`; they are kept here so inline enums
+   * they declare stay reachable and the compat surface still sees them.
+   * Emitters never serialize these to the URL.
+   */
+  bodyOwnedQueryParams?: Parameter[];
   headerParams: Parameter[];
   cookieParams?: Parameter[];
   requestBody?: TypeRef;
@@ -459,7 +467,13 @@ export function assignModelsToServices(
       for (const name of collectModelRefs(op.response)) {
         referencedModels.add(name);
       }
-      for (const param of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
+      for (const param of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
         for (const name of collectModelRefs(param.type)) {
           referencedModels.add(name);
         }

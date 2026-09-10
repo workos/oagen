@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { extractOperations } from '../../src/parser/operations.js';
+import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
+import type { Enum } from '../../src/ir/types.js';
+import type { SchemaObject } from '../../src/parser/schemas.js';
 
 describe('extractOperations', () => {
   it('groups operations by first path segment', () => {
@@ -1368,5 +1371,303 @@ describe('extractOperations', () => {
       expect(group.variants[0].optionalParameters).toBeUndefined();
       expect(group.variants[1].optionalParameters).toBeUndefined();
     });
+  });
+});
+
+describe('body-owned query parameters', () => {
+  const ok = { '200': { description: 'ok' } };
+  const tokenBody = {
+    type: 'object',
+    properties: {
+      client_id: { type: 'string' },
+      client_secret: { type: 'string' },
+      code: { type: 'string' },
+      grant_type: { type: 'string', enum: ['authorization_code'] },
+      subject_token: { type: 'string' },
+    },
+    required: ['client_id', 'client_secret', 'grant_type'],
+  };
+  const duplicatedQuery = [
+    { name: 'client_id', in: 'query' as const, required: true, schema: { type: 'string' } },
+    { name: 'client_secret', in: 'query' as const, required: true, schema: { type: 'string' } },
+    { name: 'code', in: 'query' as const, required: false, schema: { type: 'string' } },
+    {
+      name: 'grant_type',
+      in: 'query' as const,
+      required: true,
+      schema: { type: 'string', enum: ['authorization_code'] },
+    },
+    { name: 'trace', in: 'query' as const, required: false, schema: { type: 'string' } },
+  ];
+
+  it('drops query params a POST body also declares, keeping the rest', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: duplicatedQuery,
+          requestBody: { required: true, content: { 'application/json': { schema: tokenBody } } },
+          responses: ok,
+        },
+      },
+    };
+
+    const { services, inlineModels } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['trace']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id', 'client_secret', 'code', 'grant_type']);
+    // The body keeps every field, so the SDK signature still exposes `code`.
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'SSOTokenRequest' });
+    const bodyModel = inlineModels.find((m) => m.name === 'SSOTokenRequest');
+    expect(bodyModel?.fields.map((f) => f.name)).toEqual([
+      'client_id',
+      'client_secret',
+      'code',
+      'grant_type',
+      'subject_token',
+    ]);
+  });
+
+  it('resolves $ref and allOf bodies when deciding ownership', () => {
+    const componentSchemas = {
+      TokenBase: { type: 'object', properties: { client_id: { type: 'string' }, client_secret: { type: 'string' } } },
+      TokenQueryDto: {
+        allOf: [
+          { $ref: '#/components/schemas/TokenBase' },
+          { type: 'object', properties: { code: { type: 'string' } } },
+        ],
+      },
+    };
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: duplicatedQuery,
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/TokenQueryDto' } } },
+          },
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    const op = services[0].operations[0];
+    // grant_type is not a body property here, so it stays a query param.
+    expect(op.queryParams.map((p) => p.name)).toEqual(['grant_type', 'trace']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id', 'client_secret', 'code']);
+  });
+
+  it('keeps every query param on methods without a body', () => {
+    const paths = {
+      '/sso/token': {
+        get: {
+          operationId: 'SsoController_tokenInfo',
+          parameters: duplicatedQuery,
+          responses: ok,
+        },
+        delete: {
+          operationId: 'SsoController_revoke',
+          parameters: duplicatedQuery,
+          requestBody: { required: true, content: { 'application/json': { schema: tokenBody } } },
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    for (const op of services[0].operations) {
+      expect(op.queryParams.map((p) => p.name)).toEqual(['client_id', 'client_secret', 'code', 'grant_type', 'trace']);
+      expect(op.bodyOwnedQueryParams).toBeUndefined();
+    }
+  });
+
+  it('leaves POST query params alone when the body shares no names', () => {
+    const paths = {
+      '/users/{user_id}/connected_accounts/{slug}': {
+        post: {
+          operationId: 'ConnectedAccountsController_create',
+          parameters: [
+            { name: 'user_id', in: 'path' as const, required: true, schema: { type: 'string' } },
+            { name: 'slug', in: 'path' as const, required: true, schema: { type: 'string' } },
+            { name: 'organization_id', in: 'query' as const, required: false, schema: { type: 'string' } },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { scopes: { type: 'array', items: { type: 'string' } } } },
+              },
+            },
+          },
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['organization_id']);
+    expect(op.bodyOwnedQueryParams).toBeUndefined();
+    expect(op.pathParams.map((p) => p.name)).toEqual(['user_id', 'slug']);
+  });
+});
+
+describe('body-owned query parameters keep their inline enums', () => {
+  it('still promotes an inline enum declared only by a body-owned query param', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [
+            {
+              name: 'grant_type',
+              in: 'query' as const,
+              required: true,
+              schema: {
+                type: 'string',
+                enum: ['authorization_code', 'urn:ietf:params:oauth:grant-type:token-exchange'],
+              },
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { grant_type: { type: 'string' }, code: { type: 'string' } } },
+              },
+            },
+          },
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const op = services[0].operations[0];
+    expect(op.queryParams).toEqual([]);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['grant_type']);
+
+    // The published SDKs already ship this enum under the query-derived name;
+    // dropping the declaration from queryParams must not remove the type.
+    const enums: Enum[] = [];
+    collectInlineEnumsFromOperations(services, enums);
+    expect(enums.map((e) => e.name)).toEqual(['SSOGrantType']);
+    expect(enums[0].values.map((v) => v.value)).toEqual([
+      'authorization_code',
+      'urn:ietf:params:oauth:grant-type:token-exchange',
+    ]);
+  });
+});
+
+describe('body-owned query parameters: composition, groups, and body refs', () => {
+  const ok = { '200': { description: 'ok' } };
+  const q = (name: string) => ({ name, in: 'query' as const, required: false, schema: { type: 'string' } });
+  const obj = (...names: string[]): SchemaObject => ({
+    type: 'object',
+    properties: Object.fromEntries(names.map((n) => [n, { type: 'string' }])),
+  });
+  const jsonBody = (schema: SchemaObject) => ({ required: true, content: { 'application/json': { schema } } });
+
+  it('only treats properties every oneOf alternative declares as body-owned', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [q('client_id'), q('code'), q('subject_token')],
+          requestBody: jsonBody({
+            oneOf: [obj('client_id', 'code'), obj('client_id', 'subject_token'), { type: 'null' }],
+          }),
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    // `code` and `subject_token` each live on one branch only; a caller on the
+    // other branch would have nowhere to send them, so they stay in the query.
+    expect(op.queryParams.map((p) => p.name)).toEqual(['code', 'subject_token']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id']);
+  });
+
+  it('unions allOf members and intersects anyOf alternatives', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [q('client_id'), q('code'), q('subject_token')],
+          requestBody: jsonBody({ allOf: [obj('client_id'), { anyOf: [obj('code'), obj('code', 'subject_token')] }] }),
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['subject_token']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id', 'code']);
+  });
+
+  it('leaves x-mutually-exclusive-parameter-groups members as query parameters', () => {
+    const paths = {
+      '/authorization/resources': {
+        post: {
+          operationId: 'AuthorizationController_create',
+          parameters: [q('parent_resource_id'), q('parent_external_id')],
+          requestBody: jsonBody(obj('parent_resource_id', 'name')),
+          'x-mutually-exclusive-parameter-groups': {
+            parent: {
+              optional: true,
+              variants: { by_id: ['parent_resource_id'], by_external_id: ['parent_external_id'] },
+            },
+          },
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['parent_resource_id', 'parent_external_id']);
+    expect(op.bodyOwnedQueryParams).toBeUndefined();
+    expect(op.parameterGroups).toHaveLength(1);
+    expect(op.parameterGroups![0].variants.map((v) => v.parameters.map((p) => p.name))).toEqual([
+      ['parent_resource_id'],
+      ['parent_external_id'],
+    ]);
+  });
+
+  it('resolves components/requestBodies refs before deciding ownership', () => {
+    const componentRequestBodies = { TokenBody: jsonBody(obj('client_id', 'code')) };
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          parameters: [q('client_id'), q('code'), q('trace')],
+          requestBody: { $ref: '#/components/requestBodies/TokenBody' },
+          responses: ok,
+        },
+      },
+    };
+
+    const op = extractOperations(paths, undefined, undefined, undefined, componentRequestBodies).services[0]
+      .operations[0];
+    expect(op.queryParams.map((p) => p.name)).toEqual(['trace']);
+    expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id', 'code']);
+    // The referenced body is extracted too — previously a $ref body was dropped.
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'SSOTokenRequest' });
+  });
+
+  it('fails loudly on an unresolvable components/requestBodies ref', () => {
+    const paths = {
+      '/sso/token': {
+        post: {
+          operationId: 'SsoController_token',
+          requestBody: { $ref: '#/components/requestBodies/Missing' },
+          responses: ok,
+        },
+      },
+    };
+
+    expect(() => extractOperations(paths)).toThrow(/Unresolved request body \$ref/);
   });
 });
