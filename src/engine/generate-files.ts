@@ -137,7 +137,13 @@ export function collectReferencedNames(
   // Seed: walk every operation's params, request body, response, errors, and pagination
   for (const service of services) {
     for (const op of service.operations) {
-      for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
+      for (const p of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
         collectFromTypeRef(p.type);
       }
       if (op.requestBody) collectFromTypeRef(op.requestBody);

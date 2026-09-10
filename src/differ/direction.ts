@@ -39,7 +39,13 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
         if (op.requestBody) requestSeeds.push(op.requestBody);
         // Parameters are caller-supplied too, so a model reached through one is
         // request-facing even when the operation has no body.
-        for (const param of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
+        for (const param of [
+          ...op.pathParams,
+          ...op.queryParams,
+          ...(op.bodyOwnedQueryParams ?? []),
+          ...op.headerParams,
+          ...(op.cookieParams ?? []),
+        ]) {
           requestSeeds.push(param.type);
         }
         responseSeeds.push(op.response);

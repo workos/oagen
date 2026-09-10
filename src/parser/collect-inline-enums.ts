@@ -18,7 +18,13 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
   const enumNames = new Set(enums.map((e) => e.name));
   for (const service of services) {
     for (const op of service.operations) {
-      for (const param of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
+      for (const param of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
         collectInlineEnumFromRef(param.type, enums, enumNames);
       }
     }

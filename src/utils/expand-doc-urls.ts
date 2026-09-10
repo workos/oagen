@@ -28,6 +28,7 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
         description: expand(op.description),
         pathParams: op.pathParams.map((p) => ({ ...p, description: expand(p.description) })),
         queryParams: op.queryParams.map((p) => ({ ...p, description: expand(p.description) })),
+        bodyOwnedQueryParams: op.bodyOwnedQueryParams?.map((p) => ({ ...p, description: expand(p.description) })),
         headerParams: op.headerParams.map((p) => ({ ...p, description: expand(p.description) })),
       })),
     })),
