@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.2](https://github.com/workos/oagen/compare/v0.30.1...v0.30.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* **parser:** send body-duplicated query params body-only ([#168](https://github.com/workos/oagen/issues/168)) ([ec1d19b](https://github.com/workos/oagen/commit/ec1d19bea36a1fef3e8b4c6a111b465931d6f3f4))
+
 ## [0.30.1](https://github.com/workos/oagen/compare/v0.30.0...v0.30.1) (2026-09-08)
 
 
