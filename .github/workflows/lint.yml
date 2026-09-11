@@ -8,14 +8,28 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .node-version
 
+      # Keep Socket Firewall active for all package-manager work. The fallback
+      # is only active for external public forks; trusted runs fail closed.
+      - name: Set up Socket Firewall
+        uses: workos/setup-socket-firewall@ca93dd8aa351f54f4729fe3377a9be23c631c25d
+        with:
+          token: ${{ secrets.PUBLIC_SOCKET_FIREWALL_TOKEN }}
+          allow-external-fork-fallback: true
+
       - run: npm install
+        env:
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: npmjs
       - run: npm run lint
       - run: npm run format
       - run: npx prettier --check '**/*.md'
