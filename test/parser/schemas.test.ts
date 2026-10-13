@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractSchemas, schemaToTypeRef } from '../../src/parser/schemas.js';
+import { extractSchemas, schemaToTypeRef, clearSchemaNameTransform } from '../../src/parser/schemas.js';
 
 describe('extractSchemas – backend suffix handling', () => {
   it('preserves Dto suffix in schema names', () => {
@@ -518,5 +518,186 @@ describe('schemaToTypeRef', () => {
     if (ref.kind === 'nullable') {
       expect(ref.inner.kind).not.toBe('nullable');
     }
+  });
+});
+
+describe('nullable enum components (#174)', () => {
+  // OAS 3.1 lets `null` appear in `enum:` next to `type: [x, 'null']`. The
+  // `null` is a nullability marker, not a member, and a `$ref` to such a
+  // component must carry that nullability instead of dropping it.
+
+  it('drops a null enum member instead of stringifying it to "null"', () => {
+    const { enums } = extractSchemas({
+      MemberForm: { type: ['string', 'null'], enum: ['a', 'b', null] },
+    });
+    expect(enums).toHaveLength(1);
+    expect(enums[0].name).toBe('MemberForm');
+    expect(enums[0].values.map((v) => v.name)).toEqual(['A', 'B']);
+    expect(enums[0].values.map((v) => v.value)).toEqual(['a', 'b']);
+  });
+
+  it('issue repro: $ref to a nullable enum component has the same shape as the oneOf-null form', () => {
+    const { models, enums } = extractSchemas({
+      Thing: {
+        type: 'object',
+        properties: {
+          asEnumMember: { $ref: '#/components/schemas/MemberForm' },
+          asUnion: { oneOf: [{ $ref: '#/components/schemas/UnionForm' }, { type: 'null' }] },
+        },
+        required: ['asEnumMember', 'asUnion'],
+      },
+      MemberForm: { type: ['string', 'null'], enum: ['a', 'b', null] },
+      UnionForm: { type: 'string', enum: ['a', 'b'] },
+    });
+    const thing = models.find((m) => m.name === 'Thing')!;
+    const asEnumMember = thing.fields.find((f) => f.name === 'asEnumMember')!;
+    const asUnion = thing.fields.find((f) => f.name === 'asUnion')!;
+    expect(asEnumMember.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'MemberForm' } });
+    expect(asUnion.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'UnionForm' } });
+
+    const memberForm = enums.find((e) => e.name === 'MemberForm')!;
+    expect(memberForm.values.map((v) => v.value)).toEqual(['a', 'b']);
+    expect(memberForm.values.some((v) => v.name === 'NULL')).toBe(false);
+    const unionForm = enums.find((e) => e.name === 'UnionForm')!;
+    expect(unionForm.values.map((v) => v.value)).toEqual(['a', 'b']);
+  });
+
+  it('resolves $ref to an OAS 3.0 `nullable: true` enum component as nullable(enum)', () => {
+    const { models, enums } = extractSchemas({
+      Thing: { type: 'object', properties: { state: { $ref: '#/components/schemas/State' } } },
+      State: { type: 'string', nullable: true, enum: ['on', 'off'] },
+    });
+    const state = models.find((m) => m.name === 'Thing')!.fields.find((f) => f.name === 'state')!;
+    expect(state.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'State' } });
+    expect(enums.find((e) => e.name === 'State')!.values.map((v) => v.value)).toEqual(['on', 'off']);
+  });
+
+  it('resolves $ref to a component that is nullable only via a null enum member as nullable(enum)', () => {
+    const { models, enums } = extractSchemas({
+      Thing: { type: 'object', properties: { state: { $ref: '#/components/schemas/State' } } },
+      State: { type: 'string', enum: ['on', 'off', null] },
+    });
+    const state = models.find((m) => m.name === 'Thing')!.fields.find((f) => f.name === 'state')!;
+    expect(state.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'State' } });
+    expect(enums.find((e) => e.name === 'State')!.values.map((v) => v.value)).toEqual(['on', 'off']);
+  });
+
+  it('still resolves $ref to a non-nullable enum component as a bare enum ref', () => {
+    const { models } = extractSchemas({
+      Thing: { type: 'object', properties: { state: { $ref: '#/components/schemas/State' } } },
+      State: { type: 'string', enum: ['on', 'off'] },
+    });
+    const state = models.find((m) => m.name === 'Thing')!.fields.find((f) => f.name === 'state')!;
+    expect(state.type).toEqual({ kind: 'enum', name: 'State' });
+  });
+
+  it('wraps oneOf: [{ $ref: NullableEnum }, { type: null }] exactly once', () => {
+    const { models } = extractSchemas({
+      Thing: {
+        type: 'object',
+        properties: {
+          state: { oneOf: [{ $ref: '#/components/schemas/State' }, { type: 'null' }] },
+        },
+      },
+      State: { type: ['string', 'null'], enum: ['on', 'off', null] },
+    });
+    const state = models.find((m) => m.name === 'Thing')!.fields.find((f) => f.name === 'state')!;
+    expect(state.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'State' } });
+  });
+
+  it('wraps anyOf: [{ $ref: NullableEnum }, { type: null }] exactly once', () => {
+    const { models } = extractSchemas({
+      Thing: {
+        type: 'object',
+        properties: {
+          state: { anyOf: [{ $ref: '#/components/schemas/State' }, { type: 'null' }] },
+        },
+      },
+      State: { type: 'string', nullable: true, enum: ['on', 'off'] },
+    });
+    const state = models.find((m) => m.name === 'Thing')!.fields.find((f) => f.name === 'state')!;
+    expect(state.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'State' } });
+  });
+
+  it('carries nullability through an array of $ref to a nullable enum', () => {
+    const { models } = extractSchemas({
+      Thing: {
+        type: 'object',
+        properties: {
+          states: { type: 'array', items: { $ref: '#/components/schemas/State' } },
+        },
+      },
+      State: { type: ['string', 'null'], enum: ['on', 'off', null] },
+    });
+    const states = models.find((m) => m.name === 'Thing')!.fields.find((f) => f.name === 'states')!;
+    expect(states.type).toEqual({
+      kind: 'array',
+      items: { kind: 'nullable', inner: { kind: 'enum', name: 'State' } },
+    });
+  });
+
+  it('does not adopt `default: null` as the enum default', () => {
+    const { enums } = extractSchemas({
+      State: { type: ['string', 'null'], enum: ['on', 'off', null], default: null },
+    });
+    expect(enums[0].default).toBeUndefined();
+    expect(enums[0].values.map((v) => v.value)).toEqual(['on', 'off']);
+  });
+
+  it('keeps a real default on a nullable enum component', () => {
+    const { enums } = extractSchemas({
+      State: { type: ['string', 'null'], enum: ['on', 'off', null], default: 'on' },
+    });
+    expect(enums[0].default).toBe('on');
+  });
+
+  it('clears nullable enum tracking alongside the enum set', () => {
+    extractSchemas({ State: { type: ['string', 'null'], enum: ['on', 'off', null] } });
+    expect(schemaToTypeRef({ $ref: '#/components/schemas/State' })).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'enum', name: 'State' },
+    });
+    clearSchemaNameTransform();
+    // With no extraction active, a $ref is not known to be an enum at all.
+    expect(schemaToTypeRef({ $ref: '#/components/schemas/State' })).toEqual({ kind: 'model', name: 'State' });
+  });
+
+  describe('inline field enums', () => {
+    it('maps `type: [string, null], enum: [a, b, null]` to nullable(enum) without a "null" member', () => {
+      const ref = schemaToTypeRef({ type: ['string', 'null'], enum: ['a', 'b', null] }, 'status');
+      expect(ref).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'Status', values: ['a', 'b'] } });
+    });
+
+    it('maps `type: string, enum: [a, b, null]` (null member only) to nullable(enum)', () => {
+      const ref = schemaToTypeRef({ type: 'string', enum: ['a', 'b', null] }, 'status');
+      expect(ref).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'Status', values: ['a', 'b'] } });
+    });
+
+    it('maps `type: string, nullable: true, enum: [a, b, null]` to nullable(enum) wrapped once', () => {
+      const ref = schemaToTypeRef({ type: 'string', nullable: true, enum: ['a', 'b', null] }, 'status');
+      expect(ref).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'Status', values: ['a', 'b'] } });
+    });
+
+    it('maps `enum: [a, null]` to a nullable literal, not a two-member enum', () => {
+      const ref = schemaToTypeRef({ type: ['string', 'null'], enum: ['a', null] }, 'status');
+      expect(ref).toEqual({ kind: 'nullable', inner: { kind: 'literal', value: 'a' } });
+    });
+
+    it('leaves a non-nullable inline enum untouched', () => {
+      const ref = schemaToTypeRef({ type: 'string', enum: ['a', 'b'] }, 'status');
+      expect(ref).toEqual({ kind: 'enum', name: 'Status', values: ['a', 'b'] });
+    });
+
+    it('promotes an inline nullable enum to a top-level enum without a NULL member', () => {
+      const { enums } = extractSchemas({
+        Thing: {
+          type: 'object',
+          properties: { status: { type: ['string', 'null'], enum: ['a', 'b', null] } },
+        },
+      });
+      expect(enums).toHaveLength(1);
+      expect(enums[0].values.map((v) => v.value)).toEqual(['a', 'b']);
+      expect(enums[0].values.map((v) => v.name)).toEqual(['A', 'B']);
+    });
   });
 });

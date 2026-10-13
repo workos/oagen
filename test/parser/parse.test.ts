@@ -262,3 +262,64 @@ components:
     }
   });
 });
+
+describe('parseSpec – nullable enum components (#174)', () => {
+  it('drops null enum members and carries component nullability through $ref end to end', async () => {
+    // Verbatim shape from the issue: `asEnumMember` reaches a nullable enum
+    // via `$ref`, `asUnion` reaches a plain enum via `oneOf: [..., null]`.
+    // Both must land as `nullable(enum)`, and MemberForm must not grow a
+    // bogus `NULL = "null"` member.
+    const spec = {
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/thing': {
+          get: {
+            operationId: 'getThing',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Thing' } } },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Thing: {
+            type: 'object',
+            properties: {
+              asEnumMember: { $ref: '#/components/schemas/MemberForm' },
+              asUnion: { oneOf: [{ $ref: '#/components/schemas/UnionForm' }, { type: 'null' }] },
+            },
+            required: ['asEnumMember', 'asUnion'],
+          },
+          MemberForm: { type: ['string', 'null'], enum: ['a', 'b', null] },
+          UnionForm: { type: 'string', enum: ['a', 'b'] },
+        },
+      },
+    };
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-174-'));
+    const specFile = path.join(tmpDir, 'issue-174.json');
+    try {
+      await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
+      const ir = await parseSpec(specFile);
+
+      const thing = ir.models.find((m) => m.name === 'Thing');
+      expect(thing).toBeDefined();
+      const asEnumMember = thing!.fields.find((f) => f.name === 'asEnumMember');
+      const asUnion = thing!.fields.find((f) => f.name === 'asUnion');
+      expect(asEnumMember?.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'MemberForm' } });
+      expect(asUnion?.type).toEqual({ kind: 'nullable', inner: { kind: 'enum', name: 'UnionForm' } });
+
+      const memberForm = ir.enums.find((e) => e.name === 'MemberForm');
+      expect(memberForm?.values.map((v) => v.value)).toEqual(['a', 'b']);
+      expect(memberForm?.values.some((v) => v.name === 'NULL')).toBe(false);
+      const unionForm = ir.enums.find((e) => e.name === 'UnionForm');
+      expect(unionForm?.values.map((v) => v.value)).toEqual(['a', 'b']);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+});
