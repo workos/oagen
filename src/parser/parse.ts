@@ -167,6 +167,7 @@ interface SecuritySchemeObject {
  *
  * Document order is preserved. Each entry carries its `securitySchemes` key as
  * `schemeName` so emitters can join `Operation.security[].schemeName` back to it.
+ * Schemes the IR cannot represent are omitted with a warning rather than silently.
  */
 function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObject>): AuthScheme[] | undefined {
   if (!securitySchemes) return undefined;
@@ -174,12 +175,21 @@ function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObjec
   for (const [schemeName, scheme] of Object.entries(securitySchemes)) {
     // Omit `description` entirely (rather than setting it to undefined) when absent.
     const common = scheme.description ? { schemeName, description: scheme.description } : { schemeName };
-    if (scheme.type === 'http' && scheme.scheme === 'bearer') {
+    // HTTP authentication scheme names are case-insensitive (RFC 9110 §11.1).
+    const httpScheme = scheme.type === 'http' ? scheme.scheme?.toLowerCase() : undefined;
+    if (httpScheme === 'bearer') {
       schemes.push({ kind: 'bearer', ...common });
+    } else if (httpScheme === 'basic') {
+      schemes.push({ kind: 'basic', ...common });
     } else if (scheme.type === 'apiKey' && scheme.in && scheme.name) {
       schemes.push({ kind: 'apiKey', ...common, in: scheme.in as 'header' | 'query' | 'cookie', name: scheme.name });
     } else if (scheme.type === 'oauth2' && scheme.flows) {
       schemes.push({ kind: 'oauth2', ...common, flows: scheme.flows });
+    } else {
+      // Other http schemes (digest, ...), openIdConnect, mutualTLS, and malformed
+      // entries have no IR representation; say so instead of dropping them silently.
+      const detail = scheme.type === 'http' ? `type: http, scheme: ${scheme.scheme}` : `type: ${scheme.type}`;
+      console.warn(`[oagen] Warning: Unsupported security scheme "${schemeName}" (${detail}) omitted from spec.auth`);
     }
   }
   return schemes.length > 0 ? schemes : undefined;

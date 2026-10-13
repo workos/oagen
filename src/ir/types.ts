@@ -10,6 +10,7 @@ import type { SdkBehavior } from './sdk-behavior.js';
  */
 export type AuthScheme =
   | { kind: 'bearer'; schemeName: string; description?: string }
+  | { kind: 'basic'; schemeName: string; description?: string }
   | { kind: 'apiKey'; schemeName: string; description?: string; in: 'header' | 'query' | 'cookie'; name: string }
   | { kind: 'oauth2'; schemeName: string; description?: string; flows: Record<string, unknown> };
 

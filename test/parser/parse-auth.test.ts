@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -111,5 +111,91 @@ components:
         flows: { clientCredentials: { tokenUrl: 'https://auth.example.com/token', scopes: { read: 'Read access' } } },
       },
     ]);
+  });
+
+  it('accepts HTTP basic and case-insensitive bearer schemes (#176)', async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+paths:
+  /thing:
+    get:
+      operationId: getThing
+      responses: { '204': { description: ok } }
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+    bearerAuth:
+      type: http
+      scheme: Bearer
+`);
+
+    expect(ir.auth).toEqual([
+      { kind: 'basic', schemeName: 'basicAuth' },
+      { kind: 'bearer', schemeName: 'bearerAuth' },
+    ]);
+  });
+
+  it('matches HTTP scheme names case-insensitively (RFC 9110 §11.1)', async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+paths: {}
+components:
+  securitySchemes:
+    upper:
+      type: http
+      scheme: BEARER
+    mixed:
+      type: http
+      scheme: BaSiC
+`);
+
+    expect(ir.auth).toEqual([
+      { kind: 'bearer', schemeName: 'upper' },
+      { kind: 'basic', schemeName: 'mixed' },
+    ]);
+  });
+
+  it('warns about and omits security schemes the IR cannot represent', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+paths: {}
+components:
+  securitySchemes:
+    digestAuth:
+      type: http
+      scheme: digest
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://auth.example.com/.well-known/openid-configuration
+    mtls:
+      type: mutualTLS
+    bearerAuth:
+      type: http
+      scheme: bearer
+`);
+
+      // Supported schemes still come through; unsupported ones are dropped.
+      expect(ir.auth).toEqual([{ kind: 'bearer', schemeName: 'bearerAuth' }]);
+
+      // One diagnostic per unsupported scheme, naming the scheme and its type.
+      const messages = warnSpy.mock.calls.map((call) => String(call[0]));
+      expect(messages).toHaveLength(3);
+      for (const message of messages) expect(message).toContain('[oagen] Warning:');
+      expect(messages[0]).toContain('"digestAuth"');
+      expect(messages[0]).toContain('digest');
+      expect(messages[1]).toContain('"oidc"');
+      expect(messages[1]).toContain('openIdConnect');
+      expect(messages[2]).toContain('"mtls"');
+      expect(messages[2]).toContain('mutualTLS');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

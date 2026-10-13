@@ -133,6 +133,7 @@ Generic type parameters on models. Example: `DirectoryUser<TCustomAttributes = R
 ```typescript
 type AuthScheme =
   | { kind: "bearer"; schemeName: string; description?: string }
+  | { kind: "basic"; schemeName: string; description?: string }
   | {
       kind: "apiKey";
       schemeName: string;
@@ -151,6 +152,8 @@ type AuthScheme =
 Emitters use `AuthScheme` to generate authentication configuration and client constructors. The `cookie` variant supports cookie-based API key authentication.
 
 `schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. `Operation.security[].schemeName` refers to the same key, so an emitter joins a per-operation requirement to its scheme with `spec.auth.find((a) => a.schemeName === requirement.schemeName)`.
+
+HTTP scheme names are matched case-insensitively (`Bearer`, `bearer`, and `BEARER` all yield `kind: "bearer"`). Security schemes the IR cannot represent (other `http` schemes such as `digest`, plus `openIdConnect` and `mutualTLS`) are omitted from `auth`, and the parser prints an `[oagen] Warning:` diagnostic naming the scheme.
 
 ## HttpMethod
 
