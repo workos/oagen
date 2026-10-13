@@ -125,7 +125,10 @@ components:
 
       expect(result.auth).toBeDefined();
       expect(result.auth).toEqual(
-        expect.arrayContaining([{ kind: 'bearer' }, { kind: 'apiKey', in: 'header', name: 'X-API-Key' }]),
+        expect.arrayContaining([
+          { kind: 'bearer', schemeName: 'BearerAuth' },
+          { kind: 'apiKey', schemeName: 'ApiKeyAuth', in: 'header', name: 'X-API-Key' },
+        ]),
       );
       expect(result.auth).toHaveLength(2);
     } finally {

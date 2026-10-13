@@ -63,10 +63,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
-      securitySchemes?: Record<
-        string,
-        { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
-      >;
+      securitySchemes?: Record<string, SecuritySchemeObject>;
     };
   };
 
@@ -155,22 +152,34 @@ function applyFieldHints(
   }
 }
 
-/** Extract authentication schemes from OpenAPI securitySchemes. */
-function extractAuthSchemes(
-  securitySchemes?: Record<
-    string,
-    { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
-  >,
-): AuthScheme[] | undefined {
+/** A `components.securitySchemes` entry as it appears in the OpenAPI document. */
+interface SecuritySchemeObject {
+  type: string;
+  description?: string;
+  scheme?: string;
+  in?: string;
+  name?: string;
+  flows?: Record<string, unknown>;
+}
+
+/**
+ * Extract authentication schemes from OpenAPI securitySchemes.
+ *
+ * Document order is preserved. Each entry carries its `securitySchemes` key as
+ * `schemeName` so emitters can join `Operation.security[].schemeName` back to it.
+ */
+function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObject>): AuthScheme[] | undefined {
   if (!securitySchemes) return undefined;
   const schemes: AuthScheme[] = [];
-  for (const [, scheme] of Object.entries(securitySchemes)) {
+  for (const [schemeName, scheme] of Object.entries(securitySchemes)) {
+    // Omit `description` entirely (rather than setting it to undefined) when absent.
+    const common = scheme.description ? { schemeName, description: scheme.description } : { schemeName };
     if (scheme.type === 'http' && scheme.scheme === 'bearer') {
-      schemes.push({ kind: 'bearer' });
+      schemes.push({ kind: 'bearer', ...common });
     } else if (scheme.type === 'apiKey' && scheme.in && scheme.name) {
-      schemes.push({ kind: 'apiKey', in: scheme.in as 'header' | 'query' | 'cookie', name: scheme.name });
+      schemes.push({ kind: 'apiKey', ...common, in: scheme.in as 'header' | 'query' | 'cookie', name: scheme.name });
     } else if (scheme.type === 'oauth2' && scheme.flows) {
-      schemes.push({ kind: 'oauth2', flows: scheme.flows });
+      schemes.push({ kind: 'oauth2', ...common, flows: scheme.flows });
     }
   }
   return schemes.length > 0 ? schemes : undefined;

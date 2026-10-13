@@ -132,12 +132,25 @@ Generic type parameters on models. Example: `DirectoryUser<TCustomAttributes = R
 
 ```typescript
 type AuthScheme =
-  | { kind: "bearer" }
-  | { kind: "apiKey"; in: "header" | "query" | "cookie"; name: string }
-  | { kind: "oauth2"; flows: Record<string, unknown> };
+  | { kind: "bearer"; schemeName: string; description?: string }
+  | {
+      kind: "apiKey";
+      schemeName: string;
+      description?: string;
+      in: "header" | "query" | "cookie";
+      name: string;
+    }
+  | {
+      kind: "oauth2";
+      schemeName: string;
+      description?: string;
+      flows: Record<string, unknown>;
+    };
 ```
 
 Emitters use `AuthScheme` to generate authentication configuration and client constructors. The `cookie` variant supports cookie-based API key authentication.
+
+`schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. `Operation.security[].schemeName` refers to the same key, so an emitter joins a per-operation requirement to its scheme with `spec.auth.find((a) => a.schemeName === requirement.schemeName)`.
 
 ## HttpMethod
 
@@ -210,6 +223,12 @@ interface Operation {
   injectIdempotencyKey: boolean; // true when spec declares Idempotency-Key header
   deprecated?: boolean;
   async?: boolean;
+  security?: SecurityRequirement[]; // Per-operation override of spec-level security
+}
+
+interface SecurityRequirement {
+  schemeName: string; // Matches AuthScheme.schemeName in ApiSpec.auth
+  scopes: string[];
 }
 
 interface SuccessResponse {
