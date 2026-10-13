@@ -8,7 +8,7 @@ export async function resolveCommand(opts: {
   spec: string;
   format?: 'table' | 'json';
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;

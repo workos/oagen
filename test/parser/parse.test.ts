@@ -262,3 +262,84 @@ components:
     }
   });
 });
+
+describe('parseSpec – schemaNameTransform originalName (issue #175)', () => {
+  const spec = JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'repro', version: '1' },
+    paths: {
+      '/thing': {
+        get: {
+          operationId: 'getThing',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Thing' } } },
+            },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: {
+        Thing: {
+          type: 'object',
+          properties: {
+            http: { $ref: '#/components/schemas/HTTPConfig' },
+            url: { $ref: '#/components/schemas/URL' },
+            settings: { $ref: '#/components/schemas/Settings' },
+          },
+        },
+        HTTPConfig: { type: 'object', properties: { timeout: { type: 'number' } } },
+        URL: { type: 'object', properties: { href: { type: 'string' } } },
+        Settings: { type: 'object', properties: { locale: { type: 'string' } } },
+      },
+    },
+  });
+
+  async function withSpecFile<T>(fn: (specFile: string) => Promise<T>): Promise<T> {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-175-'));
+    const specFile = path.join(tmpDir, 'issue-175.json');
+    await fs.writeFile(specFile, spec);
+    try {
+      return await fn(specFile);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  it('normalises component names when no transform is given', async () => {
+    await withSpecFile(async (specFile) => {
+      const ir = await parseSpec(specFile);
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['HttpConfig', 'Setting', 'Thing', 'Url']);
+    });
+  });
+
+  it('hands the transform the original spelling so it can opt out of normalisation', async () => {
+    await withSpecFile(async (specFile) => {
+      const seen: Array<[string, string | undefined]> = [];
+      const ir = await parseSpec(specFile, {
+        schemaNameTransform: (name, originalName) => {
+          seen.push([name, originalName]);
+          return originalName ?? name;
+        },
+      });
+
+      expect(seen).toContainEqual(['HttpConfig', 'HTTPConfig']);
+      expect(seen).toContainEqual(['Url', 'URL']);
+      expect(seen).toContainEqual(['Setting', 'Settings']);
+
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['HTTPConfig', 'Settings', 'Thing', 'URL']);
+
+      const thing = ir.models.find((m) => m.name === 'Thing')!;
+      const fieldType = (fieldName: string) => thing.fields.find((f) => f.name === fieldName)!.type;
+      expect(fieldType('http')).toEqual({ kind: 'model', name: 'HTTPConfig' });
+      expect(fieldType('url')).toEqual({ kind: 'model', name: 'URL' });
+      expect(fieldType('settings')).toEqual({ kind: 'model', name: 'Settings' });
+
+      const op = ir.services.flatMap((s) => s.operations).find((o) => o.name === 'getThing');
+      expect(op).toBeDefined();
+      expect(op!.response).toEqual({ kind: 'model', name: 'Thing' });
+    });
+  });
+});

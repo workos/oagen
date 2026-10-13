@@ -46,7 +46,7 @@ export async function verifyCommand(opts: {
   diagnostics?: boolean;
   maxRetries?: number;
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   namespace?: string;
   compatConfig?: CompatConfig;

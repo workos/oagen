@@ -126,7 +126,7 @@ export async function compatExtractCommand(opts: {
   lang: string;
   output: string;
   spec?: string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);

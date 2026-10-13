@@ -12,8 +12,12 @@ import {
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
  * to apply the same name transform to $ref model/enum references.
+ *
+ * Receives the cleaned PascalCase name and, when the name comes from a
+ * component schema, the raw name exactly as spelled in the document. Names
+ * oagen synthesises (inline enums) pass no second argument.
  */
-let activeSchemaNameTransform: ((name: string) => string) | null = null;
+let activeSchemaNameTransform: ((name: string, originalName?: string) => string) | null = null;
 
 /**
  * Module-level set of resolved schema names whose components/schemas entry is
@@ -24,15 +28,26 @@ let activeSchemaNameTransform: ((name: string) => string) | null = null;
  */
 let activeEnumSchemaNames: Set<string> = new Set();
 
-/** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
+/**
+ * Apply cleanSchemaName + the active transform (if any) to a raw schema name.
+ * The transform receives both the cleaned name and `rawName`, so a consumer
+ * can opt out of normalization by returning the original spelling.
+ */
 export function resolveSchemaName(rawName: string): string {
   let name = cleanSchemaName(toPascalCase(rawName));
-  if (activeSchemaNameTransform) name = activeSchemaNameTransform(name);
+  if (activeSchemaNameTransform) name = activeSchemaNameTransform(name, rawName);
   return name;
 }
 
 export interface SchemaExtractionOptions {
-  schemaNameTransform?: (name: string) => string;
+  /**
+   * Custom transform for schema (model/enum) names. Called with the cleaned
+   * PascalCase name and, for component schemas, the original name as spelled
+   * in the document (`originalName`). Returning `originalName` opts that
+   * schema out of the built-in normalization. `originalName` is undefined for
+   * inline enum names oagen synthesises from field/parameter context.
+   */
+  schemaNameTransform?: (name: string, originalName?: string) => string;
 }
 
 export interface SchemaObject {
@@ -73,14 +88,16 @@ export function extractSchemas(
 
   if (!schemas) return { models: [], enums };
 
-  // Build collision-safe transform if provided
+  // Build collision-safe transform if provided. The transform is probed with
+  // the same (cleaned, raw) pair resolveSchemaName() will hand it, so a
+  // transform that keys off the original spelling is collision-checked on the
+  // names it will actually produce.
   if (options?.schemaNameTransform) {
     const transform = options.schemaNameTransform;
-    const rawNames = Object.keys(schemas);
-    const cleanedNames = rawNames.map((n) => cleanSchemaName(toPascalCase(n)));
     const transformedToOriginals = new Map<string, string[]>();
-    for (const cleaned of cleanedNames) {
-      const transformed = transform(cleaned);
+    for (const raw of Object.keys(schemas)) {
+      const cleaned = cleanSchemaName(toPascalCase(raw));
+      const transformed = transform(cleaned, raw);
       if (!transformedToOriginals.has(transformed)) transformedToOriginals.set(transformed, []);
       transformedToOriginals.get(transformed)!.push(cleaned);
     }
@@ -90,7 +107,8 @@ export function extractSchemas(
         for (const n of originals) unsafeToTransform.add(n);
       }
     }
-    activeSchemaNameTransform = (name: string) => (unsafeToTransform.has(name) ? name : transform(name));
+    activeSchemaNameTransform = (name: string, originalName?: string) =>
+      unsafeToTransform.has(name) ? name : transform(name, originalName);
   } else {
     activeSchemaNameTransform = null;
   }

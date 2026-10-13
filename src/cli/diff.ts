@@ -7,7 +7,7 @@ export async function diffCommand(opts: {
   old: string;
   new: string;
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
 }): Promise<void> {

@@ -25,7 +25,13 @@ export type OpenApiDocument = Record<string, unknown>;
 
 export interface ParseOptions {
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  /**
+   * Custom transform for schema (model/enum) names. Receives the cleaned
+   * PascalCase name and, for component schemas, the original name as spelled
+   * in the document. Returning `originalName` opts out of normalization.
+   * See `SchemaExtractionOptions.schemaNameTransform`.
+   */
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   /**
    * Domain-facing field-name overrides, keyed by IR model name then wire field
    * name: `{ Connection: { connection_type: 'type' } }`. Sets `Field.domainName`

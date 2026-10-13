@@ -3,7 +3,7 @@ import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 export async function parseCommand(opts: {
   spec: string;
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
 }): Promise<void> {
   const ir = await parseSpec(opts.spec, {

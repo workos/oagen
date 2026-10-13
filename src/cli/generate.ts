@@ -23,7 +23,7 @@ export async function generateCommand(opts: {
    */
   services?: string | string[];
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: (name: string, originalName?: string) => string;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;

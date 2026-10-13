@@ -39,7 +39,7 @@ const explicitConfigPath = configArgIdx !== -1 ? process.argv[configArgIdx + 1] 
 // top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
-let configSchemaNameTransform: ((name: string) => string) | undefined;
+let configSchemaNameTransform: ((name: string, originalName?: string) => string) | undefined;
 let configTransformSpec:
   | ((spec: import('../parser/parse.js').OpenApiDocument) => import('../parser/parse.js').OpenApiDocument)
   | undefined;
