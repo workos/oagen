@@ -113,6 +113,31 @@ components:
     ]);
   });
 
+  it('keeps an explicitly empty description distinct from a missing one', async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+paths: {}
+components:
+  securitySchemes:
+    emptyDesc:
+      type: http
+      scheme: bearer
+      description: ''
+    noDesc:
+      type: http
+      scheme: bearer
+`);
+
+    expect(ir.auth).toEqual([
+      { kind: 'bearer', schemeName: 'emptyDesc', description: '' },
+      { kind: 'bearer', schemeName: 'noDesc' },
+    ]);
+    // `toEqual` treats `description: undefined` as absent, so pin the key itself.
+    expect(ir.auth![0]).toHaveProperty('description', '');
+    expect(ir.auth![1]).not.toHaveProperty('description');
+  });
+
   it('accepts HTTP basic and case-insensitive bearer schemes (#176)', async () => {
     const ir = await parseYaml(`
 openapi: '3.1.0'

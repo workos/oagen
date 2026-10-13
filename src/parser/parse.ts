@@ -173,8 +173,10 @@ function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObjec
   if (!securitySchemes) return undefined;
   const schemes: AuthScheme[] = [];
   for (const [schemeName, scheme] of Object.entries(securitySchemes)) {
-    // Omit `description` entirely (rather than setting it to undefined) when absent.
-    const common = scheme.description ? { schemeName, description: scheme.description } : { schemeName };
+    // Omit `description` entirely (rather than setting it to undefined) when the
+    // document does not declare one. An explicit empty string is a declared value
+    // and is kept, so consumers can tell "empty" from "missing".
+    const common = scheme.description !== undefined ? { schemeName, description: scheme.description } : { schemeName };
     // HTTP authentication scheme names are case-insensitive (RFC 9110 §11.1).
     const httpScheme = scheme.type === 'http' ? scheme.scheme?.toLowerCase() : undefined;
     if (httpScheme === 'bearer') {
