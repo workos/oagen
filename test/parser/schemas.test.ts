@@ -626,4 +626,85 @@ describe('extractSchemas – schemaNameTransform receives the original schema na
     );
     expect(models.map((m) => m.name).sort()).toEqual(['User', 'UserDto']);
   });
+
+  it('tracks collisions by raw key so a colliding cleaned name does not disable the transform for its siblings', () => {
+    // `Users` and `User` both clean to `User`. With an originalName-based
+    // transform, `UserDto` and `User` collide on `User` (both kept as cleaned),
+    // but `Users` transforms to the distinct `Users` and must keep its own
+    // definition instead of being merged into `User` and dropped.
+    const { models } = extractSchemas(
+      {
+        UserDto: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+        User: { type: 'object', properties: { id: { type: 'string' } } },
+        Users: { type: 'object', properties: { data: { type: 'array', items: { type: 'string' } } } },
+      },
+      { schemaNameTransform: (name, originalName) => (originalName ?? name).replace(/Dto$/, '') },
+    );
+    expect(models.map((m) => m.name).sort()).toEqual(['User', 'UserDto', 'Users']);
+    const fieldsOf = (modelName: string) => models.find((m) => m.name === modelName)!.fields.map((f) => f.name);
+    expect(fieldsOf('UserDto')).toEqual(['id', 'name']);
+    expect(fieldsOf('User')).toEqual(['id']);
+    expect(fieldsOf('Users')).toEqual(['data']);
+  });
+
+  it('keeps the pre-existing collision behaviour for one-arg transforms', () => {
+    // Same three schemas with a one-arg Dto-stripping transform: UserDto and
+    // User collide on `User` and are kept as cleaned; `Users` cleans to `User`
+    // too and, as before, is merged into the single `User` model (the first
+    // definition wins when field counts tie).
+    const { models } = extractSchemas(
+      {
+        UserDto: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+        User: { type: 'object', properties: { id: { type: 'string' } } },
+        Users: { type: 'object', properties: { data: { type: 'array', items: { type: 'string' } } } },
+      },
+      { schemaNameTransform: (name) => name.replace(/Dto$/, '') },
+    );
+    expect(models.map((m) => m.name).sort()).toEqual(['User', 'UserDto']);
+    expect(models.find((m) => m.name === 'User')!.fields.map((f) => f.name)).toEqual(['id']);
+    expect(models.find((m) => m.name === 'UserDto')!.fields.map((f) => f.name)).toEqual(['id', 'name']);
+  });
+
+  it('passes no originalName for title-derived variant names', () => {
+    // A field whose oneOf has const-discriminated inline variants carrying a
+    // `title` gets its discriminator mapping named via resolveSchemaName(title).
+    // The title is not a component key, so the transform must not receive it
+    // as originalName.
+    const calls: Array<[string, string | undefined]> = [];
+    extractSchemas(
+      {
+        Envelope: {
+          type: 'object',
+          properties: {
+            event: {
+              oneOf: [
+                {
+                  title: 'UserCreatedEvent',
+                  type: 'object',
+                  properties: { event: { const: 'user.created' }, id: { type: 'string' } },
+                },
+                {
+                  title: 'UserDeletedEvent',
+                  type: 'object',
+                  properties: { event: { const: 'user.deleted' }, id: { type: 'string' } },
+                },
+              ],
+            },
+          },
+        },
+      },
+      {
+        schemaNameTransform: (name, originalName) => {
+          calls.push([name, originalName]);
+          return name;
+        },
+      },
+    );
+    expect(calls).toContainEqual(['Envelope', 'Envelope']);
+    expect(calls).toContainEqual(['UserCreatedEvent', undefined]);
+    expect(calls).toContainEqual(['UserDeletedEvent', undefined]);
+    for (const [, originalName] of calls) {
+      if (originalName !== undefined) expect(originalName).toBe('Envelope');
+    }
+  });
 });

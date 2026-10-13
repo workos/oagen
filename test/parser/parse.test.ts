@@ -342,4 +342,73 @@ describe('parseSpec – schemaNameTransform originalName (issue #175)', () => {
       expect(op!.response).toEqual({ kind: 'model', name: 'Thing' });
     });
   });
+
+  it('passes no originalName for const-derived request-body variant names', async () => {
+    // Mirrors test/parser/oneof-variant-naming.test.ts: an inline request-body
+    // oneOf whose object variant pins `grant_type` to a const. The variant
+    // model name is synthesised from the const value + operation, so the
+    // transform must see originalName === undefined for it, while the real
+    // component (`Placeholder`) still gets its key.
+    const specYaml = `
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /authenticate:
+    post:
+      operationId: SessionController_authenticate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [grant_type, password]
+                  properties:
+                    grant_type:
+                      type: string
+                      const: password
+                    password:
+                      type: string
+                - type: object
+                  required: [grant_type, code]
+                  properties:
+                    grant_type:
+                      type: string
+                      const: code
+                    code:
+                      type: string
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    Placeholder: { type: object }
+`;
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-175-variants-'));
+    const specFile = path.join(tmpDir, 'spec.yml');
+    try {
+      await fs.writeFile(specFile, specYaml, 'utf-8');
+      const calls: Array<[string, string | undefined]> = [];
+      const ir = await parseSpec(specFile, {
+        schemaNameTransform: (name, originalName) => {
+          calls.push([name, originalName]);
+          return name;
+        },
+      });
+
+      expect(ir.models.some((m) => m.name === 'PasswordSessionAuthenticateRequest')).toBe(true);
+      expect(ir.models.some((m) => m.name === 'CodeSessionAuthenticateRequest')).toBe(true);
+
+      expect(calls).toContainEqual(['Placeholder', 'Placeholder']);
+      const variantCalls = calls.filter(([name]) => name.endsWith('SessionAuthenticateRequest'));
+      expect(variantCalls.length).toBeGreaterThan(0);
+      for (const [, originalName] of variantCalls) expect(originalName).toBeUndefined();
+      // Only real component keys ever arrive as originalName.
+      for (const [, originalName] of calls) {
+        if (originalName !== undefined) expect(originalName).toBe('Placeholder');
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

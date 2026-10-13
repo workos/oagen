@@ -31,9 +31,9 @@ export interface OagenConfig {
    * document (`originalName`); return the desired name. Returning
    * `originalName` opts that schema out of normalization (e.g. keeps
    * `HTTPConfig` instead of `HttpConfig`). `originalName` is undefined for
-   * inline enum names oagen synthesises from field/parameter context.
-   * Collisions are detected automatically -- if a transform would produce a
-   * duplicate name, the cleaned name is kept.
+   * any name oagen synthesises (inline enums, request-body variant models,
+   * title-derived names). Collisions are detected automatically -- if a
+   * transform would produce a duplicate name, the cleaned name is kept.
    */
   schemaNameTransform?: (name: string, originalName?: string) => string;
   /** Base URL for documentation links. When set, relative paths in descriptions
