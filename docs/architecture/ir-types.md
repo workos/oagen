@@ -131,13 +131,19 @@ Generic type parameters on models. Example: `DirectoryUser<TCustomAttributes = R
 ## AuthScheme
 
 ```typescript
-type AuthScheme =
+type AuthScheme = { description?: string; schemeName: string } & (
+  | { kind: "basic" }
   | { kind: "bearer" }
   | { kind: "apiKey"; in: "header" | "query" | "cookie"; name: string }
-  | { kind: "oauth2"; flows: Record<string, unknown> };
+  | { kind: "oauth2"; flows: Record<string, unknown> }
+);
 ```
 
 Emitters use `AuthScheme` to generate authentication configuration and client constructors. The `cookie` variant supports cookie-based API key authentication.
+
+`schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. `Operation.security[].schemeName` refers to the same key, so an emitter joins a per-operation requirement to its scheme with `spec.auth?.find((a) => a.schemeName === requirement.schemeName)`. The optional chaining matters: `auth` is `undefined` when the document declares no scheme the IR can represent, and a requirement can still name a scheme that was omitted (see below), so a missing match means "no SDK-level auth is known for this operation", not an error.
+
+HTTP scheme names are matched case-insensitively (`Bearer`, `bearer`, and `BEARER` all yield `kind: "bearer"`). Security schemes the IR cannot represent (other `http` schemes such as `digest`, plus `openIdConnect` and `mutualTLS`) are omitted from `auth`, and the parser prints an `[oagen] Warning:` diagnostic naming the scheme.
 
 ## HttpMethod
 
@@ -210,6 +216,12 @@ interface Operation {
   injectIdempotencyKey: boolean; // true when spec declares Idempotency-Key header
   deprecated?: boolean;
   async?: boolean;
+  security?: SecurityRequirement[]; // Per-operation override of spec-level security
+}
+
+interface SecurityRequirement {
+  schemeName: string; // Matches AuthScheme.schemeName in ApiSpec.auth
+  scopes: string[];
 }
 
 interface SuccessResponse {

@@ -69,10 +69,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
-      securitySchemes?: Record<
-        string,
-        { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
-      >;
+      securitySchemes?: Record<string, SecuritySchemeObject>;
     };
   };
 
@@ -161,22 +158,46 @@ function applyFieldHints(
   }
 }
 
-/** Extract authentication schemes from OpenAPI securitySchemes. */
-function extractAuthSchemes(
-  securitySchemes?: Record<
-    string,
-    { type: string; scheme?: string; in?: string; name?: string; flows?: Record<string, unknown> }
-  >,
-): AuthScheme[] | undefined {
+/** A `components.securitySchemes` entry as it appears in the OpenAPI document. */
+interface SecuritySchemeObject {
+  type: string;
+  description?: string;
+  scheme?: string;
+  in?: string;
+  name?: string;
+  flows?: Record<string, unknown>;
+}
+
+/**
+ * Extract authentication schemes from OpenAPI securitySchemes.
+ *
+ * Document order is preserved. Each entry carries its `securitySchemes` key as
+ * `schemeName` so emitters can join `Operation.security[].schemeName` back to it.
+ * Schemes the IR cannot represent are omitted with a warning rather than silently.
+ */
+function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObject>): AuthScheme[] | undefined {
   if (!securitySchemes) return undefined;
   const schemes: AuthScheme[] = [];
-  for (const [, scheme] of Object.entries(securitySchemes)) {
-    if (scheme.type === 'http' && scheme.scheme === 'bearer') {
-      schemes.push({ kind: 'bearer' });
+  for (const [schemeName, scheme] of Object.entries(securitySchemes)) {
+    // Omit `description` entirely (rather than setting it to undefined) when the
+    // document does not declare one. An explicit empty string is a declared value
+    // and is kept, so consumers can tell "empty" from "missing".
+    const common = scheme.description !== undefined ? { schemeName, description: scheme.description } : { schemeName };
+    // HTTP authentication scheme names are case-insensitive (RFC 9110 §11.1).
+    const httpScheme = scheme.type === 'http' ? scheme.scheme?.toLowerCase() : undefined;
+    if (httpScheme === 'bearer') {
+      schemes.push({ kind: 'bearer', ...common });
+    } else if (httpScheme === 'basic') {
+      schemes.push({ kind: 'basic', ...common });
     } else if (scheme.type === 'apiKey' && scheme.in && scheme.name) {
-      schemes.push({ kind: 'apiKey', in: scheme.in as 'header' | 'query' | 'cookie', name: scheme.name });
+      schemes.push({ kind: 'apiKey', ...common, in: scheme.in as 'header' | 'query' | 'cookie', name: scheme.name });
     } else if (scheme.type === 'oauth2' && scheme.flows) {
-      schemes.push({ kind: 'oauth2', flows: scheme.flows });
+      schemes.push({ kind: 'oauth2', ...common, flows: scheme.flows });
+    } else {
+      // Other http schemes (digest, ...), openIdConnect, mutualTLS, and malformed
+      // entries have no IR representation; say so instead of dropping them silently.
+      const detail = scheme.type === 'http' ? `type: http, scheme: ${scheme.scheme}` : `type: ${scheme.type}`;
+      console.warn(`[oagen] Warning: Unsupported security scheme "${schemeName}" (${detail}) omitted from spec.auth`);
     }
   }
   return schemes.length > 0 ? schemes : undefined;

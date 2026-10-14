@@ -38,6 +38,33 @@ let activeComponentSchemaKeys: Set<string> = new Set();
 let activeEnumSchemaNames: Set<string> = new Set();
 
 /**
+ * Subset of `activeEnumSchemaNames` whose component schema also admits
+ * `null` — via an OAS 3.1 `type: [..., 'null']` array, the OAS 3.0
+ * `nullable: true` flag, or a literal `null` member in `enum:`. A `$ref` to
+ * one of these resolves to `nullable(enum)` so the component's own
+ * nullability survives the reference, matching the shape an inline
+ * `oneOf: [{ $ref }, { type: 'null' }]` already produces.
+ */
+let activeNullableEnumSchemaNames: Set<string> = new Set();
+
+/** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
+function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
+  return (values ?? []).filter((v): v is string | number => v !== null);
+}
+
+/** True when an enum schema admits `null` by any OAS 3.0 / 3.1 spelling. */
+function isNullableEnumSchema(schema: SchemaObject): boolean {
+  if (schema.nullable === true) return true;
+  if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
+  return Array.isArray(schema.enum) && schema.enum.includes(null);
+}
+
+/** Wrap `ref` in `nullable` unless it already is one, so a nullable enum `$ref` is never double-wrapped. */
+function asNullable(ref: TypeRef): TypeRef {
+  return ref.kind === 'nullable' ? ref : { kind: 'nullable', inner: ref };
+}
+
+/**
  * Apply cleanSchemaName + the active transform (if any) to a raw schema name.
  * When `rawName` is a `components.schemas` key the transform also receives it
  * as `originalName`, so a consumer can opt out of normalization by returning
@@ -73,7 +100,8 @@ export interface SchemaObject {
   properties?: Record<string, SchemaObject | undefined>;
   required?: string[];
   items?: SchemaObject;
-  enum?: (string | number)[];
+  /** OAS 3.1 allows a literal `null` member when `type` also admits null. */
+  enum?: (string | number | null)[];
   allOf?: SchemaObject[];
   oneOf?: SchemaObject[];
   anyOf?: SchemaObject[];
@@ -151,8 +179,12 @@ export function extractSchemas(
   // available before any TypeRef is resolved (operations + nested fields both
   // call schemaToTypeRef during extraction).
   activeEnumSchemaNames = new Set();
+  activeNullableEnumSchemaNames = new Set();
   for (const [name, schema] of Object.entries(schemas)) {
-    if (schema.enum) activeEnumSchemaNames.add(resolveSchemaName(name));
+    if (!schema.enum) continue;
+    const resolved = resolveSchemaName(name);
+    activeEnumSchemaNames.add(resolved);
+    if (isNullableEnumSchema(schema)) activeNullableEnumSchemaNames.add(resolved);
   }
 
   const modelsByCleanName = new Map<string, Model>();
@@ -216,6 +248,7 @@ export function extractSchemas(
 export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
   activeEnumSchemaNames = new Set();
+  activeNullableEnumSchemaNames = new Set();
   activeComponentSchemaKeys = new Set();
 }
 
@@ -648,7 +681,11 @@ function deriveInlineVariantMapping(
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
-  const values: EnumValue[] = (schema.enum ?? []).map((v) => ({
+  // A `null` member marks the schema as nullable (OAS 3.1); it is not a
+  // value. Nullability is carried on the `$ref` side via
+  // `activeNullableEnumSchemaNames`, so drop it here instead of emitting a
+  // bogus `NULL = "null"` member.
+  const values: EnumValue[] = nonNullEnumValues(schema.enum).map((v) => ({
     name: toUpperSnakeCase(String(v)),
     value: typeof v === 'number' ? v : String(v),
     description: undefined,
@@ -1153,7 +1190,11 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     const rawName = segments[segments.length - 1];
     const resolved = resolveSchemaName(rawName);
     if (activeEnumSchemaNames.has(resolved)) {
-      return { kind: 'enum', name: resolved };
+      const enumRef: TypeRef = { kind: 'enum', name: resolved };
+      // Carry the component's own nullability through the reference so
+      // `field: { $ref: NullableEnum }` has the same shape as the inline
+      // `oneOf: [{ $ref }, { type: 'null' }]` form.
+      return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
     return { kind: 'model', name: resolved };
   }
@@ -1166,10 +1207,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
     }
     if (schema.type.includes('null') && nonNullTypes.length === 1) {
-      return {
-        kind: 'nullable',
-        inner: schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName),
-      };
+      return asNullable(schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName));
     }
     // Multiple non-null types → union
     if (nonNullTypes.length > 1) {
@@ -1184,10 +1222,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
 
   // Handle OAS 3.0 nullable flag
   if (schema.nullable && schema.type) {
-    return {
-      kind: 'nullable',
-      inner: schemaToTypeRef({ ...schema, nullable: false }, contextName),
-    };
+    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName));
   }
 
   // Handle allOf — merge properties from all sub-schemas.
@@ -1236,11 +1271,9 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     const nonNullVariants = rawVariants.filter((v) => v !== nullVariant);
 
     if (nullVariant && nonNullVariants.length === 1) {
-      // Nullable single type — unwrap as nullable
-      return {
-        kind: 'nullable',
-        inner: schemaToTypeRef(nonNullVariants[0], contextName, parentModelName),
-      };
+      // Nullable single type — unwrap as nullable. `asNullable` keeps a
+      // `$ref` to an already-nullable enum component from double-wrapping.
+      return asNullable(schemaToTypeRef(nonNullVariants[0], contextName, parentModelName));
     }
 
     // Collapse an oneOf/anyOf whose non-null variants are all string-const
@@ -1350,9 +1383,17 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       return { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } };
     }
   }
-  if (schema.enum && schema.enum.length === 1) {
-    const v = schema.enum[0];
-    return { kind: 'literal', value: typeof v === 'number' ? v : String(v) };
+  // A `null` member of an inline `enum:` marks nullability, not a value.
+  // Strip it before deciding literal-vs-enum, and wrap the result so a
+  // bare `type: 'string', enum: ['a', null]` is nullable even without a
+  // `type: [..., 'null']` array (the array branch above already wrapped
+  // us when present; `asNullable` keeps that from doubling up).
+  const enumValues = nonNullEnumValues(schema.enum);
+  const enumAdmitsNull = schema.enum !== undefined && enumValues.length !== schema.enum.length;
+  if (schema.enum && enumValues.length === 1) {
+    const v = enumValues[0];
+    const literal: TypeRef = { kind: 'literal', value: typeof v === 'number' ? v : String(v) };
+    return enumAdmitsNull ? asNullable(literal) : literal;
   }
 
   // Handle enum
@@ -1368,11 +1409,12 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // this, `RadarAction` (built from path param `action` on the Radar
     // service) couldn't be redirected to `RadarListAction` from config.
     const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-    return {
+    const enumRef: TypeRef = {
       kind: 'enum',
       name: finalName,
-      values: schema.enum.map((v) => (typeof v === 'number' ? v : String(v))),
+      values: enumValues.map((v) => (typeof v === 'number' ? v : String(v))),
     };
+    return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 
   // Handle array — pass parentModelName through to qualify inline items

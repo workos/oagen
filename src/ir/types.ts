@@ -1,10 +1,19 @@
 import type { SdkBehavior } from './sdk-behavior.js';
 
-/** Authentication scheme extracted from OpenAPI securitySchemes */
-export type AuthScheme =
+/**
+ * Authentication scheme extracted from OpenAPI `components.securitySchemes`.
+ *
+ * `schemeName` is the key under `components.securitySchemes`, spelled exactly as
+ * in the document. `Operation.security[].schemeName` refers to the same key, so
+ * emitters join a per-operation requirement to its scheme on that field.
+ * `description` is present only when the document declares one.
+ */
+export type AuthScheme = { description?: string; schemeName: string } & (
+  | { kind: 'basic' }
   | { kind: 'bearer' }
   | { kind: 'apiKey'; in: 'header' | 'query' | 'cookie'; name: string }
-  | { kind: 'oauth2'; flows: Record<string, unknown> };
+  | { kind: 'oauth2'; flows: Record<string, unknown> }
+);
 
 /** Root IR node representing the full API surface */
 /** A server entry from the OpenAPI servers array */
