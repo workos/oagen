@@ -3,6 +3,7 @@ import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
+import { extractInlineModelsFromProperties } from './inline-models.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -218,28 +219,43 @@ function collectEnvelopeProperties(
   return { properties, required };
 }
 
+/**
+ * Combine two `allOf` declarations of one property. Inline objects merge their
+ * fields; an array keeps the earlier `items` when the later declaration only
+ * constrains it (`minItems: 1`), so `data: User[]` is not downgraded to
+ * `string[]`; anything else takes the later declaration.
+ */
 function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): SchemaObject {
-  if (!isInlineObjectSchema(earlier) || !isInlineObjectSchema(later)) return later;
-  return {
-    ...earlier,
-    ...later,
-    properties: { ...earlier.properties, ...later.properties },
-    required: [...(earlier.required ?? []), ...(later.required ?? [])],
-  };
+  if (isInlineObjectSchema(earlier) && isInlineObjectSchema(later)) {
+    return {
+      ...earlier,
+      ...later,
+      properties: { ...earlier.properties, ...later.properties },
+      required: [...(earlier.required ?? []), ...(later.required ?? [])],
+    };
+  }
+  if (earlier.type === 'array' && later.type === 'array') {
+    return { ...earlier, ...later, items: later.items ?? earlier.items };
+  }
+  return later;
 }
 
 /**
  * Type a list envelope's companion properties as fields, lifting any inline
  * object among them (and anything nested inside it) to a model.
  *
- * Each companion is extracted twice through `extractInlineModel`: once under
- * the operation's name, which is how its models enter the IR
- * (`ListUsersListMetadata`), and once under an empty parent, which yields the
- * name each model would carry if named from its property alone
- * (`ListMetadata`). Both runs walk the same code path, so the two model lists
- * line up index for index. `resolveEnvelopeCompanionNames` later picks, per
- * companion, which of the two names survives — the bare one only where every
- * copy of that companion across the API agrees structurally.
+ * Models come from `extractInlineModelsFromProperties`, the extractor that
+ * mirrors `schemaToTypeRef` form for form — plain, nullable and `allOf`
+ * objects, arrays of objects, and every `oneOf`/`anyOf` object variant — so a
+ * field's reference always has a model behind it.
+ *
+ * Each companion is extracted twice: once under the operation's name, which
+ * is how its models enter the IR (`ListUsersListMetadata`), and once under no
+ * parent, which yields the name each model would carry if named from its
+ * property alone (`ListMetadata`). Both runs walk the same code path, so the
+ * two model lists line up index for index. `resolveEnvelopeCompanionNames`
+ * later picks, per companion, which of the two names survives — the bare one
+ * only where every copy of that companion across the API agrees structurally.
  */
 function extractEnvelopeCompanions(
   properties: Record<string, SchemaObject>,
@@ -249,17 +265,20 @@ function extractEnvelopeCompanions(
 ): { envelopeFields: Field[]; envelopeCompanions: EnvelopeCompanion[] } {
   const envelopeFields: Field[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
+  const requiredSet = new Set(required);
 
   for (const [key, propSchema] of Object.entries(properties)) {
     if (key === dataPath) continue;
-    const single: SchemaObject = { type: 'object', properties: { [key]: propSchema }, required };
-    const [qualified, ...qualifiedModels] = extractInlineModel(operationName, single);
-    const field = qualified.fields[0];
+    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet);
     envelopeFields.push(field);
-    if (qualifiedModels.length > 0) {
-      const [, ...bareModels] = extractInlineModel('', single);
-      envelopeCompanions.push({ field, models: qualifiedModels, bareNames: bareModels.map((m) => m.name) });
-    }
+
+    const single: SchemaObject = { type: 'object', properties: { [key]: propSchema } };
+    const models: Model[] = [];
+    extractInlineModelsFromProperties(single, models, operationName);
+    if (models.length === 0) continue;
+    const bare: Model[] = [];
+    extractInlineModelsFromProperties(single, bare, undefined);
+    envelopeCompanions.push({ field, models, bareNames: bare.map((m) => m.name) });
   }
 
   return { envelopeFields, envelopeCompanions };

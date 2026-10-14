@@ -1,6 +1,5 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, walkTypeRef } from '../ir/types.js';
-import type { SchemaObject } from './schemas.js';
 
 /**
  * A list-envelope companion that was lifted to one or more inline models:
@@ -31,9 +30,10 @@ export interface EnvelopeCompanion {
  * So a companion takes its bare name only when that cannot change any other
  * type's shape:
  *
- * - When a component schema of that name exists, the copies whose field names
- *   match the component's collapse onto it (the component stays as written);
- *   the others keep their operation-qualified name.
+ * - When a component model of that name exists — compared after the parser's
+ *   own renaming, so `PaginationDto` → `Pagination` is caught — the copies
+ *   whose field names match the component's collapse onto it (the component
+ *   stays as written); the others keep their operation-qualified name.
  * - Otherwise the copies are fingerprinted structurally. The most common shape
  *   (first declared, on a tie) takes the bare name and the merge pass folds the
  *   identical copies onto one model; any copy with a different shape keeps its
@@ -42,10 +42,7 @@ export interface EnvelopeCompanion {
  * Enums declared inline in a companion stay operation-qualified, exactly like
  * enums declared inline in a parameter.
  */
-export function resolveEnvelopeCompanionNames(
-  companions: EnvelopeCompanion[],
-  componentSchemas?: Record<string, SchemaObject>,
-): Model[] {
+export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], componentModels?: Model[]): Model[] {
   const byBareName = new Map<string, EnvelopeCompanion[]>();
   for (const companion of companions) {
     if (companion.models.length === 0) continue;
@@ -56,14 +53,12 @@ export function resolveEnvelopeCompanionNames(
   }
 
   for (const [bare, group] of byBareName) {
-    const component = componentSchemas?.[bare];
-    const componentFields = component ? componentFieldNames(component) : undefined;
+    const component = componentModels?.find((m) => m.name === bare);
 
     let takesBareName: (companion: EnvelopeCompanion) => boolean;
     if (component) {
-      // Unknown component shape (built from $refs) → never collapse onto it.
-      takesBareName = (c) =>
-        componentFields !== undefined && sameSet(new Set(c.models[0].fields.map((f) => f.name)), componentFields);
+      const componentFields = new Set(component.fields.map((f) => f.name));
+      takesBareName = (c) => sameSet(new Set(c.models[0].fields.map((f) => f.name)), componentFields);
     } else {
       const counts = new Map<string, number>();
       const fingerprints = new Map<EnvelopeCompanion, string>();
@@ -109,19 +104,6 @@ function renameCompanion(companion: EnvelopeCompanion): void {
     model.name = renames.get(model.name) ?? model.name;
     for (const field of model.fields) repoint(field.type);
   }
-}
-
-/**
- * Field names a component declares directly or through inline `allOf`
- * branches; `undefined` when a `$ref` branch makes the shape unknowable here.
- */
-function componentFieldNames(schema: SchemaObject): Set<string> | undefined {
-  const names = new Set<string>(Object.keys(schema.properties ?? {}));
-  for (const sub of schema.allOf ?? []) {
-    if (sub.$ref) return undefined;
-    for (const name of Object.keys(sub.properties ?? {})) names.add(name);
-  }
-  return names;
 }
 
 function sameSet(a: Set<string>, b: Set<string>): boolean {

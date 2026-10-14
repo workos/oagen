@@ -23,10 +23,10 @@ describe('parseSpec — pagination envelope fields', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  async function parseJson(doc: unknown): Promise<ApiSpec> {
+  async function parseJson(doc: unknown, options?: Parameters<typeof parseSpec>[1]): Promise<ApiSpec> {
     const specFile = path.join(tmpDir, 'spec.json');
     await fs.writeFile(specFile, JSON.stringify(doc), 'utf-8');
-    return parseSpec(specFile);
+    return parseSpec(specFile, options);
   }
 
   function listOp(doc: Record<string, unknown>, operationId: string, parameters: unknown[], schema: unknown) {
@@ -271,6 +271,82 @@ describe('parseSpec — pagination envelope fields', () => {
     expect(op.pagination?.envelopeFields).toEqual([
       { name: 'pagination', type: { kind: 'model', name: 'GetCustomersPagination' }, required: false },
     ]);
+  });
+
+  it('recognizes a component the parser renamed, so a companion cannot overwrite it', async () => {
+    const ir = await parseJson(
+      {
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/customers': listOp({}, 'getCustomers', offsetParams, {
+            type: 'object',
+            properties: {
+              customers: { type: 'array', items: { $ref: '#/components/schemas/Customer' } },
+              pagination: {
+                type: 'object',
+                properties: { page: { type: 'number' }, total: { type: 'number' }, totalPages: { type: 'number' } },
+              },
+            },
+          }),
+        },
+        components: {
+          schemas: {
+            Customer: { type: 'object', properties: { id: { type: 'string' } } },
+            // Lands in the IR as `Pagination` once the consumer's transform strips the suffix.
+            PaginationDto: { type: 'object', properties: { cursor: { type: 'string' } } },
+          },
+        },
+      },
+      { schemaNameTransform: (name) => (name.endsWith('Dto') ? name.slice(0, -3) : name) },
+    );
+
+    const models = Object.fromEntries(ir.models.map((m) => [m.name, m.fields.map((f) => f.name)]));
+    expect(models.Pagination).toEqual(['cursor']);
+    expect(models.GetCustomersPagination).toEqual(['page', 'total', 'totalPages']);
+  });
+
+  it('materializes every object variant of a oneOf companion', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/things': listOp({}, 'listThings', offsetParams, {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { $ref: '#/components/schemas/Item' } },
+              meta: {
+                oneOf: [
+                  {
+                    type: 'object',
+                    properties: { kind: { type: 'string', const: 'cursor' }, next: { type: 'string' } },
+                  },
+                  {
+                    type: 'object',
+                    properties: { kind: { type: 'string', const: 'offset' }, page: { type: 'integer' } },
+                  },
+                ],
+              },
+            },
+          }),
+        },
+        components: { schemas: { Item: { type: 'object', properties: { id: { type: 'string' } } } } },
+      });
+
+      const names = new Set(ir.models.map((m) => m.name));
+      const [op] = ir.services.flatMap((s) => s.operations);
+      const meta = op.pagination?.envelopeFields?.find((f) => f.name === 'meta')?.type;
+      expect(meta?.kind).toBe('union');
+      for (const variant of meta?.kind === 'union' ? meta.variants : []) {
+        expect(variant.kind).toBe('model');
+        if (variant.kind === 'model') expect(names.has(variant.name), variant.name).toBe(true);
+      }
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('Unresolved model reference'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('materializes a nullable companion object so its reference resolves', async () => {

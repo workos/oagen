@@ -185,6 +185,7 @@ export function extractOperations(
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentModels?: Model[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -226,7 +227,7 @@ export function extractOperations(
 
   // Companion models of list envelopes are named once every list operation is
   // known, so copies of one envelope shape can share a model.
-  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentSchemas));
+  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"

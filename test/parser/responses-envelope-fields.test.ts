@@ -255,6 +255,30 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
     expect(companion.models[0].fields.map((f) => `${f.name}${f.required ? '!' : ''}`)).toEqual(['next!', 'total']);
   });
 
+  it('keeps the data array item type when a later allOf branch only constrains the array', () => {
+    const result = classifyAndExtractResponse(
+      {
+        allOf: [
+          {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/User' } },
+              list_metadata: { $ref: '#/components/schemas/ListMetadata' },
+            },
+          },
+          { type: 'object', properties: { data: { type: 'array', minItems: 1 } }, required: ['data'] },
+        ],
+      },
+      'ListUsersResponse',
+    );
+
+    expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'User' } });
+    expect(result.itemType).toEqual({ kind: 'model', name: 'User' });
+    expect(result.envelopeFields).toEqual([
+      { name: 'list_metadata', type: { kind: 'model', name: 'ListMetadata' }, required: false },
+    ]);
+  });
+
   it('keeps inline list items in inlineModels and companions beside them', () => {
     const result = classifyAndExtractResponse(
       {

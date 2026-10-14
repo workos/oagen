@@ -97,26 +97,31 @@ describe('resolveEnvelopeCompanionNames', () => {
       { name: 'after', type: str, required: false },
       { name: 'total', type: int, required: false },
     ]);
-    const componentSchemas = {
-      ListMetadata: { type: 'object', properties: { after: { type: 'string' }, before: { type: 'string' } } },
-    };
+    const componentModels: Model[] = [
+      {
+        name: 'ListMetadata',
+        fields: [
+          { name: 'after', type: str, required: false },
+          { name: 'before', type: str, required: false },
+        ],
+      },
+    ];
 
-    resolveEnvelopeCompanionNames([matching, extra], componentSchemas);
+    resolveEnvelopeCompanionNames([matching, extra], componentModels);
 
     expect(matching.models[0].name).toBe('ListMetadata');
     expect(extra.models[0].name).toBe('ListBListMetadata');
   });
 
-  it('never collapses onto a component whose shape is hidden behind a $ref', () => {
-    const c = companion('ListA', 'Pagination', [{ name: 'page', type: int, required: false }]);
-    const componentSchemas = {
-      Pagination: { allOf: [{ $ref: '#/components/schemas/PageBase' }] },
-      PageBase: { type: 'object', properties: { page: { type: 'integer' } } },
-    };
+  it('keeps every copy qualified when a same-named component differs from all of them, even if they agree', () => {
+    const a = companion('ListA', 'Pagination', [{ name: 'page', type: int, required: false }]);
+    const b = companion('ListB', 'Pagination', [{ name: 'page', type: int, required: false }]);
+    const componentModels: Model[] = [{ name: 'Pagination', fields: [{ name: 'cursor', type: str, required: false }] }];
 
-    resolveEnvelopeCompanionNames([c], componentSchemas);
+    resolveEnvelopeCompanionNames([a, b], componentModels);
 
-    expect(c.models[0].name).toBe('ListAPagination');
+    expect([a, b].map((c) => c.models[0].name)).toEqual(['ListAPagination', 'ListBPagination']);
+    expect(componentModels[0].fields.map((f) => f.name)).toEqual(['cursor']);
   });
 
   it('returns every companion model, renamed or not, and nothing for companions without models', () => {

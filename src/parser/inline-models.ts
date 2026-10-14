@@ -92,7 +92,7 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       }
     }
 
-    // oneOf containing objects — extract every inline object variant as a
+    // oneOf/anyOf containing objects — extract every inline object variant as a
     // model so each gets its own typed class. Variant 0 keeps the bare
     // qualified inline name (e.g. `ApiKeyCreatedDataOwner`); subsequent
     // variants are prefixed by their const-discriminator value via
@@ -100,10 +100,9 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
     // oneOf doesn't have a const-discriminator (single object variant + null
     // for nullable, or single object variant only), only variant 0 is
     // extracted and the bare name pattern preserves backward compat.
-    if (fieldSchema.oneOf) {
-      const inlineObjectVariants = fieldSchema.oneOf.filter(
-        (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
-      );
+    const unionVariants = fieldSchema.oneOf ?? fieldSchema.anyOf;
+    if (unionVariants) {
+      const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
