@@ -7,7 +7,6 @@ import type {
   TypeRef,
   ErrorResponse,
   SuccessResponse,
-  SecurityRequirement,
   Model,
   Field,
   PaginationMeta,
@@ -18,6 +17,7 @@ import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName } from './sche
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
+import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 
 interface PathItem {
   get?: OperationObject;
@@ -48,7 +48,7 @@ interface OperationObject {
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
-  security?: Array<Record<string, string[]>>;
+  security?: RawSecurityRequirements;
   'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
 }
@@ -705,8 +705,8 @@ function buildOperation(
     pagination = paginationFromParams;
   }
 
-  // Extract per-operation security overrides
-  const security = extractOperationSecurity(op.security);
+  // Per-operation security requirements; undefined means "inherit ApiSpec.security"
+  const security = extractSecurityRequirements(op.security);
 
   // Extract mutually-exclusive parameter groups (query/path/header/cookie)
   const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
@@ -744,26 +744,6 @@ function buildOperation(
     },
     inlineModels,
   };
-}
-
-/**
- * Extract per-operation security requirements from an OpenAPI security directive.
- * Returns undefined when the operation uses the spec-level default security.
- *
- * OpenAPI security format: `security: [{ schemeName: [scope1, scope2] }]`
- */
-function extractOperationSecurity(
-  security: Array<Record<string, string[]>> | undefined,
-): SecurityRequirement[] | undefined {
-  if (!security || security.length === 0) return undefined;
-
-  const requirements: SecurityRequirement[] = [];
-  for (const entry of security) {
-    for (const [schemeName, scopes] of Object.entries(entry)) {
-      requirements.push({ schemeName, scopes: scopes ?? [] });
-    }
-  }
-  return requirements.length > 0 ? requirements : undefined;
 }
 
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
