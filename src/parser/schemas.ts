@@ -18,7 +18,7 @@ import {
  * Names oagen synthesises (inline enums, request-body variant models,
  * title-derived names) pass no second argument.
  */
-let activeSchemaNameTransform: ((name: string, originalName?: string) => string) | null = null;
+let activeSchemaNameTransform: SchemaNameTransform | null = null;
 
 /**
  * Module-level set of raw `components.schemas` keys for the spec being
@@ -81,16 +81,26 @@ export function resolveSchemaName(rawName: string): string {
   return name;
 }
 
+/**
+ * Signature of the `schemaNameTransform` hook. `name` is the cleaned
+ * PascalCase name; `originalName` is the `components.schemas` key exactly
+ * as spelled in the document, or `undefined` for names oagen synthesises.
+ * See `SchemaExtractionOptions.schemaNameTransform`.
+ */
+export type SchemaNameTransform = (name: string, originalName?: string) => string;
+
 export interface SchemaExtractionOptions {
   /**
    * Custom transform for schema (model/enum) names. Called with the cleaned
    * PascalCase name and, for component schemas, the original name as spelled
    * in the document (`originalName`). Returning `originalName` opts that
-   * schema out of the built-in normalization. `originalName` is undefined for
+   * schema out of the built-in normalization; only do so when it is a valid
+   * identifier, since keys like `user-profile` are otherwise fixed by
+   * cleanSchemaName. `originalName` is undefined for
    * any name oagen synthesises (inline enums, request-body variant models,
    * title-derived names).
    */
-  schemaNameTransform?: (name: string, originalName?: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
 }
 
 export interface SchemaObject {

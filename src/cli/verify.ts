@@ -13,6 +13,7 @@ import { runStalenessCheck } from '../verify/run-staleness-check.js';
 import { runSmokeCheck } from '../verify/run-smoke-check.js';
 import { summarizeCompatCheck, setRetryDiagnostics, writeDiagnostics } from '../verify/write-diagnostics.js';
 import type { VerifyDiagnostics } from '../verify/types.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 export type { VerifyDiagnostics } from '../verify/types.js';
 
@@ -46,7 +47,7 @@ export async function verifyCommand(opts: {
   diagnostics?: boolean;
   maxRetries?: number;
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string, originalName?: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   namespace?: string;
   compatConfig?: CompatConfig;
