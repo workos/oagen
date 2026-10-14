@@ -3,12 +3,13 @@ import { resolveOperations, findResolvedMethodCollisions } from '../ir/operation
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
 import type { OperationHint, ResolvedOperation } from '../ir/operation-hints.js';
 import { CommandError } from '../errors.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 export async function resolveCommand(opts: {
   spec: string;
   format?: 'table' | 'json';
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;

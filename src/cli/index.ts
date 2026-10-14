@@ -13,6 +13,7 @@ import { resolveCommand } from './resolve.js';
 import { loadConfig } from './config-loader.js';
 import { applyConfig } from './plugin-loader.js';
 import { CommandError } from '../errors.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 function handleError(err: unknown): never {
   const exitCode = err instanceof CommandError ? err.exitCode : 1;
@@ -39,7 +40,7 @@ const explicitConfigPath = configArgIdx !== -1 ? process.argv[configArgIdx + 1] 
 // top-level await.
 let configSmokeRunners: Record<string, string> | undefined;
 let configOperationIdTransform: ((id: string) => string) | undefined;
-let configSchemaNameTransform: ((name: string) => string) | undefined;
+let configSchemaNameTransform: SchemaNameTransform | undefined;
 let configTransformSpec:
   | ((spec: import('../parser/parse.js').OpenApiDocument) => import('../parser/parse.js').OpenApiDocument)
   | undefined;

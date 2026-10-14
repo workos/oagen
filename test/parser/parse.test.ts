@@ -326,3 +326,153 @@ describe('parseSpec – nullable enum components (#174)', () => {
     }
   });
 });
+
+describe('parseSpec – schemaNameTransform originalName (issue #175)', () => {
+  const spec = JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'repro', version: '1' },
+    paths: {
+      '/thing': {
+        get: {
+          operationId: 'getThing',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Thing' } } },
+            },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: {
+        Thing: {
+          type: 'object',
+          properties: {
+            http: { $ref: '#/components/schemas/HTTPConfig' },
+            url: { $ref: '#/components/schemas/URL' },
+            settings: { $ref: '#/components/schemas/Settings' },
+          },
+        },
+        HTTPConfig: { type: 'object', properties: { timeout: { type: 'number' } } },
+        URL: { type: 'object', properties: { href: { type: 'string' } } },
+        Settings: { type: 'object', properties: { locale: { type: 'string' } } },
+      },
+    },
+  });
+
+  async function withSpecFile<T>(fn: (specFile: string) => Promise<T>): Promise<T> {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-175-'));
+    const specFile = path.join(tmpDir, 'issue-175.json');
+    await fs.writeFile(specFile, spec);
+    try {
+      return await fn(specFile);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  it('normalises component names when no transform is given', async () => {
+    await withSpecFile(async (specFile) => {
+      const ir = await parseSpec(specFile);
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['HttpConfig', 'Setting', 'Thing', 'Url']);
+    });
+  });
+
+  it('hands the transform the original spelling so it can opt out of normalisation', async () => {
+    await withSpecFile(async (specFile) => {
+      const seen: Array<[string, string | undefined]> = [];
+      const ir = await parseSpec(specFile, {
+        schemaNameTransform: (name, originalName) => {
+          seen.push([name, originalName]);
+          return originalName ?? name;
+        },
+      });
+
+      expect(seen).toContainEqual(['HttpConfig', 'HTTPConfig']);
+      expect(seen).toContainEqual(['Url', 'URL']);
+      expect(seen).toContainEqual(['Setting', 'Settings']);
+
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['HTTPConfig', 'Settings', 'Thing', 'URL']);
+
+      const thing = ir.models.find((m) => m.name === 'Thing')!;
+      const fieldType = (fieldName: string) => thing.fields.find((f) => f.name === fieldName)!.type;
+      expect(fieldType('http')).toEqual({ kind: 'model', name: 'HTTPConfig' });
+      expect(fieldType('url')).toEqual({ kind: 'model', name: 'URL' });
+      expect(fieldType('settings')).toEqual({ kind: 'model', name: 'Settings' });
+
+      const op = ir.services.flatMap((s) => s.operations).find((o) => o.name === 'getThing');
+      expect(op).toBeDefined();
+      expect(op!.response).toEqual({ kind: 'model', name: 'Thing' });
+    });
+  });
+
+  it('passes no originalName for const-derived request-body variant names', async () => {
+    // Mirrors test/parser/oneof-variant-naming.test.ts: an inline request-body
+    // oneOf whose object variant pins `grant_type` to a const. The variant
+    // model name is synthesised from the const value + operation, so the
+    // transform must see originalName === undefined for it, while the real
+    // component (`Placeholder`) still gets its key.
+    const specYaml = `
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /authenticate:
+    post:
+      operationId: SessionController_authenticate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [grant_type, password]
+                  properties:
+                    grant_type:
+                      type: string
+                      const: password
+                    password:
+                      type: string
+                - type: object
+                  required: [grant_type, code]
+                  properties:
+                    grant_type:
+                      type: string
+                      const: code
+                    code:
+                      type: string
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    Placeholder: { type: object }
+`;
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-175-variants-'));
+    const specFile = path.join(tmpDir, 'spec.yml');
+    try {
+      await fs.writeFile(specFile, specYaml, 'utf-8');
+      const calls: Array<[string, string | undefined]> = [];
+      const ir = await parseSpec(specFile, {
+        schemaNameTransform: (name, originalName) => {
+          calls.push([name, originalName]);
+          return name;
+        },
+      });
+
+      expect(ir.models.some((m) => m.name === 'PasswordSessionAuthenticateRequest')).toBe(true);
+      expect(ir.models.some((m) => m.name === 'CodeSessionAuthenticateRequest')).toBe(true);
+
+      expect(calls).toContainEqual(['Placeholder', 'Placeholder']);
+      const variantCalls = calls.filter(([name]) => name.endsWith('SessionAuthenticateRequest'));
+      expect(variantCalls.length).toBeGreaterThan(0);
+      for (const [, originalName] of variantCalls) expect(originalName).toBeUndefined();
+      // Only real component keys ever arrive as originalName.
+      for (const [, originalName] of calls) {
+        if (originalName !== undefined) expect(originalName).toBe('Placeholder');
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

@@ -12,8 +12,21 @@ import {
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
  * to apply the same name transform to $ref model/enum references.
+ *
+ * Receives the cleaned PascalCase name and, when the name is a
+ * `components.schemas` key, the raw key exactly as spelled in the document.
+ * Names oagen synthesises (inline enums, request-body variant models,
+ * title-derived names) pass no second argument.
  */
-let activeSchemaNameTransform: ((name: string) => string) | null = null;
+let activeSchemaNameTransform: SchemaNameTransform | null = null;
+
+/**
+ * Module-level set of raw `components.schemas` keys for the spec being
+ * extracted. resolveSchemaName() consults it to decide whether the name it was
+ * handed is a real component key (forwarded to the transform as
+ * `originalName`) or a name oagen synthesised (no `originalName`).
+ */
+let activeComponentSchemaKeys: Set<string> = new Set();
 
 /**
  * Module-level set of resolved schema names whose components/schemas entry is
@@ -51,15 +64,43 @@ function asNullable(ref: TypeRef): TypeRef {
   return ref.kind === 'nullable' ? ref : { kind: 'nullable', inner: ref };
 }
 
-/** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
+/**
+ * Apply cleanSchemaName + the active transform (if any) to a raw schema name.
+ * When `rawName` is a `components.schemas` key the transform also receives it
+ * as `originalName`, so a consumer can opt out of normalization by returning
+ * the original spelling. Names oagen synthesises (request-body variant
+ * models, title-derived names, ...) are not component keys and get no
+ * `originalName`.
+ */
 export function resolveSchemaName(rawName: string): string {
   let name = cleanSchemaName(toPascalCase(rawName));
-  if (activeSchemaNameTransform) name = activeSchemaNameTransform(name);
+  if (activeSchemaNameTransform) {
+    const originalName = activeComponentSchemaKeys.has(rawName) ? rawName : undefined;
+    name = activeSchemaNameTransform(name, originalName);
+  }
   return name;
 }
 
+/**
+ * Signature of the `schemaNameTransform` hook. `name` is the cleaned
+ * PascalCase name; `originalName` is the `components.schemas` key exactly
+ * as spelled in the document, or `undefined` for names oagen synthesises.
+ * See `SchemaExtractionOptions.schemaNameTransform`.
+ */
+export type SchemaNameTransform = (name: string, originalName?: string) => string;
+
 export interface SchemaExtractionOptions {
-  schemaNameTransform?: (name: string) => string;
+  /**
+   * Custom transform for schema (model/enum) names. Called with the cleaned
+   * PascalCase name and, for component schemas, the original name as spelled
+   * in the document (`originalName`). Returning `originalName` opts that
+   * schema out of the built-in normalization; only do so when it is a valid
+   * identifier, since keys like `user-profile` are otherwise fixed by
+   * cleanSchemaName. `originalName` is undefined for
+   * any name oagen synthesises (inline enums, request-body variant models,
+   * title-derived names).
+   */
+  schemaNameTransform?: SchemaNameTransform;
 }
 
 export interface SchemaObject {
@@ -101,24 +142,43 @@ export function extractSchemas(
 
   if (!schemas) return { models: [], enums };
 
-  // Build collision-safe transform if provided
+  // Record the raw component keys first so every resolveSchemaName() call
+  // below (including the collision probe) can tell a real component key from
+  // a name oagen synthesised.
+  activeComponentSchemaKeys = new Set(Object.keys(schemas));
+
+  // Build collision-safe transform if provided. The transform is probed with
+  // the same (cleaned, raw) pair resolveSchemaName() will hand it, so a
+  // transform that keys off the original spelling is collision-checked on the
+  // names it will actually produce. Collisions are tracked by raw key: two raw
+  // keys may clean to the same name yet transform to different ones (e.g.
+  // `Users`/`User` with an originalName-based transform), and marking the
+  // shared cleaned name unsafe would wrongly disable the transform for both.
   if (options?.schemaNameTransform) {
     const transform = options.schemaNameTransform;
-    const rawNames = Object.keys(schemas);
-    const cleanedNames = rawNames.map((n) => cleanSchemaName(toPascalCase(n)));
-    const transformedToOriginals = new Map<string, string[]>();
-    for (const cleaned of cleanedNames) {
-      const transformed = transform(cleaned);
-      if (!transformedToOriginals.has(transformed)) transformedToOriginals.set(transformed, []);
-      transformedToOriginals.get(transformed)!.push(cleaned);
+    const transformedToRawKeys = new Map<string, string[]>();
+    for (const raw of Object.keys(schemas)) {
+      const transformed = transform(cleanSchemaName(toPascalCase(raw)), raw);
+      if (!transformedToRawKeys.has(transformed)) transformedToRawKeys.set(transformed, []);
+      transformedToRawKeys.get(transformed)!.push(raw);
     }
-    const unsafeToTransform = new Set<string>();
-    for (const [, originals] of transformedToOriginals) {
-      if (originals.length > 1) {
-        for (const n of originals) unsafeToTransform.add(n);
+    // Raw keys whose transformed output is shared with another raw key, plus
+    // their cleaned names. Component keys are guarded by raw key; synthesised
+    // names (no originalName) keep the cleaned-name guard they always had.
+    const unsafeRawKeys = new Set<string>();
+    const unsafeCleanedNames = new Set<string>();
+    for (const [, rawKeys] of transformedToRawKeys) {
+      if (rawKeys.length > 1) {
+        for (const raw of rawKeys) {
+          unsafeRawKeys.add(raw);
+          unsafeCleanedNames.add(cleanSchemaName(toPascalCase(raw)));
+        }
       }
     }
-    activeSchemaNameTransform = (name: string) => (unsafeToTransform.has(name) ? name : transform(name));
+    activeSchemaNameTransform = (name: string, originalName?: string) => {
+      const unsafe = originalName !== undefined ? unsafeRawKeys.has(originalName) : unsafeCleanedNames.has(name);
+      return unsafe ? name : transform(name, originalName);
+    };
   } else {
     activeSchemaNameTransform = null;
   }
@@ -199,6 +259,7 @@ export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
+  activeComponentSchemaKeys = new Set();
 }
 
 /**

@@ -7,6 +7,7 @@ import type { Extractor } from '../compat/types.js';
 import type { CompatConfig } from '../compat/config.js';
 import type { OpenApiDocument } from '../parser/parse.js';
 import { ConfigLoadError } from '../errors.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 export interface OagenConfig {
   emitters?: Emitter[];
@@ -26,11 +27,18 @@ export interface OagenConfig {
   operationIdTransform?: (id: string) => string;
   /**
    * Custom transform for schema (model/enum) names. Applied after the built-in
-   * cleanSchemaName normalization. Receives the cleaned PascalCase name; return
-   * the desired name. Collisions are detected automatically -- if a transform
-   * would produce a duplicate name, the original is kept.
+   * cleanSchemaName normalization. Receives the cleaned PascalCase name and,
+   * for component schemas, the original name exactly as spelled in the
+   * document (`originalName`); return the desired name. Returning
+   * `originalName` opts that schema out of normalization (e.g. keeps
+   * `HTTPConfig` instead of `HttpConfig`); only do so when it is a valid
+   * identifier, since keys like `user-profile` are otherwise fixed by
+   * cleanSchemaName. `originalName` is undefined for
+   * any name oagen synthesises (inline enums, request-body variant models,
+   * title-derived names). Collisions are detected automatically -- if a
+   * transform would produce a duplicate name, the cleaned name is kept.
    */
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
   /** Base URL for documentation links. When set, relative paths in descriptions
    *  (e.g. `/reference/users/user`) are expanded to full URLs. */
   docUrl?: string;

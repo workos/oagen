@@ -4,6 +4,7 @@ import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
 import type { OperationHint } from '../ir/operation-hints.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 export async function generateCommand(opts: {
   spec: string;
@@ -23,7 +24,7 @@ export async function generateCommand(opts: {
    */
   services?: string | string[];
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;

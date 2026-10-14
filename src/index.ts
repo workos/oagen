@@ -122,6 +122,7 @@ export type {
 // Core parse + generate
 export { parseSpec } from './parser/parse.js';
 export type { ParseOptions, OpenApiDocument } from './parser/parse.js';
+export type { SchemaNameTransform } from './parser/schemas.js';
 export { generate } from './engine/orchestrator.js';
 export {
   generateFiles,

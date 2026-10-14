@@ -12,6 +12,7 @@ import {
 import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
+import type { SchemaNameTransform } from './schemas.js';
 
 /**
  * A bundled OpenAPI document, post-`$ref` resolution but pre-IR extraction.
@@ -25,7 +26,13 @@ export type OpenApiDocument = Record<string, unknown>;
 
 export interface ParseOptions {
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  /**
+   * Custom transform for schema (model/enum) names. Receives the cleaned
+   * PascalCase name and, for component schemas, the original name as spelled
+   * in the document. Returning `originalName` opts out of normalization.
+   * See `SchemaExtractionOptions.schemaNameTransform`.
+   */
+  schemaNameTransform?: SchemaNameTransform;
   /**
    * Domain-facing field-name overrides, keyed by IR model name then wire field
    * name: `{ Connection: { connection_type: 'type' } }`. Sets `Field.domainName`

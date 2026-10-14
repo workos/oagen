@@ -9,6 +9,7 @@ import type { Manifest } from '../engine/manifest.js';
 import type { CompatSnapshot } from '../compat/ir.js';
 import type { ApiSurface, ApiClass } from '../compat/types.js';
 import type { ApiSpec } from '../ir/types.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 const SNAPSHOT_FILENAME = '.oagen-compat-snapshot.json';
 
@@ -126,7 +127,7 @@ export async function compatExtractCommand(opts: {
   lang: string;
   output: string;
   spec?: string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);

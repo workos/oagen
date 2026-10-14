@@ -2,12 +2,13 @@ import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { diffSpecs } from '../differ/diff.js';
 import { CommandError } from '../errors.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
+import type { SchemaNameTransform } from '../parser/schemas.js';
 
 export async function diffCommand(opts: {
   old: string;
   new: string;
   operationIdTransform?: (id: string) => string;
-  schemaNameTransform?: (name: string) => string;
+  schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
 }): Promise<void> {
