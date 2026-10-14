@@ -1,7 +1,8 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
 import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema } from './schemas.js';
+import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
+import type { EnvelopeCompanion } from './envelope-companion-names.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -19,6 +20,13 @@ export interface ResponseExtractionResult {
    * `PaginationMeta.envelopeFields`). Set only for a list envelope.
    */
   envelopeFields?: Field[];
+  /**
+   * Models lifted from inline companion objects, still under their
+   * operation-qualified names. They are deliberately not in `inlineModels`:
+   * `resolveEnvelopeCompanionNames` decides their final names once every list
+   * operation has been extracted.
+   */
+  envelopeCompanions?: EnvelopeCompanion[];
 }
 
 export function classifyAndExtractResponse(
@@ -34,7 +42,7 @@ export function classifyAndExtractResponse(
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
   const envelope = detectListEnvelope(schema);
   if (envelope.isEnvelope) {
-    return extractListResponse(schema, contextName, envelope.dataPath!);
+    return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
@@ -123,38 +131,26 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   return { isEnvelope: false, dataPath: null };
 }
 
-function extractListResponse(schema: SchemaObject, contextName: string, dataPath: string): ResponseExtractionResult {
+function extractListResponse(
+  schema: SchemaObject,
+  contextName: string,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): ResponseExtractionResult {
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
-  // Collect all property sources (allOf sub-schemas or flat schema), and the
-  // `required` lists that go with them.
-  const propSources: Record<string, SchemaObject | undefined>[] = [];
-  const required: string[] = [];
-  if (schema.allOf) {
-    for (const sub of schema.allOf) {
-      if (sub.properties) propSources.push(sub.properties);
-      if (sub.required) required.push(...sub.required);
-    }
-  }
-  if (schema.properties) {
-    propSources.push(schema.properties);
-  }
-  if (schema.required) required.push(...schema.required);
+  const { properties, required } = collectEnvelopeProperties(schema, componentSchemas);
 
-  for (const props of propSources) {
-    const dataProp = props[dataPath];
-    if (!dataProp) continue;
-
-    if (dataProp.type === 'array' && dataProp.items) {
-      const items = dataProp.items;
-      if (items.$ref) {
-        itemTypeRef = schemaToTypeRef(items, contextName);
-      } else if (items.type === 'object' && items.properties) {
-        const itemName = contextName.replace(/Response$/, '') + 'Item';
-        itemTypeRef = { kind: 'model', name: itemName };
-        inlineModels.push(...extractInlineModel(itemName, items));
-      }
+  const dataProp = properties[dataPath];
+  if (dataProp?.type === 'array' && dataProp.items) {
+    const items = dataProp.items;
+    if (items.$ref) {
+      itemTypeRef = schemaToTypeRef(items, contextName);
+    } else if (items.type === 'object' && items.properties) {
+      const itemName = contextName.replace(/Response$/, '') + 'Item';
+      itemTypeRef = { kind: 'model', name: itemName };
+      inlineModels.push(...extractInlineModel(itemName, items));
     }
   }
 
@@ -162,14 +158,12 @@ function extractListResponse(schema: SchemaObject, contextName: string, dataPath
   // companion (`list_metadata`, `pagination`, `has_more`, …) and any
   // discriminant such as `object: "list"`. Without these an emitter cannot
   // type the endpoint's actual response or read the next-page details.
-  const companionProps: Record<string, SchemaObject | undefined> = {};
-  for (const props of propSources) {
-    for (const [key, propSchema] of Object.entries(props)) {
-      if (key !== dataPath && propSchema) companionProps[key] = propSchema;
-    }
-  }
-  const { fields: envelopeFields, models: companionModels } = extractEnvelopeCompanions(companionProps, required);
-  inlineModels.push(...companionModels);
+  const { envelopeFields, envelopeCompanions } = extractEnvelopeCompanions(
+    properties,
+    required,
+    dataPath,
+    contextName.replace(/Response$/, ''),
+  );
 
   return {
     response: { kind: 'array', items: itemTypeRef },
@@ -178,6 +172,59 @@ function extractListResponse(schema: SchemaObject, contextName: string, dataPath
     dataPath,
     itemType: itemTypeRef,
     envelopeFields,
+    envelopeCompanions: envelopeCompanions.length > 0 ? envelopeCompanions : undefined,
+  };
+}
+
+/**
+ * Every property the envelope declares, merged across its `allOf` branches,
+ * with the `required` lists that go with them.
+ *
+ * A `$ref` branch is resolved against the component schemas so fields an
+ * envelope inherits from a shared base (`trace_id` on every response, say)
+ * are not silently dropped. A property declared by more than one branch keeps
+ * both declarations' shape when both are inline objects — `pagination.next`
+ * from one branch and `pagination.total` from another both belong to the
+ * response — and otherwise takes the later declaration, as `allOf` merging
+ * does elsewhere in the parser.
+ */
+function collectEnvelopeProperties(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): { properties: Record<string, SchemaObject>; required: string[] } {
+  const properties: Record<string, SchemaObject> = {};
+  const required: string[] = [];
+  const seenRefs = new Set<string>();
+
+  const visit = (s: SchemaObject): void => {
+    if (s.$ref) {
+      if (seenRefs.has(s.$ref)) return;
+      seenRefs.add(s.$ref);
+      const refName = s.$ref.split('/').pop();
+      const resolved = refName ? componentSchemas?.[refName] : undefined;
+      if (resolved) visit(resolved);
+      return;
+    }
+    for (const sub of s.allOf ?? []) visit(sub);
+    for (const [key, prop] of Object.entries(s.properties ?? {})) {
+      if (!prop) continue;
+      const existing = properties[key];
+      properties[key] = existing ? mergePropertyDeclarations(existing, prop) : prop;
+    }
+    if (s.required) required.push(...s.required);
+  };
+  visit(schema);
+
+  return { properties, required };
+}
+
+function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): SchemaObject {
+  if (!isInlineObjectSchema(earlier) || !isInlineObjectSchema(later)) return later;
+  return {
+    ...earlier,
+    ...later,
+    properties: { ...earlier.properties, ...later.properties },
+    required: [...(earlier.required ?? []), ...(later.required ?? [])],
   };
 }
 
@@ -185,25 +232,37 @@ function extractListResponse(schema: SchemaObject, contextName: string, dataPath
  * Type a list envelope's companion properties as fields, lifting any inline
  * object among them (and anything nested inside it) to a model.
  *
- * Companion models are named from the property alone — `list_metadata` →
- * `ListMetadata`, `pagination` → `Pagination` — rather than qualified by the
- * operation the way list items are (`ListUsersItem`). The same envelope recurs
- * on every list endpoint of an API, so operation-qualified names would mint one
- * identical model per endpoint; a shared name lets `mergeInlineResponseModels`
- * collapse the copies onto one model, preferring the component schema when the
- * document declares one.
- *
- * Both `buildFieldFromSchema` and `extractInlineModel` derive inline names from
- * their parent name, so handing them an empty parent yields exactly that bare
- * name, and the two stay in agreement for nested objects (`PaginationLinks`).
+ * Each companion is extracted twice through `extractInlineModel`: once under
+ * the operation's name, which is how its models enter the IR
+ * (`ListUsersListMetadata`), and once under an empty parent, which yields the
+ * name each model would carry if named from its property alone
+ * (`ListMetadata`). Both runs walk the same code path, so the two model lists
+ * line up index for index. `resolveEnvelopeCompanionNames` later picks, per
+ * companion, which of the two names survives — the bare one only where every
+ * copy of that companion across the API agrees structurally.
  */
 function extractEnvelopeCompanions(
-  properties: Record<string, SchemaObject | undefined>,
+  properties: Record<string, SchemaObject>,
   required: string[],
-): { fields: Field[]; models: Model[] } {
-  if (Object.keys(properties).length === 0) return { fields: [], models: [] };
-  const [envelope, ...models] = extractInlineModel('', { type: 'object', properties, required });
-  return { fields: envelope.fields, models };
+  dataPath: string,
+  operationName: string,
+): { envelopeFields: Field[]; envelopeCompanions: EnvelopeCompanion[] } {
+  const envelopeFields: Field[] = [];
+  const envelopeCompanions: EnvelopeCompanion[] = [];
+
+  for (const [key, propSchema] of Object.entries(properties)) {
+    if (key === dataPath) continue;
+    const single: SchemaObject = { type: 'object', properties: { [key]: propSchema }, required };
+    const [qualified, ...qualifiedModels] = extractInlineModel(operationName, single);
+    const field = qualified.fields[0];
+    envelopeFields.push(field);
+    if (qualifiedModels.length > 0) {
+      const [, ...bareModels] = extractInlineModel('', single);
+      envelopeCompanions.push({ field, models: qualifiedModels, bareNames: bareModels.map((m) => m.name) });
+    }
+  }
+
+  return { envelopeFields, envelopeCompanions };
 }
 
 function hasDiscriminantConstField(schema: SchemaObject): { property: string; value: string } | null {
@@ -481,14 +540,16 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
 
     // Recursively extract nested inline objects — qualify with parent name
-    // to avoid generic names like "Domains" when multiple parents have a "domains" field
-    if (fieldSchema.type === 'object' && fieldSchema.properties) {
+    // to avoid generic names like "Domains" when multiple parents have a "domains" field.
+    // `isInlineObjectSchema` also admits the nullable `type: ['object', 'null']`
+    // form, which schemaToTypeRef turns into a nullable model reference.
+    if (isInlineObjectSchema(fieldSchema)) {
       const nestedName = qualifyNestedName(name, fieldName);
       nestedModels.push(...extractInlineModel(nestedName, fieldSchema));
     }
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items;
-      if (items.type === 'object' && items.properties) {
+      if (isInlineObjectSchema(items)) {
         const nestedName = qualifyNestedName(name, fieldName);
         nestedModels.push(...extractInlineModel(nestedName, items));
       }
@@ -510,9 +571,10 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
         }
       }
     }
-    // Handle oneOf containing inline objects — extract the first non-null object variant
-    if (fieldSchema.oneOf) {
-      const objectVariant = fieldSchema.oneOf.find((v) => v.properties && (v.type === 'object' || !v.type));
+    // Handle oneOf/anyOf containing inline objects — extract the first non-null object variant
+    const variants = fieldSchema.oneOf ?? fieldSchema.anyOf;
+    if (variants) {
+      const objectVariant = variants.find((v) => isInlineObjectSchema(v));
       if (objectVariant) {
         const nestedName = qualifyNestedName(name, fieldName);
         const existingNames = new Set(nestedModels.map((m) => m.name));

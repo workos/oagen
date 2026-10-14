@@ -1,7 +1,7 @@
 import type { Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema, resolveSchemaName } from './schemas.js';
+import { buildFieldFromSchema, isInlineObjectSchema, resolveSchemaName } from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -57,8 +57,9 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    // Direct inline object with properties (with or without explicit type: 'object')
-    if (fieldSchema.properties && (fieldSchema.type === 'object' || !fieldSchema.type)) {
+    // Direct inline object with properties (with or without explicit type: 'object',
+    // including the nullable `type: ['object', 'null']` form)
+    if (isInlineObjectSchema(fieldSchema)) {
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
       results.push(buildInlineModel(modelName, fieldSchema));
@@ -68,7 +69,7 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
     // Array of inline objects
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items;
-      if (items.properties && (items.type === 'object' || !items.type)) {
+      if (isInlineObjectSchema(items)) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
         results.push(buildInlineModel(modelName, items));

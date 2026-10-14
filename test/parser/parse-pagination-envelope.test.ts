@@ -155,12 +155,12 @@ describe('parseSpec — pagination envelope fields', () => {
     expect(listMetadata[0].fields.map((f) => f.name)).toEqual(['before', 'after']);
   });
 
-  it('promotes an inline enum companion to a top-level enum', async () => {
+  it('promotes an inline enum companion to a top-level enum, qualified by operation like a parameter enum', async () => {
     const ir = await parseJson({
       openapi: '3.1.0',
       info: { title: 'repro', version: '1' },
       paths: {
-        '/items': listOp({}, 'listItems', offsetParams, {
+        '/items': listOp({}, 'listThings', offsetParams, {
           type: 'object',
           properties: {
             items: { type: 'array', items: { $ref: '#/components/schemas/Item' } },
@@ -175,9 +175,135 @@ describe('parseSpec — pagination envelope fields', () => {
     const [op] = ir.services.flatMap((s) => s.operations);
     expect(op.pagination?.envelopeFields?.find((f) => f.name === 'sort_order')?.type).toMatchObject({
       kind: 'enum',
-      name: 'SortOrder',
+      name: 'ListThingsSortOrder',
     });
-    expect(ir.enums.find((e) => e.name === 'SortOrder')?.values.map((v) => v.value)).toEqual(['asc', 'desc']);
+    expect(ir.enums.find((e) => e.name === 'ListThingsSortOrder')?.values.map((v) => v.value)).toEqual(['asc', 'desc']);
+  });
+
+  it("keeps two endpoints' same-named enum companions apart when their values differ", async () => {
+    const envelope = (values: string[]) => ({
+      type: 'object',
+      properties: {
+        items: { type: 'array', items: { $ref: '#/components/schemas/Item' } },
+        total: { type: 'integer' },
+        sort_order: { type: 'string', enum: values },
+      },
+    });
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/items': listOp({}, 'listThings', offsetParams, envelope(['asc', 'desc'])),
+        '/events': listOp({}, 'listEvents', offsetParams, envelope(['newest', 'oldest'])),
+      },
+      components: { schemas: { Item: { type: 'object', properties: { id: { type: 'string' } } } } },
+    });
+
+    const byName = Object.fromEntries(ir.enums.map((e) => [e.name, e.values.map((v) => v.value)]));
+    expect(byName).toEqual({ ListThingsSortOrder: ['asc', 'desc'], ListEventsSortOrder: ['newest', 'oldest'] });
+  });
+
+  it('keeps a divergent companion apart under its operation name while the common shape stays bare', async () => {
+    const envelope = (pagination: Record<string, unknown>) => ({
+      type: 'object',
+      properties: {
+        items: { type: 'array', items: { $ref: '#/components/schemas/Item' } },
+        pagination: { type: 'object', properties: pagination },
+      },
+    });
+    const cursor = { next: { type: 'string' } };
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/a': listOp({}, 'listA', offsetParams, envelope(cursor)),
+        '/b': listOp({}, 'listB', offsetParams, envelope({ page: { type: 'integer' }, total: { type: 'integer' } })),
+        '/c': listOp({}, 'listC', offsetParams, envelope(cursor)),
+      },
+      components: { schemas: { Item: { type: 'object', properties: { id: { type: 'string' } } } } },
+    });
+
+    const companionOf = (name: string) =>
+      ir.services
+        .flatMap((s) => s.operations)
+        .find((o) => o.name === name)!
+        .pagination!.envelopeFields!.find((f) => f.name === 'pagination')!.type;
+    expect(companionOf('listA')).toEqual({ kind: 'model', name: 'Pagination' });
+    expect(companionOf('listC')).toEqual({ kind: 'model', name: 'Pagination' });
+    expect(companionOf('listB')).toEqual({ kind: 'model', name: 'ListBPagination' });
+
+    const models = Object.fromEntries(ir.models.map((m) => [m.name, m.fields.map((f) => f.name)]));
+    expect(models.Pagination).toEqual(['next']);
+    expect(models.ListBPagination).toEqual(['page', 'total']);
+    expect(ir.models.filter((m) => m.name === 'Pagination')).toHaveLength(1);
+  });
+
+  it('never overwrites an unrelated component that happens to share the companion name', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/customers': listOp({}, 'getCustomers', offsetParams, {
+          type: 'object',
+          properties: {
+            customers: { type: 'array', items: { $ref: '#/components/schemas/Customer' } },
+            pagination: {
+              type: 'object',
+              properties: { page: { type: 'number' }, total: { type: 'number' }, totalPages: { type: 'number' } },
+            },
+          },
+        }),
+      },
+      components: {
+        schemas: {
+          Customer: { type: 'object', properties: { id: { type: 'string' } } },
+          // Same name, one different field, fewer fields: the old "largest wins"
+          // merge would have replaced it with the companion's shape.
+          Pagination: { type: 'object', properties: { cursor: { type: 'string' } } },
+        },
+      },
+    });
+
+    const models = Object.fromEntries(ir.models.map((m) => [m.name, m.fields.map((f) => f.name)]));
+    expect(models.Pagination).toEqual(['cursor']);
+    expect(models.GetCustomersPagination).toEqual(['page', 'total', 'totalPages']);
+    const [op] = ir.services.flatMap((s) => s.operations);
+    expect(op.pagination?.envelopeFields).toEqual([
+      { name: 'pagination', type: { kind: 'model', name: 'GetCustomersPagination' }, required: false },
+    ]);
+  });
+
+  it('materializes a nullable companion object so its reference resolves', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/items': listOp({}, 'listThings', offsetParams, {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { $ref: '#/components/schemas/Item' } },
+              pagination: { type: ['object', 'null'], properties: { page: { type: 'integer' } } },
+            },
+          }),
+        },
+        components: { schemas: { Item: { type: 'object', properties: { id: { type: 'string' } } } } },
+      });
+
+      const [op] = ir.services.flatMap((s) => s.operations);
+      expect(op.pagination?.envelopeFields).toEqual([
+        {
+          name: 'pagination',
+          type: { kind: 'nullable', inner: { kind: 'model', name: 'Pagination' } },
+          required: false,
+        },
+      ]);
+      expect(ir.models.find((m) => m.name === 'Pagination')?.fields.map((f) => f.name)).toEqual(['page']);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('Unresolved model reference'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('leaves envelopeFields unset for a $ref list wrapper and for parameter-only pagination', async () => {

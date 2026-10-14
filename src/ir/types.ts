@@ -158,10 +158,12 @@ export interface PaginationMeta {
    * emitter can type what the endpoint returns and read the page details it
    * needs for the next request without parsing the document itself.
    *
-   * An inline companion object is lifted to a model named from its property
-   * alone (`list_metadata` → `ListMetadata`), not qualified by operation: the
-   * same envelope recurs on every list endpoint of an API, and the copies
-   * collapse onto one model (the component schema when one exists).
+   * An inline companion object is lifted to a model. Because the same envelope
+   * recurs on every list endpoint of an API, copies that agree structurally
+   * share one model named from the property alone (`list_metadata` →
+   * `ListMetadata`, or the component schema of that name when one exists); a
+   * copy whose shape differs keeps an operation-qualified name
+   * (`ListUsersListMetadata`) so it can never change another type's shape.
    *
    * Absent when the response is a bare array, or when pagination was inferred
    * from query parameters alone and no envelope was detected.

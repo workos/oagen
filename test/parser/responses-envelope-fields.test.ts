@@ -5,6 +5,10 @@ import { classifyAndExtractResponse } from '../../src/parser/responses.js';
  * Covers `envelopeFields` on the list-envelope path of `classifyAndExtractResponse`:
  * everything a list response carries besides the data array must survive into
  * the IR so an emitter can type the envelope and read its page details (#183).
+ *
+ * At this level a lifted companion model is still operation-qualified and
+ * travels in `envelopeCompanions`, not `inlineModels`; the bare name it may
+ * collapse to is recorded beside it for `resolveEnvelopeCompanionNames`.
  */
 describe('classifyAndExtractResponse — list envelope companion fields', () => {
   it('keeps a $ref companion as a model-typed field next to dataPath', () => {
@@ -26,11 +30,12 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
     expect(result.envelopeFields).toEqual([
       { name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true },
     ]);
-    // A $ref companion needs no inline model.
+    // A $ref companion lifts nothing.
     expect(result.inlineModels).toEqual([]);
+    expect(result.envelopeCompanions).toBeUndefined();
   });
 
-  it('lifts an inline companion object to a model named from the property alone', () => {
+  it('lifts an inline companion object under the operation name, remembering its bare name', () => {
     const result = classifyAndExtractResponse(
       {
         type: 'object',
@@ -49,21 +54,24 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
       'ListUsersResponse',
     );
 
-    expect(result.envelopeFields).toMatchObject([
-      {
-        name: 'list_metadata',
-        type: { kind: 'model', name: 'ListMetadata' },
-        required: false,
-        description: 'Cursors.',
-      },
-    ]);
-    // Not `ListUsersListMetadata`: the shape recurs on every list endpoint and
-    // must collapse onto one model.
-    expect(result.inlineModels.map((m) => m.name)).toEqual(['ListMetadata']);
-    expect(result.inlineModels[0].fields.map((f) => f.name)).toEqual(['before', 'after']);
+    const [field] = result.envelopeFields!;
+    expect(field).toMatchObject({
+      name: 'list_metadata',
+      type: { kind: 'model', name: 'ListUsersListMetadata' },
+      required: false,
+      description: 'Cursors.',
+    });
+    expect(result.inlineModels).toEqual([]);
+    expect(result.envelopeCompanions).toHaveLength(1);
+    const [companion] = result.envelopeCompanions!;
+    // The field object is shared by identity so a later rename reaches the operation.
+    expect(companion.field).toBe(field);
+    expect(companion.models.map((m) => m.name)).toEqual(['ListUsersListMetadata']);
+    expect(companion.models[0].fields.map((f) => f.name)).toEqual(['before', 'after']);
+    expect(companion.bareNames).toEqual(['ListMetadata']);
   });
 
-  it('extracts objects nested inside an inline companion with the companion as parent', () => {
+  it('extracts objects nested inside an inline companion, qualified and bare alike', () => {
     const result = classifyAndExtractResponse(
       {
         type: 'object',
@@ -81,12 +89,44 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
       'ListIssuesResponse',
     );
 
-    expect(result.inlineModels.map((m) => m.name)).toEqual(['Pagination', 'PaginationLink']);
-    const pagination = result.inlineModels[0];
-    expect(pagination.fields.find((f) => f.name === 'links')?.type).toEqual({ kind: 'model', name: 'PaginationLink' });
+    const [companion] = result.envelopeCompanions!;
+    expect(companion.models.map((m) => m.name)).toEqual(['ListIssuesPagination', 'ListIssuesPaginationLink']);
+    expect(companion.bareNames).toEqual(['Pagination', 'PaginationLink']);
+    expect(companion.models[0].fields.find((f) => f.name === 'links')?.type).toEqual({
+      kind: 'model',
+      name: 'ListIssuesPaginationLink',
+    });
   });
 
-  it('keeps every companion of a flat envelope, scalars and inline enums alike', () => {
+  it('lifts a nullable companion object and an anyOf object-or-null companion', () => {
+    const result = classifyAndExtractResponse(
+      {
+        type: 'object',
+        properties: {
+          items: { type: 'array', items: { $ref: '#/components/schemas/Issue' } },
+          pagination: { type: ['object', 'null'], properties: { page: { type: 'integer' } } },
+          meta: { anyOf: [{ type: 'object', properties: { total: { type: 'integer' } } }, { type: 'null' }] },
+        },
+      },
+      'ListIssuesResponse',
+    );
+
+    expect(result.envelopeFields).toEqual([
+      {
+        name: 'pagination',
+        type: { kind: 'nullable', inner: { kind: 'model', name: 'ListIssuesPagination' } },
+        required: false,
+      },
+      { name: 'meta', type: { kind: 'nullable', inner: { kind: 'model', name: 'ListIssuesMeta' } }, required: false },
+    ]);
+    // Both references have a model behind them.
+    expect(result.envelopeCompanions!.map((c) => c.models.map((m) => m.name))).toEqual([
+      ['ListIssuesPagination'],
+      ['ListIssuesMeta'],
+    ]);
+  });
+
+  it('keeps every companion of a flat envelope; an inline enum is qualified like a parameter enum', () => {
     const result = classifyAndExtractResponse(
       {
         type: 'object',
@@ -98,14 +138,15 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
         },
         required: ['items', 'total'],
       },
-      'ListItemsResponse',
+      'ListThingsResponse',
     );
 
     expect(result.envelopeFields).toEqual([
       { name: 'total', type: { kind: 'primitive', type: 'integer' }, required: true, description: 'Total matches.' },
       { name: 'has_more', type: { kind: 'primitive', type: 'boolean' }, required: false },
-      { name: 'sort', type: { kind: 'enum', name: 'Sort', values: ['asc', 'desc'] }, required: false },
+      { name: 'sort', type: { kind: 'enum', name: 'ListThingsSort', values: ['asc', 'desc'] }, required: false },
     ]);
+    expect(result.envelopeCompanions).toBeUndefined();
   });
 
   it('never lists the data array among the companions', () => {
@@ -156,7 +197,65 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
     ]);
   });
 
-  it('keeps inline list items and companions side by side', () => {
+  it('includes companions an allOf $ref branch contributes, with their required flags', () => {
+    const componentSchemas = {
+      ResponseBase: {
+        type: 'object',
+        properties: { trace_id: { type: 'string' } },
+        required: ['trace_id'],
+      },
+    };
+    const result = classifyAndExtractResponse(
+      {
+        allOf: [
+          { $ref: '#/components/schemas/ResponseBase' },
+          {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/Thing' } },
+              total: { type: 'integer' },
+            },
+          },
+        ],
+      },
+      'ListThingsResponse',
+      componentSchemas,
+    );
+
+    expect(result.isPaginated).toBe(true);
+    expect(result.envelopeFields).toEqual([
+      { name: 'trace_id', type: { kind: 'primitive', type: 'string' }, required: true },
+      { name: 'total', type: { kind: 'primitive', type: 'integer' }, required: false },
+    ]);
+  });
+
+  it('combines a companion object declared by more than one allOf branch', () => {
+    const result = classifyAndExtractResponse(
+      {
+        allOf: [
+          {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/Thing' } },
+              pagination: { type: 'object', properties: { next: { type: 'string' } }, required: ['next'] },
+            },
+          },
+          {
+            type: 'object',
+            properties: {
+              pagination: { type: 'object', properties: { total: { type: 'integer' } } },
+            },
+          },
+        ],
+      },
+      'ListThingsResponse',
+    );
+
+    const [companion] = result.envelopeCompanions!;
+    expect(companion.models[0].fields.map((f) => `${f.name}${f.required ? '!' : ''}`)).toEqual(['next!', 'total']);
+  });
+
+  it('keeps inline list items in inlineModels and companions beside them', () => {
     const result = classifyAndExtractResponse(
       {
         type: 'object',
@@ -169,10 +268,11 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
     );
 
     expect(result.itemType).toEqual({ kind: 'model', name: 'ListNodesItem' });
+    expect(result.inlineModels.map((m) => m.name)).toEqual(['ListNodesItem']);
     expect(result.envelopeFields).toEqual([
-      { name: 'page_info', type: { kind: 'model', name: 'PageInfo' }, required: false },
+      { name: 'page_info', type: { kind: 'model', name: 'ListNodesPageInfo' }, required: false },
     ]);
-    expect(result.inlineModels.map((m) => m.name)).toEqual(['ListNodesItem', 'PageInfo']);
+    expect(result.envelopeCompanions![0].bareNames).toEqual(['PageInfo']);
   });
 
   it('leaves envelopeFields unset when the response is not a list envelope', () => {
