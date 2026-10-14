@@ -77,11 +77,14 @@ describe('classifyAndExtractResponse', () => {
         kind: 'array',
         items: { kind: 'model', name: 'ListEventsItem' },
       });
-      expect(result.inlineModels).toHaveLength(1);
+      // The inline `list_metadata` companion is lifted to a model too (#183).
+      expect(result.inlineModels).toHaveLength(2);
       expect(result.inlineModels[0].name).toBe('ListEventsItem');
       expect(result.inlineModels[0].fields).toHaveLength(2);
       expect(result.inlineModels[0].fields[0].name).toBe('id');
       expect(result.inlineModels[0].fields[0].required).toBe(true);
+      expect(result.inlineModels[1].name).toBe('ListMetadata');
+      expect(result.inlineModels[1].fields.map((f) => f.name)).toEqual(['next']);
       expect(result.isPaginated).toBe(true);
     });
 

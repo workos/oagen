@@ -14,6 +14,11 @@ export interface ResponseExtractionResult {
   dataPath?: string;
   /** TypeRef of individual items in a paginated list */
   itemType?: TypeRef;
+  /**
+   * The envelope's properties other than the data array (see
+   * `PaginationMeta.envelopeFields`). Set only for a list envelope.
+   */
+  envelopeFields?: Field[];
 }
 
 export function classifyAndExtractResponse(
@@ -122,16 +127,20 @@ function extractListResponse(schema: SchemaObject, contextName: string, dataPath
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
-  // Collect all property sources (allOf sub-schemas or flat schema)
+  // Collect all property sources (allOf sub-schemas or flat schema), and the
+  // `required` lists that go with them.
   const propSources: Record<string, SchemaObject | undefined>[] = [];
+  const required: string[] = [];
   if (schema.allOf) {
     for (const sub of schema.allOf) {
       if (sub.properties) propSources.push(sub.properties);
+      if (sub.required) required.push(...sub.required);
     }
   }
   if (schema.properties) {
     propSources.push(schema.properties);
   }
+  if (schema.required) required.push(...schema.required);
 
   for (const props of propSources) {
     const dataProp = props[dataPath];
@@ -149,13 +158,52 @@ function extractListResponse(schema: SchemaObject, contextName: string, dataPath
     }
   }
 
+  // Everything the envelope carries besides the data array: the pagination
+  // companion (`list_metadata`, `pagination`, `has_more`, …) and any
+  // discriminant such as `object: "list"`. Without these an emitter cannot
+  // type the endpoint's actual response or read the next-page details.
+  const companionProps: Record<string, SchemaObject | undefined> = {};
+  for (const props of propSources) {
+    for (const [key, propSchema] of Object.entries(props)) {
+      if (key !== dataPath && propSchema) companionProps[key] = propSchema;
+    }
+  }
+  const { fields: envelopeFields, models: companionModels } = extractEnvelopeCompanions(companionProps, required);
+  inlineModels.push(...companionModels);
+
   return {
     response: { kind: 'array', items: itemTypeRef },
     inlineModels,
     isPaginated: true,
     dataPath,
     itemType: itemTypeRef,
+    envelopeFields,
   };
+}
+
+/**
+ * Type a list envelope's companion properties as fields, lifting any inline
+ * object among them (and anything nested inside it) to a model.
+ *
+ * Companion models are named from the property alone — `list_metadata` →
+ * `ListMetadata`, `pagination` → `Pagination` — rather than qualified by the
+ * operation the way list items are (`ListUsersItem`). The same envelope recurs
+ * on every list endpoint of an API, so operation-qualified names would mint one
+ * identical model per endpoint; a shared name lets `mergeInlineResponseModels`
+ * collapse the copies onto one model, preferring the component schema when the
+ * document declares one.
+ *
+ * Both `buildFieldFromSchema` and `extractInlineModel` derive inline names from
+ * their parent name, so handing them an empty parent yields exactly that bare
+ * name, and the two stay in agreement for nested objects (`PaginationLinks`).
+ */
+function extractEnvelopeCompanions(
+  properties: Record<string, SchemaObject | undefined>,
+  required: string[],
+): { fields: Field[]; models: Model[] } {
+  if (Object.keys(properties).length === 0) return { fields: [], models: [] };
+  const [envelope, ...models] = extractInlineModel('', { type: 'object', properties, required });
+  return { fields: envelope.fields, models };
 }
 
 function hasDiscriminantConstField(schema: SchemaObject): { property: string; value: string } | null {

@@ -686,6 +686,7 @@ function buildOperation(
     isPaginated,
     dataPath: responseDataPath,
     itemType: responseItemType,
+    envelopeFields,
   } = extractResponses(op.responses, op, path, method, componentSchemas);
   inlineModels.push(...reqBodyModels);
 
@@ -700,6 +701,7 @@ function buildOperation(
       limitParam: paginationFromParams?.limitParam,
       dataPath: responseDataPath ?? paginationFromParams?.dataPath,
       itemType,
+      envelopeFields,
     };
   } else if (paginationFromParams) {
     pagination = paginationFromParams;
@@ -1228,6 +1230,7 @@ function extractResponses(
   isPaginated: boolean;
   dataPath?: string;
   itemType?: TypeRef;
+  envelopeFields?: Field[];
 } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
@@ -1235,6 +1238,7 @@ function extractResponses(
   let isPaginated = false;
   let dataPath: string | undefined;
   let itemType: TypeRef | undefined;
+  let envelopeFields: Field[] | undefined;
 
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
@@ -1255,6 +1259,7 @@ function extractResponses(
         isPaginated = result.isPaginated;
         dataPath = result.dataPath;
         itemType = result.itemType;
+        envelopeFields = result.envelopeFields;
       } else if (resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
         if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
@@ -1301,5 +1306,5 @@ function extractResponses(
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
-  return { response, successResponses, errors, inlineModels, isPaginated, dataPath, itemType };
+  return { response, successResponses, errors, inlineModels, isPaginated, dataPath, itemType, envelopeFields };
 }
