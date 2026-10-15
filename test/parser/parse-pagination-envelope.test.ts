@@ -273,6 +273,43 @@ describe('parseSpec — pagination envelope fields', () => {
     ]);
   });
 
+  it("keeps a copy qualified when it shares the component's field names but not its types", async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/users': listOp({}, 'listUsers', [{ name: 'after', in: 'query', schema: { type: 'string' } }], {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/User' } },
+            // Same `after` / `before` names as the component, but numeric offsets.
+            list_metadata: { type: 'object', properties: { after: { type: 'integer' }, before: { type: 'integer' } } },
+          },
+        }),
+      },
+      components: {
+        schemas: {
+          User: { type: 'object', properties: { id: { type: 'string' } } },
+          ListMetadata: { type: 'object', properties: { after: { type: 'string' }, before: { type: 'string' } } },
+        },
+      },
+    });
+
+    const models = Object.fromEntries(
+      ir.models.map((m) => [
+        m.name,
+        m.fields.map((f) => `${f.name}:${f.type.kind === 'primitive' ? f.type.type : f.type.kind}`),
+      ]),
+    );
+    expect(models.ListMetadata).toEqual(['after:string', 'before:string']);
+    expect(models.ListUsersListMetadata).toEqual(['after:integer', 'before:integer']);
+    const [op] = ir.services.flatMap((s) => s.operations);
+    expect(op.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata')?.type).toEqual({
+      kind: 'model',
+      name: 'ListUsersListMetadata',
+    });
+  });
+
   it('recognizes a component the parser renamed, so a companion cannot overwrite it', async () => {
     const ir = await parseJson(
       {

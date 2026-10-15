@@ -30,13 +30,22 @@ export interface EnvelopeCompanion {
  * So a companion takes its bare name only when that cannot change any other
  * type's shape:
  *
+ * Copies are compared structurally — field names, requiredness and each
+ * field's shape, with nested models resolved and inline enums compared by
+ * value — never by name alone. A copy collapses onto a target shape only when
+ * the target *admits* every value the copy can hold: the same fields with the
+ * same types, where the target may be looser (a field the copy requires may be
+ * optional on the target, a non-null copy field may be nullable there) but
+ * never stricter. Widening a response type loses no data a reader can see;
+ * narrowing it would promise fields the wire may omit.
+ *
  * - When a component model of that name exists — compared after the parser's
- *   own renaming, so `PaginationDto` → `Pagination` is caught — the copies
- *   whose field names match the component's collapse onto it (the component
- *   stays as written); the others keep their operation-qualified name.
- * - Otherwise the copies are fingerprinted structurally. The most common shape
- *   (first declared, on a tie) takes the bare name and the merge pass folds the
- *   identical copies onto one model; any copy with a different shape keeps its
+ *   own renaming, so `PaginationDto` → `Pagination` is caught — the copies it
+ *   admits collapse onto it (the component stays as written); the others keep
+ *   their operation-qualified name.
+ * - Otherwise the most common exact shape (first declared, on a tie) becomes
+ *   the target: it and every copy it admits take the bare name, and the merge
+ *   pass folds the identical copies onto one model; any other copy keeps its
  *   operation-qualified name.
  *
  * Enums declared inline in a companion stay operation-qualified, exactly like
@@ -52,32 +61,35 @@ export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], c
     byBareName.set(bare, group);
   }
 
+  const componentMap = new Map((componentModels ?? []).map((m) => [m.name, m]));
+  const localMap = (c: EnvelopeCompanion): Map<string, Model> => new Map(c.models.map((m) => [m.name, m]));
+
   for (const [bare, group] of byBareName) {
-    const component = componentModels?.find((m) => m.name === bare);
-
-    let takesBareName: (companion: EnvelopeCompanion) => boolean;
+    // The target shape every copy is measured against, with the map its nested
+    // references resolve through: a component resolves through the other
+    // components, a copy through its own models, so a copy nesting the same
+    // shape under its own qualified name still matches.
+    let target: { model: Model; map: Map<string, Model> };
+    const component = componentMap.get(bare);
     if (component) {
-      const componentFields = new Set(component.fields.map((f) => f.name));
-      takesBareName = (c) => sameSet(new Set(c.models[0].fields.map((f) => f.name)), componentFields);
+      target = { model: component, map: componentMap };
     } else {
-      const counts = new Map<string, number>();
-      const fingerprints = new Map<EnvelopeCompanion, string>();
+      const counts = new Map<string, { n: number; first: EnvelopeCompanion }>();
       for (const c of group) {
-        const fp = fingerprintModel(c.models[0], new Map(c.models.map((m) => [m.name, m])), new Set());
-        fingerprints.set(c, fp);
-        counts.set(fp, (counts.get(fp) ?? 0) + 1);
+        const fp = fingerprintModel(c.models[0], localMap(c), new Set());
+        const seen = counts.get(fp);
+        if (seen) seen.n += 1;
+        else counts.set(fp, { n: 1, first: c });
       }
-      let winner = '';
-      let best = 0;
-      for (const [fp, n] of counts) {
-        if (n > best) [winner, best] = [fp, n];
-      }
-      takesBareName = (c) => fingerprints.get(c) === winner;
+      let best = { n: 0, first: group[0] };
+      for (const entry of counts.values()) if (entry.n > best.n) best = entry;
+      target = { model: best.first.models[0], map: localMap(best.first) };
     }
 
-    for (const companion of group) {
-      if (takesBareName(companion)) renameCompanion(companion);
-    }
+    // Decide every copy before renaming any: renaming the target repoints its
+    // nested references to the bare names, which its map no longer resolves.
+    const collapsing = group.filter((c) => admits(target.model, target.map, c.models[0], localMap(c), new Set()));
+    for (const companion of collapsing) renameCompanion(companion);
   }
 
   return companions.flatMap((c) => c.models);
@@ -106,10 +118,76 @@ function renameCompanion(companion: EnvelopeCompanion): void {
   }
 }
 
-function sameSet(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const x of a) if (!b.has(x)) return false;
-  return true;
+/**
+ * Whether `target` admits every value `copy` can hold: the same field names,
+ * each field's type admitted (see `typeAdmits`), and no field the target
+ * requires that the copy leaves optional. Nested models resolve through their
+ * respective maps and are compared the same way; a model neither map resolves
+ * is compared by name.
+ */
+function admits(
+  target: Model,
+  targetMap: Map<string, Model>,
+  copy: Model,
+  copyMap: Map<string, Model>,
+  visiting: Set<string>,
+): boolean {
+  const key = `${target.name}|${copy.name}`;
+  if (visiting.has(key)) return true;
+  visiting.add(key);
+  try {
+    if (target.fields.length !== copy.fields.length) return false;
+    const targetFields = new Map(target.fields.map((f) => [f.name, f]));
+    for (const field of copy.fields) {
+      const expected = targetFields.get(field.name);
+      if (!expected) return false;
+      if (expected.required && !field.required) return false;
+      if (!typeAdmits(expected.type, targetMap, field.type, copyMap, visiting)) return false;
+    }
+    return true;
+  } finally {
+    visiting.delete(key);
+  }
+}
+
+/**
+ * Whether `target` admits every value of `copy`'s type. A nullable target
+ * admits a nullable or a non-null copy; a non-null target admits only a
+ * non-null copy. An enum with known values admits a copy whose values are a
+ * subset of its own. Everything else must match exactly, by fingerprint.
+ */
+function typeAdmits(
+  target: TypeRef,
+  targetMap: Map<string, Model>,
+  copy: TypeRef,
+  copyMap: Map<string, Model>,
+  visiting: Set<string>,
+): boolean {
+  if (target.kind === 'nullable') {
+    return typeAdmits(target.inner, targetMap, copy.kind === 'nullable' ? copy.inner : copy, copyMap, visiting);
+  }
+  if (copy.kind === 'nullable') return false;
+  if (target.kind !== copy.kind) return false;
+  switch (target.kind) {
+    case 'model': {
+      const t = targetMap.get(target.name);
+      const c = copyMap.get((copy as typeof target).name);
+      if (t && c) return admits(t, targetMap, c, copyMap, visiting);
+      return target.name === (copy as typeof target).name;
+    }
+    case 'array':
+      return typeAdmits(target.items, targetMap, (copy as typeof target).items, copyMap, visiting);
+    case 'enum': {
+      const c = copy as typeof target;
+      if (target.values && c.values) {
+        const allowed = new Set(target.values.map((v) => `${typeof v}:${String(v)}`));
+        return c.values.every((v) => allowed.has(`${typeof v}:${String(v)}`));
+      }
+      return target.name === c.name;
+    }
+    default:
+      return fingerprintType(target, targetMap, new Set()) === fingerprintType(copy, copyMap, new Set());
+  }
 }
 
 /**

@@ -515,7 +515,6 @@ function deriveConstNamingDiscriminator(variants: SchemaObject[]): { property: s
   return null;
 }
 
-/** Build a single Field from a schema property entry. Shared across all extraction sites. */
 /**
  * True for a schema that `schemaToTypeRef` turns into an inline model reference:
  * it declares `properties` directly (no `$ref`) and is an object — whether by
@@ -529,6 +528,7 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
 }
 
+/** Build a single Field from a schema property entry. Shared across all extraction sites. */
 export function buildFieldFromSchema(
   fieldName: string,
   fieldSchema: SchemaObject,

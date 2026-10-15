@@ -49,16 +49,38 @@ describe('resolveEnvelopeCompanionNames', () => {
     expect(b.models[0].name).toBe('ListBMeta');
   });
 
-  it('treats requiredness, nullability, and nested shape as part of the structure', () => {
-    const plain = companion('ListA', 'Meta', [{ name: 'next', type: str, required: false }]);
-    const required = companion('ListB', 'Meta', [{ name: 'next', type: str, required: true }]);
-    const nullable = companion('ListC', 'Meta', [
+  it('lets a stricter copy collapse onto a looser target, never the reverse', () => {
+    // Target (first declared, so it wins the tie): optional, nullable.
+    const loose = companion('ListA', 'Meta', [
       { name: 'next', type: { kind: 'nullable', inner: str }, required: false },
     ]);
+    const required = companion('ListB', 'Meta', [
+      { name: 'next', type: { kind: 'nullable', inner: str }, required: true },
+    ]);
+    const nonNull = companion('ListC', 'Meta', [{ name: 'next', type: str, required: false }]);
+    const wrongType = companion('ListD', 'Meta', [{ name: 'next', type: int, required: false }]);
 
-    resolveEnvelopeCompanionNames([plain, required, nullable]);
+    resolveEnvelopeCompanionNames([loose, required, nonNull, wrongType]);
 
-    expect([plain, required, nullable].map((c) => c.models[0].name)).toEqual(['Meta', 'ListBMeta', 'ListCMeta']);
+    // `required` and `nonNull` hold only values `loose` admits; `wrongType` does not.
+    expect([loose, required, nonNull, wrongType].map((c) => c.models[0].name)).toEqual([
+      'Meta',
+      'Meta',
+      'Meta',
+      'ListDMeta',
+    ]);
+  });
+
+  it('keeps a looser copy qualified when the target is stricter', () => {
+    const required = companion('ListA', 'Meta', [{ name: 'next', type: str, required: true }]);
+    const optional = companion('ListB', 'Meta', [{ name: 'next', type: str, required: false }]);
+    const nullable = companion('ListC', 'Meta', [
+      { name: 'next', type: { kind: 'nullable', inner: str }, required: true },
+    ]);
+
+    resolveEnvelopeCompanionNames([required, optional, nullable]);
+
+    expect([required, optional, nullable].map((c) => c.models[0].name)).toEqual(['Meta', 'ListBMeta', 'ListCMeta']);
   });
 
   it('compares nested models by shape and inline enums by value, not by qualified name', () => {
@@ -78,7 +100,7 @@ describe('resolveEnvelopeCompanionNames', () => {
 
     resolveEnvelopeCompanionNames([a, b, c]);
 
-    // a and b agree (enum values are compared as a set); c's enum differs.
+    // a and b agree (enum values are compared as a set); c's enum has values a's does not admit.
     expect(a.models.map((m) => m.name)).toEqual(['Pagination', 'PaginationLink']);
     expect(b.models.map((m) => m.name)).toEqual(['Pagination', 'PaginationLink']);
     expect(c.models.map((m) => m.name)).toEqual(['ListCPagination', 'ListCPaginationLink']);
@@ -87,15 +109,25 @@ describe('resolveEnvelopeCompanionNames', () => {
     expect(c.models[0].fields[0].type).toEqual({ kind: 'model', name: 'ListCPaginationLink' });
   });
 
-  it('collapses onto a same-named component only when the field names match', () => {
+  it('collapses onto a same-named component only when the whole shape matches', () => {
     const matching = companion('ListA', 'ListMetadata', [
       { name: 'before', type: str, required: false },
       { name: 'after', type: str, required: false },
     ]);
-    const extra = companion('ListB', 'ListMetadata', [
+    const extraField = companion('ListB', 'ListMetadata', [
       { name: 'before', type: str, required: false },
       { name: 'after', type: str, required: false },
       { name: 'total', type: int, required: false },
+    ]);
+    // Same field names as the component, but a different type.
+    const sameNamesOnly = companion('ListC', 'ListMetadata', [
+      { name: 'before', type: str, required: false },
+      { name: 'after', type: int, required: false },
+    ]);
+    // Same names and types; the copy merely requires what the component leaves optional.
+    const stricter = companion('ListD', 'ListMetadata', [
+      { name: 'before', type: str, required: true },
+      { name: 'after', type: str, required: true },
     ]);
     const componentModels: Model[] = [
       {
@@ -107,10 +139,33 @@ describe('resolveEnvelopeCompanionNames', () => {
       },
     ];
 
-    resolveEnvelopeCompanionNames([matching, extra], componentModels);
+    resolveEnvelopeCompanionNames([matching, extraField, sameNamesOnly, stricter], componentModels);
 
     expect(matching.models[0].name).toBe('ListMetadata');
-    expect(extra.models[0].name).toBe('ListBListMetadata');
+    expect(extraField.models[0].name).toBe('ListBListMetadata');
+    expect(sameNamesOnly.models[0].name).toBe('ListCListMetadata');
+    expect(stricter.models[0].name).toBe('ListMetadata');
+    expect(componentModels[0].fields.map((f) => `${f.name}${f.required ? '!' : '?'}`)).toEqual(['after?', 'before?']);
+  });
+
+  it("resolves the component's nested references so a copy nesting the same shape still collapses", () => {
+    const copy = companion(
+      'ListA',
+      'Pagination',
+      [{ name: 'links', type: { kind: 'model', name: 'ListAPaginationLink' }, required: false }],
+      [{ name: 'ListAPaginationLink', fields: [{ name: 'next', type: str, required: false }] }],
+    );
+    const componentModels: Model[] = [
+      {
+        name: 'Pagination',
+        fields: [{ name: 'links', type: { kind: 'model', name: 'PaginationLinks' }, required: false }],
+      },
+      { name: 'PaginationLinks', fields: [{ name: 'next', type: str, required: false }] },
+    ];
+
+    resolveEnvelopeCompanionNames([copy], componentModels);
+
+    expect(copy.models.map((m) => m.name)).toEqual(['Pagination', 'PaginationLink']);
   });
 
   it('keeps every copy qualified when a same-named component differs from all of them, even if they agree', () => {
