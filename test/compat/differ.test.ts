@@ -655,3 +655,44 @@ describe('filterSurface', () => {
     expect(filtered.enums['InternalState']).toBeUndefined();
   });
 });
+
+describe('specDerivedNames — pagination envelope fields', () => {
+  it('counts a type reached only through a list envelope companion as spec-derived', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Customers',
+          operations: [
+            {
+              name: 'listCustomers',
+              httpMethod: 'get',
+              path: '/customers',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'array', items: { kind: 'model', name: 'Customer' } },
+              errors: [],
+              injectIdempotencyKey: false,
+              pagination: {
+                strategy: 'offset',
+                param: 'page',
+                dataPath: 'customers',
+                itemType: { kind: 'model', name: 'Customer' },
+                envelopeFields: [{ name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true }],
+              },
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('Pagination')).toBe(true);
+  });
+});

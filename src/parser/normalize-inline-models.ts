@@ -47,6 +47,9 @@ function rewriteModelRefs(models: Model[], services: Service[], oldName: string,
       if (op.requestBody) {
         rewriteModelRef(op.requestBody, oldName, newName);
       }
+      for (const field of op.pagination?.envelopeFields ?? []) {
+        rewriteModelRef(field.type, oldName, newName);
+      }
     }
   }
 }

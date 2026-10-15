@@ -49,6 +49,7 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
           requestSeeds.push(param.type);
         }
         responseSeeds.push(op.response);
+        for (const field of op.pagination?.envelopeFields ?? []) responseSeeds.push(field.type);
         for (const success of op.successResponses ?? []) responseSeeds.push(success.type);
         for (const error of op.errors) if (error.type) responseSeeds.push(error.type);
       }

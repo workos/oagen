@@ -544,3 +544,42 @@ describe('collectRequestBodyModels', () => {
     expect(result).toEqual(new Set(['CreateUserRequest']));
   });
 });
+
+describe('assignModelsToServices — pagination envelope fields', () => {
+  it('assigns a model reached only through a list envelope companion to that service', () => {
+    const models: Model[] = [
+      { name: 'User', fields: [] },
+      { name: 'ListMetadata', fields: [] },
+    ];
+    const services = [
+      {
+        name: 'Users',
+        operations: [
+          {
+            name: 'listUsers',
+            httpMethod: 'get' as const,
+            path: '/users',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'array' as const, items: { kind: 'model' as const, name: 'User' } },
+            errors: [],
+            injectIdempotencyKey: false,
+            pagination: {
+              strategy: 'cursor' as const,
+              param: 'after',
+              dataPath: 'data',
+              itemType: { kind: 'model' as const, name: 'User' },
+              envelopeFields: [
+                { name: 'list_metadata', type: { kind: 'model' as const, name: 'ListMetadata' }, required: true },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services);
+    expect(map.get('User')).toBe('Users');
+    expect(map.get('ListMetadata')).toBe('Users');
+  });
+});
