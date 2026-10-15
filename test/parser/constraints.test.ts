@@ -1,10 +1,12 @@
-import { describe, it, expect, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, afterEach, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { extractSchemas, extractConstraints, clearSchemaNameTransform } from '../../src/parser/schemas.js';
 import { extractOperations } from '../../src/parser/operations.js';
+import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { parseSpec } from '../../src/parser/parse.js';
+import type { Model } from '../../src/ir/types.js';
 
 describe('extractConstraints', () => {
   it('returns undefined for a schema with no validation keyword', () => {
@@ -433,5 +435,76 @@ describe('parseSpec – constraints', () => {
       minimum: 0,
       exclusiveMaximum: 1,
     });
+  });
+
+  it('keeps a Json-suffix twin’s limits when it is folded into the base model', async () => {
+    const file = await writeSpec('json-suffix.json', {
+      openapi: '3.1.0',
+      info: { title: 'widgets', version: '1' },
+      paths: {
+        '/widgets': {
+          get: {
+            operationId: 'listWidgets',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/WidgetJson' } } },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Widget: { type: 'object', properties: { id: { type: 'string' } } },
+          WidgetJson: {
+            type: 'object',
+            maxProperties: 10,
+            dependentRequired: { name: ['id'] },
+            properties: { id: { type: 'string' }, name: { type: 'string', maxLength: 20 } },
+          },
+        },
+      },
+    });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const spec = await parseSpec(file);
+      const widget = spec.models.find(({ name }) => name === 'Widget');
+      expect(spec.models.some(({ name }) => name === 'WidgetJson')).toBe(false);
+      expect(widget?.fields.map((f) => f.name)).toEqual(['id', 'name']);
+      expect(widget?.constraints).toEqual({ maxProperties: 10, dependentRequired: { name: ['id'] } });
+      expect(widget?.fields[1].constraints).toEqual({ maxLength: 20 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('collapseJsonSuffixModels – constraints', () => {
+  const field = (name: string) => ({
+    name,
+    type: { kind: 'primitive' as const, type: 'string' as const },
+    required: false,
+  });
+
+  it('merges the Json model’s limits over the base model’s and leaves the key absent when neither has any', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const models: Model[] = [
+        { name: 'Widget', fields: [field('id')], constraints: { minProperties: 1, maxProperties: 5 } },
+        { name: 'WidgetJson', fields: [field('id'), field('name')], constraints: { maxProperties: 10 } },
+        { name: 'Gadget', fields: [field('id')] },
+        { name: 'GadgetJson', fields: [field('id'), field('name')] },
+      ];
+      const merged = collapseJsonSuffixModels(models, []);
+      const widget = merged.find((m) => m.name === 'Widget');
+      const gadget = merged.find((m) => m.name === 'Gadget');
+      expect(merged.map((m) => m.name)).toEqual(['Widget', 'Gadget']);
+      expect(widget?.constraints).toEqual({ minProperties: 1, maxProperties: 10 });
+      expect(gadget).not.toHaveProperty('constraints');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
