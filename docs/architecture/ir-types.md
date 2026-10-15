@@ -206,6 +206,10 @@ The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagi
 
 Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to the first path segment (e.g., `/organizations/{id}` → `Organizations`). Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
 
+`Service.description` comes from the document's top-level `tags` list, matched by name: a tag entry applies to the service whose PascalCase name its `name` converts to, so `user-management`, `User Management`, and `user_management` all map to `UserManagement`. A service whose own name is a declared tag is described by that tag alone — its description when it has one, nothing otherwise — so another tag's wording is never borrowed for it (operations tagged `api_keys` that the path-prefix split merges into `UserManagement` do not label it "API keys"). A service whose own name is not declared, which is what the split produces when it carves `OrganizationDomains` out of operations tagged `organizations`, inherits the description of the first described tag its operations carry. The key is omitted when neither rule yields a description, including for path-named services whose operations have no tag. Malformed `tags` values (a non-array, `null` entries, non-string names) are skipped rather than failing the parse.
+
+An operation carries its OpenAPI `summary` and `description` in two fields. `Operation.description` is the combined doc text: `summary + "\n\n" + description` when the document declares both with content, or whichever one has content (a summary identical to the description is not repeated). An empty or whitespace-only `summary` or `description` is treated as absent — `summary: "List pets"` with `description: ""` yields `description: "List pets"` — and text that has content is kept verbatim, surrounding whitespace included. An emitter that prints `description` as the doc comment therefore sees the same text whether or not the document used a summary. `Operation.summary` is the document's `summary` alone and is present only when the operation declares one with content, so an emitter that wants a one-line label (and the description without it) reads `summary` rather than guessing whether the first paragraph of `description` is one. When a doc URL base is configured, relative links are expanded in `summary` exactly as in `description`.
+
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"
@@ -215,7 +219,8 @@ interface Service {
 
 interface Operation {
   name: string; // e.g., "listUsers", "getUser", "createUser"
-  description?: string;
+  summary?: string; // The document's summary alone; only when it has non-whitespace content
+  description?: string; // summary + "\n\n" + description when both have content, else whichever does
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   pathParams: Parameter[];
@@ -277,6 +282,8 @@ interface Parameter {
   example?: unknown;
 }
 ```
+
+`Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
 
 ### Idempotency Key
 

@@ -166,3 +166,49 @@ describe('expandDocUrls', () => {
     expect(result.models[0].fields[0].description).toBe('A plain description with no links.');
   });
 });
+
+describe('expandDocUrls operation summaries', () => {
+  const operation: ApiSpec['services'][number]['operations'][number] = {
+    name: 'getUser',
+    description: 'Get a [User](/reference/authkit/user).',
+    httpMethod: 'get',
+    path: '/users/{id}',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: { kind: 'primitive', type: 'string' },
+    errors: [],
+    injectIdempotencyKey: false,
+  };
+
+  it('expands relative links in an operation summary alongside its description', () => {
+    const spec = minimalSpec({
+      services: [
+        {
+          name: 'Users',
+          operations: [{ ...operation, summary: 'Get a [User](/reference/authkit/user)' }],
+        },
+      ],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    expect(result.services[0].operations[0].summary).toBe(
+      'Get a [User](https://workos.com/docs/reference/authkit/user)',
+    );
+    expect(result.services[0].operations[0].description).toBe(
+      'Get a [User](https://workos.com/docs/reference/authkit/user).',
+    );
+  });
+
+  it('leaves the summary key absent on an operation that has none', () => {
+    const spec = minimalSpec({
+      services: [{ name: 'Users', operations: [{ ...operation }] }],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    expect(result.services[0].operations[0]).not.toHaveProperty('summary');
+    expect(result.services[0].operations[0].description).toBe(
+      'Get a [User](https://workos.com/docs/reference/authkit/user).',
+    );
+  });
+});

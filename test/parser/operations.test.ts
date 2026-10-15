@@ -594,6 +594,133 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
   });
 
+  it('falls back to the inline schema description when the param declares none', () => {
+    const paths = {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [
+            {
+              name: 'petId',
+              in: 'path' as const,
+              required: true,
+              schema: { type: 'string', description: 'The ID of the pet to retrieve' },
+            },
+          ],
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const petIdParam = services[0].operations[0].pathParams[0];
+    expect(petIdParam.name).toBe('petId');
+    expect(petIdParam.description).toBe('The ID of the pet to retrieve');
+  });
+
+  it('prefers the param-level description over the inline schema description', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'fields',
+              in: 'query' as const,
+              required: false,
+              description: 'The fields to include in the response',
+              schema: { type: 'string', description: 'A comma-separated list of field names' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].queryParams[0].description).toBe('The fields to include in the response');
+  });
+
+  it('hoists description from a referenced component schema onto the param', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: {
+        type: 'string',
+        enum: ['desc', 'asc'],
+        description: 'Sort order for the returned list',
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    const orderParam = services[0].operations[0].queryParams[0];
+    expect(orderParam.name).toBe('order');
+    expect(orderParam.description).toBe('Sort order for the returned list');
+  });
+
+  it('falls through an empty param description to the schema description', () => {
+    const paths = {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [
+            {
+              name: 'petId',
+              in: 'path' as const,
+              required: true,
+              description: '',
+              schema: { type: 'string', description: 'The ID of the pet to retrieve' },
+            },
+          ],
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].pathParams[0].description).toBe('The ID of the pet to retrieve');
+  });
+
+  it('leaves description undefined when every level in the chain is empty', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              description: '',
+              schema: { $ref: '#/components/schemas/PaginationOrder', description: '' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: { type: 'string', enum: ['desc', 'asc'], description: '' },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    expect(services[0].operations[0].queryParams[0].description).toBeUndefined();
+  });
+
   it('resolves an operation-level parameter $ref into components/parameters', () => {
     const paths = {
       '/domains': {
@@ -1669,5 +1796,357 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
     };
 
     expect(() => extractOperations(paths)).toThrow(/Unresolved request body \$ref/);
+  });
+});
+
+describe('extractOperations – Service.description from document tags (issue #192)', () => {
+  const responses = { '200': { description: 'ok' } };
+  type DocTags = Parameters<typeof extractOperations>[6];
+  const withTags = (paths: Parameters<typeof extractOperations>[0], tags: DocTags) =>
+    extractOperations(paths, undefined, undefined, undefined, undefined, undefined, tags).services;
+
+  it('gives a service the description of the tag it was named after', () => {
+    const paths = {
+      '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } },
+    };
+    const tags = [{ name: 'Pets', description: 'Pets live in a store and can be adopted.' }];
+
+    expect(withTags(paths, tags)).toEqual([
+      expect.objectContaining({ name: 'Pets', description: 'Pets live in a store and can be adopted.' }),
+    ]);
+  });
+
+  it('gives every service split off a tag by path prefix that tag description', () => {
+    const paths = {
+      '/organizations': { get: { operationId: 'listOrganizations', tags: ['organizations'], responses } },
+      '/organization_domains': {
+        get: { operationId: 'listOrganizationDomains', tags: ['organizations'], responses },
+      },
+    };
+    const tags = [{ name: 'organizations', description: 'Manage organizations.' }];
+
+    const services = withTags(paths, tags);
+    expect(Object.fromEntries(services.map((s) => [s.name, s.description]))).toEqual({
+      Organizations: 'Manage organizations.',
+      OrganizationDomains: 'Manage organizations.',
+    });
+  });
+
+  it('prefers the tag a service is named after over one merged in by the split', () => {
+    const paths = {
+      '/organizations': { get: { operationId: 'listOrganizations', tags: ['organizations'], responses } },
+      '/organization_domains': {
+        get: { operationId: 'listOrganizationDomains', tags: ['organizations'], responses },
+        post: { operationId: 'createOrganizationDomain', tags: ['organization-domains'], responses },
+      },
+    };
+    const tags = [
+      { name: 'organizations', description: 'Manage organizations.' },
+      { name: 'organization-domains', description: 'Manage organization domains.' },
+    ];
+
+    const services = withTags(paths, tags);
+    expect(Object.fromEntries(services.map((s) => [s.name, s.description]))).toEqual({
+      Organizations: 'Manage organizations.',
+      OrganizationDomains: 'Manage organization domains.',
+    });
+    // Both operations landed in the same service despite the differing tags.
+    expect(services.find((s) => s.name === 'OrganizationDomains')!.operations).toHaveLength(2);
+  });
+
+  it('matches tags to services across casing and separator differences', () => {
+    const paths = {
+      '/user_management/users': {
+        get: { operationId: 'listUsers', tags: ['User Management'], responses },
+        post: { operationId: 'createUser', tags: ['user-management'], responses },
+      },
+    };
+    const tags = [{ name: 'user_management', description: 'Manage users.' }];
+
+    const services = withTags(paths, tags);
+    expect(services).toHaveLength(1);
+    expect(services[0]).toEqual(expect.objectContaining({ name: 'UserManagement', description: 'Manage users.' }));
+    expect(services[0].operations).toHaveLength(2);
+  });
+
+  it('leaves the key unset when no document tag describes the service', () => {
+    const paths = {
+      '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } },
+      '/toys': { get: { operationId: 'listToys', responses } },
+    };
+    const tags = [{ name: 'Other', description: 'Unrelated.' }];
+
+    const services = withTags(paths, tags);
+    expect(services.map((s) => s.name).sort()).toEqual(['Pets', 'Toys']);
+    for (const service of services) expect('description' in service).toBe(false);
+  });
+
+  it('describes a path-named service by the declared tag matching its name', () => {
+    const paths = { '/toys': { get: { operationId: 'listToys', responses } } };
+    const tags = [{ name: 'toys', description: 'Toys for pets.' }];
+
+    expect(withTags(paths, tags)).toEqual([expect.objectContaining({ name: 'Toys', description: 'Toys for pets.' })]);
+  });
+
+  it('never borrows another tag description for a service whose own tag is declared', () => {
+    // Reviewer scenario: the path-prefix split merges the api_keys operation
+    // under /user_management into UserManagement. user-management is declared
+    // without a description, so UserManagement must show nothing rather than
+    // "API keys."; ApiKeys keeps its own description.
+    const paths = {
+      '/user_management/users': { get: { operationId: 'listUsers', tags: ['user-management'], responses } },
+      '/user_management/api_keys': { get: { operationId: 'listUserApiKeys', tags: ['api_keys'], responses } },
+      '/api_keys/{id}': { delete: { operationId: 'deleteApiKey', tags: ['api_keys'], responses } },
+    };
+    const tags = [{ name: 'user-management' }, { name: 'api_keys', description: 'API keys.' }];
+
+    const services = withTags(paths, tags);
+    const userManagement = services.find((s) => s.name === 'UserManagement')!;
+    expect(userManagement.operations.map((o) => o.path).sort()).toEqual([
+      '/user_management/api_keys',
+      '/user_management/users',
+    ]);
+    expect('description' in userManagement).toBe(false);
+    expect(services.find((s) => s.name === 'ApiKeys')).toEqual(expect.objectContaining({ description: 'API keys.' }));
+  });
+
+  it('inherits only for split-off services whose own name is not declared', () => {
+    const paths = {
+      '/organizations': { get: { operationId: 'listOrganizations', tags: ['organizations'], responses } },
+      '/organization_domains': {
+        get: { operationId: 'listOrganizationDomains', tags: ['organizations'], responses },
+      },
+      '/organization_memberships': {
+        get: { operationId: 'listOrganizationMemberships', tags: ['organizations'], responses },
+      },
+    };
+    const tags = [
+      { name: 'organizations', description: 'Manage organizations.' },
+      // Declared for the split-off OrganizationMemberships but undescribed:
+      // that blocks inheritance instead of falling back to "Manage organizations."
+      { name: 'organization-memberships' },
+    ];
+
+    const services = withTags(paths, tags);
+    expect(Object.fromEntries(services.map((s) => [s.name, s.description]))).toEqual({
+      Organizations: 'Manage organizations.',
+      OrganizationDomains: 'Manage organizations.',
+      OrganizationMemberships: undefined,
+    });
+    expect('description' in services.find((s) => s.name === 'OrganizationMemberships')!).toBe(false);
+  });
+
+  it('lets a later described duplicate tag fill in for an earlier undescribed one', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['pets'], responses } } };
+    const tags = [{ name: 'pets' }, { name: 'Pets', description: 'Described later.' }];
+
+    expect(withTags(paths, tags)[0].description).toBe('Described later.');
+  });
+
+  it('ignores blank descriptions, nameless entries, and absent document tags', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } } };
+
+    const blank = [{ name: 'Pets', description: '   ' }, { description: 'nameless' }];
+    expect('description' in withTags(paths, blank)[0]).toBe(false);
+    expect('description' in withTags(paths, undefined)[0]).toBe(false);
+    expect('description' in extractOperations(paths).services[0]).toBe(false);
+  });
+
+  it('uses the first document tag when several normalize to the same service', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['pets'], responses } } };
+    const tags = [
+      { name: 'pets', description: 'First.' },
+      { name: 'Pets', description: 'Second.' },
+    ];
+
+    expect(withTags(paths, tags)[0].description).toBe('First.');
+  });
+
+  it('skips malformed document tag entries instead of throwing', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } } };
+    const described = { name: 'Pets', description: 'Pets live in a store.' };
+
+    // `tags` written as an object rather than a list matches nothing.
+    const asObject = { Pets: described } as unknown as DocTags;
+    expect('description' in withTags(paths, asObject)[0]).toBe(false);
+
+    // Null entries, primitives, and non-string names are skipped; a well-formed
+    // entry alongside them still applies.
+    const mixed = [null, 7, { name: 42, description: 'numeric name' }, described] as unknown as DocTags;
+    expect(withTags(paths, mixed)[0].description).toBe('Pets live in a store.');
+  });
+});
+
+describe('operation summary', () => {
+  const responses = { '204': { description: 'ok' } };
+
+  it('keeps summary on its own and folds it into description when both are declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets\n\nReturns every pet in the store, newest first.');
+  });
+
+  it('keeps summary and mirrors it into description when only summary is declared', () => {
+    const paths = {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          summary: 'Create a pet',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('Create a pet');
+    expect(op.description).toBe('Create a pet');
+  });
+
+  it('omits the summary key when only description is declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
+  });
+
+  it('omits the summary key and leaves description undefined when neither is declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBeUndefined();
+  });
+
+  it('omits the summary key when the declared summary is an empty string', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: '',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
+  });
+});
+
+describe('operation summary and description with empty or whitespace-only text', () => {
+  const responses = { '204': { description: 'ok' } };
+
+  it('treats an empty description as absent so description falls back to the summary', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: '',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets');
+  });
+
+  it('treats a whitespace-only description as absent so description falls back to the summary', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: '  \n\t',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets');
+  });
+
+  it('omits a whitespace-only summary from both summary and description', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: '  ',
+          description: 'Lists pets.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Lists pets.');
+  });
+
+  it('leaves description undefined and omits summary when both are whitespace-only', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: ' ',
+          description: '\n',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBeUndefined();
+  });
+
+  it('keeps surrounding whitespace on text that has content', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: 'Lists pets.\n',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets\n\nLists pets.\n');
   });
 });

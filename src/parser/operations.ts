@@ -179,6 +179,12 @@ export interface OperationExtractionResult {
   inlineModels: Model[];
 }
 
+/** A top-level `tags[]` entry as it appears in the OpenAPI document. */
+export interface TagObject {
+  name?: string;
+  description?: string;
+}
+
 export function extractOperations(
   paths: Record<string, PathItem> | undefined,
   operationIdTransform?: (id: string) => string,
@@ -186,12 +192,17 @@ export function extractOperations(
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentModels?: Model[],
+  documentTags?: TagObject[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
+  // Service name each tagged operation was grouped under, keyed by operation
+  // identity. The path-prefix split below moves operations between services,
+  // so this is how a split-off service is traced back to the tag it came from.
+  const tagServiceByOperation = new Map<Operation, string>();
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -200,7 +211,8 @@ export function extractOperations(
       const op = pathItem[method];
       if (!op) continue;
 
-      const serviceName = inferServiceName(path, op.tags?.[0]);
+      const tag = op.tags?.[0];
+      const serviceName = inferServiceName(path, tag);
 
       const {
         operation,
@@ -219,6 +231,9 @@ export function extractOperations(
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
+      // Same truthiness check as inferServiceName: for a tagged operation the
+      // service name *is* the normalized tag, so it doubles as the lookup key.
+      if (tag) tagServiceByOperation.set(operation, serviceName);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -263,12 +278,74 @@ export function extractOperations(
     disambiguateOperationNames(operations);
   }
 
-  const services = Array.from(serviceMap.entries()).map(([name, operations]) => ({
-    name,
-    operations,
-  }));
+  const declaredTags = indexDocumentTags(documentTags);
+  const services: Service[] = Array.from(serviceMap.entries()).map(([name, operations]) => {
+    const description = resolveServiceDescription(name, operations, tagServiceByOperation, declaredTags);
+    // Omit the key entirely when no tag describes the service so the IR shape
+    // is unchanged for documents without tag descriptions.
+    return description === undefined ? { name, operations } : { name, description, operations };
+  });
 
   return { services, inlineModels };
+}
+
+/**
+ * Index the document's top-level `tags[]` by the service name each tag
+ * produces, so a tag spelled `user_management`, `User Management`, or
+ * `user-management` all map to the `UserManagement` service. Every named tag
+ * is indexed — with its description when it declares a non-blank one, and
+ * `undefined` otherwise — because a declared-but-undescribed tag still marks
+ * its service as one that must not borrow another tag's wording. When several
+ * tags normalize to the same service name, the first described one wins.
+ *
+ * `parseSpec` ignored `tags` entirely before descriptions were read, so a
+ * document with a malformed value — `tags` written as an object, a `null`
+ * entry, a numeric `name` — used to parse and must keep parsing. Anything
+ * that cannot be matched is skipped rather than thrown on.
+ */
+function indexDocumentTags(documentTags: unknown): Map<string, string | undefined> {
+  const index = new Map<string, string | undefined>();
+  if (!Array.isArray(documentTags)) return index;
+  for (const tag of documentTags as unknown[]) {
+    if (typeof tag !== 'object' || tag === null) continue;
+    const { name, description } = tag as TagObject;
+    if (typeof name !== 'string' || name === '') continue;
+    const serviceName = toPascalCase(name);
+    if (index.get(serviceName) !== undefined) continue;
+    const described = typeof description === 'string' && description.trim() !== '';
+    index.set(serviceName, described ? description : undefined);
+  }
+  return index;
+}
+
+/**
+ * Pick a service's description from the document's tags.
+ *
+ * A service whose own name is a declared tag is described by that tag alone:
+ * its description when it has one, nothing otherwise. Another tag's wording is
+ * never borrowed for it — operations tagged `api_keys` that the path-prefix
+ * split merges into `UserManagement` must not label that service "API keys".
+ *
+ * A service whose own name is not declared is one the split carved out of a
+ * tag (e.g. `OrganizationDomains` from operations tagged `organizations`); it
+ * inherits the description of the first described tag its operations carry.
+ * Path-named services whose operations have no tag carry nothing and stay
+ * undescribed.
+ */
+function resolveServiceDescription(
+  serviceName: string,
+  operations: Operation[],
+  tagServiceByOperation: Map<Operation, string>,
+  declaredTags: Map<string, string | undefined>,
+): string | undefined {
+  if (declaredTags.has(serviceName)) return declaredTags.get(serviceName);
+  for (const op of operations) {
+    const tagService = tagServiceByOperation.get(op);
+    if (tagService === undefined) continue;
+    const description = declaredTags.get(tagService);
+    if (description !== undefined) return description;
+  }
+  return undefined;
 }
 
 function inferServiceName(path: string, tag?: string): string {
@@ -734,10 +811,17 @@ function buildOperation(
   const parameterGroups =
     queryParamGroups || bodyParamGroups ? [...(queryParamGroups ?? []), ...(bodyParamGroups ?? [])] : undefined;
 
+  // An empty or whitespace-only summary counts as absent, so it neither gets
+  // its own field nor leaks into the description as a blank first paragraph.
+  const summary = presentText(op.summary);
+
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
-      description: buildDescription(op.summary, op.description),
+      // Keep the summary on its own so emitters can tell it apart from the
+      // description; the key is omitted (not set to undefined) when absent.
+      ...(summary !== undefined ? { summary } : {}),
+      description: buildDescription(summary, op.description),
       httpMethod: method,
       path,
       pathParams,
@@ -762,11 +846,24 @@ function buildOperation(
   };
 }
 
+/**
+ * Combine an operation's `summary` and `description` into one doc text.
+ * Empty or whitespace-only text counts as absent, so `summary: "List pets"`
+ * with `description: ""` yields `"List pets"` rather than `""`. Text that has
+ * content is kept verbatim, surrounding whitespace included.
+ */
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
-  if (summary && description && summary !== description) {
-    return `${summary}\n\n${description}`;
+  const presentSummary = presentText(summary);
+  const presentDescription = presentText(description);
+  if (presentSummary && presentDescription && presentSummary !== presentDescription) {
+    return `${presentSummary}\n\n${presentDescription}`;
   }
-  return description ?? summary;
+  return presentDescription ?? presentSummary;
+}
+
+/** The text itself when it has non-whitespace content, otherwise `undefined`. */
+function presentText(text: string | undefined): string | undefined {
+  return typeof text === 'string' && text.trim() !== '' ? text : undefined;
 }
 
 function extractParams(
@@ -785,7 +882,7 @@ function extractParams(
           ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
-        description: p.description,
+        description: firstDescription(p.description, p.schema?.description, refTarget?.description),
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
         default: p.schema?.default ?? refTarget?.default,
         example: p.example ?? p.schema?.example ?? refTarget?.example,
@@ -796,9 +893,20 @@ function extractParams(
 }
 
 /**
+ * First non-empty description in precedence order. A parameter that declares
+ * `description: ""` is treated as undocumented so its schema's text still
+ * surfaces, and the result is `undefined` rather than `""` when nothing in
+ * the chain is documented.
+ */
+function firstDescription(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0);
+}
+
+/**
  * If a parameter's schema is a `$ref` to `#/components/schemas/X`, return the
  * referenced component schema. Used to surface schema-level metadata (default,
- * example, deprecated) that wouldn't otherwise be visible at the param level.
+ * example, deprecated, description) that wouldn't otherwise be visible at the
+ * param level.
  *
  * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
  * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
