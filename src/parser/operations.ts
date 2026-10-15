@@ -278,9 +278,9 @@ export function extractOperations(
     disambiguateOperationNames(operations);
   }
 
-  const tagDescriptions = indexTagDescriptions(documentTags);
+  const declaredTags = indexDocumentTags(documentTags);
   const services: Service[] = Array.from(serviceMap.entries()).map(([name, operations]) => {
-    const description = resolveServiceDescription(name, operations, tagServiceByOperation, tagDescriptions);
+    const description = resolveServiceDescription(name, operations, tagServiceByOperation, declaredTags);
     // Omit the key entirely when no tag describes the service so the IR shape
     // is unchanged for documents without tag descriptions.
     return description === undefined ? { name, operations } : { name, description, operations };
@@ -290,56 +290,62 @@ export function extractOperations(
 }
 
 /**
- * Index top-level `tags[].description` by the service name each tag produces,
- * so a tag spelled `user_management`, `User Management`, or `user-management`
- * all describe the `UserManagement` service. Entries without a name or with a
- * blank description are skipped; when several tags normalize to the same
- * service name the first one in document order wins.
+ * Index the document's top-level `tags[]` by the service name each tag
+ * produces, so a tag spelled `user_management`, `User Management`, or
+ * `user-management` all map to the `UserManagement` service. Every named tag
+ * is indexed — with its description when it declares a non-blank one, and
+ * `undefined` otherwise — because a declared-but-undescribed tag still marks
+ * its service as one that must not borrow another tag's wording. When several
+ * tags normalize to the same service name, the first described one wins.
  *
  * `parseSpec` ignored `tags` entirely before descriptions were read, so a
  * document with a malformed value — `tags` written as an object, a `null`
  * entry, a numeric `name` — used to parse and must keep parsing. Anything
  * that cannot be matched is skipped rather than thrown on.
  */
-function indexTagDescriptions(documentTags: unknown): Map<string, string> {
-  const index = new Map<string, string>();
+function indexDocumentTags(documentTags: unknown): Map<string, string | undefined> {
+  const index = new Map<string, string | undefined>();
   if (!Array.isArray(documentTags)) return index;
   for (const tag of documentTags as unknown[]) {
     if (typeof tag !== 'object' || tag === null) continue;
     const { name, description } = tag as TagObject;
     if (typeof name !== 'string' || name === '') continue;
-    if (typeof description !== 'string' || description.trim() === '') continue;
     const serviceName = toPascalCase(name);
-    if (!index.has(serviceName)) index.set(serviceName, description);
+    if (index.get(serviceName) !== undefined) continue;
+    const described = typeof description === 'string' && description.trim() !== '';
+    index.set(serviceName, described ? description : undefined);
   }
   return index;
 }
 
 /**
- * Pick a service's description from the tags its operations carry. The tag the
- * service is named after wins; otherwise the first described tag in operation
- * order is used, which is how a service split off a tag by path prefix (e.g.
- * `OrganizationDomains` carved out of tag `organizations`) inherits that tag's
- * description. Services built purely from path segments have no tagged
- * operations and therefore get no description.
+ * Pick a service's description from the document's tags.
+ *
+ * A service whose own name is a declared tag is described by that tag alone:
+ * its description when it has one, nothing otherwise. Another tag's wording is
+ * never borrowed for it — operations tagged `api_keys` that the path-prefix
+ * split merges into `UserManagement` must not label that service "API keys".
+ *
+ * A service whose own name is not declared is one the split carved out of a
+ * tag (e.g. `OrganizationDomains` from operations tagged `organizations`); it
+ * inherits the description of the first described tag its operations carry.
+ * Path-named services whose operations have no tag carry nothing and stay
+ * undescribed.
  */
 function resolveServiceDescription(
   serviceName: string,
   operations: Operation[],
   tagServiceByOperation: Map<Operation, string>,
-  tagDescriptions: Map<string, string>,
+  declaredTags: Map<string, string | undefined>,
 ): string | undefined {
-  if (tagDescriptions.size === 0) return undefined;
-  let inherited: string | undefined;
+  if (declaredTags.has(serviceName)) return declaredTags.get(serviceName);
   for (const op of operations) {
     const tagService = tagServiceByOperation.get(op);
     if (tagService === undefined) continue;
-    const description = tagDescriptions.get(tagService);
-    if (description === undefined) continue;
-    if (tagService === serviceName) return description;
-    if (inherited === undefined) inherited = description;
+    const description = declaredTags.get(tagService);
+    if (description !== undefined) return description;
   }
-  return inherited;
+  return undefined;
 }
 
 function inferServiceName(path: string, tag?: string): string {

@@ -1747,16 +1747,73 @@ describe('extractOperations – Service.description from document tags (issue #1
       '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } },
       '/toys': { get: { operationId: 'listToys', responses } },
     };
-    const tags = [
-      // Toys is named from its path; its operations carry no tag, so a same-named
-      // document tag does not apply to it.
-      { name: 'Toys', description: 'Only operations tagged Toys could claim this.' },
-      { name: 'Other', description: 'Unrelated.' },
-    ];
+    const tags = [{ name: 'Other', description: 'Unrelated.' }];
 
     const services = withTags(paths, tags);
     expect(services.map((s) => s.name).sort()).toEqual(['Pets', 'Toys']);
     for (const service of services) expect('description' in service).toBe(false);
+  });
+
+  it('describes a path-named service by the declared tag matching its name', () => {
+    const paths = { '/toys': { get: { operationId: 'listToys', responses } } };
+    const tags = [{ name: 'toys', description: 'Toys for pets.' }];
+
+    expect(withTags(paths, tags)).toEqual([expect.objectContaining({ name: 'Toys', description: 'Toys for pets.' })]);
+  });
+
+  it('never borrows another tag description for a service whose own tag is declared', () => {
+    // Reviewer scenario: the path-prefix split merges the api_keys operation
+    // under /user_management into UserManagement. user-management is declared
+    // without a description, so UserManagement must show nothing rather than
+    // "API keys."; ApiKeys keeps its own description.
+    const paths = {
+      '/user_management/users': { get: { operationId: 'listUsers', tags: ['user-management'], responses } },
+      '/user_management/api_keys': { get: { operationId: 'listUserApiKeys', tags: ['api_keys'], responses } },
+      '/api_keys/{id}': { delete: { operationId: 'deleteApiKey', tags: ['api_keys'], responses } },
+    };
+    const tags = [{ name: 'user-management' }, { name: 'api_keys', description: 'API keys.' }];
+
+    const services = withTags(paths, tags);
+    const userManagement = services.find((s) => s.name === 'UserManagement')!;
+    expect(userManagement.operations.map((o) => o.path).sort()).toEqual([
+      '/user_management/api_keys',
+      '/user_management/users',
+    ]);
+    expect('description' in userManagement).toBe(false);
+    expect(services.find((s) => s.name === 'ApiKeys')).toEqual(expect.objectContaining({ description: 'API keys.' }));
+  });
+
+  it('inherits only for split-off services whose own name is not declared', () => {
+    const paths = {
+      '/organizations': { get: { operationId: 'listOrganizations', tags: ['organizations'], responses } },
+      '/organization_domains': {
+        get: { operationId: 'listOrganizationDomains', tags: ['organizations'], responses },
+      },
+      '/organization_memberships': {
+        get: { operationId: 'listOrganizationMemberships', tags: ['organizations'], responses },
+      },
+    };
+    const tags = [
+      { name: 'organizations', description: 'Manage organizations.' },
+      // Declared for the split-off OrganizationMemberships but undescribed:
+      // that blocks inheritance instead of falling back to "Manage organizations."
+      { name: 'organization-memberships' },
+    ];
+
+    const services = withTags(paths, tags);
+    expect(Object.fromEntries(services.map((s) => [s.name, s.description]))).toEqual({
+      Organizations: 'Manage organizations.',
+      OrganizationDomains: 'Manage organizations.',
+      OrganizationMemberships: undefined,
+    });
+    expect('description' in services.find((s) => s.name === 'OrganizationMemberships')!).toBe(false);
+  });
+
+  it('lets a later described duplicate tag fill in for an earlier undescribed one', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['pets'], responses } } };
+    const tags = [{ name: 'pets' }, { name: 'Pets', description: 'Described later.' }];
+
+    expect(withTags(paths, tags)[0].description).toBe('Described later.');
   });
 
   it('ignores blank descriptions, nameless entries, and absent document tags', () => {
