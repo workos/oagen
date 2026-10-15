@@ -562,19 +562,46 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
 }
 
 /**
+ * The synthetic context names a multi-type inline variant's non-object
+ * members are typed and extracted under, chosen so the models they name can
+ * never collide with a model named from one of the variant's own properties.
+ * An `array` member's items go under `item` (`<Variant>Item`), falling back
+ * to `array_item` (`<Variant>ArrayItem`) and then `array_item2`,
+ * `array_item3`, ... when a property already claims that name; any other
+ * member goes under `value` (`<Variant>Value`), then `member_value`,
+ * `member_value2`, .... A candidate is skipped when the model name
+ * `qualifyInlineModelName` derives from it equals one derived from a
+ * property — compared after qualification, so a property `items`, whose
+ * name singularizes to `<Variant>Item`, blocks `item` as well.
+ * This is the single source of these names for the TypeRef builder
+ * (`inlineVariantTypeRef`) and the extractors (`variantMemberSchemas`).
+ */
+export function variantMemberKeys(variant: SchemaObject, variantName: string): { item: string; value: string } {
+  const modelNameFor = (key: string): string => qualifyInlineModelName(toPascalCase(key), variantName);
+  const claimed = new Set(Object.keys(variant.properties ?? {}).map(modelNameFor));
+  const pick = (preferred: string, fallback: string): string => {
+    for (let i = 0; ; i++) {
+      const candidate = i === 0 ? preferred : i === 1 ? fallback : `${fallback}${i}`;
+      if (!claimed.has(modelNameFor(candidate))) return candidate;
+    }
+  };
+  return { item: pick('item', 'array_item'), value: pick('value', 'member_value') };
+}
+
+/**
  * The schemas carried by the non-object members of a multi-type inline
  * variant (`type: ['object', 'array']` with `items`), keyed by the synthetic
- * property name `schemaToTypeRef` types them under: `item` for an `array`
- * member's items, so an inline object item is `<Variant>Item` and its own
- * nested objects `<Variant>ItemChild`. Every extractor re-enters with these
- * under the variant's name so the models line up with the refs by
- * construction. A map member cannot occur here: a variant with `properties`
- * is typed as a model, never as a map.
+ * context name from `variantMemberKeys` that `schemaToTypeRef` types them
+ * under, so an inline object item is `<Variant>Item` (or `<Variant>ArrayItem`
+ * when `item` is taken) and its own nested objects `<Variant>ItemChild`.
+ * Every extractor re-enters with these under the variant's name so the
+ * models line up with the refs by construction. A map member cannot occur
+ * here: a variant with `properties` is typed as a model, never as a map.
  */
-export function variantMemberSchemas(variant: SchemaObject): Record<string, SchemaObject> {
+export function variantMemberSchemas(variant: SchemaObject, variantName: string): Record<string, SchemaObject> {
   const members: Record<string, SchemaObject> = {};
   if (Array.isArray(variant.type) && variant.type.includes('array') && variant.items) {
-    members['item'] = variant.items;
+    members[variantMemberKeys(variant, variantName).item] = variant.items;
   }
   return members;
 }
@@ -797,21 +824,24 @@ function nameInlineObjectVariants(
  *
  * Anything inline under a non-object member is named from the variant, never
  * from the union's field: an `array` member types its items under the
- * context `item` with the variant as parent (`<Variant>Item`, see
- * `variantMemberSchemas`), and any other member under `value`
- * (`<Variant>Value` for an inline enum). Naming them from the field would
- * hand variant 0's model name to every variant's items.
+ * variant as parent with the context `variantMemberKeys` picks (`item` →
+ * `<Variant>Item`, or `array_item` → `<Variant>ArrayItem` when a property
+ * claims `item`), and any other member under its `value` key
+ * (`<Variant>Value` for an inline enum, else `<Variant>MemberValue`). Naming
+ * them from the field would hand variant 0's model name to every variant's
+ * items.
  */
 function inlineVariantTypeRef(variant: SchemaObject, name: string): TypeRef {
   const modelRef: TypeRef = { kind: 'model', name };
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
+  const keys = variantMemberKeys(variant, name);
   const members = typeList
     .filter((t) => t !== 'null')
     .map((t) =>
       t === 'object'
         ? modelRef
-        : schemaToTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? 'item' : 'value', name),
+        : schemaToTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, name),
     );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
   return nullable ? asNullable(ref) : ref;
@@ -1295,7 +1325,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
           // A multi-type variant's array member types its items under the
           // variant's name (`<Variant>Item`); extract them there too. The
           // synthetic wrapper model is dropped, only its nested models kept.
-          const memberSchemas = variantMemberSchemas(variant);
+          const memberSchemas = variantMemberSchemas(variant, variantName);
           if (Object.keys(memberSchemas).length > 0) {
             nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }).slice(1));
           }

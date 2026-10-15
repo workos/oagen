@@ -139,7 +139,11 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
             // items of its array member under the variant's name
             // (`<Variant>Item`, see `variantMemberSchemas`); re-enter with
             // them as a same-named synthetic property so the models line up.
-            extractInlineModelsFromProperties({ properties: variantMemberSchemas(variant) }, results, variantName);
+            extractInlineModelsFromProperties(
+              { properties: variantMemberSchemas(variant, variantName) },
+              results,
+              variantName,
+            );
           }
         }
       }

@@ -974,3 +974,115 @@ describe('non-object members of multi-type union variants are named from the var
     });
   });
 });
+
+describe("synthetic member names never collide with the variant's own properties", () => {
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+  const withRadius: SchemaObject = obj({ radius: n });
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const array = (items: unknown) => ({ kind: 'array', items });
+
+  type CollisionCase = {
+    label: string;
+    variant: SchemaObject;
+    /** The non-object member's TypeRef, given the variant's name. */
+    member: (v: string) => unknown;
+    /** The variant model's own fields, given its name. */
+    fields: (v: string) => Record<string, unknown>;
+    /** Nested model name → its fields, given the variant's name. */
+    nested: (v: string) => Record<string, Record<string, unknown>>;
+    /** Inline enums expected in `ir.enums`, given the variant's name. */
+    enums?: (v: string) => string[];
+  };
+  // The property's model keeps `<Variant>Item` / `<Variant>Value`; the
+  // synthetic member steps aside to `<Variant>ArrayItem` / `<Variant>MemberValue`,
+  // then `<Variant>ArrayItem2`, ... — both referenced, both extracted.
+  const cases: CollisionCase[] = [
+    {
+      label: "a property named `item` (the reviewer's case)",
+      variant: { type: ['object', 'array'], properties: { side: n, item: obj({ x: n }) }, items: obj({ y: n }) },
+      member: (v) => array(model(`${v}ArrayItem`)),
+      fields: (v) => ({ side: num, item: model(`${v}Item`) }),
+      nested: (v) => ({ [`${v}Item`]: { x: num }, [`${v}ArrayItem`]: { y: num } }),
+    },
+    {
+      label: 'properties named `item` and `array_item`',
+      variant: {
+        type: ['object', 'array'],
+        properties: { side: n, item: obj({ x: n }), array_item: obj({ z: n }) },
+        items: obj({ y: n }),
+      },
+      member: (v) => array(model(`${v}ArrayItem2`)),
+      fields: (v) => ({ side: num, item: model(`${v}Item`), array_item: model(`${v}ArrayItem`) }),
+      nested: (v) => ({ [`${v}Item`]: { x: num }, [`${v}ArrayItem`]: { z: num }, [`${v}ArrayItem2`]: { y: num } }),
+    },
+    {
+      label: 'a plural property `items`, whose model name singularizes to `Item`',
+      variant: { type: ['object', 'array'], properties: { side: n, items: obj({ x: n }) }, items: obj({ y: n }) },
+      member: (v) => array(model(`${v}ArrayItem`)),
+      fields: (v) => ({ side: num, items: model(`${v}Item`) }),
+      nested: (v) => ({ [`${v}Item`]: { x: num }, [`${v}ArrayItem`]: { y: num } }),
+    },
+    {
+      label: 'a property named `value` beside an inline enum member',
+      variant: { type: ['object', 'string'], enum: ['a', 'b'], properties: { side: n, value: obj({ x: n }) } },
+      member: (v) => ({ kind: 'enum', name: `${v}MemberValue`, values: ['a', 'b'] }),
+      fields: (v) => ({ side: num, value: model(`${v}Value`) }),
+      nested: (v) => ({ [`${v}Value`]: { x: num } }),
+      enums: (v) => [`${v}MemberValue`],
+    },
+  ];
+
+  it.each(cases)('$label, at field level and array-item level', async ({ variant, member, fields, nested, enums }) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const variants = [withRadius, variant];
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info: { title: 'member name collisions', version: '1' },
+        paths: {},
+        components: {
+          schemas: {
+            Thing: {
+              type: 'object',
+              properties: {
+                shape: { oneOf: variants },
+                markers: { type: 'array', items: { oneOf: variants } },
+              },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      const second = (v: string) => ({ kind: 'union', variants: [model(v), member(v)] });
+      expect(types['Thing']).toEqual({
+        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model('ThingShape'), second('ThingShape2')] },
+        markers: array({
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('ThingMarker'), second('ThingMarker2')],
+        }),
+      });
+      for (const v of ['ThingShape2', 'ThingMarker2']) {
+        expect(types[v]).toEqual(fields(v));
+        for (const [name, modelFields] of Object.entries(nested(v))) {
+          expect(types[name]).toEqual(modelFields);
+        }
+        for (const enumName of enums?.(v) ?? []) {
+          expect(ir.enums.map((e) => e.name)).toContain(enumName);
+        }
+      }
+
+      // Every reference resolves, and no inline model is left orphaned.
+      const referenced = modelRefsIn(ir.models);
+      const known = new Set(ir.models.map((m) => m.name));
+      expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+      expect([...known].filter((name) => name !== 'Thing' && !referenced.has(name))).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
