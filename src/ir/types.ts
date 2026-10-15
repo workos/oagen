@@ -212,7 +212,10 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * dropped. Emitters read one shape whichever version produced it.
  *
  * Only the keywords on the field, parameter or model schema itself are
- * carried; limits nested inside array `items` or map values are not.
+ * carried; limits nested inside array `items` or map values are not. A
+ * nullable wrapper — `oneOf`/`anyOf` with a single non-null, non-`$ref`
+ * branch — that declares none of its own takes that branch's keywords;
+ * limits on a general multi-variant union are not carried.
  */
 export interface Constraints {
   /** Inclusive lower bound (`minimum`). */

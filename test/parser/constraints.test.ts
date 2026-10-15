@@ -9,6 +9,40 @@ import { parseSpec } from '../../src/parser/parse.js';
 import type { Model } from '../../src/ir/types.js';
 
 describe('extractConstraints', () => {
+  it('takes the single non-null branch’s keywords from a nullable oneOf/anyOf wrapper', () => {
+    expect(extractConstraints({ anyOf: [{ type: 'string', maxLength: 8 }, { type: 'null' }] })).toEqual({
+      maxLength: 8,
+    });
+    expect(extractConstraints({ oneOf: [{ type: ['null'] }, { type: 'integer', minimum: 1 }] })).toEqual({
+      minimum: 1,
+    });
+  });
+
+  it('lets a wrapper’s own keywords win over its branch and ignores a $ref branch', () => {
+    expect(extractConstraints({ maxLength: 4, anyOf: [{ type: 'string', maxLength: 8 }, { type: 'null' }] })).toEqual({
+      maxLength: 4,
+    });
+    expect(
+      extractConstraints({ anyOf: [{ $ref: '#/components/schemas/Name', maxLength: 8 }, { type: 'null' }] }),
+    ).toBeUndefined();
+  });
+
+  it('carries nothing for a general multi-variant union', () => {
+    expect(
+      extractConstraints({
+        oneOf: [
+          { type: 'string', maxLength: 8 },
+          { type: 'integer', minimum: 1 },
+        ],
+      }),
+    ).toBeUndefined();
+    expect(
+      extractConstraints({
+        anyOf: [{ type: 'string', maxLength: 8 }, { type: 'integer', minimum: 1 }, { type: 'null' }],
+      }),
+    ).toBeUndefined();
+  });
+
   it('keeps a dependency named __proto__ as an own entry', () => {
     // Parsed from JSON the way a document arrives, so the key is an own
     // property of the input rather than an object-literal prototype slot.
@@ -133,6 +167,30 @@ describe('extractConstraints', () => {
 
 describe('extractSchemas – constraints', () => {
   afterEach(() => clearSchemaNameTransform());
+
+  it('keeps the limits of a field spelled nullable via anyOf/oneOf with a null branch', () => {
+    const { models } = extractSchemas({
+      Thing: {
+        type: 'object',
+        properties: {
+          nick: { anyOf: [{ type: 'string', maxLength: 8 }, { type: 'null' }] },
+          count: { oneOf: [{ type: 'null' }, { type: 'integer', minimum: 1, maximum: 9 }] },
+          either: {
+            oneOf: [
+              { type: 'string', maxLength: 8 },
+              { type: 'integer', minimum: 1 },
+            ],
+          },
+        },
+      },
+    });
+    expect(models[0].fields.map((f) => [f.name, f.type.kind, f.constraints])).toEqual([
+      ['nick', 'nullable', { maxLength: 8 }],
+      ['count', 'nullable', { minimum: 1, maximum: 9 }],
+      ['either', 'union', undefined],
+    ]);
+    expect(models[0].fields[2]).not.toHaveProperty('constraints');
+  });
 
   it('keeps keywords written beside a field’s $ref (OAS 3.1 siblings)', () => {
     const { models } = extractSchemas({

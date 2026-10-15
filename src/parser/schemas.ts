@@ -175,8 +175,11 @@ const NUMERIC_CONSTRAINT_KEYS = [
  * and is dropped too.
  *
  * Only the schema's own keywords are read: limits nested inside array `items`
- * or map values are not collected. Values of the wrong type (a string
- * `maxLength`, say) are ignored rather than carried.
+ * or map values are not collected. The one exception is a nullable wrapper —
+ * a `oneOf`/`anyOf` with a single non-null, non-`$ref` branch — that declares
+ * none itself: it takes that branch's keywords, since the IR collapses it to
+ * `nullable<T>`. Values of the wrong type (a string `maxLength`, say) are
+ * ignored rather than carried.
  */
 export function extractConstraints(schema: SchemaObject): Constraints | undefined {
   const out: Constraints = {};
@@ -197,8 +200,29 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
 
   const dependentRequired = readDependentRequired(schema.dependentRequired);
   if (dependentRequired) out.dependentRequired = dependentRequired;
+  if (Object.keys(out).length > 0) return out;
 
-  return Object.keys(out).length > 0 ? out : undefined;
+  // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
+  // collapses to `nullable<T>` in the IR, so that branch's keywords are the
+  // value's own. A `$ref` branch keeps its limits on the referenced model, and
+  // a genuine multi-variant union carries none.
+  const branch = singleNonNullBranch(schema);
+  return branch ? extractConstraints(branch) : undefined;
+}
+
+/** The one non-null, non-`$ref` branch of a `oneOf`/`anyOf`, or `undefined` for anything else. */
+function singleNonNullBranch(schema: SchemaObject): SchemaObject | undefined {
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (!variants) return undefined;
+  const nonNull = variants.filter((v) => !isNullSchema(v));
+  return nonNull.length === 1 && !nonNull[0].$ref ? nonNull[0] : undefined;
+}
+
+/** True for the `{ type: 'null' }` / `{ type: ['null'] }` branch of a nullable wrapper. */
+function isNullSchema(schema: SchemaObject): boolean {
+  return (
+    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
+  );
 }
 
 /**
