@@ -288,7 +288,7 @@ interface Parameter {
 }
 ```
 
-A parameter's `constraints` come from its own schema, or — like `default` and `example` — from the `$ref` target when the schema is a bare reference, since a primitive alias such as `Limit: { type: integer, maximum: 100 }` has no model of its own to carry them. The key is absent when neither declares any.
+A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
 
 ### Idempotency Key
 

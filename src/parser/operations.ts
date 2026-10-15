@@ -785,11 +785,13 @@ function extractParams(
     .filter((p) => p.in === location)
     .map((p) => {
       const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
-      // Like default/example: the param's own schema first, then the `$ref`
-      // target. A primitive alias such as `Limit: { type: integer, maximum: 100 }`
-      // has no model of its own to carry its limits, so they surface here.
-      const ownConstraints = p.schema ? extractConstraints(p.schema) : undefined;
-      const constraints = ownConstraints ?? (refTarget ? extractConstraints(refTarget) : undefined);
+      // Like default/example, fall back per value: the `$ref` target's keywords
+      // sit under the parameter's own, so `{ $ref: Limit, minimum: 5 }` narrows
+      // one bound without discarding the target's others. The alias also becomes
+      // a fieldless model, but a parameter should be readable on its own.
+      const own = p.schema ? extractConstraints(p.schema) : undefined;
+      const inherited = refTarget ? extractConstraints(refTarget) : undefined;
+      const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
       return {
         name: p.name,
         type: p.schema

@@ -260,10 +260,11 @@ export interface Parameter {
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
   /**
-   * Validation keywords from the parameter's schema, or — like `default` and
-   * `example` — from the `$ref` target when the schema is a bare reference,
-   * since a primitive alias such as `Limit: { type: integer, maximum: 100 }`
-   * has no model of its own to carry them. Absent when neither declares any.
+   * Validation keywords from the parameter's schema. When that schema is a
+   * `$ref`, the target's keywords are merged underneath the parameter's own
+   * — the per-value fallback `default` and `example` use — so a parameter
+   * can be read on its own without chasing the fieldless alias model the
+   * target also becomes. Absent when neither declares any.
    */
   constraints?: Constraints;
 }

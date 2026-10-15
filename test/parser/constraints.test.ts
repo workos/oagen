@@ -290,14 +290,24 @@ describe('extractOperations – parameter constraints', () => {
     expect(limit.constraints).toEqual({ minimum: 1, maximum: 100 });
   });
 
-  it('prefers keywords on the parameter schema over the $ref target', () => {
+  it('lets the parameter schema’s own keyword win over the $ref target’s', () => {
     const componentSchemas = { Limit: { type: 'integer', minimum: 1, maximum: 100 } };
     const { services } = extractOperations(
       listPets({ $ref: '#/components/schemas/Limit', maximum: 50 }),
       undefined,
       componentSchemas,
     );
-    expect(services[0].operations[0].queryParams[0].constraints).toEqual({ maximum: 50 });
+    expect(services[0].operations[0].queryParams[0].constraints).toEqual({ minimum: 1, maximum: 50 });
+  });
+
+  it('merges the $ref target’s other keywords under a sibling override', () => {
+    const componentSchemas = { Limit: { type: 'integer', minimum: 1, maximum: 100 } };
+    const { services } = extractOperations(
+      listPets({ $ref: '#/components/schemas/Limit', minimum: 5 }),
+      undefined,
+      componentSchemas,
+    );
+    expect(services[0].operations[0].queryParams[0].constraints).toEqual({ minimum: 5, maximum: 100 });
   });
 
   it('leaves the key absent when neither the schema nor the $ref target declares any', () => {
