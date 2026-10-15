@@ -1089,6 +1089,10 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   // variant that's missing the shared `id` / `name` / `object` etc.
   const baseProperties: Record<string, SchemaObject> = {};
   const baseRequired = new Set<string>();
+  // Object-level keywords on the base members (maxProperties, ...) bind every
+  // variant instance under allOf semantics, so they ride along with the base
+  // properties; a variant's own keywords win on a shared key below.
+  let baseConstraints: Constraints | undefined;
   for (const subSchema of schema.allOf ?? []) {
     if (subSchema.oneOf) continue; // the variant axis, handled below
     const flat = subSchema.allOf ? flattenVariantForExtraction(subSchema) : subSchema;
@@ -1098,6 +1102,8 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
       }
     }
     if (flat.required) for (const r of flat.required) baseRequired.add(r);
+    const memberConstraints = collectAllOfConstraints(subSchema);
+    if (memberConstraints) baseConstraints = { ...baseConstraints, ...memberConstraints };
   }
 
   for (const subSchema of schema.allOf ?? []) {
@@ -1118,10 +1124,17 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
         if (v) mergedProperties[k] = v;
       }
       const mergedRequired = new Set<string>([...baseRequired, ...(flat.required ?? [])]);
+      // The variant's own keywords (read through its allOf wrappers, like its
+      // properties) over the base members'. They are already in the 3.1 shape,
+      // so spreading them into the rebuilt schema lets extractInlineModelDeep's
+      // constraintsEntry read them back unchanged.
+      const variantConstraints = collectAllOfConstraints(variant);
       const merged: SchemaObject = {
         type: 'object',
         properties: mergedProperties,
         required: [...mergedRequired],
+        ...baseConstraints,
+        ...variantConstraints,
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -1134,6 +1147,25 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   }
 
   return models;
+}
+
+/**
+ * A schema's own validation keywords laid over those of its inline `allOf`
+ * members (recursively, so the outermost wrapper wins on a shared key).
+ * `$ref` members keep their limits on the referenced model and `oneOf` /
+ * `anyOf` branches are alternatives, so neither is walked. Mirrors how
+ * flattenVariantForExtraction gathers a variant's properties.
+ */
+function collectAllOfConstraints(schema: SchemaObject): Constraints | undefined {
+  let out: Constraints | undefined;
+  for (const member of schema.allOf ?? []) {
+    if (member.$ref) continue;
+    const inner = collectAllOfConstraints(member);
+    if (inner) out = { ...out, ...inner };
+  }
+  const own = extractConstraints(schema);
+  if (own) out = { ...out, ...own };
+  return out;
 }
 
 /**

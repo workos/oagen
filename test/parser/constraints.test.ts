@@ -168,6 +168,59 @@ describe('extractConstraints', () => {
 describe('extractSchemas – constraints', () => {
   afterEach(() => clearSchemaNameTransform());
 
+  it('carries a discriminated allOf+oneOf variant’s own keywords, under the base object’s', () => {
+    const { models } = extractSchemas({
+      Event: {
+        allOf: [
+          { type: 'object', maxProperties: 10, properties: { id: { type: 'string' } }, required: ['id'] },
+          {
+            oneOf: [
+              {
+                type: 'object',
+                minProperties: 2,
+                dependentRequired: { note: ['id'] },
+                properties: { event: { const: 'user.created' }, note: { type: 'string', maxLength: 80 } },
+              },
+              { type: 'object', properties: { event: { const: 'user.deleted' } } },
+              { type: 'object', maxProperties: 3, properties: { event: { const: 'user.banned' } } },
+            ],
+          },
+        ],
+      },
+    });
+    const byName = new Map(models.map((m) => [m.name, m]));
+    expect(byName.get('Event')?.discriminator).toEqual({
+      property: 'event',
+      mapping: { 'user.created': 'UserCreated', 'user.deleted': 'UserDeleted', 'user.banned': 'UserBanned' },
+    });
+    expect(byName.get('UserCreated')?.constraints).toEqual({
+      maxProperties: 10,
+      minProperties: 2,
+      dependentRequired: { note: ['id'] },
+    });
+    expect(byName.get('UserCreated')?.fields.find((f) => f.name === 'note')?.constraints).toEqual({ maxLength: 80 });
+    expect(byName.get('UserDeleted')?.constraints).toEqual({ maxProperties: 10 });
+    expect(byName.get('UserBanned')?.constraints).toEqual({ maxProperties: 3 });
+  });
+
+  it('leaves a discriminated variant model without constraints when neither it nor the base declares any', () => {
+    const { models } = extractSchemas({
+      Event: {
+        allOf: [
+          { type: 'object', properties: { id: { type: 'string' } } },
+          {
+            oneOf: [
+              { type: 'object', properties: { event: { const: 'user.created' } } },
+              { type: 'object', properties: { event: { const: 'user.deleted' } } },
+            ],
+          },
+        ],
+      },
+    });
+    expect(models.find((m) => m.name === 'UserCreated')).not.toHaveProperty('constraints');
+    expect(models.find((m) => m.name === 'UserDeleted')).not.toHaveProperty('constraints');
+  });
+
   it('keeps the limits of a field spelled nullable via anyOf/oneOf with a null branch', () => {
     const { models } = extractSchemas({
       Thing: {
