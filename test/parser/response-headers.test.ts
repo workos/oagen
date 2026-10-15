@@ -319,6 +319,53 @@ describe('response headers', () => {
       ]);
     });
 
+    it('prefers a description written next to the $ref over the component’s', () => {
+      const componentHeaders: ComponentHeaders = {
+        RequestId: { description: 'Correlation id for this request.', schema: { type: 'string' } },
+      };
+      const op = singleOperation(
+        getWithResponses({
+          '200': {
+            description: 'ok',
+            headers: {
+              'X-Request-Id': { $ref: '#/components/headers/RequestId', description: 'Echoed back for support.' },
+              'X-Trace-Id': { $ref: '#/components/headers/RequestId' },
+            },
+          },
+        }),
+        componentHeaders,
+      );
+
+      expect(op.responseHeaders?.map((h) => [h.name, h.description])).toEqual([
+        ['X-Request-Id', 'Echoed back for support.'],
+        ['X-Trace-Id', 'Correlation id for this request.'],
+      ]);
+    });
+
+    it('lets the outermost $ref description win along a chain', () => {
+      const componentHeaders: ComponentHeaders = {
+        RequestId: { description: 'From the component.', schema: { type: 'string' } },
+        RequestIdAlias: { $ref: '#/components/headers/RequestId', description: 'From the alias.' },
+      };
+      const op = singleOperation(
+        getWithResponses({
+          '200': {
+            description: 'ok',
+            headers: {
+              'X-Outer': { $ref: '#/components/headers/RequestIdAlias', description: 'From the header entry.' },
+              'X-Inner': { $ref: '#/components/headers/RequestIdAlias' },
+            },
+          },
+        }),
+        componentHeaders,
+      );
+
+      expect(op.responseHeaders?.map((h) => [h.name, h.description])).toEqual([
+        ['X-Outer', 'From the header entry.'],
+        ['X-Inner', 'From the alias.'],
+      ]);
+    });
+
     it('warns and skips an unresolvable header $ref instead of failing the parse', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const op = singleOperation(

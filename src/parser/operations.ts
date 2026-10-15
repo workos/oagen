@@ -183,9 +183,11 @@ interface HeaderObject {
 /**
  * A header entry as written in the spec: an inline Header Object or a
  * Reference Object into `components/headers`. The bundler never inlines those
- * refs (`dereference: false`), so they must be resolved before use.
+ * refs (`dereference: false`), so they must be resolved before use. In OAS 3.1
+ * a Reference Object may carry its own `description`, which overrides the
+ * referenced component's.
  */
-type RawHeaderObject = HeaderObject | { $ref: string };
+type RawHeaderObject = HeaderObject | { $ref: string; description?: string };
 
 /**
  * Resolve a raw response header to a concrete Header Object, following `$ref`
@@ -204,8 +206,12 @@ function resolveHeaderRef(
 ): HeaderObject | undefined {
   const seenRefs = new Set<string>();
   let current: RawHeaderObject = raw;
+  // Each ref in a chain overrides whatever it points at, so the outermost
+  // sibling `description` wins over any inner one and over the component's.
+  let description: string | undefined;
 
   while ('$ref' in current) {
+    if (description === undefined && typeof current.description === 'string') description = current.description;
     if (seenRefs.has(current.$ref)) {
       console.warn(
         `[oagen] Warning: Circular header $ref chain starting at "${current.$ref}" for response header ` +
@@ -231,7 +237,7 @@ function resolveHeaderRef(
     current = resolved as unknown as RawHeaderObject;
   }
 
-  return current;
+  return description === undefined ? current : { ...current, description };
 }
 
 interface ResponseObject {
