@@ -134,6 +134,25 @@ describe('extractConstraints', () => {
 describe('extractSchemas – constraints', () => {
   afterEach(() => clearSchemaNameTransform());
 
+  it('keeps keywords written beside a field’s $ref (OAS 3.1 siblings)', () => {
+    const { models } = extractSchemas({
+      Name: { type: 'string', maxLength: 50 },
+      Pet: {
+        type: 'object',
+        properties: {
+          nickname: { $ref: '#/components/schemas/Name', minLength: 2 },
+          name: { $ref: '#/components/schemas/Name' },
+        },
+      },
+    });
+    const pet = models.find((m) => m.name === 'Pet');
+    expect(pet?.fields.map((f) => [f.name, f.constraints])).toEqual([
+      ['nickname', { minLength: 2 }],
+      ['name', undefined],
+    ]);
+    expect(pet?.fields[1]).not.toHaveProperty('constraints');
+  });
+
   it('attaches a field’s own keywords and leaves the key absent on fields without any', () => {
     const { models } = extractSchemas({
       Pet: {

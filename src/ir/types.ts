@@ -374,9 +374,10 @@ export interface Field {
   default?: unknown;
   example?: unknown;
   /**
-   * Validation keywords declared on the field's schema. Absent when the
-   * schema declares none, and when the schema is a `$ref` — the limits then
-   * live on the referenced model.
+   * Validation keywords declared on the field's schema, including any
+   * written beside a `$ref` (OpenAPI 3.1 allows siblings). Absent when the
+   * schema declares none; a bare `$ref` yields none, since the referenced
+   * model carries its own limits.
    */
   constraints?: Constraints;
 }

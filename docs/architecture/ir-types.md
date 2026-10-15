@@ -331,7 +331,7 @@ interface Field {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
-  constraints?: Constraints; // Validation keywords on the field's schema; absent for a $ref field
+  constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
 }
 ```
 
@@ -377,7 +377,7 @@ Every member is optional and present only when the document declares it. A schem
 
 A 3.1 document's numeric form passes through unchanged, including the legal-but-unusual case of an inclusive and an exclusive bound on the same side.
 
-**Scope.** Only the keywords declared directly on the field, parameter or model schema are collected. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried; a field whose schema is a `$ref` gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model it is the keywords on the outer wrapper.
+**Scope.** Only the keywords declared directly on the field, parameter or model schema are collected. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried. Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` field gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model it is the keywords on the outer wrapper.
 
 ## Enum
 

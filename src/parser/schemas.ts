@@ -654,8 +654,9 @@ export function buildFieldFromSchema(
     deprecated: fieldSchema.deprecated || undefined,
     default: fieldSchema.default,
     example: fieldSchema.example,
-    // A `$ref` field's limits live on the referenced model, not on the field.
-    ...(fieldSchema.$ref ? {} : constraintsEntry(fieldSchema)),
+    // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
+    // a bare `$ref` declares none, and the referenced model carries its limits.
+    ...constraintsEntry(fieldSchema),
   };
 }
 
