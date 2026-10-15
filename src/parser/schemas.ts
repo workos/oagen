@@ -191,13 +191,13 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
   // followed — its limits stay on the referenced model.
   let out = ownConstraints(schema);
   for (const member of schema.allOf ?? []) out = combineConstraints(out, extractConstraints(member));
-  if (out) return out;
   // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
   // collapses to `nullable<T>` in the IR, so that branch's keywords are the
-  // value's own. A `$ref` branch keeps its limits on the referenced model, and
-  // a genuine multi-variant union carries none.
+  // value's own too and conjoin with the rest. A `$ref` branch keeps its
+  // limits on the referenced model, and a genuine multi-variant union carries
+  // none.
   const branch = singleNonNullBranch(schema);
-  return branch ? extractConstraints(branch) : undefined;
+  return branch ? combineConstraints(out, extractConstraints(branch)) : out;
 }
 
 /** The keywords declared strictly on `schema`, normalized — without the nullable-branch fallback. */

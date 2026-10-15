@@ -233,9 +233,8 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * `$ref` member contributes the keywords written beside the reference while
  * the referenced model keeps its own). Limits nested inside array `items` or
  * map values are not carried. A nullable wrapper — `oneOf`/`anyOf` with a
- * single non-null, non-`$ref` branch — that declares none of its own takes
- * that branch's keywords; limits on a general multi-variant union are not
- * carried.
+ * single non-null, non-`$ref` branch — conjoins that branch's keywords with
+ * its own; limits on a general multi-variant union are not carried.
  */
 export interface Constraints {
   /** Inclusive lower bound (`minimum`). */

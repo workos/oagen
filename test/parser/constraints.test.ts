@@ -16,6 +16,33 @@ import { createExampleBuilder } from '../../src/snippets/example-builder.js';
 import type { Model } from '../../src/ir/types.js';
 
 describe('extractConstraints', () => {
+  it('conjoins own keywords, allOf members and a nullable wrapper’s single branch', () => {
+    expect(
+      extractConstraints({
+        allOf: [{ maxLength: 30 }, {}],
+        anyOf: [{ type: 'string', minLength: 20 }, { type: 'null' }],
+      }),
+    ).toEqual({ maxLength: 30, minLength: 20 });
+    expect(extractConstraints({ minLength: 1, anyOf: [{ type: 'string', maxLength: 8 }, { type: 'null' }] })).toEqual({
+      minLength: 1,
+      maxLength: 8,
+    });
+    // A keyword declared on both the wrapper and the branch keeps the stricter bound.
+    expect(extractConstraints({ maxLength: 4, anyOf: [{ type: 'string', maxLength: 8 }, { type: 'null' }] })).toEqual({
+      maxLength: 4,
+    });
+    // Still nothing from a multi-variant union, even beside allOf limits.
+    expect(
+      extractConstraints({
+        allOf: [{ maxLength: 30 }],
+        oneOf: [
+          { type: 'string', minLength: 20 },
+          { type: 'integer', minimum: 1 },
+        ],
+      }),
+    ).toEqual({ maxLength: 30 });
+  });
+
   it('takes the single non-null branch’s keywords from a nullable oneOf/anyOf wrapper', () => {
     expect(extractConstraints({ anyOf: [{ type: 'string', maxLength: 8 }, { type: 'null' }] })).toEqual({
       maxLength: 8,
