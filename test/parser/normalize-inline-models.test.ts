@@ -241,3 +241,75 @@ describe('collapseJsonSuffixModels — pagination envelope fields', () => {
     });
   });
 });
+
+describe('collapseJsonSuffixModels — response headers', () => {
+  it('rewrites primary, alternate-success, and error header refs when a Json-suffix model collapses', () => {
+    const models: Model[] = [
+      { name: 'Meta', fields: [{ name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false }] },
+      {
+        name: 'MetaJson',
+        fields: [
+          { name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false },
+          { name: 'version', type: { kind: 'primitive', type: 'integer' }, required: false },
+        ],
+      },
+    ];
+    // The primary list is shared with its successResponses entry, as the parser builds it.
+    const primaryHeaders = [{ name: 'X-Meta', type: { kind: 'model' as const, name: 'MetaJson' }, required: false }];
+    const services: Service[] = [
+      {
+        name: 'Widgets',
+        operations: [
+          {
+            name: 'getWidget',
+            httpMethod: 'get',
+            path: '/widgets/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'primitive', type: 'string' },
+            responseHeaders: primaryHeaders,
+            successResponses: [
+              { statusCode: 200, type: { kind: 'primitive', type: 'string' }, headers: primaryHeaders },
+              {
+                statusCode: 202,
+                type: { kind: 'primitive', type: 'unknown' },
+                headers: [
+                  {
+                    name: 'X-Meta',
+                    type: { kind: 'array', items: { kind: 'model', name: 'MetaJson' } },
+                    required: false,
+                  },
+                ],
+              },
+            ],
+            errors: [
+              {
+                statusCode: 429,
+                headers: [
+                  {
+                    name: 'X-Meta',
+                    type: { kind: 'nullable', inner: { kind: 'model', name: 'MetaJson' } },
+                    required: false,
+                  },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+
+    const result = collapseJsonSuffixModels(models, services);
+
+    expect(result.map((m) => m.name)).toEqual(['Meta']);
+    const op = services[0].operations[0];
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(op.successResponses?.[1].headers?.[0].type).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'Meta' },
+    });
+    expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Meta' } });
+  });
+});

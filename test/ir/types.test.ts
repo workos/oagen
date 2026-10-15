@@ -583,3 +583,45 @@ describe('assignModelsToServices — pagination envelope fields', () => {
     expect(map.get('ListMetadata')).toBe('Users');
   });
 });
+
+describe('assignModelsToServices — response headers', () => {
+  it('assigns a model reached only through a response header to that service', () => {
+    const models: Model[] = [
+      { name: 'Document', fields: [] },
+      { name: 'DownloadMeta', fields: [] },
+      { name: 'ThrottleInfo', fields: [] },
+    ];
+    const services = [
+      {
+        name: 'Documents',
+        operations: [
+          {
+            name: 'downloadDocument',
+            httpMethod: 'get' as const,
+            path: '/documents/{id}/download',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'Document' },
+            responseHeaders: [
+              { name: 'X-Meta', type: { kind: 'model' as const, name: 'DownloadMeta' }, required: false },
+            ],
+            errors: [
+              {
+                statusCode: 429,
+                headers: [
+                  { name: 'X-Throttle', type: { kind: 'model' as const, name: 'ThrottleInfo' }, required: false },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services);
+    expect(map.get('Document')).toBe('Documents');
+    expect(map.get('DownloadMeta')).toBe('Documents');
+    expect(map.get('ThrottleInfo')).toBe('Documents');
+  });
+});

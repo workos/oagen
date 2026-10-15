@@ -177,3 +177,29 @@ describe('buildDirectionIndex — pagination envelope fields', () => {
     expect(directionOf(index, 'Pagination')).toBe('response');
   });
 });
+
+describe('buildDirectionIndex — response headers', () => {
+  it('marks a model reached only through a response header as response-facing', () => {
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'DownloadMeta', fields: [] },
+          { name: 'ThrottleInfo', fields: [] },
+        ],
+        [
+          op({
+            responseHeaders: [{ name: 'X-Meta', type: { kind: 'model', name: 'DownloadMeta' }, required: false }],
+            errors: [
+              {
+                statusCode: 429,
+                headers: [{ name: 'X-Throttle', type: { kind: 'model', name: 'ThrottleInfo' }, required: false }],
+              },
+            ],
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'DownloadMeta')).toBe('response');
+    expect(directionOf(index, 'ThrottleInfo')).toBe('response');
+  });
+});

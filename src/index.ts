@@ -41,6 +41,7 @@ export {
   assignModelsToServices,
   validateModelHints,
   collectRequestBodyModels,
+  collectResponseHeaders,
 } from './ir/types.js';
 
 // Operation resolution

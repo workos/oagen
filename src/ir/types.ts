@@ -548,6 +548,11 @@ export function assignModelsToServices(
           }
         }
       }
+      for (const header of collectResponseHeaders(op)) {
+        for (const name of collectModelRefs(header.type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -627,6 +632,31 @@ export function collectRequestBodyModels(services: Service[]): Set<string> {
         }
       }
     }
+  }
+  return result;
+}
+
+/**
+ * Every response header an operation declares: the primary response's, each
+ * alternate success entry's, and each error entry's. The primary list is the
+ * same array as its `successResponses` entry when both exist, so it is yielded
+ * once. Every pass that walks an operation's type refs (reachability, model
+ * assignment, ref rewriting and validation, direction, compat filtering, enum
+ * collection) goes through this so a type reached only through a header is
+ * treated the way a body or parameter type is.
+ */
+export function collectResponseHeaders(op: Operation): ResponseHeader[] {
+  const result: ResponseHeader[] = [];
+  const seen = new Set<ResponseHeader[]>();
+  const lists = [
+    op.responseHeaders,
+    ...(op.successResponses ?? []).map((r) => r.headers),
+    ...op.errors.map((e) => e.headers),
+  ];
+  for (const list of lists) {
+    if (!list || seen.has(list)) continue;
+    seen.add(list);
+    result.push(...list);
   }
   return result;
 }

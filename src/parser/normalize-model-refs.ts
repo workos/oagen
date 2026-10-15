@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
 
 export function validateModelRefs(spec: ApiSpec): void {
   const knownNames = new Set<string>();
@@ -31,6 +31,9 @@ export function validateModelRefs(spec: ApiSpec): void {
       walkRef(op.response, `${service.name}.${op.name}.response`);
       for (const field of op.pagination?.envelopeFields ?? []) {
         walkRef(field.type, `${service.name}.${op.name}.pagination.${field.name}`);
+      }
+      for (const header of collectResponseHeaders(op)) {
+        walkRef(header.type, `${service.name}.${op.name}.headers.${header.name}`);
       }
     }
   }

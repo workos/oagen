@@ -321,6 +321,8 @@ Headers a response declares (`Content-Disposition` on a download, `Location` aft
 
 Each header is typed like a parameter via its `schema` (or the first media type of its `content` map); a header with neither is a `string`. `$ref`s into `components/headers` are resolved; a ref that cannot be resolved is warned about and dropped rather than failing the parse. A header named `Content-Type` is ignored, as OpenAPI requires. All three fields are present only when at least one header survives, so operations without headers keep their shape.
 
+`collectResponseHeaders(op)` (exported from `@workos/oagen`) yields every header list once — the primary list is the same array as its `successResponses` entry — and is what reachability, model assignment, ref rewriting/validation, the differ, and the compat filter use, so a model or enum reached only through a header is emitted like any other.
+
 ## Model & Field
 
 ```typescript

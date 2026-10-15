@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
-import type { Enum, Operation } from '../../src/ir/types.js';
+import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { collectResponseHeaders } from '../../src/ir/types.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
+import type { ApiSpec, Enum, Operation } from '../../src/ir/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/response-headers.yml');
@@ -395,5 +400,176 @@ describe('response headers', () => {
         ]
       `);
     });
+  });
+});
+
+// The describes below spy on console.warn too; restore between every test so
+// one test's warnings never leak into the next test's assertions.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+const baseOperation: Operation = {
+  name: 'downloadDocument',
+  httpMethod: 'get',
+  path: '/documents/{id}/download',
+  pathParams: [],
+  queryParams: [],
+  headerParams: [],
+  response: { kind: 'primitive', type: 'string' },
+  errors: [],
+  injectIdempotencyKey: false,
+};
+
+describe('collectResponseHeaders', () => {
+  it('yields primary, alternate-success, and error headers, each list once', () => {
+    // The primary list is the same array as its successResponses entry, as the parser builds it.
+    const primary = [{ name: 'ETag', type: { kind: 'primitive' as const, type: 'string' as const }, required: false }];
+    const op: Operation = {
+      ...baseOperation,
+      responseHeaders: primary,
+      successResponses: [
+        { statusCode: 200, type: { kind: 'primitive', type: 'string' }, headers: primary },
+        {
+          statusCode: 202,
+          type: { kind: 'primitive', type: 'unknown' },
+          headers: [{ name: 'Retry-After', type: { kind: 'primitive', type: 'integer' }, required: false }],
+        },
+        { statusCode: 204, type: { kind: 'primitive', type: 'unknown' } },
+      ],
+      errors: [
+        { statusCode: 404 },
+        {
+          statusCode: 429,
+          headers: [{ name: 'X-Throttle', type: { kind: 'model', name: 'ThrottleInfo' }, required: false }],
+        },
+      ],
+    };
+
+    expect(collectResponseHeaders(op).map((h) => h.name)).toEqual(['ETag', 'Retry-After', 'X-Throttle']);
+  });
+
+  it('returns nothing for an operation that declares no headers', () => {
+    expect(collectResponseHeaders(baseOperation)).toEqual([]);
+  });
+});
+
+describe('validateModelRefs — response headers', () => {
+  it('warns about a dangling model ref in a header with operation and header context', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Documents',
+          operations: [
+            {
+              ...baseOperation,
+              responseHeaders: [{ name: 'X-Meta', type: { kind: 'model', name: 'Missing' }, required: false }],
+              errors: [
+                {
+                  statusCode: 429,
+                  headers: [
+                    {
+                      name: 'X-Throttle',
+                      type: { kind: 'array', items: { kind: 'model', name: 'AlsoMissing' } },
+                      required: false,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      models: [],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    validateModelRefs(spec);
+
+    expect(warn.mock.calls.map((call) => call[0])).toEqual([
+      '[oagen] Warning: Unresolved model reference "Missing" (context: Documents.downloadDocument.headers.X-Meta)',
+      '[oagen] Warning: Unresolved model reference "AlsoMissing" (context: Documents.downloadDocument.headers.X-Throttle)',
+    ]);
+  });
+});
+
+describe('collapseJsonSuffixModels through parseSpec — response headers', () => {
+  it('rewrites a header that referenced the collapsed Json-suffix model', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-response-headers-'));
+    const specPath = join(dir, 'collapse.yml');
+    writeFileSync(
+      specPath,
+      `
+openapi: '3.1.0'
+info:
+  title: Collapse
+  version: '1'
+paths:
+  /widgets/{id}:
+    get:
+      operationId: getWidget
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Meta:
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/MetaJson'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        id:
+          type: string
+        meta:
+          $ref: '#/components/schemas/Meta'
+    Meta:
+      type: object
+      properties:
+        etag:
+          type: string
+    MetaJson:
+      type: object
+      properties:
+        etag:
+          type: string
+        version:
+          type: integer
+`,
+    );
+
+    try {
+      const spec = await parseSpec(specPath);
+      const op = spec.services.flatMap((s) => s.operations)[0];
+      const messages = warn.mock.calls.map((call) => String(call[0]));
+
+      // MetaJson is a superset of Meta, so it collapses into Meta ...
+      expect(messages).toContain('[oagen] Merged "MetaJson" into "Meta" (2 fields, superset)');
+      expect(spec.models.map((m) => m.name)).not.toContain('MetaJson');
+      // ... and the header follows the rename instead of pointing at a deleted model.
+      expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'Meta' });
+      expect(messages.filter((m) => m.includes('Unresolved model reference'))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
