@@ -7,6 +7,7 @@ import type {
   TypeRef,
   ErrorResponse,
   SuccessResponse,
+  ResponseHeader,
   SecurityRequirement,
   Model,
   Field,
@@ -166,8 +167,75 @@ function resolveRequestBodyRef(
   return current;
 }
 
+/**
+ * A Header Object as it appears in a Response Object's `headers` map. Per OAS
+ * it carries either `schema` or a single-entry `content` map, never both.
+ */
+interface HeaderObject {
+  description?: string;
+  required?: boolean;
+  deprecated?: boolean;
+  schema?: SchemaObject;
+  content?: Record<string, { schema?: SchemaObject }>;
+}
+
+/**
+ * A header entry as written in the spec: an inline Header Object or a
+ * Reference Object into `components/headers`. The bundler never inlines those
+ * refs (`dereference: false`), so they must be resolved before use.
+ */
+type RawHeaderObject = HeaderObject | { $ref: string };
+
+/**
+ * Resolve a raw response header to a concrete Header Object, following `$ref`
+ * chains into `components/headers` with a cycle guard.
+ *
+ * Unlike parameters and request bodies, a header that cannot be resolved is
+ * warned about and dropped rather than failing the parse: a response header
+ * is informational, so losing one costs an emitter a typed accessor, not a
+ * wire contract, and should not block generating the rest of the SDK.
+ */
+function resolveHeaderRef(
+  raw: RawHeaderObject,
+  componentHeaders: Record<string, Record<string, unknown>> | undefined,
+  headerName: string,
+  operationContext: string,
+): HeaderObject | undefined {
+  const seenRefs = new Set<string>();
+  let current: RawHeaderObject = raw;
+
+  while ('$ref' in current) {
+    if (seenRefs.has(current.$ref)) {
+      console.warn(
+        `[oagen] Warning: Circular header $ref chain starting at "${current.$ref}" for response header ` +
+          `"${headerName}" in ${operationContext}. Skipping the header.`,
+      );
+      return undefined;
+    }
+    seenRefs.add(current.$ref);
+
+    // Match the whole pointer, not just its last token: a ref into any other
+    // section must not resolve off a same-named header component.
+    const match = /^#\/components\/headers\/(.+)$/.exec(current.$ref);
+    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
+    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    const resolved = refName ? componentHeaders?.[refName] : undefined;
+    if (!resolved) {
+      console.warn(
+        `[oagen] Warning: Unresolved header $ref "${current.$ref}" for response header "${headerName}" ` +
+          `in ${operationContext}: no matching entry under components/headers. Skipping the header.`,
+      );
+      return undefined;
+    }
+    current = resolved as unknown as RawHeaderObject;
+  }
+
+  return current;
+}
+
 interface ResponseObject {
   description?: string;
+  headers?: Record<string, RawHeaderObject>;
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
@@ -184,6 +252,7 @@ export function extractOperations(
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentHeaders?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -209,6 +278,7 @@ export function extractOperations(
         componentSchemas,
         componentParameters,
         componentRequestBodies,
+        componentHeaders,
       );
       inlineModels.push(...opModels);
       const ops = serviceMap.get(serviceName) ?? [];
@@ -612,8 +682,9 @@ function buildOperation(
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentHeaders?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[] } {
-  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  const opLabel = operationLabel(op, path, method);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
@@ -680,13 +751,14 @@ function buildOperation(
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(requestBodyObject, op, reqBodyModels);
   const {
     response,
+    responseHeaders,
     successResponses,
     errors,
     inlineModels,
     isPaginated,
     dataPath: responseDataPath,
     itemType: responseItemType,
-  } = extractResponses(op.responses, op, path, method, componentSchemas);
+  } = extractResponses(op.responses, op, path, method, componentSchemas, componentHeaders, opContext);
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -733,6 +805,8 @@ function buildOperation(
       requestBody,
       requestBodyEncoding,
       response,
+      // Added only when present so operations without headers keep their shape.
+      ...(responseHeaders && { responseHeaders }),
       successResponses,
       errors,
       pagination,
@@ -1205,6 +1279,53 @@ function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existin
   return name;
 }
 
+/** Human-readable label for an operation in diagnostics: its operationId, else `METHOD /path`. */
+function operationLabel(op: OperationObject | undefined, path: string, method: HttpMethod): string {
+  return op?.operationId ?? `${method.toUpperCase()} ${path}`;
+}
+
+/**
+ * Read a Response Object's `headers` map into IR response headers, resolving
+ * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
+ * survives so callers can leave the `headers` key off entirely.
+ */
+function extractResponseHeaders(
+  headers: Record<string, RawHeaderObject> | undefined,
+  componentHeaders: Record<string, Record<string, unknown>> | undefined,
+  operationLabel: string,
+  operationContext?: string,
+): ResponseHeader[] | undefined {
+  if (!headers) return undefined;
+
+  const result: ResponseHeader[] = [];
+  for (const [name, raw] of Object.entries(headers)) {
+    // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
+    // media type is already carried by the response's `content` map.
+    if (name.toLowerCase() === 'content-type') continue;
+
+    const header = resolveHeaderRef(raw, componentHeaders, name, operationLabel);
+    if (!header) continue;
+
+    // A Header Object declares `schema` or a single-entry `content` map; with
+    // `content`, the first (only) media type's schema types the header.
+    const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
+    const schema = header.schema ?? contentSchema;
+    const type: TypeRef = schema
+      ? schemaToTypeRef(schema, name, operationContext ? toPascalCase(operationContext) : undefined)
+      : { kind: 'primitive', type: 'string' };
+
+    result.push({
+      name,
+      type,
+      required: header.required ?? false,
+      description: header.description,
+      deprecated: header.deprecated || undefined,
+    });
+  }
+
+  return result.length > 0 ? result : undefined;
+}
+
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
   if (op?.operationId) {
     return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Response');
@@ -1220,8 +1341,11 @@ function extractResponses(
   path?: string,
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
+  componentHeaders?: Record<string, Record<string, unknown>>,
+  operationContext?: string,
 ): {
   response: TypeRef;
+  responseHeaders?: ResponseHeader[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   inlineModels: Model[];
@@ -1231,6 +1355,7 @@ function extractResponses(
 } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let responseHeaders: ResponseHeader[] | undefined;
   let inlineModels: Model[] = [];
   let isPaginated = false;
   let dataPath: string | undefined;
@@ -1239,9 +1364,13 @@ function extractResponses(
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
   const allSuccessResponses: SuccessResponse[] = [];
+  const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
+    // Headers belong to the status code they are declared on, success or
+    // error alike: `Location` on a 201/302, `Retry-After` on a 429.
+    const headers = extractResponseHeaders(resp.headers, componentHeaders, opLabel, operationContext);
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
@@ -1280,14 +1409,18 @@ function extractResponses(
           }
         }
       }
-      allSuccessResponses.push({ statusCode: code, type: extractedType });
+      allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
     } else if (code >= 300 && code < 400) {
       // 3xx redirects — include so emitter can detect redirect endpoints
-      allSuccessResponses.push({ statusCode: code, type: { kind: 'primitive', type: 'unknown' } });
+      allSuccessResponses.push({
+        statusCode: code,
+        type: { kind: 'primitive', type: 'unknown' },
+        ...(headers && { headers }),
+      });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
-      errors.push({ statusCode: code, type });
+      errors.push({ statusCode: code, type, ...(headers && { headers }) });
     }
   }
 
@@ -1297,9 +1430,10 @@ function extractResponses(
     const primary =
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
+    responseHeaders = primary.headers;
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
-  return { response, successResponses, errors, inlineModels, isPaginated, dataPath, itemType };
+  return { response, responseHeaders, successResponses, errors, inlineModels, isPaginated, dataPath, itemType };
 }

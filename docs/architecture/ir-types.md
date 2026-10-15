@@ -210,6 +210,7 @@ interface Operation {
     | "binary"
     | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
+  responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -227,6 +228,15 @@ interface SecurityRequirement {
 interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
+  headers?: ResponseHeader[]; // Only when the spec declares at least one
+}
+
+interface ResponseHeader {
+  name: string; // As written in the spec, e.g. "Content-Disposition"
+  type: TypeRef;
+  required: boolean;
+  description?: string;
+  deprecated?: boolean;
 }
 
 interface Parameter {
@@ -259,6 +269,12 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 ### Multiple 2xx Responses
 
 When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
+
+### Response Headers
+
+Headers a response declares (`Content-Disposition` on a download, `Location` after a create, `ETag`, rate-limit headers) are kept with the status code they belong to as `headers: ResponseHeader[]` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's headers are also exposed directly as `Operation.responseHeaders`.
+
+Each header is typed like a parameter via its `schema` (or the first media type of its `content` map); a header with neither is a `string`. `$ref`s into `components/headers` are resolved; a ref that cannot be resolved is warned about and dropped rather than failing the parse. A header named `Content-Type` is ignored, as OpenAPI requires. All three fields are present only when at least one header survives, so operations without headers keep their shape.
 
 ## Model & Field
 
@@ -304,6 +320,7 @@ interface EnumValue {
 interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
+  headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
 }
 ```
 

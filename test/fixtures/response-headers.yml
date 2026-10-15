@@ -1,0 +1,82 @@
+openapi: '3.1.0'
+info:
+  title: Response headers
+  version: '1'
+paths:
+  # Issue #186 repro: a download that names its file in Content-Disposition.
+  /documents/{id}/download:
+    get:
+      operationId: downloadDocument
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          headers:
+            Content-Disposition:
+              description: Offers the file as a download named after the document.
+              schema:
+                type: string
+                examples:
+                  - 'attachment; filename="doc_123.zip"'
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+  /documents:
+    post:
+      operationId: createDocument
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: created
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '429':
+          description: throttled
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+components:
+  schemas:
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+  headers:
+    Location:
+      description: URL of the created document.
+      required: true
+      schema:
+        type: string
+        format: uri
+    RequestId:
+      description: Correlation id for this request.
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      content:
+        text/plain:
+          schema:
+            type: integer

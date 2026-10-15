@@ -7,6 +7,7 @@ export type {
   Operation,
   SecurityRequirement,
   SuccessResponse,
+  ResponseHeader,
   PaginationMeta,
   HttpMethod,
   Parameter,

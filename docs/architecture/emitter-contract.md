@@ -112,6 +112,7 @@ Emitters should handle these additional variants introduced for open-source read
 - **Cookie params:** Optional `cookieParams` array on operations that use cookie parameters
 - **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`
 - **Multiple responses:** Optional `successResponses: SuccessResponse[]` on `Operation` when more than one 2xx exists
+- **Response headers:** Optional `responseHeaders: ResponseHeader[]` on `Operation` (the primary response's headers) and `headers: ResponseHeader[]` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares at least one
 - **Idempotency:** `injectIdempotencyKey` is now spec-driven (true only when the spec declares an `Idempotency-Key` header)
 
 ## OperationPlan
