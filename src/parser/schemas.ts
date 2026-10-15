@@ -686,7 +686,7 @@ function deriveInlineVariantMapping(
   parentModelName: string | undefined,
 ): Record<string, string> | null {
   if (variants.length === 0 || !contextName) return null;
-  const inlineObjectVariants = variants.filter((v) => !v.$ref && v.properties && (v.type === 'object' || !v.type));
+  const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
   if (inlineObjectVariants.length !== variants.length) return null;
 
   const baseInlineName = qualifyInlineModelName(toPascalCase(contextName), parentModelName);
@@ -701,6 +701,34 @@ function deriveInlineVariantMapping(
     emittedSoFar.push({ name: variantName, fields: [] });
   }
   return mapping;
+}
+
+/**
+ * Name the inline object variants of a `oneOf`/`anyOf` exactly as the inline-
+ * model extractors do (`nameOneOfVariant` in inline-models.ts, and
+ * `extractNestedSchema` / `extractInlineModelDeep` here): variant 0 keeps the
+ * qualified field name, later variants take a const-discriminator prefix when
+ * every variant pins one, and otherwise a position-based suffix (`Shape`,
+ * `Shape2`, `Shape3`). Positions are local to this variant list, so the
+ * union's entries and the extracted models agree no matter what else has
+ * been extracted. Returned keyed by variant schema identity.
+ */
+function nameInlineObjectVariants(
+  variants: SchemaObject[],
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): Map<SchemaObject, string> {
+  const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
+  const baseInlineName = qualifyInlineModelName(toPascalCase(contextName ?? 'UnknownModel'), parentModelName);
+  const namingDiscriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
+  const emitted: Model[] = [];
+  const names = new Map<SchemaObject, string>();
+  for (const variant of inlineObjectVariants) {
+    const name = nameVariantModel(variant, baseInlineName, emitted, namingDiscriminator);
+    emitted.push({ name, fields: [] });
+    names.set(variant, name);
+  }
+  return names;
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
@@ -1366,21 +1394,21 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       }
     }
 
-    // Build variants. When we have a discriminator with a known mapping and
-    // every non-null variant is an inline object that pins the discriminator
-    // property to a const, route each variant's TypeRef through that mapping.
-    // This avoids the degenerate case where `qualifyInlineModelName` would
-    // assign the same parent-derived name (e.g. `ApiKeyOwner`) to every
-    // inline variant, collapsing the union to a single repeated model ref.
+    // Build variants. An inline object variant is referenced by the name its
+    // extracted model carries: the discriminator mapping's entry when one
+    // resolves for it, otherwise the position-based name from
+    // `nameInlineObjectVariants`. Falling back to `schemaToTypeRef` instead
+    // would hand every inline variant the same parent-derived name (e.g.
+    // `ApiKeyOwner`), collapsing the union onto one repeated model ref while
+    // the extractor emits `ApiKeyOwner`, `ApiKeyOwner2`, ... for them.
+    const inlineVariantNames = nameInlineObjectVariants(nonNullVariants, contextName, parentModelName);
     const variants: TypeRef[] = [];
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
-      const inlineMappingName =
-        resolvedDiscriminator && !v.$ref && v.properties && (v.type === 'object' || !v.type)
-          ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator)
-          : null;
-      if (inlineMappingName) {
-        variants.push({ kind: 'model', name: inlineMappingName });
+      const inlineName = inlineVariantNames.get(v);
+      if (inlineName) {
+        const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
+        variants.push({ kind: 'model', name: mappedName ?? inlineName });
       } else {
         variants.push(schemaToTypeRef(v, contextName, parentModelName));
       }

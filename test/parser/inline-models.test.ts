@@ -350,3 +350,108 @@ describe('extractInlineModelsFromProperties', () => {
     expect(models.map((model) => model.name)).toEqual(['DrawingShape', 'SquareDrawingShape', 'DrawingLayer']);
   });
 });
+
+describe('oneOf variants without a shared const field', () => {
+  const byRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' } } };
+  const bySide: SchemaObject = { type: 'object', properties: { side: { type: 'number' } } };
+  const byPoints: SchemaObject = { type: 'object', properties: { points: { type: 'integer' } } };
+
+  function unionVariantNames(ref: unknown): string[] {
+    const union = (ref as { kind: string; items?: unknown }).kind === 'array' ? (ref as { items: unknown }).items : ref;
+    return ((union as { variants: Array<{ name: string }> }).variants ?? []).map((v) => v.name);
+  }
+
+  it('numbers the TypeRef variants by position, matching the extractor', () => {
+    const union = schemaToTypeRef({ oneOf: [byRadius, bySide, byPoints] }, 'shape', 'Drawing');
+    expect(unionVariantNames(union)).toEqual(['DrawingShape', 'DrawingShape2', 'DrawingShape3']);
+    expect(unionVariantNames(schemaToTypeRef({ anyOf: [byRadius, bySide] }, 'shape', 'Drawing'))).toEqual([
+      'DrawingShape',
+      'DrawingShape2',
+    ]);
+
+    const results: Model[] = [];
+    extractInlineModelsFromProperties(
+      { type: 'object', properties: { shape: { oneOf: [byRadius, bySide, byPoints] } } },
+      results,
+      'Drawing',
+    );
+    expect(results.map((model) => model.name)).toEqual(['DrawingShape', 'DrawingShape2', 'DrawingShape3']);
+  });
+
+  it('agrees at field level and array-item level in a component schema', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info: { title: 'variants', version: '1' },
+        paths: {},
+        components: {
+          schemas: {
+            Drawing: {
+              type: 'object',
+              properties: {
+                shape: { oneOf: [byRadius, bySide] },
+                markers: { type: 'array', items: { oneOf: [byRadius, bySide] } },
+              },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const drawing = fieldTypesByModel(ir.models)['Drawing']!;
+      expect(unionVariantNames(drawing['shape'])).toEqual(['DrawingShape', 'DrawingShape2']);
+      expect(unionVariantNames(drawing['markers'])).toEqual(['DrawingMarker', 'DrawingMarker2']);
+      expect(ir.models.map((model) => model.name).sort()).toEqual([
+        'Drawing',
+        'DrawingMarker',
+        'DrawingMarker2',
+        'DrawingShape',
+        'DrawingShape2',
+      ]);
+      expect(fieldTypesByModel(ir.models)['DrawingShape2']).toEqual({ side: { kind: 'primitive', type: 'number' } });
+      expect(fieldTypesByModel(ir.models)['DrawingMarker2']).toEqual({ side: { kind: 'primitive', type: 'number' } });
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('agrees for an array of variants in an inline request body', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info: { title: 'variants', version: '1' },
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      properties: { markers: { type: 'array', items: { oneOf: [byRadius, bySide] } } },
+                    },
+                  },
+                },
+              },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const body = fieldTypesByModel(ir.models)['CreateDrawingRequest']!;
+      expect(unionVariantNames(body['markers'])).toEqual(['CreateDrawingRequestMarker', 'CreateDrawingRequestMarker2']);
+      expect(ir.models.map((model) => model.name).sort()).toEqual([
+        'CreateDrawingRequest',
+        'CreateDrawingRequestMarker',
+        'CreateDrawingRequestMarker2',
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
