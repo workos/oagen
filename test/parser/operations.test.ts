@@ -594,6 +594,84 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
   });
 
+  it('falls back to the inline schema description when the param declares none', () => {
+    const paths = {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [
+            {
+              name: 'petId',
+              in: 'path' as const,
+              required: true,
+              schema: { type: 'string', description: 'The ID of the pet to retrieve' },
+            },
+          ],
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const petIdParam = services[0].operations[0].pathParams[0];
+    expect(petIdParam.name).toBe('petId');
+    expect(petIdParam.description).toBe('The ID of the pet to retrieve');
+  });
+
+  it('prefers the param-level description over the inline schema description', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'fields',
+              in: 'query' as const,
+              required: false,
+              description: 'The fields to include in the response',
+              schema: { type: 'string', description: 'A comma-separated list of field names' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].queryParams[0].description).toBe('The fields to include in the response');
+  });
+
+  it('hoists description from a referenced component schema onto the param', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: {
+        type: 'string',
+        enum: ['desc', 'asc'],
+        description: 'Sort order for the returned list',
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    const orderParam = services[0].operations[0].queryParams[0];
+    expect(orderParam.name).toBe('order');
+    expect(orderParam.description).toBe('Sort order for the returned list');
+  });
+
   it('resolves an operation-level parameter $ref into components/parameters', () => {
     const paths = {
       '/domains': {

@@ -240,6 +240,8 @@ interface Parameter {
 }
 ```
 
+`Parameter.description` is the parameter's own `description` when it declares one; otherwise the parser falls back to the inline `schema.description`, and then to the `description` of the `$ref`'d component schema, mirroring how `deprecated`, `default`, and `example` are read.
+
 ### Idempotency Key
 
 The `injectIdempotencyKey` flag is spec-driven: it is `true` only when the operation explicitly declares an `Idempotency-Key` header parameter in the OpenAPI spec. This means APIs that don't use idempotency keys (e.g., GitHub) get `false`, while APIs that do (e.g., Stripe, billing APIs) already declare the header in their spec and get `true`.
