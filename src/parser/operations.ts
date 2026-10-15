@@ -306,6 +306,15 @@ function normalizeOperationIdForNaming(operationId: string): string {
   return operationId.replace(/\[\d+\]\s*$/, '');
 }
 
+/**
+ * The inline request body or response model name of an operation that has an
+ * `operationId`. The single source of that name: extractRequestBody and
+ * deriveResponseName use it to name, resolvePathModelBaseNames to reserve.
+ */
+function operationIdModelName(operationId: string, suffix: 'Request' | 'Response'): string {
+  return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
+}
+
 function inferOperationName(
   method: HttpMethod,
   path: string,
@@ -1030,9 +1039,7 @@ function extractRequestBody(
   // inline body model. Every operationId-less body used to be `RequestBody`,
   // and only the largest survived deduplication — every other operation was
   // left pointing at a model with someone else's fields.
-  const contextName = op?.operationId
-    ? cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Request')
-    : pathModelBaseName + 'Request';
+  const contextName = op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
@@ -1274,21 +1281,32 @@ export function derivePathBasedName(
  * Decide the path-derived model prefix of every operation that has no
  * `operationId`, keyed by `${method} ${path}`.
  *
- * When two distinct raw paths with the same method flatten to the same prefix
- * (see derivePathModelBaseName), every path in that group gets a six-character
- * disambiguator — the start of the SHA-1 of its raw path, inserted before the
- * method (`POST /foo/bar` → `FooBarA82CcePost`) — so the result depends only
- * on the path, never on document order, and a path that stops colliding
- * returns to its plain name. Paths that don't collide keep the plain prefix.
+ * A prefix collides when two distinct raw paths with the same method flatten
+ * to it (see derivePathModelBaseName), or when `<prefix>Request` or
+ * `<prefix>Response` is a name that an operation with an `operationId` will
+ * use. Those names are reserved first, so an unnamed `POST /audit/events`
+ * cannot overwrite the models of a `POST /legacy-audit` whose operationId is
+ * `auditEventsPost`; operationId-derived names never change. Every colliding
+ * path gets a six-character disambiguator — the start of the SHA-1 of its raw
+ * path, inserted before the method (`POST /foo/bar` → `FooBarA82CcePost`) —
+ * so the result depends only on the document's paths and operationIds, never
+ * on their order, and a path that stops colliding returns to its plain name.
+ * Paths that don't collide keep the plain prefix.
  */
 function resolvePathModelBaseNames(paths: Record<string, PathItem>): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
+  const reservedNames = new Set<string>();
 
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
-      if (!op || op.operationId) continue;
+      if (!op) continue;
+      if (op.operationId) {
+        reservedNames.add(operationIdModelName(op.operationId, 'Request'));
+        reservedNames.add(operationIdModelName(op.operationId, 'Response'));
+        continue;
+      }
       const plain = derivePathModelBaseName(path, method);
       candidates.push({ key: `${method} ${path}`, path, method, plain });
       const rawPaths = rawPathsByPlainName.get(plain) ?? new Set<string>();
@@ -1299,7 +1317,10 @@ function resolvePathModelBaseNames(paths: Record<string, PathItem>): Map<string,
 
   const resolved = new Map<string, string>();
   for (const { key, path, method, plain } of candidates) {
-    const collides = (rawPathsByPlainName.get(plain)?.size ?? 0) > 1;
+    const collides =
+      (rawPathsByPlainName.get(plain)?.size ?? 0) > 1 ||
+      reservedNames.has(plain + 'Request') ||
+      reservedNames.has(plain + 'Response');
     resolved.set(key, collides ? derivePathModelBaseName(path, method, pathDisambiguator(path)) : plain);
   }
   return resolved;
@@ -1312,7 +1333,7 @@ function pathDisambiguator(rawPath: string): string {
 
 function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {
   if (op?.operationId) {
-    return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Response');
+    return operationIdModelName(op.operationId, 'Response');
   }
   return pathModelBaseName + 'Response';
 }

@@ -352,6 +352,60 @@ describe('path-derived names that would otherwise collide', () => {
     expect(get.response).toBe('FooBarGetResponse');
   });
 
+  it('yields to the names an operationId-bearing operation will use (POST /audit/events vs auditEventsPost)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamed = {
+      post: {
+        requestBody: jsonBody(inlineObject({ a: { type: 'string' } })),
+        responses: { '200': jsonResponse(inlineObject({ x: { type: 'string' } })) },
+      },
+    };
+    const named = {
+      post: {
+        operationId: 'auditEventsPost',
+        requestBody: jsonBody(inlineObject({ b: { type: 'string' }, c: { type: 'string' } })),
+        responses: { '200': jsonResponse(inlineObject({ y: { type: 'string' }, z: { type: 'string' } })) },
+      },
+    };
+
+    const { ops, models } = await parseInline(api({ '/audit/events': unnamed, '/legacy-audit': named }), summarizeAll);
+    expect(ops).toMatchInlineSnapshot(`
+      [
+        {
+          "name": "createEvents",
+          "path": "/audit/events",
+          "requestBody": "AuditEventsD4C4A0PostRequest",
+          "response": "AuditEventsD4C4A0PostResponse",
+        },
+        {
+          "name": "auditEventsPost",
+          "path": "/legacy-audit",
+          "requestBody": "AuditEventsPostRequest",
+          "response": "AuditEventsPostResponse",
+        },
+      ]
+    `);
+
+    const [pathNamed, idNamed] = ops;
+    // The operationId-derived names are untouched; the path-based ones step aside.
+    expect(idNamed.requestBody).toBe('AuditEventsPostRequest');
+    expect(idNamed.response).toBe('AuditEventsPostResponse');
+    expect(pathNamed.requestBody).not.toBe(idNamed.requestBody);
+    expect(pathNamed.response).not.toBe(idNamed.response);
+    expect(prefixOf(pathNamed.requestBody)).toBe(prefixOf(pathNamed.response));
+    expect(fieldsOf(models, pathNamed.requestBody)).toEqual(['a']);
+    expect(fieldsOf(models, pathNamed.response)).toEqual(['x']);
+    expect(fieldsOf(models, idNamed.requestBody)).toEqual(['b', 'c']);
+    expect(fieldsOf(models, idNamed.response)).toEqual(['y', 'z']);
+
+    // Reservation depends on the document's names, not on their order.
+    const reversed = await parseInline(api({ '/legacy-audit': named, '/audit/events': unnamed }), summarizeAll);
+    const byPath = (list: typeof ops) => Object.fromEntries(list.map((o) => [o.path, [o.requestBody, o.response]]));
+    expect(byPath(reversed.ops)).toEqual(byPath(ops));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('normalizes so request and response prefixes agree (/a/b, /v2/x/y)', async () => {
     const op = {
       post: {
