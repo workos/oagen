@@ -470,6 +470,77 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('yields to a component schema that takes the Request form (POST /audit/events vs AuditEventsPostRequest)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamed = {
+      post: {
+        requestBody: jsonBody(inlineObject({ a: { type: 'string' } })),
+        responses: { '200': jsonResponse(inlineObject({ x: { type: 'string' } })) },
+      },
+    };
+    const spec = {
+      ...api({ '/audit/events': unnamed }),
+      components: {
+        schemas: { AuditEventsPostRequest: inlineObject({ b: { type: 'string' }, c: { type: 'string' } }) },
+      },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    expect(ops.map((o) => [o.path, o.requestBody, o.response])).toMatchInlineSnapshot(`
+      [
+        [
+          "/audit/events",
+          "AuditEventsD4C4A0PostRequest",
+          "AuditEventsD4C4A0PostResponse",
+        ],
+      ]
+    `);
+
+    const [op] = ops;
+    // The component keeps its name and fields; the operation's models step aside together.
+    expect(fieldsOf(models, 'AuditEventsPostRequest')).toEqual(['b', 'c']);
+    expect(op.requestBody).not.toBe('AuditEventsPostRequest');
+    expect(prefixOf(op.requestBody)).toBe(prefixOf(op.response));
+    expect(fieldsOf(models, op.requestBody)).toEqual(['a']);
+    expect(fieldsOf(models, op.response)).toEqual(['x']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('yields to a component schema that takes the Response form (POST /audit/events vs AuditEventsPostResponse)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamed = {
+      post: {
+        requestBody: jsonBody(inlineObject({ a: { type: 'string' } })),
+        responses: { '200': jsonResponse(inlineObject({ x: { type: 'string' } })) },
+      },
+    };
+    const spec = {
+      ...api({ '/audit/events': unnamed }),
+      components: {
+        schemas: { AuditEventsPostResponse: inlineObject({ y: { type: 'string' }, z: { type: 'string' } }) },
+      },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    expect(ops.map((o) => [o.path, o.requestBody, o.response])).toMatchInlineSnapshot(`
+      [
+        [
+          "/audit/events",
+          "AuditEventsD4C4A0PostRequest",
+          "AuditEventsD4C4A0PostResponse",
+        ],
+      ]
+    `);
+
+    const [op] = ops;
+    expect(fieldsOf(models, 'AuditEventsPostResponse')).toEqual(['y', 'z']);
+    expect(op.response).not.toBe('AuditEventsPostResponse');
+    expect(prefixOf(op.requestBody)).toBe(prefixOf(op.response));
+    expect(fieldsOf(models, op.requestBody)).toEqual(['a']);
+    expect(fieldsOf(models, op.response)).toEqual(['x']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('normalizes so request and response prefixes agree (/a/b, /v2/x/y)', async () => {
     const op = {
       post: {

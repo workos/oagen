@@ -191,9 +191,10 @@ export function extractOperations(
   if (!paths) return { services: [], inlineModels: [] };
 
   // Operations without an operationId name their inline models from the
-  // path, and two distinct paths can flatten to the same name, so the prefix
-  // for every such operation is decided up front (see resolvePathModelBaseNames).
-  const pathModelBaseNames = resolvePathModelBaseNames(paths);
+  // path, and two distinct paths — or a path and an operationId or component
+  // schema — can produce the same name, so the prefix for every such
+  // operation is decided up front (see resolvePathModelBaseNames).
+  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels);
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -1315,10 +1316,13 @@ export function derivePathBasedName(
  *
  * A prefix collides when two distinct raw paths with the same method flatten
  * to it (see derivePathModelBaseName), or when `<prefix>Request` or
- * `<prefix>Response` is a name that an operation with an `operationId` will
- * use. Those names are reserved first, so an unnamed `POST /audit/events`
- * cannot overwrite the models of a `POST /legacy-audit` whose operationId is
- * `auditEventsPost`; operationId-derived names never change.
+ * `<prefix>Response` is a name already taken: by an operation with an
+ * `operationId` (an unnamed `POST /audit/events` must not overwrite the
+ * models of a `POST /legacy-audit` whose operationId is `auditEventsPost`)
+ * or by a component schema (`components/schemas/AuditEventsPostRequest`).
+ * Those names are reserved first and never change. The reservation is
+ * unconditional — an inline body is never merged into a same-named component
+ * even when the shapes agree — so the rule stays simple and order-free.
  *
  * These names are types SDK users read and import, so a collision costs the
  * plain name only where it must. Within a group of paths that flatten to one
@@ -1327,15 +1331,19 @@ export function derivePathBasedName(
  * plain prefix; every other path gets a six-character disambiguator, the
  * start of the SHA-1 of its raw path, inserted before the method
  * (`POST /foo-bar` next to `POST /foo/bar` → `FooBar546F12Post`). When two
- * paths tie for plainest, or the prefix is reserved by an operationId, nobody
- * is canonical and every path in the group is disambiguated. The outcome
- * depends only on the document's paths and operationIds, never on their
- * order, and a path that stops colliding returns to its plain name.
+ * paths tie for plainest, or the prefix is reserved, nobody is canonical and
+ * every path in the group is disambiguated. The outcome depends only on the
+ * document's paths, operationIds and component names, never on their order,
+ * and a path that stops colliding returns to its plain name.
  */
-function resolvePathModelBaseNames(paths: Record<string, PathItem>): Map<string, string> {
+function resolvePathModelBaseNames(paths: Record<string, PathItem>, componentModels?: Model[]): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
   const reservedNames = new Set<string>();
+
+  for (const model of componentModels ?? []) {
+    reservedNames.add(model.name);
+  }
 
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
