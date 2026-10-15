@@ -476,3 +476,62 @@ components:
     }
   });
 });
+
+describe('parseSpec – Service.description from document tags (issue #192)', () => {
+  it('carries the top-level tag description onto the service named after it', async () => {
+    const spec = {
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      tags: [{ name: 'Pets', description: 'Pets live in a store and can be adopted.' }],
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            tags: ['Pets'],
+            responses: { '204': { description: 'ok' } },
+          },
+        },
+      },
+    };
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-192-'));
+    const specFile = path.join(tmpDir, 'repro.json');
+    try {
+      await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
+      const ir = await parseSpec(specFile);
+
+      expect(ir.services.map(({ name, description }) => ({ name, description }))).toEqual([
+        { name: 'Pets', description: 'Pets live in a store and can be adopted.' },
+      ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves Service.description unset when the document declares no tags', async () => {
+    const spec = {
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            tags: ['Pets'],
+            responses: { '204': { description: 'ok' } },
+          },
+        },
+      },
+    };
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-192-notags-'));
+    const specFile = path.join(tmpDir, 'repro.json');
+    try {
+      await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
+      const ir = await parseSpec(specFile);
+
+      expect(ir.services).toHaveLength(1);
+      expect(ir.services[0].name).toBe('Pets');
+      expect('description' in ir.services[0]).toBe(false);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

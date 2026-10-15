@@ -181,6 +181,8 @@ The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagi
 
 Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to the first path segment (e.g., `/organizations/{id}` → `Organizations`). Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
 
+`Service.description` comes from the document's top-level `tags` list. A tag entry matches a service when its `name` converts to the same PascalCase service name as the operations' tag, so `user-management`, `User Management`, and `user_management` all describe `UserManagement`. When the path-prefix split turns one tag's operations into several services (e.g., `/organizations` and `/organization_domains` both tagged `organizations`), each resulting service carries that tag's description; if a service's operations also carry a tag that matches the service name exactly, that tag's description takes precedence. The key is omitted when no tag describes the service, including services named from a path segment because their operations have no tag.
+
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"

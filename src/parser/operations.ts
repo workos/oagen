@@ -178,17 +178,28 @@ export interface OperationExtractionResult {
   inlineModels: Model[];
 }
 
+/** A top-level `tags[]` entry as it appears in the OpenAPI document. */
+export interface TagObject {
+  name?: string;
+  description?: string;
+}
+
 export function extractOperations(
   paths: Record<string, PathItem> | undefined,
   operationIdTransform?: (id: string) => string,
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  documentTags?: TagObject[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
+  // Service name each tagged operation was grouped under, keyed by operation
+  // identity. The path-prefix split below moves operations between services,
+  // so this is how a split-off service is traced back to the tag it came from.
+  const tagServiceByOperation = new Map<Operation, string>();
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -197,7 +208,8 @@ export function extractOperations(
       const op = pathItem[method];
       if (!op) continue;
 
-      const serviceName = inferServiceName(path, op.tags?.[0]);
+      const tag = op.tags?.[0];
+      const serviceName = inferServiceName(path, tag);
 
       const { operation, inlineModels: opModels } = buildOperation(
         method,
@@ -211,6 +223,9 @@ export function extractOperations(
         componentRequestBodies,
       );
       inlineModels.push(...opModels);
+      // Same truthiness check as inferServiceName: for a tagged operation the
+      // service name *is* the normalized tag, so it doubles as the lookup key.
+      if (tag) tagServiceByOperation.set(operation, serviceName);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -251,12 +266,59 @@ export function extractOperations(
     disambiguateOperationNames(operations);
   }
 
-  const services = Array.from(serviceMap.entries()).map(([name, operations]) => ({
-    name,
-    operations,
-  }));
+  const tagDescriptions = indexTagDescriptions(documentTags);
+  const services: Service[] = Array.from(serviceMap.entries()).map(([name, operations]) => {
+    const description = resolveServiceDescription(name, operations, tagServiceByOperation, tagDescriptions);
+    // Omit the key entirely when no tag describes the service so the IR shape
+    // is unchanged for documents without tag descriptions.
+    return description === undefined ? { name, operations } : { name, description, operations };
+  });
 
   return { services, inlineModels };
+}
+
+/**
+ * Index top-level `tags[].description` by the service name each tag produces,
+ * so a tag spelled `user_management`, `User Management`, or `user-management`
+ * all describe the `UserManagement` service. Entries without a name or with a
+ * blank description are skipped; when several tags normalize to the same
+ * service name the first one in document order wins.
+ */
+function indexTagDescriptions(documentTags: TagObject[] | undefined): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const tag of documentTags ?? []) {
+    if (!tag.name || typeof tag.description !== 'string' || tag.description.trim() === '') continue;
+    const serviceName = toPascalCase(tag.name);
+    if (!index.has(serviceName)) index.set(serviceName, tag.description);
+  }
+  return index;
+}
+
+/**
+ * Pick a service's description from the tags its operations carry. The tag the
+ * service is named after wins; otherwise the first described tag in operation
+ * order is used, which is how a service split off a tag by path prefix (e.g.
+ * `OrganizationDomains` carved out of tag `organizations`) inherits that tag's
+ * description. Services built purely from path segments have no tagged
+ * operations and therefore get no description.
+ */
+function resolveServiceDescription(
+  serviceName: string,
+  operations: Operation[],
+  tagServiceByOperation: Map<Operation, string>,
+  tagDescriptions: Map<string, string>,
+): string | undefined {
+  if (tagDescriptions.size === 0) return undefined;
+  let inherited: string | undefined;
+  for (const op of operations) {
+    const tagService = tagServiceByOperation.get(op);
+    if (tagService === undefined) continue;
+    const description = tagDescriptions.get(tagService);
+    if (description === undefined) continue;
+    if (tagService === serviceName) return description;
+    if (inherited === undefined) inherited = description;
+  }
+  return inherited;
 }
 
 function inferServiceName(path: string, tag?: string): string {

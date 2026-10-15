@@ -1671,3 +1671,109 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
     expect(() => extractOperations(paths)).toThrow(/Unresolved request body \$ref/);
   });
 });
+
+describe('extractOperations – Service.description from document tags (issue #192)', () => {
+  const responses = { '200': { description: 'ok' } };
+  const withTags = (paths: Parameters<typeof extractOperations>[0], tags: Parameters<typeof extractOperations>[5]) =>
+    extractOperations(paths, undefined, undefined, undefined, undefined, tags).services;
+
+  it('gives a service the description of the tag it was named after', () => {
+    const paths = {
+      '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } },
+    };
+    const tags = [{ name: 'Pets', description: 'Pets live in a store and can be adopted.' }];
+
+    expect(withTags(paths, tags)).toEqual([
+      expect.objectContaining({ name: 'Pets', description: 'Pets live in a store and can be adopted.' }),
+    ]);
+  });
+
+  it('gives every service split off a tag by path prefix that tag description', () => {
+    const paths = {
+      '/organizations': { get: { operationId: 'listOrganizations', tags: ['organizations'], responses } },
+      '/organization_domains': {
+        get: { operationId: 'listOrganizationDomains', tags: ['organizations'], responses },
+      },
+    };
+    const tags = [{ name: 'organizations', description: 'Manage organizations.' }];
+
+    const services = withTags(paths, tags);
+    expect(Object.fromEntries(services.map((s) => [s.name, s.description]))).toEqual({
+      Organizations: 'Manage organizations.',
+      OrganizationDomains: 'Manage organizations.',
+    });
+  });
+
+  it('prefers the tag a service is named after over one merged in by the split', () => {
+    const paths = {
+      '/organizations': { get: { operationId: 'listOrganizations', tags: ['organizations'], responses } },
+      '/organization_domains': {
+        get: { operationId: 'listOrganizationDomains', tags: ['organizations'], responses },
+        post: { operationId: 'createOrganizationDomain', tags: ['organization-domains'], responses },
+      },
+    };
+    const tags = [
+      { name: 'organizations', description: 'Manage organizations.' },
+      { name: 'organization-domains', description: 'Manage organization domains.' },
+    ];
+
+    const services = withTags(paths, tags);
+    expect(Object.fromEntries(services.map((s) => [s.name, s.description]))).toEqual({
+      Organizations: 'Manage organizations.',
+      OrganizationDomains: 'Manage organization domains.',
+    });
+    // Both operations landed in the same service despite the differing tags.
+    expect(services.find((s) => s.name === 'OrganizationDomains')!.operations).toHaveLength(2);
+  });
+
+  it('matches tags to services across casing and separator differences', () => {
+    const paths = {
+      '/user_management/users': {
+        get: { operationId: 'listUsers', tags: ['User Management'], responses },
+        post: { operationId: 'createUser', tags: ['user-management'], responses },
+      },
+    };
+    const tags = [{ name: 'user_management', description: 'Manage users.' }];
+
+    const services = withTags(paths, tags);
+    expect(services).toHaveLength(1);
+    expect(services[0]).toEqual(expect.objectContaining({ name: 'UserManagement', description: 'Manage users.' }));
+    expect(services[0].operations).toHaveLength(2);
+  });
+
+  it('leaves the key unset when no document tag describes the service', () => {
+    const paths = {
+      '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } },
+      '/toys': { get: { operationId: 'listToys', responses } },
+    };
+    const tags = [
+      // Toys is named from its path; its operations carry no tag, so a same-named
+      // document tag does not apply to it.
+      { name: 'Toys', description: 'Only operations tagged Toys could claim this.' },
+      { name: 'Other', description: 'Unrelated.' },
+    ];
+
+    const services = withTags(paths, tags);
+    expect(services.map((s) => s.name).sort()).toEqual(['Pets', 'Toys']);
+    for (const service of services) expect('description' in service).toBe(false);
+  });
+
+  it('ignores blank descriptions, nameless entries, and absent document tags', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } } };
+
+    const blank = [{ name: 'Pets', description: '   ' }, { description: 'nameless' }];
+    expect('description' in withTags(paths, blank)[0]).toBe(false);
+    expect('description' in withTags(paths, undefined)[0]).toBe(false);
+    expect('description' in extractOperations(paths).services[0]).toBe(false);
+  });
+
+  it('uses the first document tag when several normalize to the same service', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['pets'], responses } } };
+    const tags = [
+      { name: 'pets', description: 'First.' },
+      { name: 'Pets', description: 'Second.' },
+    ];
+
+    expect(withTags(paths, tags)[0].description).toBe('First.');
+  });
+});
