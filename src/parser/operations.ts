@@ -1279,8 +1279,9 @@ function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existin
  * This tells the common path shapes apart (list vs. item, sibling and nested
  * sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`,
  * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/` all flatten to the
- * same words. `resolvePathModelBaseNames` detects such collisions and passes a
- * `disambiguator` derived from the raw path for every path involved.
+ * same words. `resolvePathModelBaseNames` detects such collisions: the path
+ * spelled most plainly keeps the plain name and every other one gets a
+ * `disambiguator` derived from its raw path.
  *
  * A single-segment path keeps the name the old first-segment rule produced.
  * The result is deliberately not passed through cleanSchemaName (the old
@@ -1317,12 +1318,19 @@ export function derivePathBasedName(
  * `<prefix>Response` is a name that an operation with an `operationId` will
  * use. Those names are reserved first, so an unnamed `POST /audit/events`
  * cannot overwrite the models of a `POST /legacy-audit` whose operationId is
- * `auditEventsPost`; operationId-derived names never change. Every colliding
- * path gets a six-character disambiguator — the start of the SHA-1 of its raw
- * path, inserted before the method (`POST /foo/bar` → `FooBarA82CcePost`) —
- * so the result depends only on the document's paths and operationIds, never
- * on their order, and a path that stops colliding returns to its plain name.
- * Paths that don't collide keep the plain prefix.
+ * `auditEventsPost`; operationId-derived names never change.
+ *
+ * These names are types SDK users read and import, so a collision costs the
+ * plain name only where it must. Within a group of paths that flatten to one
+ * prefix, the path spelled most plainly (see pathDeviation: no trailing
+ * slash, `{id}` rather than a literal `by-id`) is canonical and keeps the
+ * plain prefix; every other path gets a six-character disambiguator, the
+ * start of the SHA-1 of its raw path, inserted before the method
+ * (`POST /foo-bar` next to `POST /foo/bar` → `FooBar546F12Post`). When two
+ * paths tie for plainest, or the prefix is reserved by an operationId, nobody
+ * is canonical and every path in the group is disambiguated. The outcome
+ * depends only on the document's paths and operationIds, never on their
+ * order, and a path that stops colliding returns to its plain name.
  */
 function resolvePathModelBaseNames(paths: Record<string, PathItem>): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
@@ -1346,15 +1354,60 @@ function resolvePathModelBaseNames(paths: Record<string, PathItem>): Map<string,
     }
   }
 
+  const canonicalByPlainName = new Map<string, string | undefined>();
+  for (const [plain, rawPaths] of rawPathsByPlainName) {
+    const reserved = reservedNames.has(plain + 'Request') || reservedNames.has(plain + 'Response');
+    canonicalByPlainName.set(plain, reserved ? undefined : canonicalPath(rawPaths));
+  }
+
   const resolved = new Map<string, string>();
   for (const { key, path, method, plain } of candidates) {
-    const collides =
-      (rawPathsByPlainName.get(plain)?.size ?? 0) > 1 ||
-      reservedNames.has(plain + 'Request') ||
-      reservedNames.has(plain + 'Response');
-    resolved.set(key, collides ? derivePathModelBaseName(path, method, pathDisambiguator(path)) : plain);
+    const keepsPlainName = canonicalByPlainName.get(plain) === path;
+    resolved.set(key, keepsPlainName ? plain : derivePathModelBaseName(path, method, pathDisambiguator(path)));
   }
   return resolved;
+}
+
+/**
+ * The one path in a group that is spelled most plainly by pathDeviation, or
+ * undefined when two or more tie for it, so the choice never depends on the
+ * order the paths were written in.
+ */
+function canonicalPath(rawPaths: Iterable<string>): string | undefined {
+  let best: string | undefined;
+  let bestScore: [number, number] | undefined;
+  let tied = false;
+  for (const path of rawPaths) {
+    const score = pathDeviation(path);
+    const cmp = bestScore ? compareDeviation(score, bestScore) : -1;
+    if (cmp < 0) {
+      best = path;
+      bestScore = score;
+      tied = false;
+    } else if (cmp === 0) {
+      tied = true;
+    }
+  }
+  return tied ? undefined : best;
+}
+
+/**
+ * How far a raw path's spelling is from the plain prefix it flattens to:
+ * `[trailing slash, literal segments with any character outside a-z0-9]`,
+ * compared lexicographically. `/notes` scores [0, 0] and `/notes/` [1, 0];
+ * `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
+ */
+function pathDeviation(rawPath: string): [number, number] {
+  const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
+  const irregularSegments = rawPath
+    .split('/')
+    .filter(Boolean)
+    .filter((segment) => !segment.startsWith('{') && /[^a-z0-9]/.test(segment)).length;
+  return [trailingSlash, irregularSegments];
+}
+
+function compareDeviation(a: [number, number], b: [number, number]): number {
+  return a[0] - b[0] || a[1] - b[1];
 }
 
 /** The first six hex characters of the SHA-1 of a raw path. */

@@ -267,7 +267,17 @@ describe('path-derived names that would otherwise collide', () => {
     },
   };
 
-  it('tells POST /foo-bar and POST /foo/bar apart, each on its own models, independent of document order', async () => {
+  /** Parse the same paths in both orders, assert the names agree, and return them keyed by path. */
+  async function namesInBothOrders(entries: Array<[string, object]>) {
+    const forward = await parseInline(api(Object.fromEntries(entries)), summarizeAll);
+    const backward = await parseInline(api(Object.fromEntries([...entries].reverse())), summarizeAll);
+    const byPath = (list: typeof forward.ops) =>
+      Object.fromEntries(list.map((o) => [o.path, [o.requestBody, o.response]]));
+    expect(byPath(backward.ops)).toEqual(byPath(forward.ops));
+    return byPath(forward.ops);
+  }
+
+  it('keeps the plain name on POST /foo/bar and hashes POST /foo-bar, each on its own models, in either order', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const { ops, models } = await parseInline(api({ '/foo-bar': fooBar, '/foo/bar': fooSlashBar }), summarizeAll);
@@ -282,8 +292,8 @@ describe('path-derived names that would otherwise collide', () => {
         {
           "name": "createBar",
           "path": "/foo/bar",
-          "requestBody": "FooBarA82CcePostRequest",
-          "response": "FooBarA82CcePostResponse",
+          "requestBody": "FooBarPostRequest",
+          "response": "FooBarPostResponse",
         },
       ]
     `);
@@ -306,21 +316,17 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('tells GET /notes/by-id and GET /notes/{id} apart', async () => {
+  it('keeps the plain name on GET /notes/{id} and hashes GET /notes/by-id, in either order', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const byId = { get: { responses: { '200': jsonResponse(inlineObject({ ids: { type: 'string' } })) } } };
+    const byParam = {
+      get: {
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { '200': jsonResponse(inlineObject({ id: { type: 'string' }, text: { type: 'string' } })) },
+      },
+    };
 
-    const { ops, models } = await parseInline(
-      api({
-        '/notes/by-id': { get: { responses: { '200': jsonResponse(inlineObject({ ids: { type: 'string' } })) } } },
-        '/notes/{id}': {
-          get: {
-            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-            responses: { '200': jsonResponse(inlineObject({ id: { type: 'string' }, text: { type: 'string' } })) },
-          },
-        },
-      }),
-      summarizeAll,
-    );
+    const { ops, models } = await parseInline(api({ '/notes/by-id': byId, '/notes/{id}': byParam }), summarizeAll);
     expect(ops.map((o) => [o.path, o.response])).toMatchInlineSnapshot(`
       [
         [
@@ -329,7 +335,7 @@ describe('path-derived names that would otherwise collide', () => {
         ],
         [
           "/notes/{id}",
-          "NotesById846BceGetResponse",
+          "NotesByIdGetResponse",
         ],
       ]
     `);
@@ -337,6 +343,64 @@ describe('path-derived names that would otherwise collide', () => {
     expect(ops[0].response).not.toBe(ops[1].response);
     expect(fieldsOf(models, ops[0].response)).toEqual(['ids']);
     expect(fieldsOf(models, ops[1].response)).toEqual(['id', 'text']);
+    await namesInBothOrders([
+      ['/notes/by-id', byId],
+      ['/notes/{id}', byParam],
+    ]);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps the plain name on POST /notes and hashes POST /notes/ (trailing slash), in either order', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const names = await namesInBothOrders([
+      ['/notes', fooBar],
+      ['/notes/', fooSlashBar],
+    ]);
+    expect(names).toMatchInlineSnapshot(`
+      {
+        "/notes": [
+          "NotesPostRequest",
+          "NotesPostResponse",
+        ],
+        "/notes/": [
+          "Notes5F3D21PostRequest",
+          "Notes5F3D21PostResponse",
+        ],
+      }
+    `);
+
+    expect(names['/notes']).toEqual(['NotesPostRequest', 'NotesPostResponse']);
+    expect(names['/notes/'][0]).not.toBe('NotesPostRequest');
+    expect(names['/notes/'][1]).not.toBe('NotesPostResponse');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('hashes both POST /foo-bar and POST /foo_bar when they tie for plainest, in either order', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const names = await namesInBothOrders([
+      ['/foo-bar', fooBar],
+      ['/foo_bar', fooSlashBar],
+    ]);
+    expect(names).toMatchInlineSnapshot(`
+      {
+        "/foo-bar": [
+          "FooBar546F12PostRequest",
+          "FooBar546F12PostResponse",
+        ],
+        "/foo_bar": [
+          "FooBar98F6D6PostRequest",
+          "FooBar98F6D6PostResponse",
+        ],
+      }
+    `);
+
+    for (const path of ['/foo-bar', '/foo_bar']) {
+      expect(names[path][0]).not.toBe('FooBarPostRequest');
+      expect(names[path][1]).not.toBe('FooBarPostResponse');
+    }
+    expect(names['/foo-bar']).not.toEqual(names['/foo_bar']);
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
