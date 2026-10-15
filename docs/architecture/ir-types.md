@@ -202,6 +202,8 @@ The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagi
 
 Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to the first path segment (e.g., `/organizations/{id}` → `Organizations`). Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
 
+An operation carries its OpenAPI `summary` and `description` in two fields. `Operation.description` is the combined doc text: `summary + "\n\n" + description` when the document declares both with content, or whichever one has content (a summary identical to the description is not repeated). An empty or whitespace-only `summary` or `description` is treated as absent — `summary: "List pets"` with `description: ""` yields `description: "List pets"` — and text that has content is kept verbatim, surrounding whitespace included. An emitter that prints `description` as the doc comment therefore sees the same text whether or not the document used a summary. `Operation.summary` is the document's `summary` alone and is present only when the operation declares one with content, so an emitter that wants a one-line label (and the description without it) reads `summary` rather than guessing whether the first paragraph of `description` is one. When a doc URL base is configured, relative links are expanded in `summary` exactly as in `description`.
+
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"
@@ -211,7 +213,8 @@ interface Service {
 
 interface Operation {
   name: string; // e.g., "listUsers", "getUser", "createUser"
-  description?: string;
+  summary?: string; // The document's summary alone; only when it has non-whitespace content
+  description?: string; // summary + "\n\n" + description when both have content, else whichever does
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   pathParams: Parameter[];
@@ -276,6 +279,8 @@ interface Parameter {
   constraints?: Constraints; // Validation keywords; see Constraints below
 }
 ```
+
+`Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
 
 A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
 

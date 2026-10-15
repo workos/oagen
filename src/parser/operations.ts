@@ -741,10 +741,17 @@ function buildOperation(
   const parameterGroups =
     queryParamGroups || bodyParamGroups ? [...(queryParamGroups ?? []), ...(bodyParamGroups ?? [])] : undefined;
 
+  // An empty or whitespace-only summary counts as absent, so it neither gets
+  // its own field nor leaks into the description as a blank first paragraph.
+  const summary = presentText(op.summary);
+
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
-      description: buildDescription(op.summary, op.description),
+      // Keep the summary on its own so emitters can tell it apart from the
+      // description; the key is omitted (not set to undefined) when absent.
+      ...(summary !== undefined ? { summary } : {}),
+      description: buildDescription(summary, op.description),
       httpMethod: method,
       path,
       pathParams,
@@ -769,11 +776,24 @@ function buildOperation(
   };
 }
 
+/**
+ * Combine an operation's `summary` and `description` into one doc text.
+ * Empty or whitespace-only text counts as absent, so `summary: "List pets"`
+ * with `description: ""` yields `"List pets"` rather than `""`. Text that has
+ * content is kept verbatim, surrounding whitespace included.
+ */
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
-  if (summary && description && summary !== description) {
-    return `${summary}\n\n${description}`;
+  const presentSummary = presentText(summary);
+  const presentDescription = presentText(description);
+  if (presentSummary && presentDescription && presentSummary !== presentDescription) {
+    return `${presentSummary}\n\n${presentDescription}`;
   }
-  return description ?? summary;
+  return presentDescription ?? presentSummary;
+}
+
+/** The text itself when it has non-whitespace content, otherwise `undefined`. */
+function presentText(text: string | undefined): string | undefined {
+  return typeof text === 'string' && text.trim() !== '' ? text : undefined;
 }
 
 function extractParams(
@@ -799,7 +819,7 @@ function extractParams(
           ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
-        description: p.description,
+        description: firstDescription(p.description, p.schema?.description, refTarget?.description),
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
         default: p.schema?.default ?? refTarget?.default,
         example: p.example ?? p.schema?.example ?? refTarget?.example,
@@ -811,9 +831,20 @@ function extractParams(
 }
 
 /**
+ * First non-empty description in precedence order. A parameter that declares
+ * `description: ""` is treated as undocumented so its schema's text still
+ * surfaces, and the result is `undefined` rather than `""` when nothing in
+ * the chain is documented.
+ */
+function firstDescription(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0);
+}
+
+/**
  * If a parameter's schema is a `$ref` to `#/components/schemas/X`, return the
  * referenced component schema. Used to surface schema-level metadata (default,
- * example, deprecated) that wouldn't otherwise be visible at the param level.
+ * example, deprecated, description) that wouldn't otherwise be visible at the
+ * param level.
  *
  * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
  * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
