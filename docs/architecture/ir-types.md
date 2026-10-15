@@ -22,11 +22,14 @@ interface ApiSpec {
   models: Model[]; // Schema objects
   enums: Enum[]; // String enums
   auth?: AuthScheme[]; // Authentication schemes
+  security?: SecurityRequirementSet[]; // Document-level default requirements (see Operation.security)
   sdk: SdkBehavior; // Runtime policies (retry, errors, telemetry, etc.)
 }
 ```
 
 The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
+
+`security` is the document-level `security` list, in the same shape as `Operation.security`; every operation that declares no `security` of its own inherits it. It is `undefined` when the document declares none.
 
 ### SdkBehavior
 
@@ -141,7 +144,7 @@ type AuthScheme = { description?: string; schemeName: string } & (
 
 Emitters use `AuthScheme` to generate authentication configuration and client constructors. The `cookie` variant supports cookie-based API key authentication.
 
-`schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. `Operation.security[].schemeName` refers to the same key, so an emitter joins a per-operation requirement to its scheme with `spec.auth?.find((a) => a.schemeName === requirement.schemeName)`. The optional chaining matters: `auth` is `undefined` when the document declares no scheme the IR can represent, and a requirement can still name a scheme that was omitted (see below), so a missing match means "no SDK-level auth is known for this operation", not an error.
+`schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. The requirements under `ApiSpec.security` and `Operation.security` refer to the same key, so an emitter joins a requirement to its scheme with `spec.auth?.find((a) => a.schemeName === requirement.schemeName)`. The optional chaining matters: `auth` is `undefined` when the document declares no scheme the IR can represent, and a requirement can still name a scheme that was omitted (see below), so a missing match means "no SDK-level auth is known for this operation", not an error.
 
 HTTP scheme names are matched case-insensitively (`Bearer`, `bearer`, and `BEARER` all yield `kind: "bearer"`). Security schemes the IR cannot represent (other `http` schemes such as `digest`, plus `openIdConnect` and `mutualTLS`) are omitted from `auth`, and the parser prints an `[oagen] Warning:` diagnostic naming the scheme.
 
@@ -241,7 +244,7 @@ interface Operation {
   injectIdempotencyKey: boolean; // true when spec declares Idempotency-Key header
   deprecated?: boolean;
   async?: boolean;
-  security?: SecurityRequirement[]; // Per-operation override of spec-level security
+  security?: SecurityRequirementSet[]; // Per-operation requirements; undefined inherits ApiSpec.security
 }
 
 interface SecurityRequirement {
@@ -249,6 +252,23 @@ interface SecurityRequirement {
   scopes: string[];
 }
 
+// One alternative: every scheme in the set is required together.
+type SecurityRequirementSet = SecurityRequirement[];
+```
+
+`security` mirrors the OpenAPI document instead of flattening it. Each requirement object in the document becomes one `SecurityRequirementSet` whose schemes must all be satisfied together ("all of"); the list of sets is satisfied by any one of them ("either of"); an empty set is an alternative that needs no credentials, which is how a document marks authentication optional. The field therefore distinguishes cases a flat list could not:
+
+| Document                                            | `Operation.security`                  | Meaning                                              |
+| --------------------------------------------------- | ------------------------------------- | ---------------------------------------------------- |
+| no `security` key                                   | `undefined`                           | inherit `ApiSpec.security`                           |
+| `security: []`                                      | `[]`                                  | no authentication                                    |
+| `security: [{ userToken: [] }, { partnerKey: [] }]` | `[[{ userToken }], [{ partnerKey }]]` | either scheme                                        |
+| `security: [{ userToken: [], partnerKey: [] }]`     | `[[{ userToken }, { partnerKey }]]`   | both schemes together                                |
+| `security: [{ userToken: [] }, {}]`                 | `[[{ userToken }], []]`               | `userToken`, or nothing (authentication is optional) |
+
+To resolve what an operation accepts, take `op.security ?? spec.security`; a result of `undefined` means the document declares no requirements at all. The same list shape applies to `ApiSpec.security`.
+
+```typescript
 interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
