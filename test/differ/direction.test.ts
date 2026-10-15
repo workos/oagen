@@ -151,3 +151,29 @@ describe('buildDirectionIndex', () => {
     expect(directionOf(index, 'Node')).toBe('response');
   });
 });
+
+describe('buildDirectionIndex — pagination envelope fields', () => {
+  it('marks a model reached only through a list envelope companion as response-facing', () => {
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'Thing', fields: [] },
+          { name: 'Pagination', fields: [] },
+        ],
+        [
+          op({
+            response: { kind: 'array', items: { kind: 'model', name: 'Thing' } },
+            pagination: {
+              strategy: 'offset',
+              param: 'page',
+              dataPath: 'things',
+              itemType: { kind: 'model', name: 'Thing' },
+              envelopeFields: [{ name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true }],
+            },
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'Pagination')).toBe('response');
+  });
+});
