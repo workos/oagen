@@ -53,6 +53,19 @@ export interface SecurityRequirement {
 
 export interface Operation {
   name: string;
+  /**
+   * The document's `summary` alone. Present only when the OpenAPI operation
+   * declares a non-empty one. Read this to use the summary as a one-line
+   * label; `description` below still carries the combined form, so emitters
+   * that only print `description` are unchanged.
+   */
+  summary?: string;
+  /**
+   * Doc text for the operation. When the document declares both a `summary`
+   * and a `description`, this is `summary + "\n\n" + description`; when it
+   * declares only one (or both are identical), this is that one. The parts
+   * are not separable from this field alone — use `summary` for that.
+   */
   description?: string;
   httpMethod: HttpMethod;
   path: string;

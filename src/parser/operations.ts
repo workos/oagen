@@ -722,6 +722,9 @@ function buildOperation(
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
+      // Keep the summary on its own so emitters can tell it apart from the
+      // description; the key is omitted (not set to undefined) when absent.
+      ...(typeof op.summary === 'string' && op.summary !== '' ? { summary: op.summary } : {}),
       description: buildDescription(op.summary, op.description),
       httpMethod: method,
       path,

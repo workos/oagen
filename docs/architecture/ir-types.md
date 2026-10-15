@@ -181,6 +181,8 @@ The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagi
 
 Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to the first path segment (e.g., `/organizations/{id}` → `Organizations`). Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
 
+An operation carries its OpenAPI `summary` and `description` in two fields. `Operation.description` is the combined doc text: `summary + "\n\n" + description` when the document declares both, or whichever one it declares (a summary identical to the description is not repeated). An emitter that prints `description` as the doc comment therefore sees the same text whether or not the document used a summary. `Operation.summary` is the document's `summary` alone and is present only when the operation declares a non-empty one, so an emitter that wants a one-line label (and the description without it) reads `summary` rather than guessing whether the first paragraph of `description` is one.
+
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"
@@ -190,7 +192,8 @@ interface Service {
 
 interface Operation {
   name: string; // e.g., "listUsers", "getUser", "createUser"
-  description?: string;
+  summary?: string; // The document's summary alone; only when it declares a non-empty one
+  description?: string; // summary + "\n\n" + description when both exist, else whichever exists
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   pathParams: Parameter[];

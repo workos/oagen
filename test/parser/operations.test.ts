@@ -1671,3 +1671,88 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
     expect(() => extractOperations(paths)).toThrow(/Unresolved request body \$ref/);
   });
 });
+
+describe('operation summary', () => {
+  const responses = { '204': { description: 'ok' } };
+
+  it('keeps summary on its own and folds it into description when both are declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets\n\nReturns every pet in the store, newest first.');
+  });
+
+  it('keeps summary and mirrors it into description when only summary is declared', () => {
+    const paths = {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          summary: 'Create a pet',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('Create a pet');
+    expect(op.description).toBe('Create a pet');
+  });
+
+  it('omits the summary key when only description is declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
+  });
+
+  it('omits the summary key and leaves description undefined when neither is declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBeUndefined();
+  });
+
+  it('omits the summary key when the declared summary is an empty string', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: '',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
+  });
+});
