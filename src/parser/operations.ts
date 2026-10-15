@@ -295,13 +295,22 @@ export function extractOperations(
  * all describe the `UserManagement` service. Entries without a name or with a
  * blank description are skipped; when several tags normalize to the same
  * service name the first one in document order wins.
+ *
+ * `parseSpec` ignored `tags` entirely before descriptions were read, so a
+ * document with a malformed value — `tags` written as an object, a `null`
+ * entry, a numeric `name` — used to parse and must keep parsing. Anything
+ * that cannot be matched is skipped rather than thrown on.
  */
-function indexTagDescriptions(documentTags: TagObject[] | undefined): Map<string, string> {
+function indexTagDescriptions(documentTags: unknown): Map<string, string> {
   const index = new Map<string, string>();
-  for (const tag of documentTags ?? []) {
-    if (!tag.name || typeof tag.description !== 'string' || tag.description.trim() === '') continue;
-    const serviceName = toPascalCase(tag.name);
-    if (!index.has(serviceName)) index.set(serviceName, tag.description);
+  if (!Array.isArray(documentTags)) return index;
+  for (const tag of documentTags as unknown[]) {
+    if (typeof tag !== 'object' || tag === null) continue;
+    const { name, description } = tag as TagObject;
+    if (typeof name !== 'string' || name === '') continue;
+    if (typeof description !== 'string' || description.trim() === '') continue;
+    const serviceName = toPascalCase(name);
+    if (!index.has(serviceName)) index.set(serviceName, description);
   }
   return index;
 }

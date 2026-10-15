@@ -1674,7 +1674,8 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
 
 describe('extractOperations – Service.description from document tags (issue #192)', () => {
   const responses = { '200': { description: 'ok' } };
-  const withTags = (paths: Parameters<typeof extractOperations>[0], tags: Parameters<typeof extractOperations>[6]) =>
+  type DocTags = Parameters<typeof extractOperations>[6];
+  const withTags = (paths: Parameters<typeof extractOperations>[0], tags: DocTags) =>
     extractOperations(paths, undefined, undefined, undefined, undefined, undefined, tags).services;
 
   it('gives a service the description of the tag it was named after', () => {
@@ -1775,5 +1776,19 @@ describe('extractOperations – Service.description from document tags (issue #1
     ];
 
     expect(withTags(paths, tags)[0].description).toBe('First.');
+  });
+
+  it('skips malformed document tag entries instead of throwing', () => {
+    const paths = { '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } } };
+    const described = { name: 'Pets', description: 'Pets live in a store.' };
+
+    // `tags` written as an object rather than a list matches nothing.
+    const asObject = { Pets: described } as unknown as DocTags;
+    expect('description' in withTags(paths, asObject)[0]).toBe(false);
+
+    // Null entries, primitives, and non-string names are skipped; a well-formed
+    // entry alongside them still applies.
+    const mixed = [null, 7, { name: 42, description: 'numeric name' }, described] as unknown as DocTags;
+    expect(withTags(paths, mixed)[0].description).toBe('Pets live in a store.');
   });
 });
