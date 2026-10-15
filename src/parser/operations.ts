@@ -677,7 +677,13 @@ function buildOperation(
       : [];
 
   const reqBodyModels: Model[] = [];
-  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(requestBodyObject, op, reqBodyModels);
+  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
+    requestBodyObject,
+    op,
+    path,
+    method,
+    reqBodyModels,
+  );
   const {
     response,
     successResponses,
@@ -995,6 +1001,8 @@ function collectBodyPropertyNames(
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
+  path: string,
+  method: HttpMethod,
   inlineModels: Model[],
 ): { body?: TypeRef; encoding?: RequestBodyEncoding } {
   if (!body?.content) return {};
@@ -1014,10 +1022,14 @@ function extractRequestBody(
     return {};
   }
 
-  const rawName = op?.operationId
-    ? toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Request'
-    : 'RequestBody';
-  const contextName = cleanSchemaName(rawName);
+  // Without an operationId, name the body from the full path and method (see
+  // derivePathBasedName) so two operations can never share one inline body
+  // model. Every operationId-less body used to be `RequestBody`, and only the
+  // largest survived deduplication — every other operation was left pointing
+  // at a model with someone else's fields.
+  const contextName = op?.operationId
+    ? cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Request')
+    : derivePathBasedName(path, method, 'Request');
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
@@ -1205,13 +1217,41 @@ function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existin
   return name;
 }
 
+/**
+ * Name an inline request body or response model for an operation that has no
+ * `operationId`, from the only thing that identifies it: its path and method.
+ *
+ * Every non-parameter segment is PascalCased in order and every parameter
+ * segment becomes `By` + PascalCase(param name); then the method and the
+ * suffix are appended. The result is unique per (path, method) by
+ * construction, so two operationId-less operations never share an inline
+ * model. Before this, responses used only the first path segment, so
+ * `POST /notes` and `POST /notes/{id}/pin` both produced `NotesPostResponse`
+ * and one of them silently lost its fields.
+ *
+ *   GET  /widgets                   → WidgetsGetResponse
+ *   POST /notes                     → NotesPostRequest / NotesPostResponse
+ *   POST /notes/{id}/pin            → NotesByIdPinPostResponse
+ *   GET  /users/{user_id}/sessions  → UsersByUserIdSessionsGetResponse
+ *
+ * A single-segment path keeps the name the first-segment rule produced. The
+ * result is deliberately not passed through cleanSchemaName (the old fallback
+ * wasn't either): the segments are the resource names as the API spells them.
+ */
+export function derivePathBasedName(path: string, method: HttpMethod, suffix: 'Request' | 'Response'): string {
+  const segments = path.split('/').filter(Boolean);
+  const parts = segments.map((segment) =>
+    segment.startsWith('{') ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
+  );
+  const base = parts.length > 0 ? parts.join('') : 'Unknown';
+  return base + toPascalCase(method) + suffix;
+}
+
 function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
   if (op?.operationId) {
     return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Response');
   }
-  const segments = path.split('/').filter(Boolean);
-  const resource = segments[0] ?? 'Unknown';
-  return toPascalCase(resource) + toPascalCase(method) + 'Response';
+  return derivePathBasedName(path, method, 'Response');
 }
 
 function extractResponses(

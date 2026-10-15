@@ -282,6 +282,17 @@ interface Field {
 }
 ```
 
+### Inline model naming
+
+Models come from `components/schemas` (named as written, after `cleanSchemaName` and any `schemaNameTransform`) and from inline object schemas in operations, which the parser materializes as models so emitters have something to reference. An inline request body or response is named from its operation:
+
+- **With an `operationId`:** `PascalCase(operationId)` + `Request` / `Response`, passed through `cleanSchemaName`. `createNote` → `CreateNoteRequest` / `CreateNoteResponse`.
+- **Without an `operationId`:** from the full path and method. Each non-parameter segment is PascalCased in order, each `{param}` segment becomes `By` + `PascalCase(param)`, then the method and `Request` / `Response` are appended. `POST /notes` → `NotesPostRequest` / `NotesPostResponse`; `POST /notes/{id}/pin` → `NotesByIdPinPostResponse`; `GET /users/{user_id}/sessions` → `UsersByUserIdSessionsGetResponse`. This is unique per path and method, so two operations never share an inline model by accident.
+
+A response object with a string `const` discriminant (`object: "note"`) is named from that value instead (`Note`); a list envelope's inline item model replaces the `Response` suffix with `Item`; nested inline objects are qualified with their parent model's name.
+
+If two inline models still resolve to the same name with different fields (two `operationId`s that PascalCase to the same word, for example), the parser keeps the one with the most fields and prints `[oagen] Warning: Inline model "…" has more than one definition with different fields`.
+
 ## Enum
 
 ```typescript

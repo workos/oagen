@@ -5,11 +5,26 @@ function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
   for (const model of models) {
     const existing = byName.get(model.name);
+    if (existing && hasDifferentFieldNames(existing, model)) {
+      // Two inline models resolved to one name but describe different shapes
+      // (e.g. two operationIds that PascalCase to the same word). Only one can
+      // survive, so say so instead of silently handing every other reference
+      // a model with someone else's fields.
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" has more than one definition with different fields (${model.fields.length} vs ${existing.fields.length}) — keeping the definition with the most fields`,
+      );
+    }
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
     }
   }
   return [...byName.values()];
+}
+
+function hasDifferentFieldNames(a: Model, b: Model): boolean {
+  const aNames = new Set(a.fields.map((f) => f.name));
+  const bNames = new Set(b.fields.map((f) => f.name));
+  return a.fields.some((f) => !bNames.has(f.name)) || b.fields.some((f) => !aNames.has(f.name));
 }
 
 function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
