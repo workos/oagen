@@ -12,6 +12,7 @@ import {
 import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
+import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import type { SchemaNameTransform } from './schemas.js';
 
 /**
@@ -65,6 +66,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     openapi?: string;
     info?: { title?: string; version?: string; description?: string };
     servers?: Array<{ url?: string; description?: string }>;
+    security?: RawSecurityRequirements;
     paths?: Record<string, unknown>;
     components?: {
       schemas?: Record<string, unknown>;
@@ -94,6 +96,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
     spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
     spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+    models,
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
@@ -128,6 +131,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     models: finalModels,
     enums,
     auth,
+    security: extractSecurityRequirements(spec.security, 'the document'),
     sdk: defaultSdkBehavior(),
   };
 
@@ -173,7 +177,8 @@ interface SecuritySchemeObject {
  * Extract authentication schemes from OpenAPI securitySchemes.
  *
  * Document order is preserved. Each entry carries its `securitySchemes` key as
- * `schemeName` so emitters can join `Operation.security[].schemeName` back to it.
+ * `schemeName` so emitters can join the requirements under `ApiSpec.security`
+ * and `Operation.security` back to it.
  * Schemes the IR cannot represent are omitted with a warning rather than silently.
  */
 function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObject>): AuthScheme[] | undefined {

@@ -111,7 +111,7 @@ export function aggregateSurfaceServices(spec: ApiSpec, ctx: EmitterContext): Se
 /**
  * Collect model and enum names transitively referenced by service operations.
  * Walks operation parameters, request bodies, responses, and pagination item
- * types, then chases model field references until the set stabilizes.
+ * and envelope types, then chases model field references until the set stabilizes.
  */
 export function collectReferencedNames(
   services: Service[],
@@ -148,7 +148,10 @@ export function collectReferencedNames(
       }
       if (op.requestBody) collectFromTypeRef(op.requestBody);
       collectFromTypeRef(op.response);
-      if (op.pagination) collectFromTypeRef(op.pagination.itemType);
+      if (op.pagination) {
+        collectFromTypeRef(op.pagination.itemType);
+        for (const field of op.pagination.envelopeFields ?? []) collectFromTypeRef(field.type);
+      }
       for (const err of op.errors) {
         if (err.type) collectFromTypeRef(err.type);
       }

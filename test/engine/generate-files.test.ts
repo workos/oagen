@@ -139,3 +139,57 @@ describe('buildEmitterContext scopedModelNames (selected-only, minimal scope)', 
 function svc(name: string, operations: Service['operations']): Service {
   return { name, operations };
 }
+
+describe('collectReferencedNames — pagination envelope fields', () => {
+  it('reaches models and enums referenced only by a list envelope companion', () => {
+    const services: Service[] = [
+      {
+        name: 'Customers',
+        operations: [
+          {
+            name: 'listCustomers',
+            httpMethod: 'get',
+            path: '/customers',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'array', items: { kind: 'model', name: 'Customer' } },
+            errors: [],
+            injectIdempotencyKey: false,
+            pagination: {
+              strategy: 'offset',
+              param: 'page',
+              limitParam: 'limit',
+              dataPath: 'customers',
+              itemType: { kind: 'model', name: 'Customer' },
+              envelopeFields: [
+                { name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true },
+                { name: 'sort', type: { kind: 'enum', name: 'SortOrder' }, required: false },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+    const models: Model[] = [
+      { name: 'Customer', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      {
+        name: 'Pagination',
+        fields: [{ name: 'links', type: { kind: 'model', name: 'PaginationLinks' }, required: false }],
+      },
+      {
+        name: 'PaginationLinks',
+        fields: [{ name: 'next', type: { kind: 'primitive', type: 'string' }, required: false }],
+      },
+      { name: 'Unrelated', fields: [] },
+    ];
+
+    const referenced = collectReferencedNames(services, models);
+
+    expect(referenced.models.has('Pagination')).toBe(true);
+    // Chased transitively through the companion's own fields.
+    expect(referenced.models.has('PaginationLinks')).toBe(true);
+    expect(referenced.enums.has('SortOrder')).toBe(true);
+    expect(referenced.models.has('Unrelated')).toBe(false);
+  });
+});

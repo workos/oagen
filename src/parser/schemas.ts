@@ -536,6 +536,19 @@ function deriveConstNamingDiscriminator(variants: SchemaObject[]): { property: s
   return null;
 }
 
+/**
+ * True for a schema that `schemaToTypeRef` turns into an inline model reference:
+ * it declares `properties` directly (no `$ref`) and is an object — whether by
+ * `type: 'object'`, by omitting `type`, or by an OAS 3.1 nullable array such as
+ * `type: ['object', 'null']`. Every inline-model extractor must use the same
+ * test, or a field's reference points at a model nobody materializes.
+ */
+export function isInlineObjectSchema(schema: SchemaObject | undefined): schema is SchemaObject {
+  if (!schema || schema.$ref || !schema.properties) return false;
+  const { type } = schema;
+  return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
 /** Build a single Field from a schema property entry. Shared across all extraction sites. */
 export function buildFieldFromSchema(
   fieldName: string,
@@ -1242,7 +1255,9 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
     }
     if (schema.type.includes('null') && nonNullTypes.length === 1) {
-      return asNullable(schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName));
+      return asNullable(
+        schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName, parentModelName),
+      );
     }
     // Multiple non-null types → union
     if (nonNullTypes.length > 1) {
@@ -1257,7 +1272,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
 
   // Handle OAS 3.0 nullable flag
   if (schema.nullable && schema.type) {
-    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName));
+    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName));
   }
 
   // Handle allOf — merge properties from all sub-schemas.
