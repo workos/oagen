@@ -395,17 +395,17 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
     // the same property to a const value, we can derive meaningful names
     // from the const (e.g. `UserApiKeyOwner` instead of `ApiKeyOwner2`)
     // — much friendlier for SDK consumers than numeric suffixes.
-    const inlineObjectVariants: SchemaObject[] = schema.oneOf.filter(
-      (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
-    );
+    // Same inline-object test as `schemaToTypeRef` and the field extractor,
+    // so a `type: ['object', 'null']` variant is counted (and numbered) here
+    // too instead of letting the next variant claim its name.
+    const inlineObjectVariants: SchemaObject[] = schema.oneOf.filter((v) => isInlineObjectSchema(v));
     const constNamingDiscriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
 
     for (const variant of schema.oneOf) {
-      if (variant.$ref) continue;
-      if (variant.properties && (variant.type === 'object' || !variant.type)) {
+      if (isInlineObjectSchema(variant)) {
         const requiredSet = new Set(variant.required ?? []);
         const fields: Field[] = [];
-        for (const [fn, fs] of Object.entries(variant.properties)) {
+        for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
           if (!fs) continue;
           fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
         }
@@ -729,6 +729,18 @@ function nameInlineObjectVariants(
     names.set(variant, name);
   }
   return names;
+}
+
+/**
+ * Whether an inline object schema admits null on its own: the OAS 3.1
+ * `type: ['object', 'null']` form or the OAS 3.0 `nullable: true` flag. These
+ * are the two nullable forms an inline object variant can carry; a
+ * `oneOf: [X, { type: 'null' }]` variant has no `properties` of its own and
+ * is typed through `schemaToTypeRef` instead.
+ */
+function isNullableInlineObject(schema: SchemaObject): boolean {
+  if (schema.nullable === true) return true;
+  return Array.isArray(schema.type) && schema.type.includes('null');
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
@@ -1197,9 +1209,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
     }
 
     if (fieldSchema.oneOf) {
-      const inlineObjectVariants = fieldSchema.oneOf.filter(
-        (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
-      );
+      const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
         const baseQualified = qualifyNestedInlineName(name, fieldName);
         const namingDisc = deriveConstNamingDiscriminator(inlineObjectVariants);
@@ -1401,6 +1411,10 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // would hand every inline variant the same parent-derived name (e.g.
     // `ApiKeyOwner`), collapsing the union onto one repeated model ref while
     // the extractor emits `ApiKeyOwner`, `ApiKeyOwner2`, ... for them.
+    // A variant that is itself nullable (`type: ['object', 'null']` or OAS
+    // 3.0 `nullable: true`) keeps its wrapper around the named ref, exactly
+    // as `schemaToTypeRef` would wrap it — the extractor emits the model under
+    // the same name either way.
     const inlineVariantNames = nameInlineObjectVariants(nonNullVariants, contextName, parentModelName);
     const variants: TypeRef[] = [];
     for (const v of rawVariants) {
@@ -1408,7 +1422,8 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
-        variants.push({ kind: 'model', name: mappedName ?? inlineName });
+        const modelRef: TypeRef = { kind: 'model', name: mappedName ?? inlineName };
+        variants.push(isNullableInlineObject(v) ? asNullable(modelRef) : modelRef);
       } else {
         variants.push(schemaToTypeRef(v, contextName, parentModelName));
       }

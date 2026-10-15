@@ -520,3 +520,94 @@ describe('oneOf variants without a shared const field', () => {
     }
   });
 });
+
+describe('nullable inline union variants keep their wrapper', () => {
+  const byRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' } } };
+  const bySide: SchemaObject = { type: 'object', properties: { side: { type: 'number' } } };
+
+  // A variant that admits null on its own must be referenced as
+  // `nullable<model>` under the name the extractor emits for it — with a
+  // const discriminator (`shape`) and without one (`markers`, numbered).
+  const forms: Array<{ form: string; openapi: string; wrap: (schema: SchemaObject) => SchemaObject }> = [
+    { form: 'OAS 3.1 `type: ["object", "null"]`', openapi: '3.1.0', wrap: (s) => ({ ...s, type: ['object', 'null'] }) },
+    { form: 'OAS 3.0 `nullable: true`', openapi: '3.0.3', wrap: (s) => ({ ...s, nullable: true }) },
+  ];
+
+  it.each(forms)('$form variant at field level and array-item level', async ({ openapi, wrap }) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec({
+        openapi,
+        info: { title: 'nullable variants', version: '1' },
+        paths: {},
+        components: {
+          schemas: {
+            Drawing: {
+              type: 'object',
+              properties: {
+                shape: { oneOf: [circle, wrap(square)] },
+                markers: { type: 'array', items: { oneOf: [byRadius, wrap(bySide)] } },
+              },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const drawing = fieldTypesByModel(ir.models)['Drawing']!;
+      expect(drawing['shape']).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'DrawingShape' },
+          { kind: 'nullable', inner: { kind: 'model', name: 'SquareDrawingShape' } },
+        ],
+        discriminator: { property: 'kind', mapping: { circle: 'DrawingShape', square: 'SquareDrawingShape' } },
+      });
+      expect(drawing['markers']).toEqual({
+        kind: 'array',
+        items: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [
+            { kind: 'model', name: 'DrawingMarker' },
+            { kind: 'nullable', inner: { kind: 'model', name: 'DrawingMarker2' } },
+          ],
+        },
+      });
+      expect(ir.models.map((model) => model.name).sort()).toEqual([
+        'Drawing',
+        'DrawingMarker',
+        'DrawingMarker2',
+        'DrawingShape',
+        'SquareDrawingShape',
+      ]);
+      expect(fieldTypesByModel(ir.models)['SquareDrawingShape']).toEqual({
+        kind: { kind: 'literal', value: 'square' },
+        side: { kind: 'primitive', type: 'number' },
+      });
+      expect(fieldTypesByModel(ir.models)['DrawingMarker2']).toEqual({ side: { kind: 'primitive', type: 'number' } });
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('wraps the ref for anyOf too, and still extracts the variant', () => {
+    const nullableSide: SchemaObject = { ...bySide, type: ['object', 'null'] };
+    expect(schemaToTypeRef({ anyOf: [byRadius, nullableSide] }, 'shape', 'Drawing')).toEqual({
+      kind: 'union',
+      compositionKind: 'anyOf',
+      variants: [
+        { kind: 'model', name: 'DrawingShape' },
+        { kind: 'nullable', inner: { kind: 'model', name: 'DrawingShape2' } },
+      ],
+    });
+    const results: Model[] = [];
+    extractInlineModelsFromProperties(
+      { type: 'object', properties: { shape: { anyOf: [byRadius, nullableSide] } } },
+      results,
+      'Drawing',
+    );
+    expect(results.map((model) => model.name)).toEqual(['DrawingShape', 'DrawingShape2']);
+  });
+});
