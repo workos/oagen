@@ -11,6 +11,7 @@ import type {
   Field,
   PaginationMeta,
 } from '../ir/types.js';
+import { createHash } from 'node:crypto';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName } from './schemas.js';
@@ -189,6 +190,11 @@ export function extractOperations(
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
+  // Operations without an operationId name their inline models from the
+  // path, and two distinct paths can flatten to the same name, so the prefix
+  // for every such operation is decided up front (see resolvePathModelBaseNames).
+  const pathModelBaseNames = resolvePathModelBaseNames(paths);
+
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
@@ -201,6 +207,7 @@ export function extractOperations(
       if (!op) continue;
 
       const serviceName = inferServiceName(path, op.tags?.[0]);
+      const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
 
       const {
         operation,
@@ -211,6 +218,7 @@ export function extractOperations(
         path,
         op,
         pathLevelParams,
+        pathModelBaseName,
         operationIdTransform,
         serviceName,
         componentSchemas,
@@ -619,6 +627,7 @@ function buildOperation(
   path: string,
   op: OperationObject,
   pathLevelParams: RawParameterObject[],
+  pathModelBaseName: string,
   operationIdTransform?: (id: string) => string,
   serviceName?: string,
   componentSchemas?: Record<string, SchemaObject>,
@@ -692,8 +701,7 @@ function buildOperation(
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
     requestBodyObject,
     op,
-    path,
-    method,
+    pathModelBaseName,
     reqBodyModels,
   );
   const {
@@ -706,7 +714,7 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, path, method, componentSchemas);
+  } = extractResponses(op.responses, op, pathModelBaseName, componentSchemas);
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -997,8 +1005,7 @@ function collectBodyPropertyNames(
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
-  path: string,
-  method: HttpMethod,
+  pathModelBaseName: string,
   inlineModels: Model[],
 ): { body?: TypeRef; encoding?: RequestBodyEncoding } {
   if (!body?.content) return {};
@@ -1018,14 +1025,14 @@ function extractRequestBody(
     return {};
   }
 
-  // Without an operationId, name the body from the full path and method (see
-  // derivePathBasedName) so two operations can never share one inline body
-  // model. Every operationId-less body used to be `RequestBody`, and only the
-  // largest survived deduplication — every other operation was left pointing
-  // at a model with someone else's fields.
+  // Without an operationId, name the body from the operation's path-derived
+  // prefix (see derivePathModelBaseName) so two operations don't share one
+  // inline body model. Every operationId-less body used to be `RequestBody`,
+  // and only the largest survived deduplication — every other operation was
+  // left pointing at a model with someone else's fields.
   const contextName = op?.operationId
     ? cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Request')
-    : derivePathBasedName(path, method, 'Request');
+    : pathModelBaseName + 'Request';
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
@@ -1214,47 +1221,106 @@ function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existin
 }
 
 /**
- * Name an inline request body or response model for an operation that has no
- * `operationId`, from the only thing that identifies it: its path and method.
+ * Build the prefix (`NotesByIdPinPost`) that names both inline models — the
+ * request body (`…Request`) and the response (`…Response`) — of an operation
+ * that has no `operationId`, from the only thing that identifies it: its path
+ * and method.
  *
  * Every non-parameter segment is PascalCased in order and every parameter
- * segment becomes `By` + PascalCase(param name); then the method and the
- * suffix are appended. The result is unique per (path, method) by
- * construction, so two operationId-less operations never share an inline
- * model. Before this, responses used only the first path segment, so
- * `POST /notes` and `POST /notes/{id}/pin` both produced `NotesPostResponse`
- * and one of them silently lost its fields.
+ * segment becomes `By` + PascalCase(param name); then the optional
+ * disambiguator and the method are appended. The whole is normalized with
+ * toPascalCase so it is a fixed point of that function: responses.ts re-cases
+ * the response name in `deriveModelName`, and without this step `POST /a/b`
+ * named its body `ABPostRequest` but its response `AbPostResponse`.
  *
- *   GET  /widgets                   → WidgetsGetResponse
- *   POST /notes                     → NotesPostRequest / NotesPostResponse
- *   POST /notes/{id}/pin            → NotesByIdPinPostResponse
- *   GET  /users/{user_id}/sessions  → UsersByUserIdSessionsGetResponse
+ *   GET  /widgets                   → WidgetsGet
+ *   POST /notes                     → NotesPost
+ *   POST /notes/{id}/pin            → NotesByIdPinPost
+ *   GET  /users/{user_id}/sessions  → UsersByUserIdSessionsGet
  *
- * A single-segment path keeps the name the first-segment rule produced. The
- * result is deliberately not passed through cleanSchemaName (the old fallback
- * wasn't either): the segments are the resource names as the API spells them.
+ * This tells the common path shapes apart (list vs. item, sibling and nested
+ * sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`,
+ * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/` all flatten to the
+ * same words. `resolvePathModelBaseNames` detects such collisions and passes a
+ * `disambiguator` derived from the raw path for every path involved.
+ *
+ * A single-segment path keeps the name the old first-segment rule produced.
+ * The result is deliberately not passed through cleanSchemaName (the old
+ * fallback wasn't either): the segments are the resource names as the API
+ * spells them.
  */
-export function derivePathBasedName(path: string, method: HttpMethod, suffix: 'Request' | 'Response'): string {
+export function derivePathModelBaseName(path: string, method: HttpMethod, disambiguator = ''): string {
   const segments = path.split('/').filter(Boolean);
   const parts = segments.map((segment) =>
     segment.startsWith('{') ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
   );
-  const base = parts.length > 0 ? parts.join('') : 'Unknown';
-  return base + toPascalCase(method) + suffix;
+  const resource = parts.length > 0 ? parts.join('') : 'Unknown';
+  // `_` separators guarantee a word boundary on each side of the disambiguator
+  // and the method, whatever the resource ends with; splitWords drops them.
+  return toPascalCase([resource, disambiguator, method].filter(Boolean).join('_'));
 }
 
-function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
+/** `derivePathModelBaseName` plus the `Request` / `Response` suffix. */
+export function derivePathBasedName(
+  path: string,
+  method: HttpMethod,
+  suffix: 'Request' | 'Response',
+  disambiguator = '',
+): string {
+  return derivePathModelBaseName(path, method, disambiguator) + suffix;
+}
+
+/**
+ * Decide the path-derived model prefix of every operation that has no
+ * `operationId`, keyed by `${method} ${path}`.
+ *
+ * When two distinct raw paths with the same method flatten to the same prefix
+ * (see derivePathModelBaseName), every path in that group gets a six-character
+ * disambiguator — the start of the SHA-1 of its raw path, inserted before the
+ * method (`POST /foo/bar` → `FooBarA82CcePost`) — so the result depends only
+ * on the path, never on document order, and a path that stops colliding
+ * returns to its plain name. Paths that don't collide keep the plain prefix.
+ */
+function resolvePathModelBaseNames(paths: Record<string, PathItem>): Map<string, string> {
+  const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
+  const rawPathsByPlainName = new Map<string, Set<string>>();
+
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op || op.operationId) continue;
+      const plain = derivePathModelBaseName(path, method);
+      candidates.push({ key: `${method} ${path}`, path, method, plain });
+      const rawPaths = rawPathsByPlainName.get(plain) ?? new Set<string>();
+      rawPaths.add(path);
+      rawPathsByPlainName.set(plain, rawPaths);
+    }
+  }
+
+  const resolved = new Map<string, string>();
+  for (const { key, path, method, plain } of candidates) {
+    const collides = (rawPathsByPlainName.get(plain)?.size ?? 0) > 1;
+    resolved.set(key, collides ? derivePathModelBaseName(path, method, pathDisambiguator(path)) : plain);
+  }
+  return resolved;
+}
+
+/** The first six hex characters of the SHA-1 of a raw path. */
+function pathDisambiguator(rawPath: string): string {
+  return createHash('sha1').update(rawPath).digest('hex').slice(0, 6);
+}
+
+function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {
   if (op?.operationId) {
     return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Response');
   }
-  return derivePathBasedName(path, method, 'Response');
+  return pathModelBaseName + 'Response';
 }
 
 function extractResponses(
-  responses?: Record<string, ResponseObject>,
-  op?: OperationObject,
-  path?: string,
-  method?: HttpMethod,
+  responses: Record<string, ResponseObject> | undefined,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): {
   response: TypeRef;
@@ -1287,7 +1353,7 @@ function extractResponses(
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
-        const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
+        const contextName = deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
         extractedType = result.response;
         // Keep track of inline models and pagination from the latest 2xx with a schema
@@ -1314,10 +1380,7 @@ function extractResponses(
           if (firstKey) {
             const firstContent = resp.content[firstKey];
             if (firstContent?.schema) {
-              extractedType = schemaToTypeRef(
-                firstContent.schema,
-                deriveResponseName(op, path ?? '/', method ?? 'get'),
-              );
+              extractedType = schemaToTypeRef(firstContent.schema, deriveResponseName(op, pathModelBaseName));
             }
           }
         }

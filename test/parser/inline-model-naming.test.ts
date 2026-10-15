@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { derivePathBasedName } from '../../src/parser/operations.js';
 import { mergeInlineResponseModels } from '../../src/parser/normalize-inline-models.js';
+import { toPascalCase } from '../../src/utils/naming.js';
 import type { Model, Operation } from '../../src/ir/types.js';
 
 /**
@@ -236,7 +237,170 @@ describe('inline model naming without operationId (issue #188)', () => {
   });
 });
 
+describe('path-derived names that would otherwise collide', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const api = (paths: object) => ({ openapi: '3.1.0', info: { title: 'collide', version: '1' }, paths });
+
+  const summarizeAll = (ir: Awaited<ReturnType<typeof parseSpec>>) => ({
+    ops: ir.services.flatMap((s) => s.operations).map(summarize),
+    models: ir.models.map((m) => ({ name: m.name, fields: m.fields.map((f) => f.name) })),
+  });
+
+  const fieldsOf = (models: Array<{ name: string; fields: string[] }>, name: unknown) =>
+    models.find((m) => m.name === name)?.fields;
+
+  const prefixOf = (name: unknown) => String(name).replace(/Re(quest|sponse)$/, '');
+
+  const fooBar = {
+    post: {
+      requestBody: jsonBody(inlineObject({ a: { type: 'string' } })),
+      responses: { '200': jsonResponse(inlineObject({ x: { type: 'string' } })) },
+    },
+  };
+  const fooSlashBar = {
+    post: {
+      requestBody: jsonBody(inlineObject({ b: { type: 'string' }, c: { type: 'string' } })),
+      responses: { '200': jsonResponse(inlineObject({ y: { type: 'string' }, z: { type: 'string' } })) },
+    },
+  };
+
+  it('tells POST /foo-bar and POST /foo/bar apart, each on its own models, independent of document order', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { ops, models } = await parseInline(api({ '/foo-bar': fooBar, '/foo/bar': fooSlashBar }), summarizeAll);
+    expect(ops).toMatchInlineSnapshot(`
+      [
+        {
+          "name": "create",
+          "path": "/foo-bar",
+          "requestBody": "FooBar546F12PostRequest",
+          "response": "FooBar546F12PostResponse",
+        },
+        {
+          "name": "createBar",
+          "path": "/foo/bar",
+          "requestBody": "FooBarA82CcePostRequest",
+          "response": "FooBarA82CcePostResponse",
+        },
+      ]
+    `);
+
+    const [dashed, nested] = ops;
+    expect(dashed.requestBody).not.toBe(nested.requestBody);
+    expect(dashed.response).not.toBe(nested.response);
+    expect(prefixOf(dashed.requestBody)).toBe(prefixOf(dashed.response));
+    expect(prefixOf(nested.requestBody)).toBe(prefixOf(nested.response));
+    expect(fieldsOf(models, dashed.requestBody)).toEqual(['a']);
+    expect(fieldsOf(models, dashed.response)).toEqual(['x']);
+    expect(fieldsOf(models, nested.requestBody)).toEqual(['b', 'c']);
+    expect(fieldsOf(models, nested.response)).toEqual(['y', 'z']);
+
+    // The disambiguator comes from the raw path, not from document order.
+    const reversed = await parseInline(api({ '/foo/bar': fooSlashBar, '/foo-bar': fooBar }), summarizeAll);
+    const byPath = (list: typeof ops) => Object.fromEntries(list.map((o) => [o.path, [o.requestBody, o.response]]));
+    expect(byPath(reversed.ops)).toEqual(byPath(ops));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('tells GET /notes/by-id and GET /notes/{id} apart', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { ops, models } = await parseInline(
+      api({
+        '/notes/by-id': { get: { responses: { '200': jsonResponse(inlineObject({ ids: { type: 'string' } })) } } },
+        '/notes/{id}': {
+          get: {
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: { '200': jsonResponse(inlineObject({ id: { type: 'string' }, text: { type: 'string' } })) },
+          },
+        },
+      }),
+      summarizeAll,
+    );
+    expect(ops.map((o) => [o.path, o.response])).toMatchInlineSnapshot(`
+      [
+        [
+          "/notes/by-id",
+          "NotesByIdBa41B5GetResponse",
+        ],
+        [
+          "/notes/{id}",
+          "NotesById846BceGetResponse",
+        ],
+      ]
+    `);
+
+    expect(ops[0].response).not.toBe(ops[1].response);
+    expect(fieldsOf(models, ops[0].response)).toEqual(['ids']);
+    expect(fieldsOf(models, ops[1].response)).toEqual(['id', 'text']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('only disambiguates the colliding method: GET /foo-bar keeps its plain name next to the POST collision', async () => {
+    const { ops } = await parseInline(
+      api({
+        '/foo-bar': { ...fooBar, get: { responses: { '200': jsonResponse(inlineObject({ g: { type: 'string' } })) } } },
+        '/foo/bar': fooSlashBar,
+      }),
+      summarizeAll,
+    );
+    const get = ops.find((o) => o.path === '/foo-bar' && o.requestBody === undefined)!;
+    expect(get.response).toBe('FooBarGetResponse');
+  });
+
+  it('normalizes so request and response prefixes agree (/a/b, /v2/x/y)', async () => {
+    const op = {
+      post: {
+        requestBody: jsonBody(inlineObject({ q: { type: 'string' } })),
+        responses: { '200': jsonResponse(inlineObject({ r: { type: 'string' } })) },
+      },
+    };
+    const { ops } = await parseInline(api({ '/a/b': op, '/v2/x/y': op }), summarizeAll);
+    expect(ops.map((o) => [o.path, o.requestBody, o.response])).toMatchInlineSnapshot(`
+      [
+        [
+          "/a/b",
+          "AbPostRequest",
+          "AbPostResponse",
+        ],
+        [
+          "/v2/x/y",
+          "V2XyPostRequest",
+          "V2XyPostResponse",
+        ],
+      ]
+    `);
+    for (const o of ops) expect(prefixOf(o.requestBody)).toBe(prefixOf(o.response));
+  });
+});
+
 describe('derivePathBasedName', () => {
+  it('produces names that are fixed points of toPascalCase, with or without a disambiguator', () => {
+    const names = [
+      derivePathBasedName('/a/b', 'post', 'Request'),
+      derivePathBasedName('/v2/x/y', 'post', 'Response'),
+      derivePathBasedName('/foo/bar', 'post', 'Response', '3f9a2c'),
+      derivePathBasedName('/foo-bar', 'post', 'Request', 'abcdef'),
+      derivePathBasedName('/sso', 'get', 'Response', 'ab12cd'),
+      derivePathBasedName('/users/{user_id}/sessions', 'get', 'Response'),
+    ];
+    expect(names).toMatchInlineSnapshot(`
+      [
+        "AbPostRequest",
+        "V2XyPostResponse",
+        "FooBar3F9A2CPostResponse",
+        "FooBarAbcdefPostRequest",
+        "SSOAb12CdGetResponse",
+        "UsersByUserIdSessionsGetResponse",
+      ]
+    `);
+    for (const name of names) expect(toPascalCase(name)).toBe(name);
+  });
+
   it('encodes every path segment, parameters as By<Name>, then the method and suffix', () => {
     const cases: Array<[string, 'get' | 'post', 'Request' | 'Response']> = [
       ['/widgets', 'get', 'Response'],
