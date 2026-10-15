@@ -785,7 +785,7 @@ function extractParams(
           ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
-        description: p.description ?? p.schema?.description ?? refTarget?.description,
+        description: firstDescription(p.description, p.schema?.description, refTarget?.description),
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
         default: p.schema?.default ?? refTarget?.default,
         example: p.example ?? p.schema?.example ?? refTarget?.example,
@@ -793,6 +793,16 @@ function extractParams(
         explode: p.explode,
       };
     });
+}
+
+/**
+ * First non-empty description in precedence order. A parameter that declares
+ * `description: ""` is treated as undocumented so its schema's text still
+ * surfaces, and the result is `undefined` rather than `""` when nothing in
+ * the chain is documented.
+ */
+function firstDescription(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0);
 }
 
 /**

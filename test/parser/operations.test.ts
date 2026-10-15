@@ -672,6 +672,55 @@ describe('extractOperations', () => {
     expect(orderParam.description).toBe('Sort order for the returned list');
   });
 
+  it('falls through an empty param description to the schema description', () => {
+    const paths = {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [
+            {
+              name: 'petId',
+              in: 'path' as const,
+              required: true,
+              description: '',
+              schema: { type: 'string', description: 'The ID of the pet to retrieve' },
+            },
+          ],
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].pathParams[0].description).toBe('The ID of the pet to retrieve');
+  });
+
+  it('leaves description undefined when every level in the chain is empty', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              description: '',
+              schema: { $ref: '#/components/schemas/PaginationOrder', description: '' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: { type: 'string', enum: ['desc', 'asc'], description: '' },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    expect(services[0].operations[0].queryParams[0].description).toBeUndefined();
+  });
+
   it('resolves an operation-level parameter $ref into components/parameters', () => {
     const paths = {
       '/domains': {

@@ -285,7 +285,7 @@ interface Parameter {
 }
 ```
 
-`Parameter.description` is the parameter's own `description` when it declares one; otherwise the parser falls back to the inline `schema.description`, and then to the `description` of the `$ref`'d component schema, mirroring how `deprecated`, `default`, and `example` are read.
+`Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
 
 ### Idempotency Key
 
