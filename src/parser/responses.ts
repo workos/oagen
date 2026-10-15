@@ -5,7 +5,7 @@ import {
   schemaToTypeRef,
   buildFieldFromSchema,
   constraintsEntry,
-  collectAllOfConstraints,
+  extractConstraints,
   isInlineObjectSchema,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
@@ -459,7 +459,7 @@ function extractDirectResource(
         type: 'object',
         properties: mergedProperties,
         required: mergedRequired,
-        ...collectAllOfConstraints(schema),
+        ...extractConstraints(schema),
       };
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
@@ -600,7 +600,7 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
           type: 'object',
           properties: mergedProperties,
           required: mergedRequired,
-          ...collectAllOfConstraints(fieldSchema),
+          ...extractConstraints(fieldSchema),
         };
         const existingNames = new Set(nestedModels.map((m) => m.name));
         if (!existingNames.has(nestedName)) {

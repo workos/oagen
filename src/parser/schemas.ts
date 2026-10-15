@@ -182,8 +182,16 @@ const NUMERIC_CONSTRAINT_KEYS = [
  * ignored rather than carried.
  */
 export function extractConstraints(schema: SchemaObject): Constraints | undefined {
-  const own = ownConstraints(schema);
-  if (own) return own;
+  // The schema's own keywords conjoined with its `allOf` members' (recursively;
+  // a keyword declared at more than one level is combined by
+  // combineConstraints, so the stricter bound wins). schemaToTypeRef unwraps a
+  // single-member `allOf`, so `{ allOf: [{ type: 'string', maxLength: 3 }] }`
+  // is a string whose limit is the value's own; a `$ref` member contributes
+  // the keywords written beside the reference, but the target itself is not
+  // followed — its limits stay on the referenced model.
+  let out = ownConstraints(schema);
+  for (const member of schema.allOf ?? []) out = combineConstraints(out, extractConstraints(member));
+  if (out) return out;
   // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
   // collapses to `nullable<T>` in the IR, so that branch's keywords are the
   // value's own. A `$ref` branch keeps its limits on the referenced model, and
@@ -1047,14 +1055,10 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     description: schema.description,
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
-    ...allOfConstraintsEntry(schema),
+    // The wrapper's own keywords conjoined with its inline members'; `$ref`
+    // members keep theirs on the referenced model.
+    ...constraintsEntry(schema),
   };
-}
-
-/** `{ constraints }` from collectAllOfConstraints, or `{}` — the allOf counterpart of constraintsEntry. */
-function allOfConstraintsEntry(schema: SchemaObject): { constraints?: Constraints } {
-  const constraints = collectAllOfConstraints(schema);
-  return constraints ? { constraints } : {};
 }
 
 /**
@@ -1177,7 +1181,7 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
       }
     }
     if (flat.required) for (const r of flat.required) baseRequired.add(r);
-    baseConstraints = combineConstraints(baseConstraints, collectAllOfConstraints(subSchema));
+    baseConstraints = combineConstraints(baseConstraints, extractConstraints(subSchema));
   }
 
   for (const subSchema of schema.allOf ?? []) {
@@ -1206,7 +1210,7 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
         type: 'object',
         properties: mergedProperties,
         required: [...mergedRequired],
-        ...combineConstraints(baseConstraints, collectAllOfConstraints(variant)),
+        ...combineConstraints(baseConstraints, extractConstraints(variant)),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -1219,28 +1223,6 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   }
 
   return models;
-}
-
-/**
- * A schema's own validation keywords conjoined with those of its `allOf`
- * members (recursively; a keyword declared at more than one level is combined
- * by combineConstraints, so the stricter bound wins). A `$ref` member
- * contributes the keywords written beside the reference — they belong to the
- * member, not to its target — but the target itself is not followed: its
- * limits stay on the referenced model. `oneOf` / `anyOf` branches are
- * alternatives and are not walked.
- *
- * Used wherever the parser rebuilds one object schema out of `allOf` members
- * — component models, inline responses, request bodies, nested fields and
- * discriminated variants — so the rebuilt schema still carries every limit an
- * instance must satisfy, the same way its properties are gathered.
- */
-export function collectAllOfConstraints(schema: SchemaObject): Constraints | undefined {
-  let out: Constraints | undefined;
-  for (const member of schema.allOf ?? []) {
-    out = combineConstraints(out, collectAllOfConstraints(member));
-  }
-  return combineConstraints(out, extractConstraints(schema));
 }
 
 /**
@@ -1407,7 +1389,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
             type: 'object',
             properties: mergedProperties,
             required: mergedRequired,
-            ...collectAllOfConstraints(fieldSchema),
+            ...extractConstraints(fieldSchema),
           }),
         );
       }

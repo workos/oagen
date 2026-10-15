@@ -4,7 +4,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   constraintsEntry,
-  collectAllOfConstraints,
+  extractConstraints,
   isInlineObjectSchema,
   resolveSchemaName,
 } from './schemas.js';
@@ -201,7 +201,7 @@ function mergeAllOfObjectSchema(schema: SchemaObject): SchemaObject {
   visit(schema);
   // The wrapper's limits conjoined with its inline members' ride along, so
   // buildInlineModel's constraintsEntry sees what an instance must satisfy.
-  return { type: 'object', properties, required, description: schema.description, ...collectAllOfConstraints(schema) };
+  return { type: 'object', properties, required, description: schema.description, ...extractConstraints(schema) };
 }
 
 function buildInlineModel(name: string, schema: SchemaObject): Model {

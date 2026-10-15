@@ -12,6 +12,7 @@ import {
 import { extractOperations } from '../../src/parser/operations.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { parseSpec } from '../../src/parser/parse.js';
+import { createExampleBuilder } from '../../src/snippets/example-builder.js';
 import type { Model } from '../../src/ir/types.js';
 
 describe('extractConstraints', () => {
@@ -299,6 +300,32 @@ describe('extractSchemas – constraints', () => {
       ['either', 'union', undefined],
     ]);
     expect(models[0].fields[2]).not.toHaveProperty('constraints');
+  });
+
+  it('carries the limits of an allOf-wrapped field, including a $ref member’s siblings', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { models } = extractSchemas({
+        Name: { type: 'string', minLength: 1 },
+        Pet: {
+          type: 'object',
+          properties: {
+            nickname: { allOf: [{ type: 'string', maxLength: 3 }] },
+            motto: { allOf: [{ type: 'string', minLength: 2 }, { maxLength: 5 }] },
+            name: { allOf: [{ $ref: '#/components/schemas/Name', maxLength: 3 }] },
+          },
+        },
+      });
+      const pet = models.find((m) => m.name === 'Pet');
+      expect(pet?.fields.map((f) => [f.name, f.type.kind, f.constraints])).toEqual([
+        ['nickname', 'primitive', { maxLength: 3 }],
+        ['motto', 'primitive', { minLength: 2, maxLength: 5 }],
+        // The sibling is the member's own; Name's minLength stays on Name.
+        ['name', 'model', { maxLength: 3 }],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('keeps keywords written beside a field’s $ref (OAS 3.1 siblings)', () => {
@@ -644,6 +671,53 @@ describe('parseSpec – constraints', () => {
       minimum: 0,
       exclusiveMaximum: 1,
     });
+  });
+
+  it('keeps a single-member allOf field’s limit end to end and inside its generated example', async () => {
+    const file = await writeSpec('allof-field.json', {
+      openapi: '3.1.0',
+      info: { title: 'wrapped', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [
+              { name: 'limit', in: 'query', schema: { allOf: [{ type: 'integer', minimum: 5, maximum: 50 }] } },
+              { name: 'page', in: 'query', schema: { $ref: '#/components/schemas/Page' } },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Page: { allOf: [{ type: 'integer', minimum: 2 }] },
+          Pet: {
+            type: 'object',
+            properties: { name: { allOf: [{ type: 'string', maxLength: 3 }] } },
+          },
+        },
+      },
+    });
+
+    const spec = await parseSpec(file);
+    const pet = spec.models.find(({ name }) => name === 'Pet');
+    const [field] = pet?.fields ?? [];
+    expect(field?.type).toEqual({ kind: 'primitive', type: 'string' });
+    expect(field?.constraints).toEqual({ maxLength: 3 });
+    const [operation] = spec.services.flatMap(({ operations }) => operations);
+    expect(operation.queryParams.map((p) => [p.name, p.constraints])).toEqual([
+      ['limit', { minimum: 5, maximum: 50 }],
+      // A referenced parameter target written with allOf is read the same way.
+      ['page', { minimum: 2 }],
+    ]);
+
+    const examples = createExampleBuilder(spec);
+    expect(examples.forField(field!)).toBe('str');
+    expect(examples.forParameter(operation.queryParams[0]!)).toBe(5);
+    // `page` is typed as the `Page` alias model (a primitive-alias component
+    // becomes a fieldless model), so its example is that model's object; the
+    // constraints asserted above are what this fix adds for it.
   });
 
   it('keeps a Json-suffix twin’s limits when it is folded into the base model', async () => {
