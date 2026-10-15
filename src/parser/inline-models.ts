@@ -1,7 +1,7 @@
 import type { Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema, resolveSchemaName } from './schemas.js';
+import { buildFieldFromSchema, constraintsEntry, resolveSchemaName } from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -205,5 +205,5 @@ function buildInlineModel(name: string, schema: SchemaObject): Model {
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
   }
 
-  return { name, description: schema.description, fields };
+  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
 }

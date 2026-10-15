@@ -237,8 +237,13 @@ interface Parameter {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
+  style?: "form" | "simple" | "label" | "matrix";
+  explode?: boolean;
+  constraints?: Constraints; // Validation keywords; see Constraints below
 }
 ```
+
+A parameter's `constraints` come from its own schema, or — like `default` and `example` — from the `$ref` target when the schema is a bare reference, since a primitive alias such as `Limit: { type: integer, maximum: 100 }` has no model of its own to carry them. The key is absent when neither declares any.
 
 ### Idempotency Key
 
@@ -268,6 +273,7 @@ interface Model {
   description?: string;
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
+  constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
 }
 
 interface Field {
@@ -279,8 +285,54 @@ interface Field {
   writeOnly?: boolean;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown;
+  constraints?: Constraints; // Validation keywords on the field's schema; absent for a $ref field
 }
 ```
+
+### Constraints
+
+JSON Schema's validation keywords are carried on `Field`, `Parameter` and `Model` so an emitter can document a value's limits ("at most 100"), check a value before sending it, or keep a generated example within range. `type`, `enum`, `const` and `required` already have their own place in the IR and are not repeated here.
+
+```typescript
+interface Constraints {
+  // numbers
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  multipleOf?: number;
+  // strings
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string; // ECMA-262 regex, verbatim from the document
+  // arrays
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean; // present only when true
+  minContains?: number;
+  maxContains?: number;
+  // objects
+  minProperties?: number;
+  maxProperties?: number;
+  dependentRequired?: Record<string, string[]>;
+}
+```
+
+Every member is optional and present only when the document declares it. A schema with no validation keyword yields no `constraints` key at all, so `field.constraints?.maxLength` is the idiomatic read. The parser ignores a keyword whose value has the wrong type (a string `maxLength`, say) rather than carrying it.
+
+**OAS 3.0 → 3.1 normalization.** OpenAPI 3.1 (JSON Schema 2020-12) gives `exclusiveMinimum` / `exclusiveMaximum` as the bound itself; OpenAPI 3.0 spells them as booleans that make `minimum` / `maximum` exclusive. Both versions are parsed, and the IR always uses the 3.1 shape:
+
+| Document (3.0)                             | IR                                         |
+| ------------------------------------------ | ------------------------------------------ |
+| `minimum: 0, exclusiveMinimum: true`       | `{ exclusiveMinimum: 0 }` (no `minimum`)   |
+| `maximum: 100, exclusiveMaximum: true`     | `{ exclusiveMaximum: 100 }` (no `maximum`) |
+| `minimum: 0, exclusiveMinimum: false`      | `{ minimum: 0 }`                           |
+| `exclusiveMinimum: true` with no `minimum` | nothing                                    |
+
+A 3.1 document's numeric form passes through unchanged, including the legal-but-unusual case of an inclusive and an exclusive bound on the same side.
+
+**Scope.** Only the keywords declared directly on the field, parameter or model schema are collected. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried; a field whose schema is a `$ref` gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model it is the keywords on the outer wrapper.
 
 ## Enum
 

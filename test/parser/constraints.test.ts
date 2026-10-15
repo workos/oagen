@@ -1,0 +1,437 @@
+import { describe, it, expect, afterEach, afterAll } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { extractSchemas, extractConstraints, clearSchemaNameTransform } from '../../src/parser/schemas.js';
+import { extractOperations } from '../../src/parser/operations.js';
+import { parseSpec } from '../../src/parser/parse.js';
+
+describe('extractConstraints', () => {
+  it('returns undefined for a schema with no validation keyword', () => {
+    expect(
+      extractConstraints({ type: 'string', format: 'uuid', description: 'An id', default: 'x', example: 'y' }),
+    ).toBeUndefined();
+    expect(extractConstraints({})).toBeUndefined();
+  });
+
+  it('carries every validation keyword', () => {
+    expect(
+      extractConstraints({
+        minimum: 1,
+        maximum: 10,
+        multipleOf: 2,
+        minLength: 3,
+        maxLength: 8,
+        pattern: '^[a-z]+$',
+        minItems: 1,
+        maxItems: 5,
+        uniqueItems: true,
+        minContains: 1,
+        maxContains: 2,
+        minProperties: 1,
+        maxProperties: 4,
+        dependentRequired: { credit_card: ['billing_address'] },
+      }),
+    ).toMatchInlineSnapshot(`
+      {
+        "dependentRequired": {
+          "credit_card": [
+            "billing_address",
+          ],
+        },
+        "maxContains": 2,
+        "maxItems": 5,
+        "maxLength": 8,
+        "maxProperties": 4,
+        "maximum": 10,
+        "minContains": 1,
+        "minItems": 1,
+        "minLength": 3,
+        "minProperties": 1,
+        "minimum": 1,
+        "multipleOf": 2,
+        "pattern": "^[a-z]+$",
+        "uniqueItems": true,
+      }
+    `);
+  });
+
+  it('passes OAS 3.1 numeric exclusive bounds through unchanged', () => {
+    expect(extractConstraints({ type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 })).toEqual({
+      exclusiveMinimum: 0,
+      exclusiveMaximum: 1,
+    });
+  });
+
+  it('keeps both an inclusive and an exclusive bound on the same side (OAS 3.1)', () => {
+    expect(extractConstraints({ type: 'integer', minimum: 0, exclusiveMinimum: -1 })).toEqual({
+      minimum: 0,
+      exclusiveMinimum: -1,
+    });
+  });
+
+  it('normalizes the OAS 3.0 boolean exclusive form to the 3.1 shape', () => {
+    expect(
+      extractConstraints({
+        type: 'integer',
+        minimum: 0,
+        exclusiveMinimum: true,
+        maximum: 100,
+        exclusiveMaximum: true,
+      }),
+    ).toEqual({ exclusiveMinimum: 0, exclusiveMaximum: 100 });
+  });
+
+  it('drops a false boolean exclusive flag and keeps the inclusive bound', () => {
+    expect(
+      extractConstraints({ type: 'integer', minimum: 0, exclusiveMinimum: false, maximum: 9, exclusiveMaximum: false }),
+    ).toEqual({ minimum: 0, maximum: 9 });
+  });
+
+  it('drops a true exclusive flag that has no bound to apply to', () => {
+    expect(extractConstraints({ type: 'integer', exclusiveMinimum: true, exclusiveMaximum: true })).toBeUndefined();
+  });
+
+  it('drops uniqueItems: false, an empty dependentRequired, and values of the wrong type', () => {
+    expect(
+      extractConstraints({
+        type: 'array',
+        uniqueItems: false,
+        maxItems: '5' as never,
+        pattern: 42 as never,
+        dependentRequired: {},
+      }),
+    ).toBeUndefined();
+    expect(extractConstraints({ dependentRequired: { a: ['b'], c: 'd' as never, e: [1] as never } })).toEqual({
+      dependentRequired: { a: ['b'] },
+    });
+  });
+
+  it('copies dependentRequired rather than aliasing the document', () => {
+    const dependentRequired = { a: ['b'] };
+    const constraints = extractConstraints({ dependentRequired });
+    expect(constraints?.dependentRequired).toEqual(dependentRequired);
+    expect(constraints?.dependentRequired).not.toBe(dependentRequired);
+    expect(constraints?.dependentRequired?.a).not.toBe(dependentRequired.a);
+  });
+});
+
+describe('extractSchemas – constraints', () => {
+  afterEach(() => clearSchemaNameTransform());
+
+  it('attaches a field’s own keywords and leaves the key absent on fields without any', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', minLength: 1, maxLength: 50, pattern: '^[A-Z]' },
+          tags: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 5 },
+          id: { type: 'string', format: 'uuid' },
+        },
+      },
+    });
+    const [pet] = models;
+    expect(pet.fields.map((f) => [f.name, f.constraints])).toEqual([
+      ['name', { minLength: 1, maxLength: 50, pattern: '^[A-Z]' }],
+      ['tags', { minItems: 1, maxItems: 5 }],
+      ['id', undefined],
+    ]);
+    expect(pet.fields[2]).not.toHaveProperty('constraints');
+    expect(pet).not.toHaveProperty('constraints');
+  });
+
+  it('gives a $ref field no constraints — they live on the referenced model', () => {
+    const { models } = extractSchemas({
+      Owner: {
+        type: 'object',
+        minProperties: 1,
+        maxProperties: 3,
+        dependentRequired: { email: ['name'] },
+        properties: { name: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' } },
+      },
+      Pet: {
+        type: 'object',
+        properties: { owner: { $ref: '#/components/schemas/Owner' } },
+      },
+    });
+    const owner = models.find((m) => m.name === 'Owner');
+    const pet = models.find((m) => m.name === 'Pet');
+    expect(owner?.constraints).toEqual({ minProperties: 1, maxProperties: 3, dependentRequired: { email: ['name'] } });
+    expect(pet?.fields[0]).not.toHaveProperty('constraints');
+  });
+
+  it('keeps a nullable field’s keywords (OAS 3.0 flag and 3.1 type array)', () => {
+    const { models } = extractSchemas({
+      Thing: {
+        type: 'object',
+        properties: {
+          legacy: { type: 'integer', nullable: true, minimum: 0 },
+          modern: { type: ['integer', 'null'], maximum: 9 },
+        },
+      },
+    });
+    expect(models[0].fields.map((f) => [f.name, f.type.kind, f.constraints])).toEqual([
+      ['legacy', 'nullable', { minimum: 0 }],
+      ['modern', 'nullable', { maximum: 9 }],
+    ]);
+  });
+
+  it('attaches object-level keywords on an allOf wrapper to the merged model', () => {
+    const { models } = extractSchemas({
+      Base: { type: 'object', properties: { id: { type: 'string' } } },
+      Extended: {
+        minProperties: 2,
+        allOf: [{ $ref: '#/components/schemas/Base' }, { type: 'object', properties: { note: { type: 'string' } } }],
+      },
+    });
+    const extended = models.find((m) => m.name === 'Extended');
+    expect(extended?.constraints).toEqual({ minProperties: 2 });
+    expect(models.find((m) => m.name === 'Base')).not.toHaveProperty('constraints');
+  });
+
+  it('attaches keywords to inline nested models and the field that references them', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        properties: {
+          address: {
+            type: 'object',
+            minProperties: 1,
+            properties: { line1: { type: 'string', maxLength: 100 } },
+          },
+        },
+      },
+    });
+    const pet = models.find((m) => m.name === 'Pet');
+    const address = models.find((m) => m.name === 'PetAddress');
+    expect(pet?.fields[0].constraints).toEqual({ minProperties: 1 });
+    expect(address?.constraints).toEqual({ minProperties: 1 });
+    expect(address?.fields[0].constraints).toEqual({ maxLength: 100 });
+  });
+
+  it('does not collect keywords nested inside array items', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        properties: {
+          tags: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 10 } },
+        },
+      },
+    });
+    expect(models[0].fields[0].constraints).toEqual({ maxItems: 3 });
+  });
+});
+
+describe('extractOperations – parameter constraints', () => {
+  const listPets = (schema: Record<string, unknown>) => ({
+    '/pets': {
+      get: {
+        operationId: 'listPets',
+        parameters: [{ name: 'limit', in: 'query' as const, required: false, schema }],
+        responses: { '200': { description: 'ok' } },
+      },
+    },
+  });
+
+  it('attaches the parameter schema’s keywords', () => {
+    const { services } = extractOperations(listPets({ type: 'integer', minimum: 1, maximum: 100 }));
+    expect(services[0].operations[0].queryParams[0].constraints).toEqual({ minimum: 1, maximum: 100 });
+  });
+
+  it('leaves the key absent when the schema declares no keyword', () => {
+    const { services } = extractOperations(listPets({ type: 'integer' }));
+    expect(services[0].operations[0].queryParams[0]).not.toHaveProperty('constraints');
+  });
+
+  it('falls back to the $ref target when the schema is a bare reference', () => {
+    const componentSchemas = { Limit: { type: 'integer', minimum: 1, maximum: 100, default: 10 } };
+    const { services } = extractOperations(
+      listPets({ $ref: '#/components/schemas/Limit' }),
+      undefined,
+      componentSchemas,
+    );
+    const limit = services[0].operations[0].queryParams[0];
+    expect(limit.default).toBe(10);
+    expect(limit.constraints).toEqual({ minimum: 1, maximum: 100 });
+  });
+
+  it('prefers keywords on the parameter schema over the $ref target', () => {
+    const componentSchemas = { Limit: { type: 'integer', minimum: 1, maximum: 100 } };
+    const { services } = extractOperations(
+      listPets({ $ref: '#/components/schemas/Limit', maximum: 50 }),
+      undefined,
+      componentSchemas,
+    );
+    expect(services[0].operations[0].queryParams[0].constraints).toEqual({ maximum: 50 });
+  });
+
+  it('leaves the key absent when neither the schema nor the $ref target declares any', () => {
+    const componentSchemas = { Order: { type: 'string', enum: ['asc', 'desc'] } };
+    const { services } = extractOperations(
+      listPets({ $ref: '#/components/schemas/Order' }),
+      undefined,
+      componentSchemas,
+    );
+    expect(services[0].operations[0].queryParams[0]).not.toHaveProperty('constraints');
+  });
+
+  it('normalizes a 3.0 boolean exclusive bound on a path parameter', () => {
+    const paths = {
+      '/pets/{page}': {
+        get: {
+          operationId: 'getPage',
+          parameters: [
+            {
+              name: 'page',
+              in: 'path' as const,
+              required: true,
+              schema: { type: 'integer', minimum: 0, exclusiveMinimum: true },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].pathParams[0].constraints).toEqual({ exclusiveMinimum: 0 });
+  });
+
+  it('carries keywords on an inline request body model and its fields', () => {
+    const paths = {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  minProperties: 1,
+                  dependentRequired: { nickname: ['name'] },
+                  properties: {
+                    name: { type: 'string', maxLength: 50 },
+                    nickname: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+    const { inlineModels } = extractOperations(paths);
+    const body = inlineModels.find((m) => m.name === 'CreatePetRequest');
+    expect(body?.constraints).toEqual({ minProperties: 1, dependentRequired: { nickname: ['name'] } });
+    expect(body?.fields.map((f) => [f.name, f.constraints])).toEqual([
+      ['name', { maxLength: 50 }],
+      ['nickname', undefined],
+    ]);
+  });
+});
+
+describe('parseSpec – constraints', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  async function writeSpec(name: string, doc: unknown): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-constraints-'));
+    dirs.push(dir);
+    const file = path.join(dir, name);
+    await fs.writeFile(file, JSON.stringify(doc));
+    return file;
+  }
+
+  it('carries limits for params and fields end to end (issue #193 repro)', async () => {
+    const file = await writeSpec('repro.json', {
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 } }],
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': {
+                    schema: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Pet: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', minLength: 1, maxLength: 50, pattern: '^[A-Z]' },
+              tags: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 5 },
+            },
+            required: ['name'],
+          },
+        },
+      },
+    });
+
+    const spec = await parseSpec(file);
+    const [operation] = spec.services.flatMap(({ operations }) => operations);
+    const pet = spec.models.find(({ name }) => name === 'Pet');
+
+    expect(operation.queryParams.map((p) => [p.name, p.constraints])).toEqual([
+      ['limit', { minimum: 1, maximum: 100 }],
+    ]);
+    expect(pet?.fields.map((f) => [f.name, f.constraints])).toEqual([
+      ['name', { minLength: 1, maxLength: 50, pattern: '^[A-Z]' }],
+      ['tags', { minItems: 1, maxItems: 5 }],
+    ]);
+    expect(pet).not.toHaveProperty('constraints');
+  });
+
+  it('normalizes an OAS 3.0 document’s boolean exclusive bounds', async () => {
+    const file = await writeSpec('legacy.json', {
+      openapi: '3.0.3',
+      info: { title: 'legacy', version: '1' },
+      paths: {
+        '/items': {
+          get: {
+            operationId: 'listItems',
+            parameters: [
+              {
+                name: 'limit',
+                in: 'query',
+                schema: { type: 'integer', minimum: 0, exclusiveMinimum: true, maximum: 100 },
+              },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Item: {
+            type: 'object',
+            properties: {
+              price: { type: 'number', minimum: 0, exclusiveMinimum: false, maximum: 1, exclusiveMaximum: true },
+            },
+          },
+        },
+      },
+    });
+
+    const spec = await parseSpec(file);
+    const [operation] = spec.services.flatMap(({ operations }) => operations);
+    expect(operation.queryParams[0].constraints).toEqual({ exclusiveMinimum: 0, maximum: 100 });
+    expect(spec.models.find(({ name }) => name === 'Item')?.fields[0].constraints).toEqual({
+      minimum: 0,
+      exclusiveMaximum: 1,
+    });
+  });
+});

@@ -24,6 +24,7 @@ export type {
   Model,
   TypeParam,
   Field,
+  Constraints,
   Enum,
   EnumValue,
   ErrorResponse,

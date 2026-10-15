@@ -1,4 +1,4 @@
-import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
+import type { Model, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import {
   toPascalCase,
@@ -126,7 +126,112 @@ export interface SchemaObject {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
+  // JSON Schema validation vocabulary. An exclusive bound is the bound itself
+  // in OAS 3.1 and, in OAS 3.0, a boolean that makes `minimum` / `maximum`
+  // exclusive; extractConstraints() normalizes both to the 3.1 shape.
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number | boolean;
+  exclusiveMaximum?: number | boolean;
+  multipleOf?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  minContains?: number;
+  maxContains?: number;
+  minProperties?: number;
+  maxProperties?: number;
+  dependentRequired?: Record<string, string[]>;
   [key: string]: unknown;
+}
+
+/** Validation keywords copied through unchanged when they hold a number. */
+const NUMERIC_CONSTRAINT_KEYS = [
+  'multipleOf',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'minContains',
+  'maxContains',
+  'minProperties',
+  'maxProperties',
+] as const;
+
+/**
+ * Collect the JSON Schema validation keywords declared directly on `schema`
+ * into a `Constraints` object, or `undefined` when it declares none — so a
+ * schema without limits yields no `constraints` key on its IR node at all.
+ *
+ * Numeric bounds are normalized to the OAS 3.1 shape. OAS 3.0 spells an
+ * exclusive bound as `exclusiveMinimum: true` beside `minimum: n`; that pair
+ * becomes `exclusiveMinimum: n` with no `minimum`. A boolean `false`, or a
+ * `true` with no bound to apply to, is dropped. The 3.1 numeric form passes
+ * through, including the legal-but-unusual case of both an inclusive and an
+ * exclusive bound on the same side. `uniqueItems: false` restates the default
+ * and is dropped too.
+ *
+ * Only the schema's own keywords are read: limits nested inside array `items`
+ * or map values are not collected. Values of the wrong type (a string
+ * `maxLength`, say) are ignored rather than carried.
+ */
+export function extractConstraints(schema: SchemaObject): Constraints | undefined {
+  const out: Constraints = {};
+
+  const lower = normalizeBound(schema.minimum, schema.exclusiveMinimum);
+  if (lower.inclusive !== undefined) out.minimum = lower.inclusive;
+  if (lower.exclusive !== undefined) out.exclusiveMinimum = lower.exclusive;
+  const upper = normalizeBound(schema.maximum, schema.exclusiveMaximum);
+  if (upper.inclusive !== undefined) out.maximum = upper.inclusive;
+  if (upper.exclusive !== undefined) out.exclusiveMaximum = upper.exclusive;
+
+  for (const key of NUMERIC_CONSTRAINT_KEYS) {
+    const value = schema[key];
+    if (typeof value === 'number') out[key] = value;
+  }
+  if (typeof schema.pattern === 'string') out.pattern = schema.pattern;
+  if (schema.uniqueItems === true) out.uniqueItems = true;
+
+  const dependentRequired = readDependentRequired(schema.dependentRequired);
+  if (dependentRequired) out.dependentRequired = dependentRequired;
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * `{ constraints }` when `schema` declares any validation keyword, `{}`
+ * otherwise — spread into an IR node so the key stays absent rather than
+ * present-but-undefined.
+ */
+export function constraintsEntry(schema: SchemaObject): { constraints?: Constraints } {
+  const constraints = extractConstraints(schema);
+  return constraints ? { constraints } : {};
+}
+
+/**
+ * Resolve one side's bound from `minimum` / `maximum` plus its `exclusive*`
+ * companion into the OAS 3.1 shape: a numeric companion is the exclusive
+ * bound itself, `true` turns the inclusive bound into the exclusive one, and
+ * `false` or absent leaves the inclusive bound as is.
+ */
+function normalizeBound(inclusive: unknown, exclusive: unknown): { inclusive?: number; exclusive?: number } {
+  const bound = typeof inclusive === 'number' ? inclusive : undefined;
+  if (typeof exclusive === 'number') return { inclusive: bound, exclusive };
+  if (exclusive === true) return { exclusive: bound };
+  return { inclusive: bound };
+}
+
+/** Copy `dependentRequired` when it is an object whose values are string arrays; anything else is ignored. */
+function readDependentRequired(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [property, deps] of Object.entries(value as Record<string, unknown>)) {
+    if (Array.isArray(deps) && deps.every((d): d is string => typeof d === 'string')) out[property] = [...deps];
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export interface ExtractedSchemas {
@@ -410,7 +515,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
           fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
         }
         const variantName = nameVariantModel(variant, name, models, constNamingDiscriminator);
-        models.push({ name: variantName, description: variant.description, fields });
+        models.push({ name: variantName, description: variant.description, fields, ...constraintsEntry(variant) });
       }
     }
     return models;
@@ -424,7 +529,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
     }
-    return [{ name, description: schema.description, fields }];
+    return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }];
   }
 
   // Handle array with inline items
@@ -435,7 +540,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
     }
-    return [{ name, description: schema.items.description, fields }];
+    return [{ name, description: schema.items.description, fields, ...constraintsEntry(schema.items) }];
   }
 
   return [];
@@ -532,6 +637,8 @@ export function buildFieldFromSchema(
     deprecated: fieldSchema.deprecated || undefined,
     default: fieldSchema.default,
     example: fieldSchema.example,
+    // A `$ref` field's limits live on the referenced model, not on the field.
+    ...(fieldSchema.$ref ? {} : constraintsEntry(fieldSchema)),
   };
 }
 
@@ -754,7 +861,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     }
   }
 
-  return { name, description: schema.description, fields };
+  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
 }
 
 function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
@@ -837,6 +944,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     description: schema.description,
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
+    ...constraintsEntry(schema),
   };
 }
 
@@ -1172,7 +1280,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
     }
   }
 
-  return [{ name, description: schema.description, fields }, ...nestedModels];
+  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
 }
 
 function qualifyNestedInlineName(parentName: string, fieldName: string): string {

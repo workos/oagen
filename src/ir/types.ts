@@ -154,6 +154,58 @@ export interface PaginationMeta {
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
 
+/**
+ * JSON Schema validation keywords declared directly on a schema, carried so an
+ * emitter can document a value's limits ("at most 100"), check a value before
+ * sending it, or keep a generated example within range. Every member is
+ * optional and present only when the document declares it; a schema with no
+ * validation keyword has no `constraints` at all.
+ *
+ * Numeric bounds use the OpenAPI 3.1 / JSON Schema 2020-12 shape, where
+ * `exclusiveMinimum` / `exclusiveMaximum` are the bound itself. OpenAPI 3.0
+ * spells them as booleans that make `minimum` / `maximum` exclusive; the
+ * parser normalizes that form, so `{ minimum: 0, exclusiveMinimum: true }`
+ * arrives as `{ exclusiveMinimum: 0 }` with no `minimum`, and a `false` is
+ * dropped. Emitters read one shape whichever version produced it.
+ *
+ * Only the keywords on the field, parameter or model schema itself are
+ * carried; limits nested inside array `items` or map values are not.
+ */
+export interface Constraints {
+  /** Inclusive lower bound (`minimum`). */
+  minimum?: number;
+  /** Inclusive upper bound (`maximum`). */
+  maximum?: number;
+  /** Exclusive lower bound as a number; the OAS 3.0 boolean form is normalized to this. */
+  exclusiveMinimum?: number;
+  /** Exclusive upper bound as a number; the OAS 3.0 boolean form is normalized to this. */
+  exclusiveMaximum?: number;
+  /** The value must be an integer multiple of this (`multipleOf`). */
+  multipleOf?: number;
+  /** Minimum string length in characters (`minLength`). */
+  minLength?: number;
+  /** Maximum string length in characters (`maxLength`). */
+  maxLength?: number;
+  /** ECMA-262 regular expression the string must match (`pattern`), verbatim from the document. */
+  pattern?: string;
+  /** Minimum number of array items (`minItems`). */
+  minItems?: number;
+  /** Maximum number of array items (`maxItems`). */
+  maxItems?: number;
+  /** Present, and `true`, when array items must be unique; `uniqueItems: false` restates the default and is dropped. */
+  uniqueItems?: boolean;
+  /** Minimum number of items matching the schema's `contains` (`minContains`). */
+  minContains?: number;
+  /** Maximum number of items matching the schema's `contains` (`maxContains`). */
+  maxContains?: number;
+  /** Minimum number of object properties (`minProperties`). */
+  minProperties?: number;
+  /** Maximum number of object properties (`maxProperties`). */
+  maxProperties?: number;
+  /** Property name → properties that must also be present when it is (`dependentRequired`). */
+  dependentRequired?: Record<string, string[]>;
+}
+
 export interface Parameter {
   name: string;
   type: TypeRef;
@@ -164,6 +216,13 @@ export interface Parameter {
   example?: unknown;
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
+  /**
+   * Validation keywords from the parameter's schema, or — like `default` and
+   * `example` — from the `$ref` target when the schema is a bare reference,
+   * since a primitive alias such as `Limit: { type: integer, maximum: 100 }`
+   * has no model of its own to carry them. Absent when neither declares any.
+   */
+  constraints?: Constraints;
 }
 
 /** Type reference — the core type system of the IR */
@@ -244,6 +303,12 @@ export interface Model {
     property: string;
     mapping: Record<string, string>;
   };
+  /**
+   * Validation keywords declared on the model's own schema — for an object
+   * schema, `minProperties`, `maxProperties` and `dependentRequired`. Absent
+   * when the schema declares none.
+   */
+  constraints?: Constraints;
 }
 
 export interface Field {
@@ -265,6 +330,12 @@ export interface Field {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
+  /**
+   * Validation keywords declared on the field's schema. Absent when the
+   * schema declares none, and when the schema is a `$ref` — the limits then
+   * live on the referenced model.
+   */
+  constraints?: Constraints;
 }
 
 /** Enum definition */

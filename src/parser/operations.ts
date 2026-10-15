@@ -14,7 +14,13 @@ import type {
 } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName } from './schemas.js';
+import {
+  schemaToTypeRef,
+  buildFieldFromSchema,
+  resolveSchemaName,
+  extractConstraints,
+  constraintsEntry,
+} from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -783,6 +789,11 @@ function extractParams(
     .filter((p) => p.in === location)
     .map((p) => {
       const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
+      // Like default/example: the param's own schema first, then the `$ref`
+      // target. A primitive alias such as `Limit: { type: integer, maximum: 100 }`
+      // has no model of its own to carry its limits, so they surface here.
+      const ownConstraints = p.schema ? extractConstraints(p.schema) : undefined;
+      const constraints = ownConstraints ?? (refTarget ? extractConstraints(refTarget) : undefined);
       return {
         name: p.name,
         type: p.schema
@@ -795,6 +806,7 @@ function extractParams(
         example: p.example ?? p.schema?.example ?? refTarget?.example,
         style: p.style as Parameter['style'],
         explode: p.explode,
+        ...(constraints ? { constraints } : {}),
       };
     });
 }
@@ -1039,7 +1051,7 @@ function extractRequestBody(
       if (!fieldSchema) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet));
     }
-    inlineModels.push({ name: contextName, description: undefined, fields });
+    inlineModels.push({ name: contextName, description: undefined, fields, ...constraintsEntry(schema) });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
     // by this branch. Recurse to materialize them, matching how component
@@ -1068,7 +1080,12 @@ function extractRequestBody(
           if (!fieldSchema) continue;
           fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet));
         }
-        inlineModels.push({ name: variantName, description: variant.description, fields });
+        inlineModels.push({
+          name: variantName,
+          description: variant.description,
+          fields,
+          ...constraintsEntry(variant),
+        });
         extractInlineModelsFromProperties(variant, inlineModels, variantName);
         variants.push({ kind: 'model', name: variantName });
       } else {
