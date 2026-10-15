@@ -104,6 +104,8 @@ interface MapType {
 
 The optional `keyType` allows non-string map keys (e.g., enum-keyed maps). When absent, emitters should assume `string` keys.
 
+A map's value schema is typed the same way an array's items are: with the owning field's name and parent model. When the value is an inline object (or an array or `oneOf` of inline objects), the parser extracts it as a model named by the parent plus the singularized field name, e.g. `layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`, matching `shapes` → `CreateDrawingRequestShape` for array items. `additionalProperties: {}` or `true` keeps the value type `unknown`.
+
 ### UnionType
 
 ```typescript

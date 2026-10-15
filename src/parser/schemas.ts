@@ -1216,12 +1216,19 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     if (nonNullTypes.length === 0) {
       return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
     }
+    // Keep `parentModelName` through the unwrap so an inline object, map
+    // value, or enum under a nullable field is qualified exactly like its
+    // non-nullable twin — the inline-model extractor names it that way.
     if (schema.type.includes('null') && nonNullTypes.length === 1) {
-      return asNullable(schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName));
+      return asNullable(
+        schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName, parentModelName),
+      );
     }
     // Multiple non-null types → union
     if (nonNullTypes.length > 1) {
-      const variants = nonNullTypes.map((t: string) => schemaToTypeRef({ ...schema, type: t }, contextName));
+      const variants = nonNullTypes.map((t: string) =>
+        schemaToTypeRef({ ...schema, type: t }, contextName, parentModelName),
+      );
       const ref: TypeRef = { kind: 'union', variants };
       if (schema.type.includes('null')) {
         return { kind: 'nullable', inner: ref };
@@ -1232,7 +1239,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
 
   // Handle OAS 3.0 nullable flag
   if (schema.nullable && schema.type) {
-    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName));
+    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName));
   }
 
   // Handle allOf — merge properties from all sub-schemas.
@@ -1455,19 +1462,24 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   }
 
   // Handle freeform object with additionalProperties or patternProperties → Map<string, T>
+  // The value schema is typed with the field's own `contextName` and
+  // `parentModelName`, exactly like array items, so an inline object value is
+  // referenced as `${Parent}${SingularField}` (`layers` on
+  // `CreateDrawingRequest` → `CreateDrawingRequestLayer`) and the inline-model
+  // extractor (`extractInlineModelsFromProperties`) emits a model of that name.
   if (schema.type === 'object' && !schema.properties) {
     let valueType: TypeRef = { kind: 'primitive', type: 'unknown' };
     if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
       // Empty additionalProperties ({}) means "any value" — keep as unknown
       const apKeys = Object.keys(schema.additionalProperties);
       if (apKeys.length > 0) {
-        valueType = schemaToTypeRef(schema.additionalProperties as SchemaObject, contextName);
+        valueType = schemaToTypeRef(schema.additionalProperties as SchemaObject, contextName, parentModelName);
       }
     } else if (schema.patternProperties) {
       // patternProperties: { "pattern": schema } → use the first pattern's schema as value type
       const patterns = Object.values(schema.patternProperties);
       if (patterns.length > 0) {
-        valueType = schemaToTypeRef(patterns[0], contextName);
+        valueType = schemaToTypeRef(patterns[0], contextName, parentModelName);
       }
     }
     return {

@@ -29,7 +29,9 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
 
 /**
  * Walk all component schemas and extract inline Model definitions for fields
- * that are objects with properties (or arrays of such objects).
+ * that are objects with properties, including objects reached through array
+ * items, `oneOf` variants, and map (`additionalProperties` /
+ * `patternProperties`) values.
  * These correspond to the ModelRef entries created by schemaToTypeRef.
  */
 export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObject> | undefined): Model[] {
@@ -65,14 +67,26 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       extractInlineModelsFromProperties(fieldSchema, results, modelName);
     }
 
-    // Array of inline objects
+    // Array: schemaToTypeRef types the items with the field's own context
+    // name and parent, so every inline model reachable through the items — a
+    // plain inline object, the variants of an `items.oneOf`, a nested array
+    // or map — is named exactly as if the items schema were the field itself
+    // (`shapes` → `CreateDrawingRequestShape`, `SquareCreateDrawingRequestShape`).
+    // Re-enter with a same-named synthetic property so the branches in this
+    // function do the extraction with byte-for-byte identical naming.
     if (fieldSchema.type === 'array' && fieldSchema.items) {
-      const items = fieldSchema.items;
-      if (items.properties && (items.type === 'object' || !items.type)) {
-        const baseName = toPascalCase(fieldName);
-        const modelName = qualifyInlineModelName(baseName, parentName);
-        results.push(buildInlineModel(modelName, items));
-        extractInlineModelsFromProperties(items, results, modelName);
+      extractInlineModelsFromProperties({ properties: { [fieldName]: fieldSchema.items } }, results, parentName);
+    }
+
+    // Map (`additionalProperties` / `patternProperties` on a property-less
+    // object): schemaToTypeRef types the values the same way it types array
+    // items, so a map of inline objects references `${Parent}${SingularField}`
+    // (`layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`).
+    // Re-enter with the value schema as a same-named synthetic property.
+    if (fieldSchema.type === 'object' && !fieldSchema.properties) {
+      const valueSchema = mapValueSchema(fieldSchema);
+      if (valueSchema) {
+        extractInlineModelsFromProperties({ properties: { [fieldName]: valueSchema } }, results, parentName);
       }
     }
 
@@ -194,6 +208,22 @@ function mergeAllOfObjectSchema(schema: SchemaObject): SchemaObject {
   };
   visit(schema);
   return { type: 'object', properties, required, description: schema.description };
+}
+
+/**
+ * The schema that types a map's values, in the precedence `schemaToTypeRef`
+ * uses: a non-empty `additionalProperties` object wins, otherwise the first
+ * `patternProperties` entry. `additionalProperties: {}` means "any value"
+ * (typed `unknown`, nothing to extract) and does not fall through to
+ * `patternProperties`, matching the type-ref branch.
+ */
+function mapValueSchema(schema: SchemaObject): SchemaObject | null {
+  const additional = schema.additionalProperties;
+  if (additional && typeof additional === 'object') {
+    return Object.keys(additional).length > 0 ? additional : null;
+  }
+  const patterns = schema.patternProperties ? Object.values(schema.patternProperties) : [];
+  return patterns[0] ?? null;
 }
 
 function buildInlineModel(name: string, schema: SchemaObject): Model {
