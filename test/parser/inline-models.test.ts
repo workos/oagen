@@ -802,3 +802,175 @@ function modelRefsIn(models: Model[]): Set<string> {
   }
   return names;
 }
+
+describe('non-object members of multi-type union variants are named from the variant', () => {
+  const point: SchemaObject = { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } };
+  const withRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' } } };
+  const side = { side: { type: 'number' } };
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const array = (items: unknown) => ({ kind: 'array', items });
+
+  // For each case: the second variant's schema, the TypeRef of its non-object
+  // member given the variant's name, and the models that member adds (all
+  // named `<Variant>Item...`, never from the union's field).
+  type MemberCase = {
+    label: string;
+    variant: SchemaObject;
+    member: (variantName: string) => unknown;
+    models: (variantName: string) => string[];
+    nullable?: boolean;
+  };
+  const cases: MemberCase[] = [
+    {
+      label: 'array member with inline object items',
+      variant: { type: ['object', 'array'], properties: side, items: point },
+      member: (v) => array(model(`${v}Item`)),
+      models: (v) => [`${v}Item`],
+    },
+    {
+      label: 'array member whose items nest another inline object',
+      variant: {
+        type: ['object', 'array'],
+        properties: side,
+        items: { type: 'object', properties: { x: { type: 'number' }, origin: point } },
+      },
+      member: (v) => array(model(`${v}Item`)),
+      models: (v) => [`${v}Item`, `${v}ItemOrigin`],
+    },
+    {
+      label: 'array member with oneOf items and no const field',
+      variant: {
+        type: ['object', 'array'],
+        properties: side,
+        items: { oneOf: [point, { type: 'object', properties: { label: { type: 'string' } } }] },
+      },
+      member: (v) =>
+        array({ kind: 'union', compositionKind: 'oneOf', variants: [model(`${v}Item`), model(`${v}Item2`)] }),
+      models: (v) => [`${v}Item`, `${v}Item2`],
+    },
+    {
+      label: 'array member with const-discriminated oneOf items',
+      variant: {
+        type: ['object', 'array'],
+        properties: side,
+        items: {
+          oneOf: [
+            { type: 'object', properties: { kind: { type: 'string', const: 'dot' }, x: { type: 'number' } } },
+            { type: 'object', properties: { kind: { type: 'string', const: 'tag' }, label: { type: 'string' } } },
+          ],
+        },
+      },
+      member: (v) =>
+        array({
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model(`${v}Item`), model(`Tag${v}Item`)],
+          discriminator: { property: 'kind', mapping: { dot: `${v}Item`, tag: `Tag${v}Item` } },
+        }),
+      models: (v) => [`${v}Item`, `Tag${v}Item`],
+    },
+    {
+      label: 'array member with $ref items',
+      variant: { type: ['object', 'array'], properties: side, items: { $ref: '#/components/schemas/Gadget' } },
+      member: () => array(model('Gadget')),
+      models: () => [],
+    },
+    {
+      label: 'nullable array member with inline object items',
+      variant: { type: ['object', 'array', 'null'], properties: side, items: point },
+      member: (v) => array(model(`${v}Item`)),
+      models: (v) => [`${v}Item`],
+      nullable: true,
+    },
+    {
+      // `properties` make the object member a model, so `additionalProperties`
+      // never turns it into a map; no `<Variant>Value` model exists.
+      label: 'object member with properties and additionalProperties (not a map)',
+      variant: { type: ['object', 'string'], properties: side, additionalProperties: point },
+      member: () => ({ kind: 'primitive', type: 'string' }),
+      models: () => [],
+    },
+  ];
+
+  it.each(cases)('$label, at field level and array-item level', async ({ variant, member, models, nullable }) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const variants = [withRadius, variant];
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info: { title: 'variant members', version: '1' },
+        paths: {},
+        components: {
+          schemas: {
+            Gadget: { type: 'object', properties: { id: { type: 'string' } } },
+            Thing: {
+              type: 'object',
+              properties: {
+                shape: { oneOf: variants },
+                markers: { type: 'array', items: { oneOf: variants } },
+              },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      const second = (v: string) => {
+        const union = { kind: 'union', variants: [model(v), member(v)] };
+        return nullable ? { kind: 'nullable', inner: union } : union;
+      };
+      expect(types['Thing']).toEqual({
+        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model('ThingShape'), second('ThingShape2')] },
+        markers: array({
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('ThingMarker'), second('ThingMarker2')],
+        }),
+      });
+      expect(types['ThingShape2']).toEqual({ side: num });
+      expect(types['ThingMarker2']).toEqual({ side: num });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(
+        [
+          'Gadget',
+          'Thing',
+          'ThingShape',
+          'ThingShape2',
+          ...models('ThingShape2'),
+          'ThingMarker',
+          'ThingMarker2',
+          ...models('ThingMarker2'),
+        ].sort(),
+      );
+      expect(ir.models.some((m) => m.name.endsWith('Value'))).toBe(false);
+
+      // Every reference resolves, and no inline model is left orphaned.
+      const referenced = modelRefsIn(ir.models);
+      const known = new Set(ir.models.map((m) => m.name));
+      expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+      expect([...known].filter((name) => !['Thing', 'Gadget'].includes(name) && !referenced.has(name))).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('the field extractor emits the item models under the variant name', () => {
+    const results: Model[] = [];
+    extractInlineModelsFromProperties(
+      { type: 'object', properties: { shape: { oneOf: [withRadius, cases[1]!.variant] } } },
+      results,
+      'Thing',
+    );
+    expect(results.map((m) => m.name)).toEqual([
+      'ThingShape',
+      'ThingShape2',
+      'ThingShape2Item',
+      'ThingShape2ItemOrigin',
+    ]);
+    expect(fieldTypesByModel(results)['ThingShape2Item']).toEqual({
+      x: num,
+      origin: model('ThingShape2ItemOrigin'),
+    });
+  });
+});

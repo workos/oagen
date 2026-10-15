@@ -310,9 +310,18 @@ function collectNestedInlineModels(
   modelNames: Set<string>,
   queue: Model[],
 ): void {
+  // `extractNestedSchema` names what it extracts from the ref it is handed, so
+  // it is only right for refs the field schema produces directly — its own
+  // object, its array items, or its union variants. A ref deeper in the tree
+  // (the items of a variant's array member, a nested union) is named from its
+  // enclosing variant; handing it over here would re-derive the variants'
+  // names from it and register them under the wrong names. Those models come
+  // from the field extractor, which names them by construction.
+  const directRefs = directModelRefNames(ref);
   walkTypeRef(ref, {
     model: (modelRef) => {
       if (modelNames.has(modelRef.name)) return; // already extracted
+      if (!directRefs.has(modelRef.name)) return; // nested under a variant — field extractor's
       // Check if this model name corresponds to a component schema
       // by checking all possible original names that would map to this PascalCase name
       const isComponent = Object.keys(schemas).some((k) => resolveSchemaName(k) === modelRef.name);
@@ -337,6 +346,26 @@ function collectNestedInlineModels(
       }
     },
   });
+}
+
+/**
+ * The model refs a field's TypeRef produces directly: the ref itself, the
+ * items of a (possibly nullable) array, or each (possibly nullable) variant of
+ * a union — the shapes `extractNestedSchema` can name from a ref. Refs nested
+ * any deeper are excluded.
+ */
+function directModelRefNames(ref: TypeRef): Set<string> {
+  const names = new Set<string>();
+  let root = ref;
+  while (root.kind === 'nullable' || root.kind === 'array') {
+    root = root.kind === 'nullable' ? root.inner : root.items;
+  }
+  const leaves = root.kind === 'union' ? root.variants : [root];
+  for (const leaf of leaves) {
+    const inner = leaf.kind === 'nullable' ? leaf.inner : leaf;
+    if (inner.kind === 'model') names.add(inner.name);
+  }
+  return names;
 }
 
 /** Find a component schema by PascalCase name. */
@@ -530,6 +559,24 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   if (!schema || schema.$ref || !schema.properties) return false;
   const { type } = schema;
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
+/**
+ * The schemas carried by the non-object members of a multi-type inline
+ * variant (`type: ['object', 'array']` with `items`), keyed by the synthetic
+ * property name `schemaToTypeRef` types them under: `item` for an `array`
+ * member's items, so an inline object item is `<Variant>Item` and its own
+ * nested objects `<Variant>ItemChild`. Every extractor re-enters with these
+ * under the variant's name so the models line up with the refs by
+ * construction. A map member cannot occur here: a variant with `properties`
+ * is typed as a model, never as a map.
+ */
+export function variantMemberSchemas(variant: SchemaObject): Record<string, SchemaObject> {
+  const members: Record<string, SchemaObject> = {};
+  if (Array.isArray(variant.type) && variant.type.includes('array') && variant.items) {
+    members['item'] = variant.items;
+  }
+  return members;
 }
 
 /** Build a single Field from a schema property entry. Shared across all extraction sites. */
@@ -747,13 +794,15 @@ function nameInlineObjectVariants(
  * `['object', 'null']` / `nullable: true` → `nullable<model>`.
  * A `oneOf: [X, { type: 'null' }]` variant has no `properties` of its own
  * and never reaches this path; `schemaToTypeRef` types it directly.
+ *
+ * Anything inline under a non-object member is named from the variant, never
+ * from the union's field: an `array` member types its items under the
+ * context `item` with the variant as parent (`<Variant>Item`, see
+ * `variantMemberSchemas`), and any other member under `value`
+ * (`<Variant>Value` for an inline enum). Naming them from the field would
+ * hand variant 0's model name to every variant's items.
  */
-function inlineVariantTypeRef(
-  variant: SchemaObject,
-  name: string,
-  contextName: string | undefined,
-  parentModelName: string | undefined,
-): TypeRef {
+function inlineVariantTypeRef(variant: SchemaObject, name: string): TypeRef {
   const modelRef: TypeRef = { kind: 'model', name };
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
@@ -762,7 +811,7 @@ function inlineVariantTypeRef(
     .map((t) =>
       t === 'object'
         ? modelRef
-        : schemaToTypeRef({ ...variant, type: t, nullable: false }, contextName, parentModelName),
+        : schemaToTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? 'item' : 'value', name),
     );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
   return nullable ? asNullable(ref) : ref;
@@ -1243,6 +1292,13 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
           const variantName = nameVariantModel(variant, baseQualified, emitted, namingDisc);
           emitted.push({ name: variantName, fields: [] });
           nestedModels.push(...extractInlineModelDeep(variantName, variant));
+          // A multi-type variant's array member types its items under the
+          // variant's name (`<Variant>Item`); extract them there too. The
+          // synthetic wrapper model is dropped, only its nested models kept.
+          const memberSchemas = variantMemberSchemas(variant);
+          if (Object.keys(memberSchemas).length > 0) {
+            nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }).slice(1));
+          }
         }
       }
     }
@@ -1449,7 +1505,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
-        variants.push(inlineVariantTypeRef(v, mappedName ?? inlineName, contextName, parentModelName));
+        variants.push(inlineVariantTypeRef(v, mappedName ?? inlineName));
       } else {
         variants.push(schemaToTypeRef(v, contextName, parentModelName));
       }

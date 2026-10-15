@@ -109,6 +109,8 @@ The optional `keyType` allows non-string map keys (e.g., enum-keyed maps). When 
 
 A map's value schema is typed the same way an array's items are: with the owning field's name and parent model. When the value is an inline object (or an array or `oneOf` of inline objects), the parser extracts it as a model named by the parent plus the singularized field name, e.g. `layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`, matching `shapes` → `CreateDrawingRequestShape` for array items. `additionalProperties: {}` or `true` keeps the value type `unknown`.
 
+Inline object variants of a `oneOf`/`anyOf` are extracted as their own models: the first keeps the field's inline name (`DrawingShape`), later ones take a const-discriminator prefix when every variant pins one (`SquareDrawingShape`) or a position suffix otherwise (`DrawingShape2`). Everything nested under a variant is named from the variant, never from the union's field: a multi-type variant such as `type: ['object', 'array']` keeps its other types beside the model (`union[model, array]`), and the inline items of that array member are `<Variant>Item` (`DrawingShape2Item`, with nested objects `DrawingShape2ItemChild`); any other non-object member is named `<Variant>Value` (an inline enum, for instance). A variant that admits null (`['object', 'null']` or `nullable: true`) keeps its `nullable` wrapper around the model.
+
 ### UnionType
 
 ```typescript

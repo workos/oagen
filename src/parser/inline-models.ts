@@ -1,7 +1,7 @@
 import type { Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema, isInlineObjectSchema, resolveSchemaName } from './schemas.js';
+import { buildFieldFromSchema, isInlineObjectSchema, resolveSchemaName, variantMemberSchemas } from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -135,6 +135,11 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
             existingNames.add(variantName);
             results.push(buildInlineModel(variantName, variant));
             extractInlineModelsFromProperties(variant, results, variantName);
+            // A multi-type variant (`type: ['object', 'array']`) types the
+            // items of its array member under the variant's name
+            // (`<Variant>Item`, see `variantMemberSchemas`); re-enter with
+            // them as a same-named synthetic property so the models line up.
+            extractInlineModelsFromProperties({ properties: variantMemberSchemas(variant) }, results, variantName);
           }
         }
       }
