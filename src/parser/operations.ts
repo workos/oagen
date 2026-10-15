@@ -393,6 +393,17 @@ function operationIdModelName(operationId: string, suffix: 'Request' | 'Response
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
 }
 
+/**
+ * The stem every model derived from an `operationId` starts with: its
+ * `Request` and `Response` models, a list's `Item`, nested inline models under
+ * those (`…ResponseOwner`) and envelope companions (`…ListMetadata`). Every
+ * step of cleanSchemaName is a global replace or acts on the leading word, so
+ * this is a true prefix of each of those names. Used to reserve them all.
+ */
+function operationIdModelBase(operationId: string): string {
+  return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)));
+}
+
 function inferOperationName(
   method: HttpMethod,
   path: string,
@@ -1392,14 +1403,25 @@ export function derivePathBasedName(
  * `operationId`, keyed by `${method} ${path}`.
  *
  * A prefix collides when two distinct raw paths with the same method flatten
- * to it (see derivePathModelBaseName), or when `<prefix>Request` or
- * `<prefix>Response` is a name already taken: by an operation with an
- * `operationId` (an unnamed `POST /audit/events` must not overwrite the
- * models of a `POST /legacy-audit` whose operationId is `auditEventsPost`)
- * or by a component schema (`components/schemas/AuditEventsPostRequest`).
- * Those names are reserved first and never change. The reservation is
- * unconditional — an inline body is never merged into a same-named component
- * even when the shapes agree — so the rule stays simple and order-free.
+ * to it (see derivePathModelBaseName), or when a reserved name starts with
+ * it. The reserved names are every resolved component model name and, for
+ * every operation with an `operationId`, its model stem
+ * (operationIdModelBase). A prefix is the stem of several emitted names —
+ * `…Request`, `…Response`, a list's `…Item`, nested inline models such as
+ * `…ResponseOwner`, envelope companions such as `…ListMetadata` — so the
+ * check is on the stem, not on an enumeration of suffixes: an unnamed
+ * `GET /audit/events` must not overwrite `components/schemas/AuditEventsGetItem`
+ * any more than an unnamed `POST /audit/events` may overwrite the models of
+ * a `POST /legacy-audit` whose operationId is `auditEventsPost`. Reserved
+ * names never change.
+ *
+ * This is deliberately a superset: a component named `AuditEventsGetter`, or
+ * an operationId `auditEventsGetSummary`, also pushes `GET /audit/events`
+ * onto a hashed name although no emitted name would coincide. Determinism
+ * and never sharing a name wrongly matter more than the rare extra hash, and
+ * the reservation is unconditional — an inline body is never merged into a
+ * same-named component even when the shapes agree — so the rule stays
+ * simple and order-free.
  *
  * These names are types SDK users read and import, so a collision costs the
  * plain name only where it must. Within a group of paths that flatten to one
@@ -1427,8 +1449,7 @@ function resolvePathModelBaseNames(paths: Record<string, PathItem>, componentMod
       const op = pathItem[method];
       if (!op) continue;
       if (op.operationId) {
-        reservedNames.add(operationIdModelName(op.operationId, 'Request'));
-        reservedNames.add(operationIdModelName(op.operationId, 'Response'));
+        reservedNames.add(operationIdModelBase(op.operationId));
         continue;
       }
       const plain = derivePathModelBaseName(path, method);
@@ -1439,9 +1460,10 @@ function resolvePathModelBaseNames(paths: Record<string, PathItem>, componentMod
     }
   }
 
+  const reservedList = [...reservedNames];
   const canonicalByPlainName = new Map<string, string | undefined>();
   for (const [plain, rawPaths] of rawPathsByPlainName) {
-    const reserved = reservedNames.has(plain + 'Request') || reservedNames.has(plain + 'Response');
+    const reserved = reservedList.some((name) => name.startsWith(plain));
     canonicalByPlainName.set(plain, reserved ? undefined : canonicalPath(rawPaths));
   }
 

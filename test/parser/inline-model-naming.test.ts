@@ -541,6 +541,118 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  /** The inline item model name of an array response, or undefined. */
+  const itemNameOf = (response: unknown) => (response as { items?: { name?: string } }).items?.name;
+
+  it('reserves every name a component could take: AuditEventsGetItem beside an unnamed GET /audit/events list', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamedList = {
+      get: { responses: { '200': jsonResponse({ type: 'array', items: inlineObject({ a: { type: 'string' } }) }) } },
+    };
+    const spec = {
+      ...api({ '/audit/events': unnamedList }),
+      components: { schemas: { AuditEventsGetItem: inlineObject({ b: { type: 'string' }, c: { type: 'string' } }) } },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    const [op] = ops;
+    const itemName = itemNameOf(op.response);
+    expect([op.path, itemName]).toMatchInlineSnapshot(`
+      [
+        "/audit/events",
+        "AuditEventsD4C4A0GetItem",
+      ]
+    `);
+
+    // The component keeps its name and fields; the list items get their own model.
+    expect(fieldsOf(models, 'AuditEventsGetItem')).toEqual(['b', 'c']);
+    expect(itemName).not.toBe('AuditEventsGetItem');
+    expect(fieldsOf(models, itemName)).toEqual(['a']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('reserves the whole stem of an operationId: auditEventsGet minting AuditEventsGetItem beside an unnamed GET /audit/events list', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamedList = {
+      get: { responses: { '200': jsonResponse({ type: 'array', items: inlineObject({ a: { type: 'string' } }) }) } },
+    };
+    const namedList = {
+      get: {
+        operationId: 'auditEventsGet',
+        responses: {
+          '200': jsonResponse({ type: 'array', items: inlineObject({ b: { type: 'string' }, c: { type: 'string' } }) }),
+        },
+      },
+    };
+    const itemNamesByPath = (paths: object) =>
+      parseInline(api(paths), (ir) =>
+        Object.fromEntries(ir.services.flatMap((s) => s.operations).map((o) => [o.path, itemNameOf(o.response)])),
+      );
+
+    const forward = await itemNamesByPath({ '/audit/events': unnamedList, '/legacy-audit': namedList });
+    const backward = await itemNamesByPath({ '/legacy-audit': namedList, '/audit/events': unnamedList });
+    expect(backward).toEqual(forward);
+    expect(forward).toMatchInlineSnapshot(`
+      {
+        "/audit/events": "AuditEventsD4C4A0GetItem",
+        "/legacy-audit": "AuditEventsGetItem",
+      }
+    `);
+
+    // The operationId's stem `AuditEventsGet` is a prefix of the path-based `AuditEventsGetItem`,
+    // so the operationId keeps its item model and the path-based list steps aside.
+    expect(forward['/legacy-audit']).toBe('AuditEventsGetItem');
+    expect(forward['/audit/events']).not.toBe('AuditEventsGetItem');
+    const { models } = await parseInline(
+      api({ '/audit/events': unnamedList, '/legacy-audit': namedList }),
+      summarizeAll,
+    );
+    expect(fieldsOf(models, 'AuditEventsGetItem')).toEqual(['b', 'c']);
+    expect(fieldsOf(models, forward['/audit/events'])).toEqual(['a']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('is deliberately a superset: AuditEventsGetter or auditEventsGetSummary also push GET /audit/events onto a hashed name', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamed = { get: { responses: { '200': jsonResponse(inlineObject({ a: { type: 'string' } })) } } };
+
+    const withComponent = await parseInline(
+      {
+        ...api({ '/audit/events': unnamed }),
+        components: { schemas: { AuditEventsGetter: inlineObject({ b: { type: 'string' } }) } },
+      },
+      summarizeAll,
+    );
+    const withOperationId = await parseInline(
+      api({
+        '/audit/events': unnamed,
+        '/legacy-audit': {
+          get: {
+            operationId: 'auditEventsGetSummary',
+            responses: { '200': jsonResponse(inlineObject({ b: { type: 'string' } })) },
+          },
+        },
+      }),
+      summarizeAll,
+    );
+
+    // No emitted name would have coincided, but a reserved name starts with the
+    // path-based prefix `AuditEventsGet`, so the path gets the hash. Expected.
+    expect([withComponent.ops[0].response, withOperationId.ops[0].response]).toMatchInlineSnapshot(`
+      [
+        "AuditEventsD4C4A0GetResponse",
+        "AuditEventsD4C4A0GetResponse",
+      ]
+    `);
+    for (const { ops, models } of [withComponent, withOperationId]) {
+      expect(ops[0].response).not.toBe('AuditEventsGetResponse');
+      expect(fieldsOf(models, ops[0].response)).toEqual(['a']);
+    }
+    expect(fieldsOf(withComponent.models, 'AuditEventsGetter')).toEqual(['b']);
+    expect(withOperationId.ops[1].response).toBe('AuditEventsGetSummaryResponse');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('normalizes so request and response prefixes agree (/a/b, /v2/x/y)', async () => {
     const op = {
       post: {
