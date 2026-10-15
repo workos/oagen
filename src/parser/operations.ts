@@ -267,6 +267,13 @@ export function extractOperations(
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
+  // One registry for the whole spec, seeded with the component models: a
+  // header model's name must not collide with a differently shaped component
+  // (a request body may already use `DocumentsXMeta`) or with another
+  // operation's header model, or the later merge would overwrite the first.
+  const headerModelRegistry: HeaderModelRegistry = new Map(
+    (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
+  );
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -292,6 +299,7 @@ export function extractOperations(
         componentParameters,
         componentRequestBodies,
         componentHeaders,
+        headerModelRegistry,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -701,8 +709,10 @@ function buildOperation(
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  headerModelRegistry: HeaderModelRegistry = new Map(),
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
+  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
@@ -778,7 +788,12 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, path, method, componentSchemas, componentHeaders, opContext);
+  } = extractResponses(op.responses, op, path, method, componentSchemas, {
+    componentHeaders,
+    serviceName: opContext,
+    operationQualifier: toPascalCase(operationName),
+    registry: headerModelRegistry,
+  });
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -814,7 +829,7 @@ function buildOperation(
 
   return {
     operation: {
-      name: inferOperationName(method, path, op.operationId, operationIdTransform),
+      name: operationName,
       description: buildDescription(op.summary, op.description),
       httpMethod: method,
       path,
@@ -1287,11 +1302,24 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
 }
 
 /**
- * Per-operation record of the inline header models already materialized:
- * model name → shape fingerprint. Lets two headers whose inline schemas would
- * get the same name be told apart when they describe different shapes.
+ * Spec-wide record of every model name a header model must not silently
+ * reuse: the component models (seeded up front) and each inline header model
+ * materialized so far. The value carries the model's shape fingerprint, so a
+ * header whose shape matches can share the name, and — for header models —
+ * which operation produced it, so a collision inside one operation can be
+ * told apart from one across operations.
  */
-type HeaderModelRegistry = Map<string, string>;
+type HeaderModelRegistry = Map<string, { fingerprint: string; operation?: string }>;
+
+/** What response-header extraction needs from the operation and the spec. */
+interface HeaderExtractionContext {
+  componentHeaders?: Record<string, Record<string, unknown>>;
+  /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
+  serviceName?: string;
+  /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
+  operationQualifier: string;
+  registry: HeaderModelRegistry;
+}
 
 /** Shape of a model, independent of field order: name, requiredness, and type of every field. */
 function modelFingerprint(model: Model): string {
@@ -1316,22 +1344,36 @@ function stableStringify(value: unknown): string {
 
 /**
  * Type a header's schema and materialize the inline models it names, under a
- * property name that does not collide with a different shape this operation
- * has already materialized.
+ * property name that does not collide with a different shape anywhere in the
+ * spec.
  *
  * Header models are named from the service and header name alone, so an
- * inline `X-Meta` on a 200 and a differently shaped one on a 429 would both
- * be `DocumentsXMeta`, and `keepLargestByName` would then hand the error
- * header the success header's fields. The response visited first keeps the
- * bare name; responses are visited in ascending status-code order (integer-
- * like keys iterate that way), so the lowest code wins regardless of where it
- * appears in the document. A later header with a different shape — at any
- * depth, a nested object that differs counts — is re-derived under
- * `${name}${statusCode}` (`DocumentsXMeta429`), or `${name}2`, `${name}3`,
- * ... when that is taken by yet another shape. Both the type and the models
- * come from the same property name, so nested models
- * (`DocumentsXMeta429Origin`) line up by construction. Identical shapes keep
- * sharing the bare name and are materialized once.
+ * inline `X-Meta` on a `Documents` operation is `DocumentsXMeta` — the same
+ * name a component schema, or the same header on a 429 or on another
+ * `Documents` operation, may already own with a different shape. Left alone,
+ * the later merge keeps one definition for the name and every other
+ * reference silently gets the wrong fields (a request body using the
+ * component would even change type without any emitter reading headers).
+ *
+ * The first owner of a name keeps it: component models are seeded before any
+ * operation, operations are visited in path order, and a single operation's
+ * responses in ascending status-code order (integer-like keys iterate that
+ * way), so the lowest code wins regardless of where it appears in the
+ * document. A later header with a different shape — at any depth, a nested
+ * object that differs counts — is re-derived under the first free candidate:
+ *
+ *   1. the bare header name                `DocumentsXMeta`
+ *   2. when the name is taken inside this operation, the status code
+ *      (`DocumentsXMeta429`); when taken by a component or another
+ *      operation, the operation (`DocumentsCreateDocumentXMeta`)
+ *   3. the other of those two
+ *   4. operation and status code            `DocumentsCreateDocumentXMeta429`
+ *   5. a numeric suffix                     `DocumentsXMeta2`, `DocumentsXMeta3`, ...
+ *
+ * Both the type and the models come from the same property name, so nested
+ * models (`DocumentsXMeta429Origin`) line up by construction. A shape
+ * identical to the name's current owner shares it and materializes nothing
+ * new, which is also how a header reuses a matching component model.
  *
  * Treating the header as a one-property object reuses the field-level
  * extractor, whose names come from the same `qualifyInlineModelName(name,
@@ -1342,25 +1384,39 @@ function typeHeaderSchema(
   schema: SchemaObject,
   name: string,
   statusCode: number,
-  parentName: string | undefined,
+  ctx: HeaderExtractionContext,
   models: Model[],
-  registry: HeaderModelRegistry,
 ): TypeRef {
+  const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
+  const byStatus = `${name}${statusCode}`;
+  const byOperation = `${ctx.operationQualifier}${name}`;
+  const byBoth = `${ctx.operationQualifier}${name}${statusCode}`;
+  let candidates = [name, byStatus, byOperation, byBoth];
+
   for (let attempt = 0; ; attempt++) {
-    const propertyName = attempt === 0 ? name : attempt === 1 ? `${name}${statusCode}` : `${name}${attempt}`;
+    const propertyName =
+      attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`;
     const trial: Model[] = [];
     extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, parentName);
 
     const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
-    const collides = fingerprints.some(([model, fingerprint]) => {
-      const registered = registry.get(model.name);
-      return registered !== undefined && registered !== fingerprint;
+    const collisions = fingerprints.flatMap(([model, fingerprint]) => {
+      const registered = ctx.registry.get(model.name);
+      return registered !== undefined && registered.fingerprint !== fingerprint ? [registered] : [];
     });
-    if (collides) continue;
+    if (collisions.length > 0) {
+      // Decide the preference between candidates 2 and 3 from the bare name's
+      // owner: a clash within this operation reads best by status code, one
+      // with a component or another operation by operation name.
+      if (attempt === 0 && !collisions.every((c) => c.operation === ctx.operationQualifier)) {
+        candidates = [name, byOperation, byStatus, byBoth];
+      }
+      continue;
+    }
 
     for (const [model, fingerprint] of fingerprints) {
-      if (registry.has(model.name)) continue;
-      registry.set(model.name, fingerprint);
+      if (ctx.registry.has(model.name)) continue;
+      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
       models.push(model);
     }
     return schemaToTypeRef(schema, propertyName, parentName);
@@ -1378,12 +1434,10 @@ function typeHeaderSchema(
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
-  componentHeaders: Record<string, Record<string, unknown>> | undefined,
   operationLabel: string,
-  operationContext: string | undefined,
   statusCode: number,
+  ctx: HeaderExtractionContext,
   models: Model[],
-  registry: HeaderModelRegistry,
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
@@ -1393,16 +1447,15 @@ function extractResponseHeaders(
     // media type is already carried by the response's `content` map.
     if (name.toLowerCase() === 'content-type') continue;
 
-    const header = resolveHeaderRef(raw, componentHeaders, name, operationLabel);
+    const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel);
     if (!header) continue;
 
     // A Header Object declares `schema` or a single-entry `content` map; with
     // `content`, the first (only) media type's schema types the header.
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
-    const parentName = operationContext ? toPascalCase(operationContext) : undefined;
     const type: TypeRef = schema
-      ? typeHeaderSchema(schema, name, statusCode, parentName, models, registry)
+      ? typeHeaderSchema(schema, name, statusCode, ctx, models)
       : { kind: 'primitive', type: 'string' };
 
     result.push({
@@ -1432,8 +1485,7 @@ function extractResponses(
   path?: string,
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
-  componentHeaders?: Record<string, Record<string, unknown>>,
-  operationContext?: string,
+  headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
@@ -1463,7 +1515,6 @@ function extractResponses(
   // Kept apart from `inlineModels`, which the latest 2xx body replaces
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
-  const headerModelRegistry: HeaderModelRegistry = new Map();
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
@@ -1472,17 +1523,7 @@ function extractResponses(
     // response no branch below keeps (`default`, 1xx) declares none worth
     // materializing models for.
     const headers =
-      code >= 200
-        ? extractResponseHeaders(
-            resp.headers,
-            componentHeaders,
-            opLabel,
-            operationContext,
-            code,
-            headerModels,
-            headerModelRegistry,
-          )
-        : undefined;
+      code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, headerContext, headerModels) : undefined;
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };

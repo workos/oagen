@@ -9,7 +9,7 @@ import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inlin
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
 import { collectResponseHeaders, collectModelRefs } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
-import type { ApiSpec, Enum, Model, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Field, Model, Operation } from '../../src/ir/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/response-headers.yml');
@@ -776,7 +776,7 @@ describe('inline header models', () => {
       expect(fieldsOf(inlineModels, 'DocumentsXMeta429')).toEqual(['reset_at']);
     });
 
-    it('falls back to a numeric suffix when the status-qualified name is taken by another shape', () => {
+    it('qualifies by the operation when the status-qualified name is taken by another shape', () => {
       // A header literally named `X-Meta429` on the 200 occupies `DocumentsXMeta429`.
       const { op, inlineModels } = extract({
         '200': {
@@ -789,11 +789,188 @@ describe('inline header models', () => {
         '429': { description: 'throttled', headers: { 'X-Meta': object({ reset_at: { type: 'integer' } }) } },
       });
 
-      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta2' });
-      expect(fieldsOf(inlineModels, 'DocumentsXMeta2')).toEqual(['reset_at']);
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsListDocumentsXMeta' });
+      expect(fieldsOf(inlineModels, 'DocumentsListDocumentsXMeta')).toEqual(['reset_at']);
       expect(fieldsOf(inlineModels, 'DocumentsXMeta429')).toEqual(['taken']);
       expectHeaderModelsMaterialized(op, inlineModels);
     });
+  });
+});
+
+describe('header models across the spec', () => {
+  const object = (properties: Record<string, unknown>) => ({ schema: { type: 'object', properties } });
+  const stringField = (name: string): Field => ({ name, type: { kind: 'primitive', type: 'string' }, required: false });
+  const fieldsOf = (models: Model[], name: string) => models.find((m) => m.name === name)?.fields.map((f) => f.name);
+  const modelNameOf = (type: unknown) => (type as { name: string }).name;
+
+  function extractAll(paths: Record<string, unknown>, componentModels: Model[] = []) {
+    const { services, inlineModels } = extractOperations(
+      paths as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      componentModels,
+    );
+    return { ops: services.flatMap((s) => s.operations), inlineModels };
+  }
+
+  // A singular service: `cleanSchemaName` singularizes a component's leading
+  // word, so a component can only share a header model's name when the
+  // service name is already singular (`Profile` + `X-Meta` → `ProfileXMeta`).
+  const createWithHeader = (headerProperties: Record<string, unknown>) => ({
+    '/profile': {
+      post: {
+        operationId: 'createProfile',
+        requestBody: {
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/ProfileXMeta' } } },
+        },
+        responses: { '201': { description: 'created', headers: { 'X-Meta': object(headerProperties) } } },
+      },
+    },
+  });
+
+  it('qualifies a header model by its operation when a same-named component has a different shape', () => {
+    const componentModels: Model[] = [{ name: 'ProfileXMeta', fields: [stringField('note')] }];
+    const { ops, inlineModels } = extractAll(
+      createWithHeader({ etag: { type: 'string' }, version: { type: 'integer' } }),
+      componentModels,
+    );
+
+    // The request body still names the component, and the component is untouched.
+    expect(ops[0].requestBody).toEqual({ kind: 'model', name: 'ProfileXMeta' });
+    expect(componentModels[0].fields.map((f) => f.name)).toEqual(['note']);
+    // The header gets its own model under an operation-qualified name.
+    expect(ops[0].responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'ProfileCreateProfileXMeta' });
+    expect(inlineModels.map((m) => m.name)).toEqual(['ProfileCreateProfileXMeta']);
+    expect(fieldsOf(inlineModels, 'ProfileCreateProfileXMeta')).toEqual(['etag', 'version']);
+  });
+
+  it('shares a same-named component whose shape is identical and materializes nothing new', () => {
+    const componentModels: Model[] = [{ name: 'ProfileXMeta', fields: [stringField('etag')] }];
+    const { ops, inlineModels } = extractAll(createWithHeader({ etag: { type: 'string' } }), componentModels);
+
+    expect(ops[0].responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'ProfileXMeta' });
+    expect(inlineModels).toEqual([]);
+  });
+
+  it('keeps same-named headers with different shapes on two operations apart, whichever path comes first', () => {
+    const list = {
+      get: {
+        operationId: 'listDocuments',
+        responses: { '200': { description: 'ok', headers: { 'X-Meta': object({ total: { type: 'integer' } }) } } },
+      },
+    };
+    const get = {
+      get: {
+        operationId: 'getDocument',
+        responses: { '200': { description: 'ok', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } } },
+      },
+    };
+
+    const listFirst = extractAll({ '/documents': list, '/documents/{id}': get });
+    const getFirst = extractAll({ '/documents/{id}': get, '/documents': list });
+
+    for (const { ops, inlineModels } of [listFirst, getFirst]) {
+      const names = Object.fromEntries(ops.map((op) => [op.name, modelNameOf(op.responseHeaders?.[0].type)]));
+      expect(names.listDocuments).not.toBe(names.getDocument);
+      expect(fieldsOf(inlineModels, names.listDocuments)).toEqual(['total']);
+      expect(fieldsOf(inlineModels, names.getDocument)).toEqual(['etag']);
+    }
+    // The operation visited first keeps the bare name; the other is qualified by its operation.
+    expect(listFirst.ops.map((op) => modelNameOf(op.responseHeaders?.[0].type))).toEqual([
+      'DocumentsXMeta',
+      'DocumentsGetDocumentXMeta',
+    ]);
+    expect(getFirst.ops.map((op) => modelNameOf(op.responseHeaders?.[0].type))).toEqual([
+      'DocumentsXMeta',
+      'DocumentsListDocumentsXMeta',
+    ]);
+  });
+
+  it('falls back to a numeric suffix when every qualified name is taken by another shape', () => {
+    const componentModels: Model[] = [
+      { name: 'DocumentsXMeta', fields: [stringField('a')] },
+      { name: 'DocumentsXMeta429', fields: [stringField('b')] },
+      { name: 'DocumentsListDocumentsXMeta', fields: [stringField('c')] },
+      { name: 'DocumentsListDocumentsXMeta429', fields: [stringField('d')] },
+    ];
+    const { ops, inlineModels } = extractAll(
+      {
+        '/documents': {
+          get: {
+            operationId: 'listDocuments',
+            responses: {
+              '200': { description: 'ok' },
+              '429': { description: 'throttled', headers: { 'X-Meta': object({ reset_at: { type: 'integer' } }) } },
+            },
+          },
+        },
+      },
+      componentModels,
+    );
+
+    expect(ops[0].errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta2' });
+    expect(fieldsOf(inlineModels, 'DocumentsXMeta2')).toEqual(['reset_at']);
+  });
+
+  it('leaves a same-named component untouched through parseSpec', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-response-headers-'));
+    const specPath = join(dir, 'component-collision.yml');
+    writeFileSync(
+      specPath,
+      `
+openapi: '3.1.0'
+info:
+  title: Collision
+  version: '1'
+paths:
+  /profile:
+    post:
+      operationId: createProfile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileXMeta'
+      responses:
+        '201':
+          description: created
+          headers:
+            X-Meta:
+              schema:
+                type: object
+                properties:
+                  etag:
+                    type: string
+                  version:
+                    type: integer
+components:
+  schemas:
+    ProfileXMeta:
+      type: object
+      properties:
+        note:
+          type: string
+`,
+    );
+
+    try {
+      const spec = await parseSpec(specPath);
+      const op = spec.services.flatMap((s) => s.operations)[0];
+      const modelFields = (name: string) => spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+
+      // The component keeps its own field; nothing merged the header's shape over it.
+      expect(modelFields('ProfileXMeta')).toEqual(['note']);
+      expect(op.requestBody).toEqual({ kind: 'model', name: 'ProfileXMeta' });
+      expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'ProfileCreateProfileXMeta' });
+      expect(modelFields('ProfileCreateProfileXMeta')).toEqual(['etag', 'version']);
+      const messages = warn.mock.calls.map((call) => String(call[0]));
+      expect(messages.filter((m) => m.includes('ProfileXMeta'))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
