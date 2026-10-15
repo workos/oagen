@@ -1287,6 +1287,87 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
 }
 
 /**
+ * Per-operation record of the inline header models already materialized:
+ * model name → shape fingerprint. Lets two headers whose inline schemas would
+ * get the same name be told apart when they describe different shapes.
+ */
+type HeaderModelRegistry = Map<string, string>;
+
+/** Shape of a model, independent of field order: name, requiredness, and type of every field. */
+function modelFingerprint(model: Model): string {
+  return model.fields
+    .map((f) => `${f.name}${f.required ? '!' : '?'}:${stableStringify(f.type)}`)
+    .sort()
+    .join('|');
+}
+
+/** `JSON.stringify` with object keys sorted, so equal shapes serialize equally. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+/**
+ * Type a header's schema and materialize the inline models it names, under a
+ * property name that does not collide with a different shape this operation
+ * has already materialized.
+ *
+ * Header models are named from the service and header name alone, so an
+ * inline `X-Meta` on a 200 and a differently shaped one on a 429 would both
+ * be `DocumentsXMeta`, and `keepLargestByName` would then hand the error
+ * header the success header's fields. The response visited first keeps the
+ * bare name; responses are visited in ascending status-code order (integer-
+ * like keys iterate that way), so the lowest code wins regardless of where it
+ * appears in the document. A later header with a different shape — at any
+ * depth, a nested object that differs counts — is re-derived under
+ * `${name}${statusCode}` (`DocumentsXMeta429`), or `${name}2`, `${name}3`,
+ * ... when that is taken by yet another shape. Both the type and the models
+ * come from the same property name, so nested models
+ * (`DocumentsXMeta429Origin`) line up by construction. Identical shapes keep
+ * sharing the bare name and are materialized once.
+ *
+ * Treating the header as a one-property object reuses the field-level
+ * extractor, whose names come from the same `qualifyInlineModelName(name,
+ * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
+ * path uses.
+ */
+function typeHeaderSchema(
+  schema: SchemaObject,
+  name: string,
+  statusCode: number,
+  parentName: string | undefined,
+  models: Model[],
+  registry: HeaderModelRegistry,
+): TypeRef {
+  for (let attempt = 0; ; attempt++) {
+    const propertyName = attempt === 0 ? name : attempt === 1 ? `${name}${statusCode}` : `${name}${attempt}`;
+    const trial: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, parentName);
+
+    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
+    const collides = fingerprints.some(([model, fingerprint]) => {
+      const registered = registry.get(model.name);
+      return registered !== undefined && registered !== fingerprint;
+    });
+    if (collides) continue;
+
+    for (const [model, fingerprint] of fingerprints) {
+      if (registry.has(model.name)) continue;
+      registry.set(model.name, fingerprint);
+      models.push(model);
+    }
+    return schemaToTypeRef(schema, propertyName, parentName);
+  }
+}
+
+/**
  * Read a Response Object's `headers` map into IR response headers, resolving
  * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
  * survives so callers can leave the `headers` key off entirely.
@@ -1300,7 +1381,9 @@ function extractResponseHeaders(
   componentHeaders: Record<string, Record<string, unknown>> | undefined,
   operationLabel: string,
   operationContext: string | undefined,
+  statusCode: number,
   models: Model[],
+  registry: HeaderModelRegistry,
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
@@ -1318,13 +1401,9 @@ function extractResponseHeaders(
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
     const parentName = operationContext ? toPascalCase(operationContext) : undefined;
-    const type: TypeRef = schema ? schemaToTypeRef(schema, name, parentName) : { kind: 'primitive', type: 'string' };
-    // Materialize the models that `schemaToTypeRef` just named. Treating the
-    // header as a one-property object reuses the field-level extractor, whose
-    // names come from the same `qualifyInlineModelName(name, parent)` rule, so
-    // nested objects, array items, and oneOf variants all line up — the same
-    // trick the inline request-body path uses.
-    if (schema) extractInlineModelsFromProperties({ properties: { [name]: schema } }, models, parentName);
+    const type: TypeRef = schema
+      ? typeHeaderSchema(schema, name, statusCode, parentName, models, registry)
+      : { kind: 'primitive', type: 'string' };
 
     result.push({
       name,
@@ -1384,12 +1463,26 @@ function extractResponses(
   // Kept apart from `inlineModels`, which the latest 2xx body replaces
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
+  const headerModelRegistry: HeaderModelRegistry = new Map();
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
     // Headers belong to the status code they are declared on, success or
-    // error alike: `Location` on a 201/302, `Retry-After` on a 429.
-    const headers = extractResponseHeaders(resp.headers, componentHeaders, opLabel, operationContext, headerModels);
+    // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
+    // response no branch below keeps (`default`, 1xx) declares none worth
+    // materializing models for.
+    const headers =
+      code >= 200
+        ? extractResponseHeaders(
+            resp.headers,
+            componentHeaders,
+            opLabel,
+            operationContext,
+            code,
+            headerModels,
+            headerModelRegistry,
+          )
+        : undefined;
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };

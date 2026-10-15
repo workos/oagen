@@ -673,6 +673,128 @@ describe('inline header models', () => {
     expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'Meta' });
     expect(inlineModels).toEqual([]);
   });
+
+  it('creates no model for a header on a response no branch keeps (default)', () => {
+    const { op, inlineModels } = extract({
+      '200': { description: 'ok' },
+      default: {
+        description: 'anything else',
+        headers: { 'X-Meta': { schema: { type: 'object', properties: { etag: { type: 'string' } } } } },
+      },
+    });
+
+    expect('responseHeaders' in op).toBe(false);
+    expect(inlineModels).toEqual([]);
+  });
+
+  describe('same header name, different shapes', () => {
+    const object = (properties: Record<string, unknown>) => ({ schema: { type: 'object', properties } });
+    const fieldsOf = (models: Model[], name: string) => models.find((m) => m.name === name)?.fields.map((f) => f.name);
+
+    it('gives the 429 header a status-qualified model when its shape differs from the 200', () => {
+      const { op, inlineModels } = extract({
+        '200': { description: 'ok', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } },
+        '429': { description: 'throttled', headers: { 'X-Meta': object({ reset_at: { type: 'integer' } }) } },
+      });
+
+      expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta429' });
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta')).toEqual(['etag']);
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta429')).toEqual(['reset_at']);
+      expectHeaderModelsMaterialized(op, inlineModels);
+    });
+
+    it('shares one model when the shapes are identical', () => {
+      const { op, inlineModels } = extract({
+        '200': { description: 'ok', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } },
+        '202': { description: 'accepted', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } },
+        '429': { description: 'throttled', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } },
+      });
+
+      expect(op.successResponses?.map((r) => r.headers?.[0].type)).toEqual([
+        { kind: 'model', name: 'DocumentsXMeta' },
+        { kind: 'model', name: 'DocumentsXMeta' },
+      ]);
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+      expect(inlineModels.map((m) => m.name)).toEqual(['DocumentsXMeta']);
+    });
+
+    it('renames nested models along with the header that owns them', () => {
+      const { op, inlineModels } = extract({
+        '200': { description: 'ok', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } },
+        '429': {
+          description: 'throttled',
+          headers: {
+            'X-Meta': object({ origin: { type: 'object', properties: { zone: { type: 'string' } } } }),
+          },
+        },
+      });
+
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta429' });
+      expect(inlineModels.find((m) => m.name === 'DocumentsXMeta429')?.fields[0].type).toEqual({
+        kind: 'model',
+        name: 'DocumentsXMeta429Origin',
+      });
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta429Origin')).toEqual(['zone']);
+      expectHeaderModelsMaterialized(op, inlineModels);
+    });
+
+    it('treats a difference buried in a nested object as a different shape', () => {
+      const { op, inlineModels } = extract({
+        '200': {
+          description: 'ok',
+          headers: {
+            'X-Meta': object({ origin: { type: 'object', properties: { region: { type: 'string' } } } }),
+          },
+        },
+        '429': {
+          description: 'throttled',
+          headers: {
+            'X-Meta': object({ origin: { type: 'object', properties: { zone: { type: 'string' } } } }),
+          },
+        },
+      });
+
+      expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta429' });
+      expect(fieldsOf(inlineModels, 'DocumentsXMetaOrigin')).toEqual(['region']);
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta429Origin')).toEqual(['zone']);
+      expectHeaderModelsMaterialized(op, inlineModels);
+    });
+
+    it('gives the 429 header the distinct name even when it is declared first', () => {
+      // Integer-like keys iterate in ascending order, so the 200 is visited
+      // first and keeps the bare name no matter where the 429 appears.
+      const { op, inlineModels } = extract({
+        '429': { description: 'throttled', headers: { 'X-Meta': object({ reset_at: { type: 'integer' } }) } },
+        '200': { description: 'ok', headers: { 'X-Meta': object({ etag: { type: 'string' } }) } },
+      });
+
+      expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta429' });
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta')).toEqual(['etag']);
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta429')).toEqual(['reset_at']);
+    });
+
+    it('falls back to a numeric suffix when the status-qualified name is taken by another shape', () => {
+      // A header literally named `X-Meta429` on the 200 occupies `DocumentsXMeta429`.
+      const { op, inlineModels } = extract({
+        '200': {
+          description: 'ok',
+          headers: {
+            'X-Meta': object({ etag: { type: 'string' } }),
+            'X-Meta429': object({ taken: { type: 'boolean' } }),
+          },
+        },
+        '429': { description: 'throttled', headers: { 'X-Meta': object({ reset_at: { type: 'integer' } }) } },
+      });
+
+      expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta2' });
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta2')).toEqual(['reset_at']);
+      expect(fieldsOf(inlineModels, 'DocumentsXMeta429')).toEqual(['taken']);
+      expectHeaderModelsMaterialized(op, inlineModels);
+    });
+  });
 });
 
 describe('inline header enums', () => {
