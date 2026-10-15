@@ -48,7 +48,7 @@ export function classifyAndExtractResponse(
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
   if (isSingleResourceWrapper(schema)) {
-    return extractWrappedResource(schema, contextName);
+    return extractWrappedResource(schema, contextName, componentSchemas);
   }
 
   // 4. Direct resource or plain inline object
@@ -151,7 +151,7 @@ function extractListResponse(
     } else if (items.type === 'object' && items.properties) {
       const itemName = contextName.replace(/Response$/, '') + 'Item';
       itemTypeRef = { kind: 'model', name: itemName };
-      inlineModels.push(...extractInlineModel(itemName, items));
+      inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
     }
   }
 
@@ -164,6 +164,7 @@ function extractListResponse(
     required,
     dataPath,
     contextName.replace(/Response$/, ''),
+    componentSchemas,
   );
 
   return {
@@ -262,6 +263,7 @@ function extractEnvelopeCompanions(
   required: string[],
   dataPath: string,
   operationName: string,
+  componentSchemas?: Record<string, SchemaObject>,
 ): { envelopeFields: Field[]; envelopeCompanions: EnvelopeCompanion[] } {
   const envelopeFields: Field[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
@@ -269,15 +271,18 @@ function extractEnvelopeCompanions(
 
   for (const [key, propSchema] of Object.entries(properties)) {
     if (key === dataPath) continue;
-    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet);
+    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet, componentSchemas);
     envelopeFields.push(field);
 
+    // Both runs get the component map so a companion's `$ref` fields carry
+    // the component's example in the qualified and bare copies alike; it
+    // only feeds field metadata, so the two model lists still line up.
     const single: SchemaObject = { type: 'object', properties: { [key]: propSchema } };
     const models: Model[] = [];
-    extractInlineModelsFromProperties(single, models, operationName);
+    extractInlineModelsFromProperties(single, models, operationName, componentSchemas);
     if (models.length === 0) continue;
     const bare: Model[] = [];
-    extractInlineModelsFromProperties(single, bare, undefined);
+    extractInlineModelsFromProperties(single, bare, undefined, componentSchemas);
     envelopeCompanions.push({ field, models, bareNames: bare.map((m) => m.name) });
   }
 
@@ -344,7 +349,11 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   return false;
 }
 
-function extractWrappedResource(schema: SchemaObject, contextName: string): ResponseExtractionResult {
+function extractWrappedResource(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): ResponseExtractionResult {
   const props = schema.properties!;
   const wrapperKey = schema.required && schema.required.length === 1 ? schema.required[0] : Object.keys(props)[0];
   const propSchema = props[wrapperKey]!;
@@ -358,7 +367,7 @@ function extractWrappedResource(schema: SchemaObject, contextName: string): Resp
 
     if (objectVariant) {
       const modelName = deriveModelName(objectVariant, resourceName);
-      inlineModels.push(...extractInlineModel(modelName, objectVariant));
+      inlineModels.push(...extractInlineModel(modelName, objectVariant, componentSchemas));
 
       const hasNullVariant = propSchema.oneOf.some(
         (v) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
@@ -375,7 +384,7 @@ function extractWrappedResource(schema: SchemaObject, contextName: string): Resp
 
   // Direct object
   const modelName = deriveModelName(propSchema, resourceName);
-  inlineModels.push(...extractInlineModel(modelName, propSchema));
+  inlineModels.push(...extractInlineModel(modelName, propSchema, componentSchemas));
 
   return {
     response: { kind: 'model', name: modelName },
@@ -394,7 +403,7 @@ function extractDirectResource(
   // Direct object with properties (with or without explicit type: 'object')
   if (schema.properties && (schema.type === 'object' || !schema.type)) {
     const modelName = deriveModelName(schema, contextName);
-    inlineModels.push(...extractInlineModel(modelName, schema));
+    inlineModels.push(...extractInlineModel(modelName, schema, componentSchemas));
     return {
       response: { kind: 'model', name: modelName },
       inlineModels,
@@ -452,7 +461,7 @@ function extractDirectResource(
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
       // would collide with the component model, so keep the context name.
       const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(merged, contextName);
-      inlineModels.push(...extractInlineModel(modelName, merged));
+      inlineModels.push(...extractInlineModel(modelName, merged, componentSchemas));
       return {
         response: { kind: 'model', name: modelName },
         inlineModels,
@@ -469,7 +478,7 @@ function extractDirectResource(
         const modelName = deriveModelName(variant, contextName);
         const existingNames = new Set(inlineModels.map((m) => m.name));
         if (!existingNames.has(modelName)) {
-          inlineModels.push(...extractInlineModel(modelName, variant));
+          inlineModels.push(...extractInlineModel(modelName, variant, componentSchemas));
         }
       }
     }
@@ -487,7 +496,7 @@ function extractDirectResource(
     }
     if (items.properties && (items.type === 'object' || !items.type)) {
       const itemName = contextName.replace(/Response$/, '') + 'Item';
-      inlineModels.push(...extractInlineModel(itemName, items));
+      inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
       return {
         response: { kind: 'array', items: { kind: 'model', name: itemName } },
         inlineModels,
@@ -548,7 +557,18 @@ function qualifyNestedName(parentName: string, fieldName: string): string {
   return qualified;
 }
 
-function extractInlineModel(name: string, schema: SchemaObject): Model[] {
+/**
+ * Materialise an inline response object (and every nested inline object
+ * under it) as models. `componentSchemas` only feeds `buildFieldFromSchema`,
+ * so a response field that `$ref`s a component takes the component's
+ * `example`/`examples` exactly as a request-body or component-model field
+ * does; nested models get the same map so the fallback reaches every level.
+ */
+function extractInlineModel(
+  name: string,
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): Model[] {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
   const properties = schema.properties ?? {};
@@ -556,7 +576,7 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas));
 
     // Recursively extract nested inline objects — qualify with parent name
     // to avoid generic names like "Domains" when multiple parents have a "domains" field.
@@ -564,13 +584,13 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
     // form, which schemaToTypeRef turns into a nullable model reference.
     if (isInlineObjectSchema(fieldSchema)) {
       const nestedName = qualifyNestedName(name, fieldName);
-      nestedModels.push(...extractInlineModel(nestedName, fieldSchema));
+      nestedModels.push(...extractInlineModel(nestedName, fieldSchema, componentSchemas));
     }
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items;
       if (isInlineObjectSchema(items)) {
         const nestedName = qualifyNestedName(name, fieldName);
-        nestedModels.push(...extractInlineModel(nestedName, items));
+        nestedModels.push(...extractInlineModel(nestedName, items, componentSchemas));
       }
     }
     // Handle allOf with inline object properties — merge into a single nested model
@@ -586,7 +606,7 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
         const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
         const existingNames = new Set(nestedModels.map((m) => m.name));
         if (!existingNames.has(nestedName)) {
-          nestedModels.push(...extractInlineModel(nestedName, merged));
+          nestedModels.push(...extractInlineModel(nestedName, merged, componentSchemas));
         }
       }
     }
@@ -598,7 +618,7 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
         const nestedName = qualifyNestedName(name, fieldName);
         const existingNames = new Set(nestedModels.map((m) => m.name));
         if (!existingNames.has(nestedName)) {
-          nestedModels.push(...extractInlineModel(nestedName, objectVariant));
+          nestedModels.push(...extractInlineModel(nestedName, objectVariant, componentSchemas));
         }
       }
     }
