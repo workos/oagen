@@ -227,11 +227,15 @@ function normalizeBound(inclusive: unknown, exclusive: unknown): { inclusive?: n
 /** Copy `dependentRequired` when it is an object whose values are string arrays; anything else is ignored. */
 function readDependentRequired(value: unknown): Record<string, string[]> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const out: Record<string, string[]> = {};
+  const entries: [string, string[]][] = [];
   for (const [property, deps] of Object.entries(value as Record<string, unknown>)) {
-    if (Array.isArray(deps) && deps.every((d): d is string => typeof d === 'string')) out[property] = [...deps];
+    if (Array.isArray(deps) && deps.every((d): d is string => typeof d === 'string'))
+      entries.push([property, [...deps]]);
   }
-  return Object.keys(out).length > 0 ? out : undefined;
+  // Object.fromEntries creates an own property for every key. Assigning
+  // `out[property]` on a literal would instead set the prototype for a
+  // dependency named `__proto__` and silently drop it.
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 export interface ExtractedSchemas {

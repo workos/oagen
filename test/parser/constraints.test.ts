@@ -9,6 +9,19 @@ import { parseSpec } from '../../src/parser/parse.js';
 import type { Model } from '../../src/ir/types.js';
 
 describe('extractConstraints', () => {
+  it('keeps a dependency named __proto__ as an own entry', () => {
+    // Parsed from JSON the way a document arrives, so the key is an own
+    // property of the input rather than an object-literal prototype slot.
+    const schema = JSON.parse('{"dependentRequired":{"__proto__":["a"],"b":["c"]}}');
+    const dependentRequired = extractConstraints(schema)?.dependentRequired ?? {};
+    expect(Object.entries(dependentRequired)).toEqual([
+      ['__proto__', ['a']],
+      ['b', ['c']],
+    ]);
+    expect(Object.prototype.hasOwnProperty.call(dependentRequired, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(dependentRequired)).toBe(Object.prototype);
+  });
+
   it('returns undefined for a schema with no validation keyword', () => {
     expect(
       extractConstraints({ type: 'string', format: 'uuid', description: 'An id', default: 'x', example: 'y' }),
