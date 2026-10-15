@@ -1417,3 +1417,172 @@ describe('singular siblings: only name-minting siblings count, and identical sha
     expectConsistent(ir, ['User']);
   });
 });
+
+describe('shape sharing keeps property names, and element fallbacks avoid sibling claims (#206 follow-up)', () => {
+  const str = { kind: 'primitive', type: 'string' };
+  const int = { kind: 'primitive', type: 'integer' };
+  const num = { kind: 'primitive', type: 'number' };
+  const bool = { kind: 'primitive', type: 'boolean' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const obj = (properties: Record<string, SchemaObject>, extra: Partial<SchemaObject> = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const info = { title: 'round 8', version: '1' };
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = modelRefsIn(ir.models);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  it('does not share when a property named `description` differs in type', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          Drawing: obj({
+            layer: obj({ description: { type: 'string' } }),
+            layers: { type: 'array', items: obj({ description: { type: 'integer' } }) },
+          }),
+        },
+      },
+    });
+
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      layer: model('DrawingLayer'),
+      layers: { kind: 'array', items: model('DrawingLayersItem') },
+    });
+    expect(types['DrawingLayer']).toEqual({ description: str });
+    expect(types['DrawingLayersItem']).toEqual({ description: int });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Drawing', 'DrawingLayer', 'DrawingLayersItem']);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('keeps a property named `title` apart from the `title` keyword', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          // A `title` property of differing type: split, whatever the keywords say.
+          Drawing: obj({
+            layer: obj({ title: { type: 'string' } }, { title: 'Layer', description: 'The layer' }),
+            layers: { type: 'array', items: obj({ title: { type: 'number' } }, { title: 'Layer' }) },
+          }),
+          // Same `title` property, different documentation keywords: still shared.
+          Canvas: obj({
+            layer: obj({ title: { type: 'string' } }, { title: 'Layer', description: 'Primary' }),
+            layers: { type: 'array', items: obj({ title: { type: 'string' } }, { description: 'All of them' }) },
+          }),
+        },
+      },
+    });
+
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      layer: model('DrawingLayer'),
+      layers: { kind: 'array', items: model('DrawingLayersItem') },
+    });
+    expect(types['DrawingLayer']).toEqual({ title: str });
+    expect(types['DrawingLayersItem']).toEqual({ title: num });
+    expect(types['Canvas']).toEqual({
+      layer: model('CanvasLayer'),
+      layers: { kind: 'array', items: model('CanvasLayer') },
+    });
+    expect(types['CanvasLayer']).toEqual({ title: str });
+    expect(ir.models.map((m) => m.name).sort()).toEqual([
+      'Canvas',
+      'CanvasLayer',
+      'Drawing',
+      'DrawingLayer',
+      'DrawingLayersItem',
+    ]);
+    expectConsistent(ir, ['Drawing', 'Canvas']);
+  });
+
+  it('the array fallback steps past a sibling that already claims `<Field>Item`', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          Drawing: obj({
+            layer: obj({ name: { type: 'string' } }),
+            layers: { type: 'array', items: obj({ visible: { type: 'boolean' } }) },
+            layers_item: obj({ opacity: { type: 'number' } }),
+          }),
+        },
+      },
+    });
+
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      layer: model('DrawingLayer'),
+      layers: { kind: 'array', items: model('DrawingLayersArrayItem') },
+      layers_item: model('DrawingLayersItem'),
+    });
+    expect(types['DrawingLayer']).toEqual({ name: str });
+    expect(types['DrawingLayersItem']).toEqual({ opacity: num });
+    expect(types['DrawingLayersArrayItem']).toEqual({ visible: bool });
+    expect(ir.models.map((m) => m.name).sort()).toEqual([
+      'Drawing',
+      'DrawingLayer',
+      'DrawingLayersArrayItem',
+      'DrawingLayersItem',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('the map fallback steps past a sibling that already claims `<Field>Value`', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          Drawing: obj({
+            layer: obj({ name: { type: 'string' } }),
+            layers: { type: 'object', additionalProperties: obj({ visible: { type: 'boolean' } }) },
+            layers_value: obj({ opacity: { type: 'number' } }),
+          }),
+        },
+      },
+    });
+
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      layer: model('DrawingLayer'),
+      layers: { kind: 'map', valueType: model('DrawingLayersMemberValue') },
+      layers_value: model('DrawingLayersValue'),
+    });
+    expect(types['DrawingLayer']).toEqual({ name: str });
+    expect(types['DrawingLayersValue']).toEqual({ opacity: num });
+    expect(types['DrawingLayersMemberValue']).toEqual({ visible: bool });
+    expect(ir.models.map((m) => m.name).sort()).toEqual([
+      'Drawing',
+      'DrawingLayer',
+      'DrawingLayersMemberValue',
+      'DrawingLayersValue',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+});

@@ -75,38 +75,87 @@ export function mintedInlineName(
   return null;
 }
 
+/** Documentation keywords that do not shape a model; ignored by `schemaShapeKey` at a schema's own level. */
+const DOC_KEYWORDS = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs', 'deprecated']);
+/** Keywords whose value maps NAMES (not keywords) to schemas: names are kept verbatim, values recurse as schemas. */
+const NAMED_SCHEMA_MAPS = new Set(['properties', 'patternProperties', 'dependentSchemas', '$defs', 'definitions']);
+/** Keywords whose value is a single schema. */
+const SCHEMA_KEYWORDS = new Set([
+  'items',
+  'additionalProperties',
+  'additionalItems',
+  'contains',
+  'propertyNames',
+  'not',
+  'if',
+  'then',
+  'else',
+  'unevaluatedProperties',
+  'unevaluatedItems',
+]);
+/** Keywords whose value is an ordered list of schemas. */
+const SCHEMA_LIST_KEYWORDS = new Set(['allOf', 'oneOf', 'anyOf', 'prefixItems']);
+/** Keywords whose list value is a set: compared order-insensitively. */
+const UNORDERED_LIST_KEYWORDS = new Set(['required', 'type']);
+
 /**
  * A canonical rendering of a schema's shape, for deciding whether two inline
  * schemas describe the same model: every structural keyword (`type`,
  * `properties`, `required`, `items`, `additionalProperties`,
  * `patternProperties`, `allOf`/`oneOf`/`anyOf`, `enum`, `const`, `format`,
- * `nullable`, ...) recursively, with object keys sorted and the `required`
- * and `type` lists order-insensitive. Documentation (`description`, `title`,
- * `example`, `examples`, `summary`, `externalDocs`, `deprecated`) and vendor
- * extensions (`x-*`) are ignored, and so is `nullable: false`, which the
- * nullable unwrap leaves behind. Enum values keep their order, as the IR
- * does.
+ * `nullable`, ...) recursively, with keywords sorted and the `required` and
+ * `type` lists order-insensitive. Documentation keywords (`description`,
+ * `title`, `example`, `examples`, `summary`, `externalDocs`, `deprecated`)
+ * and vendor extensions (`x-*`) are ignored, and so is `nullable: false`,
+ * which the nullable unwrap leaves behind — but only where they are a
+ * schema's own keywords. Inside `properties`, `patternProperties`,
+ * `dependentSchemas`, `dependentRequired` and `$defs` the keys are property
+ * names, kept verbatim: a field named `description` or `title` is part of the
+ * shape. Enum, const and default values are compared as plain data, in
+ * order, as the IR keeps them.
  */
 export function schemaShapeKey(schema: SchemaObject): string {
-  const ignored = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs', 'deprecated']);
-  const canon = (value: unknown, key?: string): unknown => {
-    if (Array.isArray(value)) {
-      const items = value.map((v) => canon(v));
-      return key === 'required' || key === 'type' ? items.map(String).sort() : items;
-    }
-    if (value && typeof value === 'object') {
-      const record = value as Record<string, unknown>;
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(record).sort()) {
-        if (ignored.has(k) || k.startsWith('x-')) continue;
-        if (k === 'nullable' && record[k] === false) continue;
-        out[k] = canon(record[k], k);
-      }
-      return out;
-    }
-    return value;
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+  // Plain data (enum members, const, default): sorted keys, nothing stripped.
+  const dataKey = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(dataKey);
+    if (!isRecord(value)) return value;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) out[key] = dataKey(value[key]);
+    return out;
   };
-  return JSON.stringify(canon(schema));
+  const schemaKey = (value: unknown): unknown => {
+    if (!isRecord(value)) return value; // boolean schemas such as `additionalProperties: true`
+    const out: Record<string, unknown> = {};
+    for (const keyword of Object.keys(value).sort()) {
+      const v = value[keyword];
+      if (DOC_KEYWORDS.has(keyword) || keyword.startsWith('x-')) continue;
+      if (keyword === 'nullable' && v === false) continue;
+      if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(v)) {
+        const named: Record<string, unknown> = {};
+        for (const name of Object.keys(v).sort()) named[name] = schemaKey(v[name]);
+        out[keyword] = named;
+      } else if (keyword === 'dependentRequired' && isRecord(v)) {
+        const named: Record<string, unknown> = {};
+        for (const name of Object.keys(v).sort()) {
+          const names = v[name];
+          named[name] = Array.isArray(names) ? names.map(String).sort() : dataKey(names);
+        }
+        out[keyword] = named;
+      } else if (SCHEMA_KEYWORDS.has(keyword)) {
+        out[keyword] = schemaKey(v);
+      } else if (SCHEMA_LIST_KEYWORDS.has(keyword) && Array.isArray(v)) {
+        out[keyword] = v.map(schemaKey);
+      } else if (UNORDERED_LIST_KEYWORDS.has(keyword) && Array.isArray(v)) {
+        out[keyword] = v.map(String).sort();
+      } else {
+        out[keyword] = dataKey(v);
+      }
+    }
+    return out;
+  };
+  return JSON.stringify(schemaKey(schema));
 }
 
 /**
@@ -121,17 +170,24 @@ export function schemaShapeKey(schema: SchemaObject): string {
  * `email` beside `emails` claims nothing — the elements step aside to
  * `<field>_item` / `<field>_value`, which qualify to `<Parent><Field>Item` /
  * `<Parent><Field>Value` (`DrawingLayersItem`, `DrawingLayersValue`),
- * matching the `<Variant>Item` convention.
+ * matching the `<Variant>Item` convention. Should a sibling mint that name
+ * too (a property `layers_item`), the fallback keeps going the way
+ * `variantMemberKeys` does for variants: `<field>_array_item`, then
+ * `<field>_array_item2`, `<field>_array_item3`, ... for items
+ * (`DrawingLayersArrayItem`, ...) and `<field>_member_value`,
+ * `<field>_member_value2`, ... for values, taking the first candidate whose
+ * minted name no sibling claims.
  *
- * Identical-shape sharing: when the claiming sibling is an inline object
- * whose shape is structurally identical to the items or values
- * (`schemaShapeKey`: same properties, required, types, nested inline schemas
- * and enum values; description, title and example ignored), the two fields
- * share one model under the singular name. They are the same shape, so one
- * model is the right SDK type and a duplicate would only add noise; should a
- * later spec version make the shapes diverge, the split happens then, which
- * is the moment the item type genuinely changes. This deliberately departs
- * from a literal one-model-per-field reading for the identical case.
+ * Identical-shape sharing: when every sibling claiming the singular name is
+ * an inline object whose shape is structurally identical to the items or
+ * values (`schemaShapeKey`: same properties, required, types, nested inline
+ * schemas and enum values; description, title and example ignored), the
+ * fields share one model under the singular name. They are the same shape,
+ * so one model is the right SDK type and a duplicate would only add noise;
+ * should a later spec version make the shapes diverge, the split happens
+ * then, which is the moment the item type genuinely changes. This
+ * deliberately departs from a literal one-model-per-field reading for the
+ * identical case.
  *
  * Decided from sibling names and schema content alone, so document order
  * plays no part. `schemaToTypeRef` and every extractor call this with the
@@ -148,21 +204,36 @@ export function elementContextName(
   if (!siblings) return fieldName;
   const own = mintedInlineName(fieldName, elementSchema, parentModelName);
   if (own === null) return fieldName;
-  const element = unwrapNullableSchema(elementSchema);
+
+  // Every inline name the other siblings mint, with the schemas minting it.
+  const claimed = new Map<string, SchemaObject[]>();
   for (const [siblingName, siblingSchema] of siblings) {
     if (siblingName === fieldName) continue;
-    if (mintedInlineName(siblingName, siblingSchema, parentModelName) !== own) continue;
-    const sibling = unwrapNullableSchema(siblingSchema);
-    if (
+    const minted = mintedInlineName(siblingName, siblingSchema, parentModelName);
+    if (minted === null) continue;
+    claimed.set(minted, [...(claimed.get(minted) ?? []), siblingSchema]);
+  }
+
+  const rivals = claimed.get(own);
+  if (!rivals) return fieldName;
+  const element = unwrapNullableSchema(elementSchema);
+  const identical = (rival: SchemaObject): boolean => {
+    const sibling = unwrapNullableSchema(rival);
+    return (
       isInlineObjectSchema(sibling) &&
       isInlineObjectSchema(element) &&
       schemaShapeKey(sibling) === schemaShapeKey(element)
-    ) {
-      continue; // same shape: share the singular name
-    }
-    return `${fieldName}_${kind}`;
+    );
+  };
+  if (rivals.every(identical)) return fieldName; // same shape: share the singular name
+
+  const fallback = kind === 'item' ? 'array_item' : 'member_value';
+  for (let i = 0; ; i++) {
+    const candidate =
+      i === 0 ? `${fieldName}_${kind}` : i === 1 ? `${fieldName}_${fallback}` : `${fieldName}_${fallback}${i}`;
+    const minted = mintedInlineName(candidate, elementSchema, parentModelName);
+    if (minted === null || !claimed.has(minted)) return candidate;
   }
-  return fieldName;
 }
 
 /**
