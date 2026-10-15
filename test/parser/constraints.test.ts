@@ -6,6 +6,7 @@ import {
   extractSchemas,
   extractConstraints,
   combineConstraints,
+  extractInlineModelsFromSchemas,
   clearSchemaNameTransform,
 } from '../../src/parser/schemas.js';
 import { extractOperations } from '../../src/parser/operations.js';
@@ -773,6 +774,175 @@ describe('combineConstraints', () => {
     combineConstraints(only, other);
     expect(only).toEqual({ minimum: 1, dependentRequired: { a: ['b'] } });
     expect(other).toEqual({ minimum: 2, dependentRequired: { a: ['c'] } });
+  });
+});
+
+describe('allOf rebuilds – constraints', () => {
+  afterEach(() => clearSchemaNameTransform());
+
+  it('carries an inline allOf response wrapper’s limits, conjoined with its members’', () => {
+    const paths = {
+      '/things': {
+        get: {
+          operationId: 'getThing',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: {
+                    minProperties: 2,
+                    allOf: [
+                      { type: 'object', maxProperties: 5, properties: { id: { type: 'string' } }, required: ['id'] },
+                      { type: 'object', properties: { note: { type: 'string', maxLength: 10 } } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const { services, inlineModels } = extractOperations(paths);
+    const response = services[0].operations[0].response;
+    const name = response.kind === 'model' ? response.name : undefined;
+    const model = inlineModels.find((m) => m.name === name);
+    expect(model?.constraints).toEqual({ minProperties: 2, maxProperties: 5 });
+    expect(model?.fields.map((f) => [f.name, f.constraints])).toEqual([
+      ['id', undefined],
+      ['note', { maxLength: 10 }],
+    ]);
+  });
+
+  it('carries a nested allOf field wrapper’s limits inside an inline response model', () => {
+    const paths = {
+      '/things': {
+        get: {
+          operationId: 'getThing',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      meta: {
+                        minProperties: 1,
+                        allOf: [{ type: 'object', maxProperties: 4, properties: { a: { type: 'string' } } }],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const { inlineModels } = extractOperations(paths);
+    const nested = inlineModels.find((m) => m.fields.some((f) => f.name === 'a'));
+    expect(nested?.constraints).toEqual({ minProperties: 1, maxProperties: 4 });
+  });
+
+  it('carries a discriminated-union request body wrapper’s own limits onto the flattened body model', () => {
+    const paths = {
+      '/things': {
+        post: {
+          operationId: 'createThing',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  minProperties: 2,
+                  discriminator: { propertyName: 'kind' },
+                  oneOf: [
+                    {
+                      type: 'object',
+                      maxProperties: 9,
+                      properties: { kind: { const: 'a' }, x: { type: 'string' } },
+                      required: ['kind'],
+                    },
+                    {
+                      type: 'object',
+                      properties: { kind: { const: 'b' }, y: { type: 'integer' } },
+                      required: ['kind'],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+    const { inlineModels } = extractOperations(paths);
+    // Only the wrapper's keywords: the variants' are alternatives, not conjoined.
+    expect(inlineModels.find((m) => m.name === 'CreateThingRequest')?.constraints).toEqual({ minProperties: 2 });
+  });
+
+  it('carries an allOf field wrapper’s limits onto the inline model built by mergeAllOfObjectSchema', () => {
+    const models = extractInlineModelsFromSchemas({
+      Pet: {
+        type: 'object',
+        properties: {
+          address: {
+            minProperties: 1,
+            allOf: [
+              { type: 'object', maxProperties: 4, properties: { a: { type: 'string' } } },
+              { properties: { b: { type: 'string' } } },
+            ],
+          },
+        },
+      },
+    });
+    const address = models.find((m) => m.name === 'PetAddress');
+    expect(address?.fields.map((f) => f.name)).toEqual(['a', 'b']);
+    expect(address?.constraints).toEqual({ minProperties: 1, maxProperties: 4 });
+  });
+
+  it('conjoins an allOf component wrapper’s limits with its inline members’', () => {
+    const { models } = extractSchemas({
+      Base: { type: 'object', properties: { id: { type: 'string' } } },
+      Extended: {
+        minProperties: 2,
+        allOf: [
+          { $ref: '#/components/schemas/Base' },
+          { type: 'object', minProperties: 1, maxProperties: 5, properties: { note: { type: 'string' } } },
+        ],
+      },
+    });
+    expect(models.find((m) => m.name === 'Extended')?.constraints).toEqual({ minProperties: 2, maxProperties: 5 });
+  });
+
+  it('carries an allOf field wrapper’s limits inside a discriminated variant model', () => {
+    const { models } = extractSchemas({
+      Event: {
+        allOf: [
+          { type: 'object', properties: { id: { type: 'string' } } },
+          {
+            oneOf: [
+              {
+                type: 'object',
+                properties: {
+                  event: { const: 'user.created' },
+                  meta: {
+                    minProperties: 1,
+                    allOf: [{ type: 'object', maxProperties: 4, properties: { a: { type: 'string' } } }],
+                  },
+                },
+              },
+              { type: 'object', properties: { event: { const: 'user.deleted' } } },
+            ],
+          },
+        ],
+      },
+    });
+    const nested = models.find((m) => m.name.startsWith('UserCreated') && m.fields.some((f) => f.name === 'a'));
+    expect(nested?.constraints).toEqual({ minProperties: 1, maxProperties: 4 });
   });
 });
 

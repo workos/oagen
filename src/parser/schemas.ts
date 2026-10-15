@@ -1042,8 +1042,14 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     description: schema.description,
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
-    ...constraintsEntry(schema),
+    ...allOfConstraintsEntry(schema),
   };
+}
+
+/** `{ constraints }` from collectAllOfConstraints, or `{}` — the allOf counterpart of constraintsEntry. */
+function allOfConstraintsEntry(schema: SchemaObject): { constraints?: Constraints } {
+  const constraints = collectAllOfConstraints(schema);
+  return constraints ? { constraints } : {};
 }
 
 /**
@@ -1208,10 +1214,14 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
  * `allOf` members (recursively; a keyword declared at more than one level is
  * combined by combineConstraints, so the stricter bound wins). `$ref` members
  * keep their limits on the referenced model and `oneOf` / `anyOf` branches
- * are alternatives, so neither is walked. Mirrors how
- * flattenVariantForExtraction gathers a variant's properties.
+ * are alternatives, so neither is walked.
+ *
+ * Used wherever the parser rebuilds one object schema out of `allOf` members
+ * — component models, inline responses, request bodies, nested fields and
+ * discriminated variants — so the rebuilt schema still carries every limit an
+ * instance must satisfy, the same way its properties are gathered.
  */
-function collectAllOfConstraints(schema: SchemaObject): Constraints | undefined {
+export function collectAllOfConstraints(schema: SchemaObject): Constraints | undefined {
   let out: Constraints | undefined;
   for (const member of schema.allOf ?? []) {
     if (member.$ref) continue;
@@ -1384,6 +1394,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
             type: 'object',
             properties: mergedProperties,
             required: mergedRequired,
+            ...collectAllOfConstraints(fieldSchema),
           }),
         );
       }

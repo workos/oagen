@@ -1,7 +1,13 @@
 import type { Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema, constraintsEntry, isInlineObjectSchema, resolveSchemaName } from './schemas.js';
+import {
+  buildFieldFromSchema,
+  constraintsEntry,
+  collectAllOfConstraints,
+  isInlineObjectSchema,
+  resolveSchemaName,
+} from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -193,7 +199,9 @@ function mergeAllOfObjectSchema(schema: SchemaObject): SchemaObject {
     if (s.allOf) for (const sub of s.allOf) visit(sub);
   };
   visit(schema);
-  return { type: 'object', properties, required, description: schema.description };
+  // The wrapper's limits conjoined with its inline members' ride along, so
+  // buildInlineModel's constraintsEntry sees what an instance must satisfy.
+  return { type: 'object', properties, required, description: schema.description, ...collectAllOfConstraints(schema) };
 }
 
 function buildInlineModel(name: string, schema: SchemaObject): Model {

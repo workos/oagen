@@ -19,6 +19,7 @@ import {
   resolveSchemaName,
   extractConstraints,
   constraintsEntry,
+  collectAllOfConstraints,
 } from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
@@ -1190,6 +1191,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     properties,
     required: requiredFields,
     ...(schema.description ? { description: schema.description } : {}),
+    // The wrapper's own keywords bind every branch, so they ride along; the
+    // variants' keywords are alternatives and are not carried.
+    ...collectAllOfConstraints(schema),
   };
 }
 
