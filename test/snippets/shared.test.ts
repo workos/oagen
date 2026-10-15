@@ -59,6 +59,63 @@ describe('snippets/shared: hiddenParamSet', () => {
 });
 
 describe('snippets/shared: collectSnippetArgs', () => {
+  it('generates path, body and query values inside their constraints', () => {
+    const op = makeOp({
+      path: '/x/{slug}',
+      pathParams: [
+        { name: 'slug', type: { kind: 'primitive', type: 'string' }, required: true, constraints: { maxLength: 6 } },
+      ],
+      requestBody: { kind: 'model', name: 'Req' },
+      queryParams: [
+        {
+          name: 'limit',
+          type: { kind: 'primitive', type: 'integer' },
+          required: true,
+          constraints: { minimum: 10, maximum: 100 },
+        },
+        // An explicit default still wins over the generated in-range value.
+        {
+          name: 'page',
+          type: { kind: 'primitive', type: 'integer' },
+          required: true,
+          default: 1,
+          constraints: { minimum: 5 },
+        },
+      ],
+    });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec(
+      [service],
+      [
+        {
+          name: 'Req',
+          fields: [
+            {
+              name: 'tags',
+              type: { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+              required: true,
+              constraints: { minItems: 2, uniqueItems: true },
+            },
+          ],
+        },
+      ],
+    );
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const examples = createExampleBuilder(spec);
+    const { args } = collectSnippetArgs(ctx.resolvedOperations![0]!, ctx, examples);
+    expect(args.map((a) => [a.wireName, a.value])).toEqual([
+      ['slug', 'string'],
+      ['tags', ['string_example', 'string_example1']],
+      ['limit', 10],
+      ['page', 1],
+    ]);
+  });
+
   it('walks path → body → query, only keeping required args', () => {
     const op = makeOp({
       pathParams: [
