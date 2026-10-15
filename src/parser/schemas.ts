@@ -403,13 +403,17 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
 
     for (const variant of schema.oneOf) {
       if (isInlineObjectSchema(variant)) {
+        // Name the variant first and build its fields under that name: an
+        // inline object nested under variant N is then referenced as
+        // `<VariantN>Child` (`ThingShape2Center`), which is the name the
+        // field extractor materializes it under — not `<Variant0>Child`.
+        const variantName = nameVariantModel(variant, name, models, constNamingDiscriminator);
         const requiredSet = new Set(variant.required ?? []);
         const fields: Field[] = [];
         for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
           if (!fs) continue;
-          fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
+          fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet));
         }
-        const variantName = nameVariantModel(variant, name, models, constNamingDiscriminator);
         models.push({ name: variantName, description: variant.description, fields });
       }
     }

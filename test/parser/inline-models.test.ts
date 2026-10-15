@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
 import { extractInlineModelsFromProperties, extractInlineModelsFromSchemas } from '../../src/parser/inline-models.js';
-import type { Model } from '../../src/ir/types.js';
+import { walkTypeRef, type Model } from '../../src/ir/types.js';
 
 // The two shapes from workos/oagen#187: an array whose `items.oneOf` lists
 // inline object variants, and a map whose `additionalProperties` value is an
@@ -609,5 +609,98 @@ describe('nullable inline union variants keep their wrapper', () => {
       'Drawing',
     );
     expect(results.map((model) => model.name)).toEqual(['DrawingShape', 'DrawingShape2']);
+  });
+});
+
+describe('nested inline objects under later union variants', () => {
+  const center: SchemaObject = { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } };
+  const withRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' }, center } };
+  const withSide: SchemaObject = { type: 'object', properties: { side: { type: 'number' }, center } };
+  const num = { kind: 'primitive', type: 'number' };
+  const point = { x: num, y: num };
+
+  /** Every model name referenced from any field of any model. */
+  function referencedModelNames(models: Model[]): Set<string> {
+    const names = new Set<string>();
+    for (const model of models) {
+      for (const field of model.fields) walkTypeRef(field.type, { model: (ref) => void names.add(ref.name) });
+    }
+    return names;
+  }
+
+  // The component-schema path (`extractNestedSchema`) and the field extractor
+  // must agree on the name of an inline object nested under variant N:
+  // `<VariantN>Child`, never `<Variant0>Child`.
+  const forms: Array<{ form: string; nullable: boolean; wrap: (schema: SchemaObject) => SchemaObject }> = [
+    { form: 'plain', nullable: false, wrap: (s) => s },
+    { form: 'nullable `type: ["object", "null"]`', nullable: true, wrap: (s) => ({ ...s, type: ['object', 'null'] }) },
+  ];
+
+  it.each(forms)('$form second variant at field level and array-item level', async ({ nullable, wrap }) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info: { title: 'nested variants', version: '1' },
+        paths: {},
+        components: {
+          schemas: {
+            Thing: {
+              type: 'object',
+              properties: {
+                shape: { oneOf: [withRadius, wrap(withSide)] },
+                markers: { type: 'array', items: { oneOf: [withRadius, wrap(withSide)] } },
+              },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const second = (name: string) =>
+        nullable ? { kind: 'nullable', inner: { kind: 'model', name } } : { kind: 'model', name };
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Thing']).toEqual({
+        shape: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [{ kind: 'model', name: 'ThingShape' }, second('ThingShape2')],
+        },
+        markers: {
+          kind: 'array',
+          items: {
+            kind: 'union',
+            compositionKind: 'oneOf',
+            variants: [{ kind: 'model', name: 'ThingMarker' }, second('ThingMarker2')],
+          },
+        },
+      });
+      expect(types['ThingShape']).toEqual({ radius: num, center: { kind: 'model', name: 'ThingShapeCenter' } });
+      expect(types['ThingShape2']).toEqual({ side: num, center: { kind: 'model', name: 'ThingShape2Center' } });
+      expect(types['ThingMarker']).toEqual({ radius: num, center: { kind: 'model', name: 'ThingMarkerCenter' } });
+      expect(types['ThingMarker2']).toEqual({ side: num, center: { kind: 'model', name: 'ThingMarker2Center' } });
+      for (const nested of ['ThingShapeCenter', 'ThingShape2Center', 'ThingMarkerCenter', 'ThingMarker2Center']) {
+        expect(types[nested]).toEqual(point);
+      }
+      expect(ir.models.map((model) => model.name).sort()).toEqual([
+        'Thing',
+        'ThingMarker',
+        'ThingMarker2',
+        'ThingMarker2Center',
+        'ThingMarkerCenter',
+        'ThingShape',
+        'ThingShape2',
+        'ThingShape2Center',
+        'ThingShapeCenter',
+      ]);
+
+      // Every reference resolves, and no nested model is left orphaned.
+      const referenced = referencedModelNames(ir.models);
+      const known = new Set(ir.models.map((model) => model.name));
+      expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+      expect([...known].filter((name) => name !== 'Thing' && !referenced.has(name))).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
