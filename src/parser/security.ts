@@ -21,7 +21,10 @@ export type RawSecurityRequirements = Array<Record<string, string[] | undefined>
  * An entry that is not an object (`null`, say) is not a requirement object.
  * Reading it as `{}` would declare an anonymous alternative and make the
  * operation look open, so it is dropped with an `[oagen] Warning:` naming
- * `context` (the operation, or the document).
+ * `context` (the operation, or the document). A non-empty list left with no
+ * valid entry is treated as undeclared (`undefined`) rather than as `[]`:
+ * the document never said "no authentication", so the operation keeps
+ * inheriting the default.
  *
  * The previous flattening collapsed the alternatives onto one list and turned
  * `[]` into `undefined`, so "no auth" read the same as "use the default" and
@@ -47,6 +50,10 @@ export function extractSecurityRequirements(
         scopes: Array.isArray(scopes) ? scopes : [],
       })),
     );
+  }
+  if (security.length > 0 && sets.length === 0) {
+    console.warn(`[oagen] Warning: No valid security requirement on ${context}; treating security as undeclared`);
+    return undefined;
   }
   return sets;
 }

@@ -132,6 +132,27 @@ describe('parseSpec — security requirements', () => {
     }
   });
 
+  it('treats a list with no valid entry as undeclared, so the document default still applies', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        security: [{ userToken: [] }],
+        paths: { '/thing': op('getThing', [null]) },
+        components: { securitySchemes },
+      });
+
+      const [thing] = ir.services.flatMap((s) => s.operations);
+      // Not `[]`: the document never said "no authentication".
+      expect(thing.security).toBeUndefined();
+      expect(thing.security ?? ir.security).toEqual([[{ schemeName: 'userToken', scopes: [] }]]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('No valid security requirement on getThing'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('keeps document order for sets and for the schemes within a set', async () => {
     const ir = await parseJson({
       openapi: '3.1.0',
@@ -181,6 +202,19 @@ describe('extractSecurityRequirements', () => {
       expect(warn).toHaveBeenCalledTimes(4);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring security requirement null on POST /x'));
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring security requirement "bearer" on POST /x'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('returns undefined, not [], when a non-empty list has no valid entry', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(extractSecurityRequirements([null], 'op')).toBeUndefined();
+      expect(extractSecurityRequirements([undefined, 'x' as never], 'op')).toBeUndefined();
+      // An empty list is still the explicit "no authentication".
+      expect(extractSecurityRequirements([], 'op')).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('No valid security requirement on op'));
     } finally {
       warn.mockRestore();
     }
