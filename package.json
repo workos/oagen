@@ -96,10 +96,10 @@
     "@types/node": "^25.3.3",
     "@vitest/coverage-v8": "^4.1.2",
     "husky": "^9.1.7",
-    "oxfmt": "^0.36.0",
+    "oxfmt": "^0.72.0",
     "oxlint": "^1.51.0",
     "prettier": "^3.8.1",
-    "tsdown": "^0.21.5",
+    "tsdown": "^0.23.0",
     "vitest": "^4.1.2"
   }
 }
