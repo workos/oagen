@@ -628,6 +628,98 @@ describe('inline header models', () => {
   });
 });
 
+describe('inline header enums', () => {
+  function extractWithEnums(paths: Record<string, unknown>, seed: Enum[] = []): { op: Operation; enums: Enum[] } {
+    const { services } = extractOperations(paths as never);
+    const enums = [...seed];
+    collectInlineEnumsFromOperations(services, enums);
+    return { op: services[0].operations[0], enums };
+  }
+  const policy = (values: string[]) => ({ schema: { type: 'string', enum: values } });
+  const valuesOf = (enums: Enum[], name: string) => enums.find((e) => e.name === name)?.values.map((v) => v.value);
+
+  it('keeps a 200 and a 429 header enum with different values apart', () => {
+    const { op, enums } = extractWithEnums(
+      getWithResponses({
+        '200': { description: 'ok', headers: { 'X-Policy': policy(['fast', 'slow']) } },
+        '429': { description: 'throttled', headers: { 'X-Policy': policy(['retry', 'stop']) } },
+      }),
+    );
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'enum', name: 'DocumentsXPolicy', values: ['fast', 'slow'] });
+    // Qualified by the status code it was declared on, and the ref follows the rename.
+    expect(op.errors[0].headers?.[0].type).toEqual({
+      kind: 'enum',
+      name: 'DocumentsXPolicy429',
+      values: ['retry', 'stop'],
+    });
+    expect(valuesOf(enums, 'DocumentsXPolicy')).toEqual(['fast', 'slow']);
+    expect(valuesOf(enums, 'DocumentsXPolicy429')).toEqual(['retry', 'stop']);
+  });
+
+  it('keeps a header enum apart from a request parameter enum of the same name', () => {
+    const { op, enums } = extractWithEnums({
+      '/documents': {
+        get: {
+          operationId: 'listDocuments',
+          parameters: [{ name: 'X-Policy', in: 'header', schema: { type: 'string', enum: ['a', 'b'] } }],
+          responses: { '200': { description: 'ok', headers: { 'X-Policy': policy(['c', 'd']) } } },
+        },
+      },
+    });
+
+    expect(op.headerParams[0].type).toEqual({ kind: 'enum', name: 'DocumentsXPolicy', values: ['a', 'b'] });
+    // A lone 2xx carries no status code in the IR, so the fallback is a numeric suffix.
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'enum', name: 'DocumentsXPolicy2', values: ['c', 'd'] });
+    expect(valuesOf(enums, 'DocumentsXPolicy')).toEqual(['a', 'b']);
+    expect(valuesOf(enums, 'DocumentsXPolicy2')).toEqual(['c', 'd']);
+  });
+
+  it('shares one enum when the value sets are identical, regardless of order', () => {
+    const { op, enums } = extractWithEnums(
+      getWithResponses({
+        '200': { description: 'ok', headers: { 'X-Policy': policy(['fast', 'slow']) } },
+        '202': { description: 'accepted', headers: { 'X-Policy': policy(['slow', 'fast']) } },
+        '429': { description: 'throttled', headers: { 'X-Policy': policy(['fast', 'slow']) } },
+      }),
+    );
+
+    const nameOf = (type: unknown) => (type as { name: string }).name;
+    expect(op.successResponses?.map((r) => nameOf(r.headers?.[0].type))).toEqual([
+      'DocumentsXPolicy',
+      'DocumentsXPolicy',
+    ]);
+    expect(nameOf(op.errors[0].headers?.[0].type)).toBe('DocumentsXPolicy');
+    expect(enums.map((e) => e.name)).toEqual(['DocumentsXPolicy']);
+  });
+
+  it('renames through array and nullable wrappers, with a numeric suffix when the code-qualified name is taken', () => {
+    const seed: Enum[] = [
+      { name: 'DocumentsXPolicy', values: [{ name: 'A', value: 'a' }] },
+      { name: 'DocumentsXPolicy429', values: [{ name: 'X', value: 'x' }] },
+    ];
+    const { op, enums } = extractWithEnums(
+      getWithResponses({
+        '200': { description: 'ok' },
+        '429': {
+          description: 'throttled',
+          headers: {
+            'X-Policy': { schema: { type: 'array', items: { type: ['string', 'null'], enum: ['retry', 'stop'] } } },
+          },
+        },
+      }),
+      seed,
+    );
+
+    expect(op.errors[0].headers?.[0].type).toEqual({
+      kind: 'array',
+      items: { kind: 'nullable', inner: { kind: 'enum', name: 'DocumentsXPolicy2', values: ['retry', 'stop'] } },
+    });
+    expect(valuesOf(enums, 'DocumentsXPolicy2')).toEqual(['retry', 'stop']);
+    expect(valuesOf(enums, 'DocumentsXPolicy429')).toEqual(['x']);
+  });
+});
+
 const baseOperation: Operation = {
   name: 'downloadDocument',
   httpMethod: 'get',
