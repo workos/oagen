@@ -704,3 +704,101 @@ describe('nested inline objects under later union variants', () => {
     }
   });
 });
+
+describe('multi-type inline union variants keep their other types', () => {
+  const center: SchemaObject = { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } };
+  const withRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' }, center } };
+  const objectOrString: SchemaObject = { type: ['object', 'string'], properties: { side: { type: 'number' }, center } };
+  const objectOrIntegerOrNull: SchemaObject = {
+    type: ['object', 'integer', 'null'],
+    properties: { points: { type: 'integer' }, center },
+  };
+  const variants = [withRadius, objectOrString, objectOrIntegerOrNull];
+  const num = { kind: 'primitive', type: 'number' };
+  const int = { kind: 'primitive', type: 'integer' };
+  const str = { kind: 'primitive', type: 'string' };
+
+  // The named ref stands in for the `object` member only; the string and
+  // integer alternatives survive exactly as schemaToTypeRef builds them for a
+  // multi-type schema, and the numbered names are the extractor's.
+  const expectedUnion = (base: string) => ({
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: [
+      { kind: 'model', name: base },
+      { kind: 'union', variants: [{ kind: 'model', name: `${base}2` }, str] },
+      { kind: 'nullable', inner: { kind: 'union', variants: [{ kind: 'model', name: `${base}3` }, int] } },
+    ],
+  });
+
+  it('at field level and array-item level, end to end', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info: { title: 'multi-type variants', version: '1' },
+        paths: {},
+        components: {
+          schemas: {
+            Thing: {
+              type: 'object',
+              properties: {
+                shape: { oneOf: variants },
+                markers: { type: 'array', items: { oneOf: variants } },
+              },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Thing']).toEqual({
+        shape: expectedUnion('ThingShape'),
+        markers: { kind: 'array', items: expectedUnion('ThingMarker') },
+      });
+      for (const base of ['ThingShape', 'ThingMarker']) {
+        expect(types[base]).toEqual({ radius: num, center: { kind: 'model', name: `${base}Center` } });
+        expect(types[`${base}2`]).toEqual({ side: num, center: { kind: 'model', name: `${base}2Center` } });
+        expect(types[`${base}3`]).toEqual({ points: int, center: { kind: 'model', name: `${base}3Center` } });
+        for (const suffix of ['', '2', '3']) {
+          expect(types[`${base}${suffix}Center`]).toEqual({ x: num, y: num });
+        }
+      }
+
+      // Every reference resolves, and no model is left orphaned.
+      const referenced = modelRefsIn(ir.models);
+      const known = new Set(ir.models.map((model) => model.name));
+      expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+      expect([...known].filter((name) => name !== 'Thing' && !referenced.has(name))).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('names the variants the way the extractor does, for anyOf too', () => {
+    const results: Model[] = [];
+    extractInlineModelsFromProperties({ type: 'object', properties: { shape: { oneOf: variants } } }, results, 'Thing');
+    expect(results.map((model) => model.name)).toEqual([
+      'ThingShape',
+      'ThingShapeCenter',
+      'ThingShape2',
+      'ThingShape2Center',
+      'ThingShape3',
+      'ThingShape3Center',
+    ]);
+    expect(schemaToTypeRef({ anyOf: variants }, 'shape', 'Thing')).toEqual({
+      ...expectedUnion('ThingShape'),
+      compositionKind: 'anyOf',
+    });
+  });
+});
+
+/** Every model name referenced from any field of any model. */
+function modelRefsIn(models: Model[]): Set<string> {
+  const names = new Set<string>();
+  for (const model of models) {
+    for (const field of model.fields) walkTypeRef(field.type, { model: (ref) => void names.add(ref.name) });
+  }
+  return names;
+}

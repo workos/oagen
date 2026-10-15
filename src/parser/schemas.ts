@@ -736,15 +736,36 @@ function nameInlineObjectVariants(
 }
 
 /**
- * Whether an inline object schema admits null on its own: the OAS 3.1
- * `type: ['object', 'null']` form or the OAS 3.0 `nullable: true` flag. These
- * are the two nullable forms an inline object variant can carry; a
- * `oneOf: [X, { type: 'null' }]` variant has no `properties` of its own and
- * is typed through `schemaToTypeRef` instead.
+ * The TypeRef for an inline object variant referenced by the name its
+ * extracted model carries, keeping every other type the variant allows.
+ * Mirrors what `schemaToTypeRef` builds for the same schema — one member per
+ * non-null entry of a `type` array, `union`-wrapped when there is more than
+ * one, `nullable`-wrapped when `null` or OAS 3.0 `nullable: true` is present
+ * — with the `object` member swapped for the named ref:
+ * `type: ['object', 'string']` → `union[model, string]`,
+ * `['object', 'integer', 'null']` → `nullable<union[model, integer]>`,
+ * `['object', 'null']` / `nullable: true` → `nullable<model>`.
+ * A `oneOf: [X, { type: 'null' }]` variant has no `properties` of its own
+ * and never reaches this path; `schemaToTypeRef` types it directly.
  */
-function isNullableInlineObject(schema: SchemaObject): boolean {
-  if (schema.nullable === true) return true;
-  return Array.isArray(schema.type) && schema.type.includes('null');
+function inlineVariantTypeRef(
+  variant: SchemaObject,
+  name: string,
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): TypeRef {
+  const modelRef: TypeRef = { kind: 'model', name };
+  const typeList = Array.isArray(variant.type) ? variant.type : [];
+  const nullable = variant.nullable === true || typeList.includes('null');
+  const members = typeList
+    .filter((t) => t !== 'null')
+    .map((t) =>
+      t === 'object'
+        ? modelRef
+        : schemaToTypeRef({ ...variant, type: t, nullable: false }, contextName, parentModelName),
+    );
+  const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
+  return nullable ? asNullable(ref) : ref;
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
@@ -1415,10 +1436,12 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // would hand every inline variant the same parent-derived name (e.g.
     // `ApiKeyOwner`), collapsing the union onto one repeated model ref while
     // the extractor emits `ApiKeyOwner`, `ApiKeyOwner2`, ... for them.
-    // A variant that is itself nullable (`type: ['object', 'null']` or OAS
-    // 3.0 `nullable: true`) keeps its wrapper around the named ref, exactly
-    // as `schemaToTypeRef` would wrap it — the extractor emits the model under
-    // the same name either way.
+    // The named ref replaces only the `object` member of what `schemaToTypeRef`
+    // would build for the variant: a nullable variant (`['object', 'null']`,
+    // OAS 3.0 `nullable: true`) keeps its wrapper, and a multi-type variant
+    // (`['object', 'string']`) keeps its other alternatives in a union — see
+    // `inlineVariantTypeRef`. The extractor emits the model under the same
+    // name in every case.
     const inlineVariantNames = nameInlineObjectVariants(nonNullVariants, contextName, parentModelName);
     const variants: TypeRef[] = [];
     for (const v of rawVariants) {
@@ -1426,8 +1449,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
-        const modelRef: TypeRef = { kind: 'model', name: mappedName ?? inlineName };
-        variants.push(isNullableInlineObject(v) ? asNullable(modelRef) : modelRef);
+        variants.push(inlineVariantTypeRef(v, mappedName ?? inlineName, contextName, parentModelName));
       } else {
         variants.push(schemaToTypeRef(v, contextName, parentModelName));
       }
