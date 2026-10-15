@@ -2,7 +2,12 @@ import { describe, it, expect, afterEach, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { extractSchemas, extractConstraints, clearSchemaNameTransform } from '../../src/parser/schemas.js';
+import {
+  extractSchemas,
+  extractConstraints,
+  combineConstraints,
+  clearSchemaNameTransform,
+} from '../../src/parser/schemas.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { parseSpec } from '../../src/parser/parse.js';
@@ -167,6 +172,56 @@ describe('extractConstraints', () => {
 
 describe('extractSchemas – constraints', () => {
   afterEach(() => clearSchemaNameTransform());
+
+  it('conjoins a base member’s keywords with a discriminated variant’s instead of overriding them', () => {
+    const { models } = extractSchemas({
+      Event: {
+        allOf: [
+          {
+            type: 'object',
+            minProperties: 1,
+            maxProperties: 3,
+            dependentRequired: { note: ['id'] },
+            properties: { id: { type: 'string' }, note: { type: 'string' } },
+          },
+          {
+            oneOf: [
+              {
+                type: 'object',
+                minProperties: 2,
+                maxProperties: 10,
+                dependentRequired: { note: ['event'], extra: ['id'] },
+                properties: { event: { const: 'user.created' }, extra: { type: 'string' } },
+              },
+              { type: 'object', properties: { event: { const: 'user.deleted' } } },
+              // A variant that is itself an allOf wrapper: its member's and its
+              // own keywords conjoin before meeting the base's.
+              {
+                minProperties: 2,
+                allOf: [{ type: 'object', minProperties: 4, properties: { event: { const: 'user.banned' } } }],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const byName = new Map(models.map((m) => [m.name, m]));
+    expect(byName.get('UserCreated')?.constraints).toEqual({
+      minProperties: 2,
+      maxProperties: 3,
+      dependentRequired: { note: ['id', 'event'], extra: ['id'] },
+    });
+    expect(byName.get('UserDeleted')?.constraints).toEqual({
+      minProperties: 1,
+      maxProperties: 3,
+      dependentRequired: { note: ['id'] },
+    });
+    expect(byName.get('UserBanned')?.constraints).toEqual({
+      minProperties: 4,
+      maxProperties: 3,
+      dependentRequired: { note: ['id'] },
+    });
+  });
 
   it('carries a discriminated allOf+oneOf variant’s own keywords, under the base object’s', () => {
     const { models } = extractSchemas({
@@ -631,6 +686,93 @@ describe('parseSpec – constraints', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('combineConstraints', () => {
+  it('keeps the stricter bound for every min* and max* keyword, whichever side declares it', () => {
+    const a = {
+      minimum: 1,
+      exclusiveMinimum: 0,
+      minLength: 2,
+      minItems: 1,
+      minContains: 1,
+      minProperties: 1,
+      maximum: 100,
+      exclusiveMaximum: 50,
+      maxLength: 20,
+      maxItems: 10,
+      maxContains: 5,
+      maxProperties: 3,
+    };
+    const b = {
+      minimum: 5,
+      exclusiveMinimum: -1,
+      minLength: 1,
+      minItems: 3,
+      minContains: 2,
+      minProperties: 2,
+      maximum: 90,
+      exclusiveMaximum: 60,
+      maxLength: 30,
+      maxItems: 4,
+      maxContains: 6,
+      maxProperties: 10,
+    };
+    const expected = {
+      minimum: 5,
+      exclusiveMinimum: 0,
+      minLength: 2,
+      minItems: 3,
+      minContains: 2,
+      minProperties: 2,
+      maximum: 90,
+      exclusiveMaximum: 50,
+      maxLength: 20,
+      maxItems: 4,
+      maxContains: 5,
+      maxProperties: 3,
+    };
+    expect(combineConstraints(a, b)).toEqual(expected);
+    expect(combineConstraints(b, a)).toEqual(expected);
+  });
+
+  it('unions dependentRequired per property, deduplicated and in first-seen order', () => {
+    expect(
+      combineConstraints(
+        { dependentRequired: { note: ['id', 'event'], extra: ['id'] } },
+        { dependentRequired: { note: ['event', 'actor'], other: ['note'] } },
+      ),
+    ).toEqual({ dependentRequired: { note: ['id', 'event', 'actor'], extra: ['id'], other: ['note'] } });
+  });
+
+  it('demands uniqueItems when either side does', () => {
+    expect(combineConstraints({ uniqueItems: true }, { minItems: 1 })).toEqual({ uniqueItems: true, minItems: 1 });
+    expect(combineConstraints({ minItems: 1 }, { uniqueItems: true })).toEqual({ uniqueItems: true, minItems: 1 });
+  });
+
+  it('keeps a keyword declared on one side only, and the first multipleOf/pattern when they differ', () => {
+    expect(combineConstraints({ maxLength: 5, multipleOf: 2, pattern: '^a' }, { minLength: 1 })).toEqual({
+      maxLength: 5,
+      minLength: 1,
+      multipleOf: 2,
+      pattern: '^a',
+    });
+    expect(combineConstraints({ multipleOf: 2, pattern: '^a' }, { multipleOf: 3, pattern: '^b' })).toEqual({
+      multipleOf: 2,
+      pattern: '^a',
+    });
+  });
+
+  it('returns the other side unchanged when one is absent, and does not mutate its inputs', () => {
+    const only = { minimum: 1, dependentRequired: { a: ['b'] } };
+    expect(combineConstraints(undefined, only)).toBe(only);
+    expect(combineConstraints(only, undefined)).toBe(only);
+    expect(combineConstraints(undefined, undefined)).toBeUndefined();
+    const other = { minimum: 2, dependentRequired: { a: ['c'] } };
+    combineConstraints(only, other);
+    expect(only).toEqual({ minimum: 1, dependentRequired: { a: ['b'] } });
+    expect(other).toEqual({ minimum: 2, dependentRequired: { a: ['c'] } });
   });
 });
 

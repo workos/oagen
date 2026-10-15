@@ -235,6 +235,62 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
   return constraints ? { constraints } : {};
 }
 
+/** Keywords where the stricter of two declarations is the larger value. */
+const MIN_KEYS = ['minimum', 'exclusiveMinimum', 'minLength', 'minItems', 'minContains', 'minProperties'] as const;
+/** Keywords where the stricter of two declarations is the smaller value. */
+const MAX_KEYS = ['maximum', 'exclusiveMaximum', 'maxLength', 'maxItems', 'maxContains', 'maxProperties'] as const;
+
+/**
+ * Conjoin two constraint sets the way `allOf` conjoins schemas: an instance
+ * must satisfy both, so every `min*` takes the larger value, every `max*` the
+ * smaller, `uniqueItems` holds if either side demands it, and
+ * `dependentRequired` merges per property with the union of its names
+ * (deduplicated, `a`'s order first). A keyword declared on one side only is
+ * kept as is, and an absent side yields the other unchanged.
+ *
+ * `multipleOf` and `pattern` keep `a`'s value when the two differ: a true
+ * conjunction would need the least common multiple, or a lookahead regex
+ * joining both patterns, and neither is worth carrying into the IR.
+ *
+ * Not for the parameter `$ref` fallback in extractParams: keywords written
+ * beside a `$ref` override the target's there, which is a different operation.
+ */
+export function combineConstraints(a: Constraints | undefined, b: Constraints | undefined): Constraints | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const out: Constraints = { ...a, ...b };
+  for (const key of MIN_KEYS) {
+    const [x, y] = [a[key], b[key]];
+    if (x !== undefined && y !== undefined) out[key] = Math.max(x, y);
+  }
+  for (const key of MAX_KEYS) {
+    const [x, y] = [a[key], b[key]];
+    if (x !== undefined && y !== undefined) out[key] = Math.min(x, y);
+  }
+  if (a.uniqueItems || b.uniqueItems) out.uniqueItems = true;
+  if (a.multipleOf !== undefined && b.multipleOf !== undefined) out.multipleOf = a.multipleOf;
+  if (a.pattern !== undefined && b.pattern !== undefined) out.pattern = a.pattern;
+  if (a.dependentRequired && b.dependentRequired) {
+    out.dependentRequired = unionDependentRequired(a.dependentRequired, b.dependentRequired);
+  }
+  return out;
+}
+
+/** Per-property union of two `dependentRequired` maps, deduplicated and keeping `a`'s order first. */
+function unionDependentRequired(a: Record<string, string[]>, b: Record<string, string[]>): Record<string, string[]> {
+  const merged = new Map<string, string[]>();
+  for (const [property, names] of Object.entries(a)) merged.set(property, [...names]);
+  for (const [property, names] of Object.entries(b)) {
+    const existing = merged.get(property);
+    if (!existing) {
+      merged.set(property, [...names]);
+      continue;
+    }
+    for (const name of names) if (!existing.includes(name)) existing.push(name);
+  }
+  return Object.fromEntries(merged);
+}
+
 /**
  * Resolve one side's bound from `minimum` / `maximum` plus its `exclusive*`
  * companion into the OAS 3.1 shape: a numeric companion is the exclusive
@@ -1091,7 +1147,8 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   const baseRequired = new Set<string>();
   // Object-level keywords on the base members (maxProperties, ...) bind every
   // variant instance under allOf semantics, so they ride along with the base
-  // properties; a variant's own keywords win on a shared key below.
+  // properties and are conjoined with each variant's own below: on a shared
+  // keyword the stricter bound wins, since an instance must satisfy both.
   let baseConstraints: Constraints | undefined;
   for (const subSchema of schema.allOf ?? []) {
     if (subSchema.oneOf) continue; // the variant axis, handled below
@@ -1102,8 +1159,7 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
       }
     }
     if (flat.required) for (const r of flat.required) baseRequired.add(r);
-    const memberConstraints = collectAllOfConstraints(subSchema);
-    if (memberConstraints) baseConstraints = { ...baseConstraints, ...memberConstraints };
+    baseConstraints = combineConstraints(baseConstraints, collectAllOfConstraints(subSchema));
   }
 
   for (const subSchema of schema.allOf ?? []) {
@@ -1125,16 +1181,14 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
       }
       const mergedRequired = new Set<string>([...baseRequired, ...(flat.required ?? [])]);
       // The variant's own keywords (read through its allOf wrappers, like its
-      // properties) over the base members'. They are already in the 3.1 shape,
-      // so spreading them into the rebuilt schema lets extractInlineModelDeep's
-      // constraintsEntry read them back unchanged.
-      const variantConstraints = collectAllOfConstraints(variant);
+      // properties) conjoined with the base members'. They are already in the
+      // 3.1 shape, so spreading them into the rebuilt schema lets
+      // extractInlineModelDeep's constraintsEntry read them back unchanged.
       const merged: SchemaObject = {
         type: 'object',
         properties: mergedProperties,
         required: [...mergedRequired],
-        ...baseConstraints,
-        ...variantConstraints,
+        ...combineConstraints(baseConstraints, collectAllOfConstraints(variant)),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -1150,22 +1204,20 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
 }
 
 /**
- * A schema's own validation keywords laid over those of its inline `allOf`
- * members (recursively, so the outermost wrapper wins on a shared key).
- * `$ref` members keep their limits on the referenced model and `oneOf` /
- * `anyOf` branches are alternatives, so neither is walked. Mirrors how
+ * A schema's own validation keywords conjoined with those of its inline
+ * `allOf` members (recursively; a keyword declared at more than one level is
+ * combined by combineConstraints, so the stricter bound wins). `$ref` members
+ * keep their limits on the referenced model and `oneOf` / `anyOf` branches
+ * are alternatives, so neither is walked. Mirrors how
  * flattenVariantForExtraction gathers a variant's properties.
  */
 function collectAllOfConstraints(schema: SchemaObject): Constraints | undefined {
   let out: Constraints | undefined;
   for (const member of schema.allOf ?? []) {
     if (member.$ref) continue;
-    const inner = collectAllOfConstraints(member);
-    if (inner) out = { ...out, ...inner };
+    out = combineConstraints(out, collectAllOfConstraints(member));
   }
-  const own = extractConstraints(schema);
-  if (own) out = { ...out, ...own };
-  return out;
+  return combineConstraints(out, extractConstraints(schema));
 }
 
 /**
