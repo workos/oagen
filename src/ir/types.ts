@@ -68,7 +68,6 @@ export interface SecurityRequirement {
 export type SecurityRequirementSet = SecurityRequirement[];
 
 /** A single API operation (maps to an SDK method) */
-
 export interface Operation {
   name: string;
   description?: string;

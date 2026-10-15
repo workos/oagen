@@ -130,7 +130,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     models: finalModels,
     enums,
     auth,
-    security: extractSecurityRequirements(spec.security),
+    security: extractSecurityRequirements(spec.security, 'the document'),
     sdk: defaultSdkBehavior(),
   };
 

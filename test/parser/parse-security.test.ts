@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -111,6 +111,27 @@ describe('parseSpec — security requirements', () => {
     expect(open.security).toEqual([]);
   });
 
+  it('drops an entry that is not a requirement object, with a warning naming the operation', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: { '/thing': op('getThing', [{ partnerKey: [] }, null]) },
+        components: { securitySchemes },
+      });
+
+      const [thing] = ir.services.flatMap((s) => s.operations);
+      // Not `[[partnerKey], []]`: a null entry must not read as "or no authentication".
+      expect(thing.security).toEqual([[{ schemeName: 'partnerKey', scopes: [] }]]);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('[oagen] Warning: Ignoring security requirement null on getThing'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('keeps document order for sets and for the schemes within a set', async () => {
     const ir = await parseJson({
       openapi: '3.1.0',
@@ -128,17 +149,17 @@ describe('parseSpec — security requirements', () => {
 
 describe('extractSecurityRequirements', () => {
   it('returns undefined when nothing is declared or the value is not a list', () => {
-    expect(extractSecurityRequirements(undefined)).toBeUndefined();
-    expect(extractSecurityRequirements(null as never)).toBeUndefined();
-    expect(extractSecurityRequirements({ userToken: [] } as never)).toBeUndefined();
+    expect(extractSecurityRequirements(undefined, 'op')).toBeUndefined();
+    expect(extractSecurityRequirements(null as never, 'op')).toBeUndefined();
+    expect(extractSecurityRequirements({ userToken: [] } as never, 'op')).toBeUndefined();
   });
 
   it('returns an empty list for `security: []`', () => {
-    expect(extractSecurityRequirements([])).toEqual([]);
+    expect(extractSecurityRequirements([], 'op')).toEqual([]);
   });
 
   it('turns each requirement object into one set, in order', () => {
-    expect(extractSecurityRequirements([{ a: ['x'] }, { b: [], c: ['y', 'z'] }])).toEqual([
+    expect(extractSecurityRequirements([{ a: ['x'] }, { b: [], c: ['y', 'z'] }], 'op')).toEqual([
       [{ schemeName: 'a', scopes: ['x'] }],
       [
         { schemeName: 'b', scopes: [] },
@@ -147,11 +168,21 @@ describe('extractSecurityRequirements', () => {
     ]);
   });
 
-  it('tolerates a null entry or missing scopes without dropping the alternative', () => {
-    expect(extractSecurityRequirements([{ a: undefined }, null, {}])).toEqual([
-      [{ schemeName: 'a', scopes: [] }],
-      [],
-      [],
-    ]);
+  it('keeps an empty object as an anonymous alternative and tolerates missing scopes', () => {
+    expect(extractSecurityRequirements([{ a: undefined }, {}], 'op')).toEqual([[{ schemeName: 'a', scopes: [] }], []]);
+  });
+
+  it('drops entries that are not requirement objects and warns for each, naming the context', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        extractSecurityRequirements([null, { a: [] }, undefined, 'bearer' as never, [] as never], 'POST /x'),
+      ).toEqual([[{ schemeName: 'a', scopes: [] }]]);
+      expect(warn).toHaveBeenCalledTimes(4);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring security requirement null on POST /x'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring security requirement "bearer" on POST /x'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

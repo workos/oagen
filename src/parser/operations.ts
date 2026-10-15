@@ -706,7 +706,7 @@ function buildOperation(
   }
 
   // Per-operation security requirements; undefined means "inherit ApiSpec.security"
-  const security = extractSecurityRequirements(op.security);
+  const security = extractSecurityRequirements(op.security, opLabel);
 
   // Extract mutually-exclusive parameter groups (query/path/header/cookie)
   const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
