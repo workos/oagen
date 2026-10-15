@@ -39,19 +39,30 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
 
   for (const [schemaName, schema] of Object.entries(schemas)) {
     const parentName = resolveSchemaName(schemaName);
-    extractInlineModelsFromProperties(schema, inlineModels, parentName);
+    extractInlineModelsFromProperties(schema, inlineModels, parentName, schemas);
   }
 
   return inlineModels;
 }
 
-export function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[], parentName?: string): void {
+/**
+ * Walk a schema's properties and materialise every inline object as a model.
+ * `componentSchemas` is optional and only feeds `buildFieldFromSchema`, so a
+ * field that `$ref`s a component can take its `example`/`examples` from it;
+ * callers without the component map at hand simply omit it.
+ */
+export function extractInlineModelsFromProperties(
+  schema: SchemaObject,
+  results: Model[],
+  parentName?: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): void {
   const properties = schema.properties ?? {};
   const allOfSchemas = schema.allOf ?? [];
 
   for (const sub of allOfSchemas) {
     if (sub.properties) {
-      extractInlineModelsFromProperties(sub, results, parentName);
+      extractInlineModelsFromProperties(sub, results, parentName, componentSchemas);
     }
   }
 
@@ -62,8 +73,8 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
     if (isInlineObjectSchema(fieldSchema)) {
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
-      results.push(buildInlineModel(modelName, fieldSchema));
-      extractInlineModelsFromProperties(fieldSchema, results, modelName);
+      results.push(buildInlineModel(modelName, fieldSchema, componentSchemas));
+      extractInlineModelsFromProperties(fieldSchema, results, modelName, componentSchemas);
     }
 
     // Array of inline objects
@@ -72,8 +83,8 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       if (isInlineObjectSchema(items)) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
-        results.push(buildInlineModel(modelName, items));
-        extractInlineModelsFromProperties(items, results, modelName);
+        results.push(buildInlineModel(modelName, items, componentSchemas));
+        extractInlineModelsFromProperties(items, results, modelName, componentSchemas);
       }
     }
 
@@ -87,8 +98,8 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       if (Object.keys(merged.properties ?? {}).length > 0) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
-        results.push(buildInlineModel(modelName, merged));
-        extractInlineModelsFromProperties(merged, results, modelName);
+        results.push(buildInlineModel(modelName, merged, componentSchemas));
+        extractInlineModelsFromProperties(merged, results, modelName, componentSchemas);
       }
     }
 
@@ -114,8 +125,8 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
           emittedNames.push(variantName);
           if (!existingNames.has(variantName)) {
             existingNames.add(variantName);
-            results.push(buildInlineModel(variantName, variant));
-            extractInlineModelsFromProperties(variant, results, variantName);
+            results.push(buildInlineModel(variantName, variant, componentSchemas));
+            extractInlineModelsFromProperties(variant, results, variantName, componentSchemas);
           }
         }
       }
@@ -196,13 +207,13 @@ function mergeAllOfObjectSchema(schema: SchemaObject): SchemaObject {
   return { type: 'object', properties, required, description: schema.description };
 }
 
-function buildInlineModel(name: string, schema: SchemaObject): Model {
+function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): Model {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas));
   }
 
   return { name, description: schema.description, fields };

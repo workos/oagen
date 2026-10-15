@@ -288,7 +288,9 @@ interface Parameter {
 
 ### Parameter Examples
 
-`example` and `examples` are read from the parameter itself first, then its inline `schema`, then the component schema its `$ref` points at. A parameter-level `examples` is an OpenAPI map of Example Objects, so each entry's `value` is taken in document order (entries with `$ref` or `externalValue` are skipped); a schema-level `examples` is the JSON Schema list and is taken as-is. `example` is the document's own `example` when present, otherwise the first entry of the resolved `examples`, so emitters that read only `example` still see a value for an OAS 3.1 document that uses `examples` alone.
+`example` and `examples` are read from three levels in order: the parameter itself, then its inline `schema`, then the component schema its `$ref` points at. A parameter-level `examples` is an OpenAPI map of Example Objects, so each entry's `value` is taken in document order; a `$ref` entry is resolved against `components.examples` (a dangling ref is skipped with a warning), and an `externalValue` entry is skipped. A schema-level `examples` is the JSON Schema list and is taken as-is.
+
+Each value walks the levels on its own. `examples` is the first level's non-empty list. `example` comes from the first level that has either an `example` or a list, preferring that level's own `example` over its first list entry, so a schema-level `example` can never mask the parameter's own `examples` map. A level with neither falls through; an explicit `null` is a value and is kept. Emitters that read only `example` therefore still see a value for an OAS 3.1 document that uses `examples` alone.
 
 ### Idempotency Key
 
@@ -336,7 +338,7 @@ interface Field {
 
 ### Field Examples
 
-OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema gives neither has no `example` and no `examples` key.
+OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does. A field whose schema (and `$ref` target, if any) gives neither has no `example` and no `examples` key.
 
 ## Enum
 

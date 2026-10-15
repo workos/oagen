@@ -205,16 +205,19 @@ export interface Parameter {
   deprecated?: boolean;
   default?: unknown;
   /**
-   * A single illustrative value. The document's `example` (on the parameter,
-   * its schema, or the schema its `$ref` points at) when present, otherwise
-   * the first entry of `examples`. Absent when the document gives neither.
+   * A single illustrative value, resolved level by level: the parameter's own
+   * `example` (else the first entry of its `examples` map), then its inline
+   * schema's `example` (else the first of its `examples` list), then the same
+   * on the component schema its `$ref` points at. A level with neither falls
+   * through; an explicit `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
-   * Every example value the document gives, in document order. Sourced from
-   * the parameter's `examples` map of Example Objects (each entry's `value`),
-   * or, failing that, the JSON Schema `examples` list on its schema. Present
-   * only when at least one value exists.
+   * Every example value the document gives, in document order: the
+   * parameter's `examples` map of Example Objects (each entry's `value`, with
+   * `$ref`s resolved against `components.examples`), else the JSON Schema
+   * `examples` list on its inline schema, else the list on the component
+   * schema its `$ref` points at. Present only when at least one value exists.
    */
   examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
@@ -320,14 +323,16 @@ export interface Field {
   deprecated?: boolean;
   default?: unknown;
   /**
-   * A single illustrative value. The schema's `example` when present,
-   * otherwise the first entry of `examples`. Absent when the schema gives
-   * neither.
+   * A single illustrative value. The field schema's `example` when present,
+   * otherwise the first entry of its `examples`; when the schema is a `$ref`
+   * with neither, the same taken from the component it points at. An
+   * explicit `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
    * Every example value the schema gives, in document order, from the JSON
-   * Schema `examples` list (OAS 3.1 deprecates `example` in its favour).
+   * Schema `examples` list (OAS 3.1 deprecates `example` in its favour) —
+   * on the field schema, else on the component its `$ref` points at.
    * Present only when the list has at least one entry.
    */
   examples?: unknown[];

@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { extractSchemas, schemaToTypeRef, clearSchemaNameTransform } from '../../src/parser/schemas.js';
+import {
+  extractSchemas,
+  extractInlineModelsFromSchemas,
+  schemaToTypeRef,
+  clearSchemaNameTransform,
+} from '../../src/parser/schemas.js';
 
 describe('extractSchemas – backend suffix handling', () => {
   it('preserves Dto suffix in schema names', () => {
@@ -962,5 +967,109 @@ describe('extractSchemas – JSON Schema `examples` on fields (issue #189)', () 
     });
     for (const field of models[0].fields) expect(field).not.toHaveProperty('examples');
     expect(models[0].fields.map((f) => f.example)).toEqual(['Rexie', undefined, undefined]);
+  });
+});
+
+describe('extractSchemas – fields fall back to a referenced component (PR #198 review)', () => {
+  const projected = (fields: Array<{ name: string; example?: unknown; examples?: unknown[] }>) =>
+    fields.map(({ name, example, examples }) => ({ name, example, examples }));
+  const components = {
+    Category: { type: 'string', enum: ['dog', 'cat'], examples: ['dog', 'cat'] },
+    Direction: { type: 'string', enum: ['asc', 'desc'], example: 'asc' },
+    Plain: { type: 'string' },
+  };
+
+  it('takes example and examples from the component a field $refs', () => {
+    const { models } = extractSchemas({
+      ...components,
+      Pet: {
+        type: 'object',
+        properties: {
+          category: { $ref: '#/components/schemas/Category' },
+          direction: { $ref: '#/components/schemas/Direction' },
+          plain: { $ref: '#/components/schemas/Plain' },
+        },
+      },
+    });
+    const pet = models.find((m) => m.name === 'Pet')!;
+    expect(projected(pet.fields)).toMatchInlineSnapshot(`
+      [
+        {
+          "example": "dog",
+          "examples": [
+            "dog",
+            "cat",
+          ],
+          "name": "category",
+        },
+        {
+          "example": "asc",
+          "examples": undefined,
+          "name": "direction",
+        },
+        {
+          "example": undefined,
+          "examples": undefined,
+          "name": "plain",
+        },
+      ]
+    `);
+    expect(pet.fields[1]).not.toHaveProperty('examples');
+    expect(pet.fields[2]).not.toHaveProperty('examples');
+  });
+
+  it('prefers the field schema over the referenced component, and keeps an explicit null', () => {
+    const { models } = extractSchemas({
+      ...components,
+      Pet: {
+        type: 'object',
+        properties: {
+          own: { $ref: '#/components/schemas/Category', examples: ['own'] },
+          nulled: { $ref: '#/components/schemas/Category', example: null },
+        },
+      },
+    });
+    const pet = models.find((m) => m.name === 'Pet')!;
+    expect(projected(pet.fields)).toEqual([
+      { name: 'own', example: 'own', examples: ['own'] },
+      // `example` stops at the field's explicit null; `examples` still
+      // walks on to the component's list.
+      { name: 'nulled', example: null, examples: ['dog', 'cat'] },
+    ]);
+  });
+
+  it('reaches fields declared through allOf composition', () => {
+    const { models } = extractSchemas({
+      ...components,
+      Base: { type: 'object', properties: { direction: { $ref: '#/components/schemas/Direction' } } },
+      Pet: {
+        allOf: [
+          { $ref: '#/components/schemas/Base' },
+          { type: 'object', properties: { category: { $ref: '#/components/schemas/Category' } } },
+        ],
+      },
+    });
+    const pet = models.find((m) => m.name === 'Pet')!;
+    expect(projected(pet.fields)).toEqual([
+      { name: 'direction', example: 'asc', examples: undefined },
+      { name: 'category', example: 'dog', examples: ['dog', 'cat'] },
+    ]);
+  });
+
+  it('reaches fields of inline models nested under a component', () => {
+    const inlineModels = extractInlineModelsFromSchemas({
+      ...components,
+      Pet: {
+        type: 'object',
+        properties: {
+          owner: {
+            type: 'object',
+            properties: { preference: { $ref: '#/components/schemas/Category' } },
+          },
+        },
+      },
+    });
+    const owner = inlineModels.find((m) => m.name === 'PetOwner')!;
+    expect(projected(owner.fields)).toEqual([{ name: 'preference', example: 'dog', examples: ['dog', 'cat'] }]);
   });
 });

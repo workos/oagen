@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import type { Enum } from '../../src/ir/types.js';
@@ -1878,5 +1878,201 @@ describe('extractOperations – parameter `examples` (issue #189)', () => {
     const [petId] = services[0].operations[0].pathParams;
     expect(petId.example).toBeUndefined();
     expect(petId).not.toHaveProperty('examples');
+  });
+});
+
+describe('extractOperations – per-level parameter example precedence (PR #198 review)', () => {
+  const ok = { '200': { description: 'ok' } };
+  const projected = (params: Array<{ name: string; example?: unknown; examples?: unknown[] }>) =>
+    params.map(({ name, example, examples }) => ({ name, example, examples }));
+  const listPets = (parameters: unknown[]) =>
+    ({ '/pets': { get: { operationId: 'listPets', parameters, responses: ok } } }) as never;
+  const query = (paths: never, ...rest: unknown[]) =>
+    extractOperations(paths, ...(rest as [])).services[0].operations[0].queryParams;
+
+  it('takes example from the parameter-level map before a schema-level example', () => {
+    const params = query(
+      listPets([
+        {
+          name: 'species',
+          in: 'query',
+          examples: { one: { value: 'param' } },
+          schema: { type: 'string', example: 'schema' },
+        },
+      ]),
+    );
+    expect(projected(params)).toEqual([{ name: 'species', example: 'param', examples: ['param'] }]);
+  });
+
+  it('keeps an explicit null example at any level instead of falling through', () => {
+    const params = query(
+      listPets([
+        { name: 'on_param', in: 'query', example: null, schema: { type: ['string', 'null'], examples: ['dog'] } },
+        { name: 'on_schema', in: 'query', schema: { type: ['string', 'null'], example: null, examples: ['dog'] } },
+      ]),
+    );
+    expect(projected(params)).toEqual([
+      { name: 'on_param', example: null, examples: ['dog'] },
+      { name: 'on_schema', example: null, examples: ['dog'] },
+    ]);
+  });
+
+  it('keeps an explicit null on the referenced component over a later level', () => {
+    const componentSchemas = { Species: { type: ['string', 'null'], example: null, examples: ['dog'] } };
+    const params = query(
+      listPets([{ name: 'species', in: 'query', schema: { $ref: '#/components/schemas/Species' } }]),
+      undefined,
+      componentSchemas,
+    );
+    expect(projected(params)).toEqual([{ name: 'species', example: null, examples: ['dog'] }]);
+  });
+
+  it('lets examples fall to a later level while example stays on an earlier one', () => {
+    const params = query(
+      listPets([
+        { name: 'species', in: 'query', example: 'param', schema: { type: 'string', examples: ['s1', 's2'] } },
+      ]),
+    );
+    expect(projected(params)).toEqual([{ name: 'species', example: 'param', examples: ['s1', 's2'] }]);
+  });
+});
+
+describe('extractOperations – `$ref` entries in a parameter examples map (PR #198 review)', () => {
+  const ok = { '200': { description: 'ok' } };
+  const projected = (params: Array<{ name: string; example?: unknown; examples?: unknown[] }>) =>
+    params.map(({ name, example, examples }) => ({ name, example, examples }));
+  const withExamples = (examples: Record<string, unknown>, schema: Record<string, unknown> = { type: 'string' }) =>
+    ({
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [{ name: 'species', in: 'query', schema, examples }],
+          responses: ok,
+        },
+      },
+    }) as never;
+  const query = (paths: never, componentExamples?: Record<string, Record<string, unknown>>) =>
+    extractOperations(paths, undefined, undefined, undefined, undefined, undefined, componentExamples).services[0]
+      .operations[0].queryParams;
+
+  it('resolves a $ref entry against components.examples in document order', () => {
+    const params = query(withExamples({ dog: { $ref: '#/components/examples/Dog' }, cat: { value: 'cat' } }), {
+      Dog: { summary: 'A dog', value: 'dog' },
+    });
+    expect(projected(params)).toEqual([{ name: 'species', example: 'dog', examples: ['dog', 'cat'] }]);
+  });
+
+  it('reads a map made only of refs instead of falling through to the schema list', () => {
+    const params = query(
+      withExamples(
+        { a: { $ref: '#/components/examples/Dog' }, b: { $ref: '#/components/examples/Cat' } },
+        { type: 'string', examples: ['schema'] },
+      ),
+      { Dog: { value: 'dog' }, Cat: { value: 'cat' } },
+    );
+    expect(projected(params)).toEqual([{ name: 'species', example: 'dog', examples: ['dog', 'cat'] }]);
+  });
+
+  it('skips a dangling $ref with a warning and keeps the rest', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const params = query(
+        withExamples({ missing: { $ref: '#/components/examples/Missing' }, cat: { value: 'cat' } }),
+        {},
+      );
+      expect(projected(params)).toEqual([{ name: 'species', example: 'cat', examples: ['cat'] }]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(/Unresolved example \$ref "#\/components\/examples\/Missing"/);
+      expect(warn.mock.calls[0][0]).toMatch(/parameter "species" in listPets/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('falls through to the schema list when every ref dangles', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const params = query(
+        withExamples({ missing: { $ref: '#/components/examples/Missing' } }, { type: 'string', examples: ['schema'] }),
+      );
+      expect(projected(params)).toEqual([{ name: 'species', example: 'schema', examples: ['schema'] }]);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('follows a chain of refs, unescapes JSON Pointer tokens, and guards against cycles', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const params = query(
+        withExamples({
+          alias: { $ref: '#/components/examples/Alias' },
+          escaped: { $ref: '#/components/examples/pets~1cat' },
+          loop: { $ref: '#/components/examples/Loop' },
+        }),
+        {
+          Alias: { $ref: '#/components/examples/Dog' },
+          Dog: { value: 'dog' },
+          'pets/cat': { value: 'cat' },
+          Loop: { $ref: '#/components/examples/Loop' },
+        },
+      );
+      expect(projected(params)).toEqual([{ name: 'species', example: 'dog', examples: ['dog', 'cat'] }]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(/Circular example \$ref chain starting at "#\/components\/examples\/Loop"/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('skips a resolved entry that carries externalValue or no value', () => {
+    const params = query(
+      withExamples({
+        remote: { $ref: '#/components/examples/Remote' },
+        blank: { $ref: '#/components/examples/Blank' },
+      }),
+      { Remote: { externalValue: 'https://example.com/dog.json' }, Blank: { summary: 'no inline value' } },
+    );
+    expect(projected(params)).toEqual([{ name: 'species', example: undefined, examples: undefined }]);
+  });
+});
+
+describe('extractOperations – request-body fields fall back to a referenced component (PR #198 review)', () => {
+  it('takes example and examples from the component a body field $refs', () => {
+    const paths = {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    category: { $ref: '#/components/schemas/Category' },
+                    direction: { $ref: '#/components/schemas/Direction' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      Category: { type: 'string', enum: ['dog', 'cat'], examples: ['dog', 'cat'] },
+      Direction: { type: 'string', enum: ['asc', 'desc'], example: 'asc' },
+    };
+
+    const { inlineModels } = extractOperations(paths, undefined, componentSchemas);
+    const body = inlineModels.find((m) => m.name === 'CreatePetRequest');
+    expect(body?.fields.map(({ name, example, examples }) => ({ name, example, examples }))).toEqual([
+      { name: 'category', example: 'dog', examples: ['dog', 'cat'] },
+      { name: 'direction', example: 'asc', examples: undefined },
+    ]);
+    expect(body?.fields[1]).not.toHaveProperty('examples');
   });
 });
