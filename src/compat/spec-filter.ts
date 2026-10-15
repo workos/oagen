@@ -20,6 +20,9 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
       // Operation methods are matched by the class diff, not by name here
       collectTypeRefNames(op.response, names, hints, topLevelEnumNames);
       if (op.requestBody) collectTypeRefNames(op.requestBody, names, hints, topLevelEnumNames);
+      for (const field of op.pagination?.envelopeFields ?? []) {
+        collectTypeRefNames(field.type, names, hints, topLevelEnumNames);
+      }
       for (const p of [
         ...op.pathParams,
         ...op.queryParams,

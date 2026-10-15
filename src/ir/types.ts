@@ -4,9 +4,10 @@ import type { SdkBehavior } from './sdk-behavior.js';
  * Authentication scheme extracted from OpenAPI `components.securitySchemes`.
  *
  * `schemeName` is the key under `components.securitySchemes`, spelled exactly as
- * in the document. `Operation.security[].schemeName` refers to the same key, so
- * emitters join a per-operation requirement to its scheme on that field.
- * `description` is present only when the document declares one.
+ * in the document. The requirements under `ApiSpec.security` and
+ * `Operation.security` refer to the same key, so emitters join a requirement to
+ * its scheme on that field. `description` is present only when the document
+ * declares one.
  */
 export type AuthScheme = { description?: string; schemeName: string } & (
   | { kind: 'basic' }
@@ -33,6 +34,12 @@ export interface ApiSpec {
   models: Model[];
   enums: Enum[];
   auth?: AuthScheme[];
+  /**
+   * Document-level security requirements: the default every operation uses
+   * unless it declares its own `Operation.security`. Same shape and semantics
+   * as that field. `undefined` when the document declares none.
+   */
+  security?: SecurityRequirementSet[];
   /** Language-agnostic runtime policies (retry, errors, telemetry, etc.). */
   sdk: SdkBehavior;
 }
@@ -44,13 +51,23 @@ export interface Service {
   operations: Operation[];
 }
 
-/** A single API operation (maps to an SDK method) */
-/** Per-operation security requirement: scheme name → scope list. */
+/** One scheme a request must satisfy, with the scopes it needs. */
 export interface SecurityRequirement {
+  /** Key under `components.securitySchemes`; joins to `AuthScheme.schemeName`. */
   schemeName: string;
   scopes: string[];
 }
 
+/**
+ * One alternative from an OpenAPI security requirement list: a request must
+ * satisfy *every* scheme in the set together ("all of"). A list of sets is
+ * satisfied by *any one* of them ("either of"). An empty set is an alternative
+ * that needs no credentials at all, which is how a document makes
+ * authentication optional (`security: [{ userToken: [] }, {}]`).
+ */
+export type SecurityRequirementSet = SecurityRequirement[];
+
+/** A single API operation (maps to an SDK method) */
 export interface Operation {
   name: string;
   /**
@@ -90,8 +107,15 @@ export interface Operation {
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
   async?: boolean;
-  /** Per-operation security overrides. When present, overrides the global spec-level security. */
-  security?: SecurityRequirement[];
+  /**
+   * Per-operation security requirements, mirroring the OpenAPI document:
+   * - `undefined` — the operation declares nothing and inherits
+   *   `ApiSpec.security` (which may itself be `undefined`).
+   * - `[]` — `security: []`: the operation needs no authentication.
+   * - otherwise one `SecurityRequirementSet` per requirement object; the
+   *   request must satisfy any one set, and every scheme within it.
+   */
+  security?: SecurityRequirementSet[];
   /**
    * Mutually-exclusive parameter groups parsed from `x-mutually-exclusive-parameter-groups`.
    * Each group represents a logical choice the caller must (or may) make between
@@ -163,6 +187,25 @@ export interface PaginationMeta {
   limitParam?: string;
   dataPath?: string;
   itemType: TypeRef;
+  /**
+   * Every property the list envelope carries besides the data array, in
+   * document order: the pagination companion (`list_metadata`, `pagination`,
+   * `has_more`, …) and any discriminant such as `object: "list"`. Together
+   * with `dataPath` and `itemType` this is the envelope's full shape, so an
+   * emitter can type what the endpoint returns and read the page details it
+   * needs for the next request without parsing the document itself.
+   *
+   * An inline companion object is lifted to a model. Because the same envelope
+   * recurs on every list endpoint of an API, copies that agree structurally
+   * share one model named from the property alone (`list_metadata` →
+   * `ListMetadata`, or the component schema of that name when one exists); a
+   * copy whose shape differs keeps an operation-qualified name
+   * (`ListUsersListMetadata`) so it can never change another type's shape.
+   *
+   * Absent when the response is a bare array, or when pagination was inferred
+   * from query parameters alone and no envelope was detected.
+   */
+  envelopeFields?: Field[];
 }
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
@@ -503,6 +546,11 @@ export function assignModelsToServices(
       if (op.pagination) {
         for (const name of collectModelRefs(op.pagination.itemType)) {
           referencedModels.add(name);
+        }
+        for (const field of op.pagination.envelopeFields ?? []) {
+          for (const name of collectModelRefs(field.type)) {
+            referencedModels.add(name);
+          }
         }
       }
     }

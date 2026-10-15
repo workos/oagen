@@ -77,12 +77,12 @@ components:
     expect(operations).toHaveLength(3);
     for (const op of operations) {
       expect(op.security, `${op.name} has security`).toBeDefined();
-      for (const requirement of op.security!) {
+      for (const requirement of op.security!.flat()) {
         const scheme = ir.auth!.find((a) => a.schemeName === requirement.schemeName);
         expect(scheme, `${op.name} references ${requirement.schemeName}`).toBeDefined();
       }
     }
-    const byName = Object.fromEntries(operations.map((op) => [op.name, op.security!.map((r) => r.schemeName)]));
+    const byName = Object.fromEntries(operations.map((op) => [op.name, op.security!.flat().map((r) => r.schemeName)]));
     expect(byName).toEqual({ getOne: ['userToken'], getTwo: ['partnerKey'], getThree: ['serviceToken'] });
   });
 
