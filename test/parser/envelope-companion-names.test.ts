@@ -29,6 +29,100 @@ describe('resolveEnvelopeCompanionNames', () => {
     expect(b.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
 
+  it('judges a oneOf companion on every variant, and folds only when the variants line up', () => {
+    const variants = (op: string, second: string) => {
+      const base = `${op}Meta`;
+      const other = `${second}${op}Meta`;
+      const c: EnvelopeCompanion = {
+        field: {
+          name: 'meta',
+          type: {
+            kind: 'union',
+            compositionKind: 'oneOf',
+            variants: [
+              { kind: 'model', name: base },
+              { kind: 'model', name: other },
+            ],
+          },
+          required: false,
+        },
+        models: [
+          { name: base, fields: [{ name: 'kind', type: { kind: 'literal', value: 'cursor' }, required: true }] },
+          {
+            name: other,
+            fields: [{ name: 'kind', type: { kind: 'literal', value: second.toLowerCase() }, required: true }],
+          },
+        ],
+        bareNames: ['Meta', `${second}Meta`],
+      };
+      return c;
+    };
+    const cursorOffset = variants('ListA', 'Offset');
+    const cursorToken = variants('ListB', 'Token');
+    const cursorOffsetAgain = variants('ListC', 'Offset');
+
+    const models = resolveEnvelopeCompanionNames([cursorOffset, cursorToken, cursorOffsetAgain]);
+
+    // A and C share every variant and fold; B's second variant differs, so it keeps its own models.
+    expect(models.map((m) => m.name)).toEqual(['Meta', 'OffsetMeta', 'ListBMeta', 'TokenListBMeta']);
+    expect(cursorOffsetAgain.field.type).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [
+        { kind: 'model', name: 'Meta' },
+        { kind: 'model', name: 'OffsetMeta' },
+      ],
+    });
+    expect(cursorToken.field.type).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [
+        { kind: 'model', name: 'ListBMeta' },
+        { kind: 'model', name: 'TokenListBMeta' },
+      ],
+    });
+  });
+
+  it('never folds a oneOf companion onto a plain component', () => {
+    const c: EnvelopeCompanion = {
+      field: {
+        name: 'pagination',
+        type: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [
+            { kind: 'model', name: 'ListAPagination' },
+            { kind: 'model', name: 'OffsetListAPagination' },
+          ],
+        },
+        required: false,
+      },
+      models: [
+        { name: 'ListAPagination', fields: [{ name: 'next', type: str, required: false }] },
+        { name: 'OffsetListAPagination', fields: [{ name: 'page', type: int, required: false }] },
+      ],
+      bareNames: ['Pagination', 'OffsetPagination'],
+    };
+    const componentModels: Model[] = [{ name: 'Pagination', fields: [{ name: 'next', type: str, required: false }] }];
+
+    const models = resolveEnvelopeCompanionNames([c], componentModels);
+
+    expect(models.map((m) => m.name)).toEqual(['ListAPagination', 'OffsetListAPagination']);
+  });
+
+  it('folds a nullable copy onto a component by repointing only its reference', () => {
+    const c = companion('ListA', 'ListMetadata', [{ name: 'after', type: str, required: false }]);
+    c.field.type = { kind: 'nullable', inner: { kind: 'model', name: 'ListAListMetadata' } };
+    const componentModels: Model[] = [
+      { name: 'ListMetadata', fields: [{ name: 'after', type: { kind: 'nullable', inner: str }, required: false }] },
+    ];
+
+    const models = resolveEnvelopeCompanionNames([c], componentModels);
+
+    expect(models).toEqual([]);
+    expect(c.field.type).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'ListMetadata' } });
+  });
+
   it("keeps the target's definition when stricter copies fold onto it, whatever their order", () => {
     const required = companion('ListA', 'Pagination', [{ name: 'next', type: str, required: true }]);
     const optional1 = companion('ListB', 'Pagination', [{ name: 'next', type: str, required: false }]);
@@ -192,9 +286,11 @@ describe('resolveEnvelopeCompanionNames', () => {
       { name: 'PaginationLinks', fields: [{ name: 'next', type: str, required: false }] },
     ];
 
-    resolveEnvelopeCompanionNames([copy], componentModels);
+    const models = resolveEnvelopeCompanionNames([copy], componentModels);
 
-    expect(copy.models.map((m) => m.name)).toEqual(['Pagination', 'PaginationLink']);
+    // Folded onto the component: the field points at it and the copy's own models are dropped.
+    expect(models).toEqual([]);
+    expect(copy.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
 
   it('keeps every copy qualified when a same-named component differs from all of them, even if they agree', () => {

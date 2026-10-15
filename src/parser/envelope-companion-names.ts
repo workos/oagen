@@ -1,5 +1,5 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
-import { assertNever, walkTypeRef } from '../ir/types.js';
+import { assertNever, collectModelRefs, walkTypeRef } from '../ir/types.js';
 
 /**
  * A list-envelope companion that was lifted to one or more inline models:
@@ -47,10 +47,17 @@ export interface EnvelopeCompanion {
  *   the target: it and every copy it admits take the bare name; any other
  *   copy keeps its operation-qualified name.
  *
+ * The comparison covers the companion's whole field type, so a `oneOf`
+ * companion is judged on every variant, not just the first, and a copy folds
+ * among copies only when its lifted models line up name for name with the
+ * target's (same variants, same order); onto a component, only a companion
+ * whose field references exactly its own lifted model can fold.
+ *
  * Only the target's definition survives a collapse. The admitted copies'
  * models are dropped rather than handed to the merge pass, which keeps the
  * first model of a name and would let a stricter copy declared earlier
- * narrow the shared type for everyone.
+ * narrow the shared type for everyone; their field references are repointed
+ * at the target's models instead.
  *
  * Enums declared inline in a companion stay operation-qualified, exactly like
  * enums declared inline in a parameter.
@@ -69,46 +76,72 @@ export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], c
 
   const componentMap = new Map((componentModels ?? []).map((m) => [m.name, m]));
   const localMap = (c: EnvelopeCompanion): Map<string, Model> => new Map(c.models.map((m) => [m.name, m]));
+  // A folded copy keeps its own field wrapper and only its references move, so
+  // whether the envelope field itself is nullable has no bearing on folding.
+  const unwrap = (t: TypeRef): TypeRef => (t.kind === 'nullable' ? t.inner : t);
 
   for (const [bare, group] of byBareName) {
-    // The target shape every copy is measured against, with the map its nested
-    // references resolve through: a component resolves through the other
-    // components, a copy through its own models, so a copy nesting the same
-    // shape under its own qualified name still matches.
-    let target: { model: Model; map: Map<string, Model>; owner?: EnvelopeCompanion };
+    // What every copy is measured against: a field type, the map its model
+    // references resolve through (a component through the other components, a
+    // copy through its own models), and the names a folded copy's references
+    // are repointed to.
+    let folds: (c: EnvelopeCompanion) => boolean;
+    let finalNames: string[];
+    let owner: EnvelopeCompanion | undefined;
+
     const component = componentMap.get(bare);
     if (component) {
-      target = { model: component, map: componentMap };
+      const targetType: TypeRef = { kind: 'model', name: component.name };
+      finalNames = [component.name];
+      folds = (c) => {
+        // Only a field that references exactly its own lifted model can be
+        // repointed at the component; a union of variants has nowhere to go.
+        const refs = collectModelRefs(c.field.type);
+        if (refs.length !== 1 || refs[0] !== c.models[0].name) return false;
+        return typeAdmits(targetType, componentMap, unwrap(c.field.type), localMap(c), new Set());
+      };
     } else {
       const counts = new Map<string, { n: number; first: EnvelopeCompanion }>();
       for (const c of group) {
-        const fp = fingerprintModel(c.models[0], localMap(c), new Set());
-        const seen = counts.get(fp);
+        const key = `${fingerprintType(unwrap(c.field.type), localMap(c), new Set())}|${c.bareNames.join(',')}`;
+        const seen = counts.get(key);
         if (seen) seen.n += 1;
-        else counts.set(fp, { n: 1, first: c });
+        else counts.set(key, { n: 1, first: c });
       }
       let best = { n: 0, first: group[0] };
       for (const entry of counts.values()) if (entry.n > best.n) best = entry;
-      target = { model: best.first.models[0], map: localMap(best.first), owner: best.first };
+      owner = best.first;
+      finalNames = owner.bareNames;
+      const ownerType = unwrap(owner.field.type);
+      const ownerMap = localMap(owner);
+      const ownerNames = owner.bareNames;
+      folds = (c) =>
+        c.bareNames.length === ownerNames.length &&
+        c.bareNames.every((name, i) => name === ownerNames[i]) &&
+        typeAdmits(ownerType, ownerMap, unwrap(c.field.type), localMap(c), new Set());
     }
 
     // Decide every copy before renaming any: renaming the target repoints its
     // nested references to the bare names, which its map no longer resolves.
-    const collapsing = group.filter((c) => admits(target.model, target.map, c.models[0], localMap(c), new Set()));
+    const collapsing = group.filter(folds);
     for (const companion of collapsing) {
-      renameCompanion(companion);
-      if (companion !== target.owner) folded.add(companion);
+      renameCompanion(companion, finalNames);
+      if (companion !== owner) folded.add(companion);
     }
   }
 
   return companions.filter((c) => !folded.has(c)).flatMap((c) => c.models);
 }
 
-/** Rename a companion's models to their bare names and repoint every reference. */
-function renameCompanion(companion: EnvelopeCompanion): void {
+/**
+ * Rename a companion's models to `names` (index-aligned with `models`) and
+ * repoint every reference, in its field and inside its models.
+ */
+function renameCompanion(companion: EnvelopeCompanion, names: string[]): void {
   const renames = new Map<string, string>();
   companion.models.forEach((model, i) => {
-    if (model.name !== companion.bareNames[i]) renames.set(model.name, companion.bareNames[i]);
+    const name = names[i];
+    if (name !== undefined && model.name !== name) renames.set(model.name, name);
   });
   if (renames.size === 0) return;
 
