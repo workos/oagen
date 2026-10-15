@@ -232,7 +232,7 @@ describe('inline model naming without operationId (issue #188)', () => {
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toMatchInlineSnapshot(
-      `"[oagen] Warning: Inline model "CreateNoteRequest" has more than one definition with different fields (2 vs 1) — keeping the definition with the most fields"`,
+      `"[oagen] Warning: Inline model "CreateNoteRequest" has more than one definition with different fields or field types (2 vs 1) — keeping the one with more fields"`,
     );
   });
 });
@@ -450,12 +450,33 @@ describe('keepLargestByName collision warning', () => {
     );
   });
 
-  it('stays quiet when same-named inline models have the same field names', () => {
+  it('stays quiet when same-named inline models have the same field names and types', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const merged = mergeInlineResponseModels([], [model('Thing', ['a', 'b']), model('Thing', ['b', 'a'])]);
 
     expect(merged).toHaveLength(1);
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('warns on a tie when only the field types differ, and says it keeps the first definition', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const first: Model = {
+      name: 'Thing',
+      fields: [{ name: 'a', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    const second: Model = {
+      name: 'Thing',
+      fields: [{ name: 'a', type: { kind: 'array', items: { kind: 'primitive', type: 'string' } }, required: true }],
+    };
+
+    const merged = mergeInlineResponseModels([], [first, second]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].fields[0].type).toEqual({ kind: 'primitive', type: 'string' });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toMatchInlineSnapshot(
+      `"[oagen] Warning: Inline model "Thing" has more than one definition with different fields or field types (1 vs 1) — keeping the first definition"`,
+    );
   });
 });

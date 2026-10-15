@@ -336,7 +336,7 @@ Models come from `components/schemas` (named as written, after `cleanSchemaName`
 
 A response object with a string `const` discriminant (`object: "note"`) is named from that value instead (`Note`); a list envelope's inline item model replaces the `Response` suffix with `Item`; nested inline objects are qualified with their parent model's name.
 
-If two inline models still resolve to the same name with different fields (two `operationId`s that PascalCase to the same word, for example), the parser keeps the one with the most fields and prints `[oagen] Warning: Inline model "…" has more than one definition with different fields`.
+If two inline models still resolve to the same name with different fields or field types (two `operationId`s that PascalCase to the same word, for example), the parser keeps the one with more fields — the first definition on a tie — and prints `[oagen] Warning: Inline model "…" has more than one definition with different fields or field types`.
 
 ## Enum
 
