@@ -28,6 +28,176 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
 }
 
 /**
+ * The inline model or enum name `schemaToTypeRef` would mint for `schema`
+ * typed under `contextName` with `parentModelName`, or null when it mints
+ * none (a `$ref`, a primitive, an array or map of those). Mirrors the naming
+ * branches of `schemaToTypeRef`: an inline object in any form it recognises
+ * (`properties`, an `allOf` with object members, a `oneOf`/`anyOf` with an
+ * inline object variant) takes `qualifyInlineModelName`; an inline enum, or
+ * a `oneOf` of string consts that collapses into one, takes the parent-
+ * prefixed enum name, which is never singularized; an array or map claims
+ * whatever its items or values would.
+ */
+export function mintedInlineName(
+  contextName: string,
+  schema: SchemaObject,
+  parentModelName: string | undefined,
+): string | null {
+  const s = unwrapNullableSchema(schema);
+  if (s.$ref) return null;
+  const base = toPascalCase(contextName);
+  const modelName = (): string => qualifyInlineModelName(base, parentModelName);
+  const enumName = (): string => {
+    const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
+    return cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base;
+  };
+  if (s.allOf) {
+    const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
+    if (only) return mintedInlineName(contextName, only, parentModelName);
+    return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : null;
+  }
+  const variants = s.oneOf ?? s.anyOf;
+  if (variants) {
+    const nonNull = variants.filter((v) => !isNullSchema(v));
+    if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
+    return nonNull.some((v) => isInlineObjectSchema(v)) ? modelName() : null;
+  }
+  if (s.const !== undefined) return null;
+  if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return enumName();
+  // A plain boolean: the type guard would otherwise narrow `s` to `never` below.
+  const inlineObject: boolean = isInlineObjectSchema(s);
+  if (inlineObject) return modelName();
+  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineName(contextName, s.items, parentModelName);
+  if (s.type === 'object' && !s.properties) {
+    const value = mapValueSchema(s);
+    return value ? mintedInlineName(contextName, value, parentModelName) : null;
+  }
+  return null;
+}
+
+/**
+ * A canonical rendering of a schema's shape, for deciding whether two inline
+ * schemas describe the same model: every structural keyword (`type`,
+ * `properties`, `required`, `items`, `additionalProperties`,
+ * `patternProperties`, `allOf`/`oneOf`/`anyOf`, `enum`, `const`, `format`,
+ * `nullable`, ...) recursively, with object keys sorted and the `required`
+ * and `type` lists order-insensitive. Documentation (`description`, `title`,
+ * `example`, `examples`, `summary`, `externalDocs`, `deprecated`) and vendor
+ * extensions (`x-*`) are ignored, and so is `nullable: false`, which the
+ * nullable unwrap leaves behind. Enum values keep their order, as the IR
+ * does.
+ */
+export function schemaShapeKey(schema: SchemaObject): string {
+  const ignored = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs', 'deprecated']);
+  const canon = (value: unknown, key?: string): unknown => {
+    if (Array.isArray(value)) {
+      const items = value.map((v) => canon(v));
+      return key === 'required' || key === 'type' ? items.map(String).sort() : items;
+    }
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(record).sort()) {
+        if (ignored.has(k) || k.startsWith('x-')) continue;
+        if (k === 'nullable' && record[k] === false) continue;
+        out[k] = canon(record[k], k);
+      }
+      return out;
+    }
+    return value;
+  };
+  return JSON.stringify(canon(schema));
+}
+
+/**
+ * The context name an array field's items (`kind: 'item'`) or a map field's
+ * values (`kind: 'value'`) are typed and extracted under. By default it is
+ * the field itself, so the inline model is the parent plus the singularized
+ * field (`layers` on `Drawing` → `DrawingLayer`).
+ *
+ * When a sibling property of the same object would mint that very name —
+ * `layer` as an inline object, an inline enum, an inline union with object
+ * variants, or an array or map of such (`mintedInlineName`); a primitive
+ * `email` beside `emails` claims nothing — the elements step aside to
+ * `<field>_item` / `<field>_value`, which qualify to `<Parent><Field>Item` /
+ * `<Parent><Field>Value` (`DrawingLayersItem`, `DrawingLayersValue`),
+ * matching the `<Variant>Item` convention.
+ *
+ * Identical-shape sharing: when the claiming sibling is an inline object
+ * whose shape is structurally identical to the items or values
+ * (`schemaShapeKey`: same properties, required, types, nested inline schemas
+ * and enum values; description, title and example ignored), the two fields
+ * share one model under the singular name. They are the same shape, so one
+ * model is the right SDK type and a duplicate would only add noise; should a
+ * later spec version make the shapes diverge, the split happens then, which
+ * is the moment the item type genuinely changes. This deliberately departs
+ * from a literal one-model-per-field reading for the identical case.
+ *
+ * Decided from sibling names and schema content alone, so document order
+ * plays no part. `schemaToTypeRef` and every extractor call this with the
+ * same sibling set (`collectProperties`); otherwise the reference and the
+ * model disagree.
+ */
+export function elementContextName(
+  fieldName: string,
+  kind: 'item' | 'value',
+  siblings: ReadonlyMap<string, SchemaObject> | undefined,
+  parentModelName: string | undefined,
+  elementSchema: SchemaObject,
+): string {
+  if (!siblings) return fieldName;
+  const own = mintedInlineName(fieldName, elementSchema, parentModelName);
+  if (own === null) return fieldName;
+  const element = unwrapNullableSchema(elementSchema);
+  for (const [siblingName, siblingSchema] of siblings) {
+    if (siblingName === fieldName) continue;
+    if (mintedInlineName(siblingName, siblingSchema, parentModelName) !== own) continue;
+    const sibling = unwrapNullableSchema(siblingSchema);
+    if (
+      isInlineObjectSchema(sibling) &&
+      isInlineObjectSchema(element) &&
+      schemaShapeKey(sibling) === schemaShapeKey(element)
+    ) {
+      continue; // same shape: share the singular name
+    }
+    return `${fieldName}_${kind}`;
+  }
+  return fieldName;
+}
+
+/**
+ * Every property the object described by `schema` exposes, by name: its own
+ * `properties`, those of its `allOf` members (following a member's `$ref`
+ * into `schemas` when given, as `extractAllOfModel` does), and those of
+ * inline `oneOf`/`anyOf` variants, whose fields the model extractors flatten
+ * in; the first definition of a name wins. This is the sibling set
+ * `elementContextName` decides from; the TypeRef builder and every extractor
+ * derive it through this one function so they agree.
+ */
+export function collectProperties(
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): Map<string, SchemaObject> {
+  const properties = new Map<string, SchemaObject>();
+  const seen = new Set<SchemaObject>();
+  const visit = (s: SchemaObject | undefined, followRef: boolean): void => {
+    if (!s || seen.has(s)) return;
+    seen.add(s);
+    if (s.$ref) {
+      if (followRef && schemas) visit(schemas[s.$ref.split('/').pop() ?? ''], true);
+      return;
+    }
+    for (const [key, value] of Object.entries(s.properties ?? {})) {
+      if (value && !properties.has(key)) properties.set(key, value);
+    }
+    for (const sub of s.allOf ?? []) visit(sub, true);
+    for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false);
+  };
+  visit(schema, false);
+  return properties;
+}
+
+/**
  * Walk all component schemas and extract inline Model definitions for fields
  * that are objects with properties, including objects reached through array
  * items, `oneOf` variants, and map (`additionalProperties` /
@@ -41,19 +211,31 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
 
   for (const [schemaName, schema] of Object.entries(schemas)) {
     const parentName = resolveSchemaName(schemaName);
-    extractInlineModelsFromProperties(schema, inlineModels, parentName);
+    // The same sibling set `extractModel` / `extractAllOfModel` type the
+    // component's fields from, `$ref`'d allOf members included.
+    extractInlineModelsFromProperties(schema, inlineModels, parentName, collectProperties(schema, schemas));
   }
 
   return inlineModels;
 }
 
-export function extractInlineModelsFromProperties(schema: SchemaObject, results: Model[], parentName?: string): void {
+export function extractInlineModelsFromProperties(
+  schema: SchemaObject,
+  results: Model[],
+  parentName?: string,
+  siblingProperties?: ReadonlyMap<string, SchemaObject>,
+): void {
   const properties = schema.properties ?? {};
   const allOfSchemas = schema.allOf ?? [];
+  // Every property the parent object exposes, so array items and map values
+  // can step aside from a sibling that would mint their name (see
+  // `elementContextName`). A caller that sees more siblings than this schema
+  // shows — an `allOf` member, an envelope field — passes them in.
+  const siblings = siblingProperties ?? collectProperties(schema);
 
   for (const sub of allOfSchemas) {
     if (sub.properties) {
-      extractInlineModelsFromProperties(sub, results, parentName);
+      extractInlineModelsFromProperties(sub, results, parentName, siblings);
     }
   }
 
@@ -78,21 +260,26 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
     // plain inline object, the variants of an `items.oneOf`, a nested array
     // or map — is named exactly as if the items schema were the field itself
     // (`shapes` → `CreateDrawingRequestShape`, `SquareCreateDrawingRequestShape`).
-    // Re-enter with a same-named synthetic property so the branches in this
-    // function do the extraction with byte-for-byte identical naming.
+    // Re-enter with a synthetic property named by `elementContextName` — the
+    // field itself, or `<field>_item` when a sibling would take the singular
+    // name — so the branches in this function do the extraction with
+    // byte-for-byte identical naming.
     if (fieldSchema.type === 'array' && fieldSchema.items) {
-      extractInlineModelsFromProperties({ properties: { [fieldName]: fieldSchema.items } }, results, parentName);
+      const itemContext = elementContextName(fieldName, 'item', siblings, parentName, fieldSchema.items);
+      extractInlineModelsFromProperties({ properties: { [itemContext]: fieldSchema.items } }, results, parentName);
     }
 
     // Map (`additionalProperties` / `patternProperties` on a property-less
     // object): schemaToTypeRef types the values the same way it types array
     // items, so a map of inline objects references `${Parent}${SingularField}`
-    // (`layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`).
-    // Re-enter with the value schema as a same-named synthetic property.
+    // (`layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`), or
+    // `<Parent><Field>Value` when a sibling takes the singular name. Re-enter
+    // with the value schema as a synthetic property of that name.
     if (fieldSchema.type === 'object' && !fieldSchema.properties) {
       const valueSchema = mapValueSchema(fieldSchema);
       if (valueSchema) {
-        extractInlineModelsFromProperties({ properties: { [fieldName]: valueSchema } }, results, parentName);
+        const valueContext = elementContextName(fieldName, 'value', siblings, parentName, valueSchema);
+        extractInlineModelsFromProperties({ properties: { [valueContext]: valueSchema } }, results, parentName);
       }
     }
 
@@ -270,7 +457,7 @@ function isNullSchema(schema: SchemaObject): boolean {
  * (typed `unknown`, nothing to extract) and does not fall through to
  * `patternProperties`, matching the type-ref branch.
  */
-function mapValueSchema(schema: SchemaObject): SchemaObject | null {
+export function mapValueSchema(schema: SchemaObject): SchemaObject | null {
   const additional = schema.additionalProperties;
   if (additional && typeof additional === 'object') {
     return Object.keys(additional).length > 0 ? additional : null;
@@ -282,10 +469,11 @@ function mapValueSchema(schema: SchemaObject): SchemaObject | null {
 function buildInlineModel(name: string, schema: SchemaObject): Model {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
+  const siblings = collectProperties(schema);
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
   }
 
   return { name, description: schema.description, fields };

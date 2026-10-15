@@ -3,7 +3,12 @@ import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
-import { extractInlineModelsFromProperties } from './inline-models.js';
+import {
+  collectProperties,
+  elementContextName,
+  extractInlineModelsFromProperties,
+  mapValueSchema,
+} from './inline-models.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -266,18 +271,22 @@ function extractEnvelopeCompanions(
   const envelopeFields: Field[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
   const requiredSet = new Set(required);
+  // The companion is extracted from a one-property schema, so hand the
+  // extractor the envelope's full property list: array items and map values
+  // must step aside from a singular sibling exactly as the field does.
+  const siblings = collectProperties({ properties });
 
   for (const [key, propSchema] of Object.entries(properties)) {
     if (key === dataPath) continue;
-    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet);
+    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet, siblings);
     envelopeFields.push(field);
 
     const single: SchemaObject = { type: 'object', properties: { [key]: propSchema } };
     const models: Model[] = [];
-    extractInlineModelsFromProperties(single, models, operationName);
+    extractInlineModelsFromProperties(single, models, operationName, siblings);
     if (models.length === 0) continue;
     const bare: Model[] = [];
-    extractInlineModelsFromProperties(single, bare, undefined);
+    extractInlineModelsFromProperties(single, bare, undefined, siblings);
     envelopeCompanions.push({ field, models, bareNames: bare.map((m) => m.name) });
   }
 
@@ -554,9 +563,10 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
   const properties = schema.properties ?? {};
   const nestedModels: Model[] = [];
 
+  const siblings = collectProperties(schema);
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
 
     // Recursively extract nested inline objects — qualify with parent name
     // to avoid generic names like "Domains" when multiple parents have a "domains" field.
@@ -566,11 +576,21 @@ function extractInlineModel(name: string, schema: SchemaObject): Model[] {
       const nestedName = qualifyNestedName(name, fieldName);
       nestedModels.push(...extractInlineModel(nestedName, fieldSchema));
     }
+    // Array items and map values take the field's singular name unless a
+    // sibling would mint it, then `<Field>Item` / `<Field>Value` — the same
+    // decision `schemaToTypeRef` made for the reference (`elementContextName`).
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const items = fieldSchema.items;
       if (isInlineObjectSchema(items)) {
-        const nestedName = qualifyNestedName(name, fieldName);
+        const nestedName = qualifyNestedName(name, elementContextName(fieldName, 'item', siblings, name, items));
         nestedModels.push(...extractInlineModel(nestedName, items));
+      }
+    }
+    if (fieldSchema.type === 'object' && !fieldSchema.properties) {
+      const valueSchema = mapValueSchema(fieldSchema);
+      if (valueSchema && isInlineObjectSchema(valueSchema)) {
+        const nestedName = qualifyNestedName(name, elementContextName(fieldName, 'value', siblings, name, valueSchema));
+        nestedModels.push(...extractInlineModel(nestedName, valueSchema));
       }
     }
     // Handle allOf with inline object properties — merge into a single nested model

@@ -73,9 +73,20 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
   return [...mergedSchemaModels, ...keepLargestByName(deduplicatedInlineModels)];
 }
 
-export function mergeFieldInlineModels(existingModels: Model[], fieldInlineModels: Model[]): Model[] {
+/**
+ * Fold the field extractor's inline models into the models gathered so far,
+ * keeping the earlier definition on a name clash. `componentNames` tells a
+ * clash with a real component schema apart from one between two inline
+ * models, so the warning can say which happened and name both shapes.
+ */
+export function mergeFieldInlineModels(
+  existingModels: Model[],
+  fieldInlineModels: Model[],
+  componentNames?: Set<string>,
+): Model[] {
   const modelNames = new Set(existingModels.map((m) => m.name));
   const modelsByName = new Map(existingModels.map((m) => [m.name, m]));
+  const fieldList = (m: Model): string => m.fields.map((f) => f.name).join(', ') || '(no fields)';
 
   const deduplicatedFieldModels = fieldInlineModels.filter((model) => {
     if (!modelNames.has(model.name)) return true;
@@ -88,9 +99,15 @@ export function mergeFieldInlineModels(existingModels: Model[], fieldInlineModel
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
 
     if (hasDifference) {
-      console.warn(
-        `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,
-      );
+      if (componentNames && !componentNames.has(model.name)) {
+        console.warn(
+          `[oagen] Warning: Two inline models are named "${model.name}" (fields: ${fieldList(existing)} | ${fieldList(model)}) — keeping the first, the second is dropped`,
+        );
+      } else {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,
+        );
+      }
     }
 
     return false;

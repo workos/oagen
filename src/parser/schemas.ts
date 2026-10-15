@@ -438,10 +438,11 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
         // field extractor materializes it under — not `<Variant0>Child`.
         const variantName = nameVariantModel(variant, name, models, constNamingDiscriminator);
         const requiredSet = new Set(variant.required ?? []);
+        const siblings = collectProperties(variant);
         const fields: Field[] = [];
         for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
           if (!fs) continue;
-          fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet));
+          fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, siblings));
         }
         models.push({ name: variantName, description: variant.description, fields });
       }
@@ -452,10 +453,11 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
   // Handle direct object
   if (schema.properties && (schema.type === 'object' || !schema.type)) {
     const requiredSet = new Set(schema.required ?? []);
+    const siblings = collectProperties(schema);
     const fields: Field[] = [];
     for (const [fn, fs] of Object.entries(schema.properties)) {
       if (!fs) continue;
-      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
+      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, siblings));
     }
     return [{ name, description: schema.description, fields }];
   }
@@ -463,10 +465,11 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
   // Handle array with inline items
   if (schema.type === 'array' && schema.items?.properties) {
     const requiredSet = new Set(schema.items.required ?? []);
+    const siblings = collectProperties(schema.items);
     const fields: Field[] = [];
     for (const [fn, fs] of Object.entries(schema.items.properties)) {
       if (!fs) continue;
-      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet));
+      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, siblings));
     }
     return [{ name, description: schema.items.description, fields }];
   }
@@ -606,16 +609,23 @@ export function variantMemberSchemas(variant: SchemaObject, variantName: string)
   return members;
 }
 
-/** Build a single Field from a schema property entry. Shared across all extraction sites. */
+/**
+ * Build a single Field from a schema property entry. Shared across all
+ * extraction sites. `siblingProperties` are the other properties of the object the
+ * field belongs to (`collectPropertyNames`); array items and map values use
+ * them to step aside from a sibling that would take their singular name
+ * (`elementContextName`).
+ */
 export function buildFieldFromSchema(
   fieldName: string,
   fieldSchema: SchemaObject,
   contextName: string,
   requiredSet: Set<string>,
+  siblingProperties?: ReadonlyMap<string, SchemaObject>,
 ): Field {
   return {
     name: fieldName,
-    type: schemaToTypeRef(fieldSchema, fieldName, contextName),
+    type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
     required: requiredSet.has(fieldName),
     description: fieldSchema.description,
     readOnly: fieldSchema.readOnly || undefined,
@@ -873,10 +883,13 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
 
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
+  // The sibling set the field extractor derives for this component too, so
+  // array items and map values are named the same on both sides.
+  const siblings = collectProperties(schema, schemas);
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
   }
 
   // Pure oneOf/anyOf schemas (no allOf, no properties): merge variant fields
@@ -891,7 +904,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
       for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
         if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
         seenFieldNames.add(fieldName);
-        fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+        fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, siblings));
       }
     }
   }
@@ -914,9 +927,17 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   return { name, description: schema.description, fields };
 }
 
-function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
+function extractAllOfModel(
+  name: string,
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+  siblingProperties?: ReadonlyMap<string, SchemaObject>,
+): Model {
   const fields: Field[] = [];
   const requiredSet = new Set<string>();
+  // One sibling set for every field of the composed model, nested `allOf`
+  // levels included, matching what the field extractor derives for it.
+  const siblings = siblingProperties ?? collectProperties(schema, schemas);
   let resultDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
 
   for (const subSchema of schema.allOf ?? []) {
@@ -932,7 +953,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
 
     // If the resolved schema is itself an allOf, recursively extract its fields
     if (resolved.allOf) {
-      const nested = extractAllOfModel(name, resolved, schemas);
+      const nested = extractAllOfModel(name, resolved, schemas, siblings);
       for (const f of nested.fields) {
         fields.push({ ...f, required: false }); // will be re-set below
         if (f.required) requiredSet.add(f.name);
@@ -957,7 +978,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
           for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
             if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
             seenFieldNames.add(fieldName);
-            fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+            fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, siblings));
           }
         }
         // Do NOT add variant-level required to the requiredSet — these fields
@@ -973,7 +994,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
         const emptyRequired = new Set<string>();
         for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
           if (!fieldSchema) continue;
-          fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired));
+          fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired, siblings));
         }
       }
     }
@@ -1282,16 +1303,29 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
   const properties = schema.properties ?? {};
   const nestedModels: Model[] = [];
 
+  const siblings = collectProperties(schema);
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
 
     if (fieldSchema.type === 'object' && fieldSchema.properties) {
       nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema));
     }
 
+    // Array items and map values are named like the field — or `<Field>Item` /
+    // `<Field>Value` when a sibling takes the singular name — exactly as
+    // `schemaToTypeRef` references them (`elementContextName`).
     if (fieldSchema.type === 'array' && fieldSchema.items?.properties) {
-      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema.items));
+      const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
+      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items));
+    }
+
+    if (fieldSchema.type === 'object' && !fieldSchema.properties) {
+      const valueSchema = mapValueSchema(fieldSchema);
+      if (valueSchema && !valueSchema.$ref && valueSchema.properties) {
+        const valueContext = elementContextName(fieldName, 'value', siblings, name, valueSchema);
+        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, valueContext), valueSchema));
+      }
     }
 
     if (fieldSchema.allOf) {
@@ -1350,7 +1384,28 @@ function qualifyNestedInlineName(parentName: string, fieldName: string): string 
   return qualified;
 }
 
-export function schemaToTypeRef(schema: SchemaObject, contextName?: string, parentModelName?: string): TypeRef {
+/**
+ * `elementContextName` for an optional context: with no field name there is
+ * nothing to decide, and the items / values keep an undefined context.
+ */
+function elementContext(
+  contextName: string | undefined,
+  kind: 'item' | 'value',
+  siblingProperties: ReadonlyMap<string, SchemaObject> | undefined,
+  parentModelName: string | undefined,
+  elementSchema: SchemaObject,
+): string | undefined {
+  return contextName === undefined
+    ? undefined
+    : elementContextName(contextName, kind, siblingProperties, parentModelName, elementSchema);
+}
+
+export function schemaToTypeRef(
+  schema: SchemaObject,
+  contextName?: string,
+  parentModelName?: string,
+  siblingProperties?: ReadonlyMap<string, SchemaObject>,
+): TypeRef {
   // Handle $ref → ModelRef or EnumRef.
   // A `$ref` to a top-level component schema needs to preserve whether the
   // target is a model or an enum, because emitters route imports differently
@@ -1383,13 +1438,18 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     // non-nullable twin — the inline-model extractor names it that way.
     if (schema.type.includes('null') && nonNullTypes.length === 1) {
       return asNullable(
-        schemaToTypeRef({ ...schema, type: nonNullTypes[0], nullable: false }, contextName, parentModelName),
+        schemaToTypeRef(
+          { ...schema, type: nonNullTypes[0], nullable: false },
+          contextName,
+          parentModelName,
+          siblingProperties,
+        ),
       );
     }
     // Multiple non-null types → union
     if (nonNullTypes.length > 1) {
       const variants = nonNullTypes.map((t: string) =>
-        schemaToTypeRef({ ...schema, type: t }, contextName, parentModelName),
+        schemaToTypeRef({ ...schema, type: t }, contextName, parentModelName, siblingProperties),
       );
       const ref: TypeRef = { kind: 'union', variants };
       if (schema.type.includes('null')) {
@@ -1401,7 +1461,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
 
   // Handle OAS 3.0 nullable flag
   if (schema.nullable && schema.type) {
-    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName));
+    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName, siblingProperties));
   }
 
   // Handle allOf — merge properties from all sub-schemas.
@@ -1422,7 +1482,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     }
     // If allOf has a single item, unwrap it
     if (schema.allOf.length === 1) {
-      return schemaToTypeRef(schema.allOf[0], contextName, parentModelName);
+      return schemaToTypeRef(schema.allOf[0], contextName, parentModelName, siblingProperties);
     }
     // If allOf items all have properties, treat as a merged model
     const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
@@ -1452,7 +1512,7 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     if (nullVariant && nonNullVariants.length === 1) {
       // Nullable single type — unwrap as nullable. `asNullable` keeps a
       // `$ref` to an already-nullable enum component from double-wrapping.
-      return asNullable(schemaToTypeRef(nonNullVariants[0], contextName, parentModelName));
+      return asNullable(schemaToTypeRef(nonNullVariants[0], contextName, parentModelName, siblingProperties));
     }
 
     // Collapse an oneOf/anyOf whose non-null variants are all string-const
@@ -1602,18 +1662,29 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 
-  // Handle array — pass parentModelName through to qualify inline items
+  // Handle array — pass parentModelName through to qualify inline items. The
+  // items' context is the field itself, or `<field>_item` when a sibling
+  // property would take the singular name (`elementContextName`), so an
+  // inline object item is `<Parent><Field>` or `<Parent><Field>Item`.
   if (schema.type === 'array' && schema.items) {
     return {
       kind: 'array',
-      items: schemaToTypeRef(schema.items, contextName, parentModelName),
+      items: schemaToTypeRef(
+        schema.items,
+        elementContext(contextName, 'item', siblingProperties, parentModelName, schema.items),
+        parentModelName,
+      ),
     };
   }
   // Handle array without explicit type but with items (valid OAS 3.1)
   if (!schema.type && schema.items) {
     return {
       kind: 'array',
-      items: schemaToTypeRef(schema.items, contextName, parentModelName),
+      items: schemaToTypeRef(
+        schema.items,
+        elementContext(contextName, 'item', siblingProperties, parentModelName, schema.items),
+        parentModelName,
+      ),
     };
   }
 
@@ -1635,20 +1706,18 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   // referenced as `${Parent}${SingularField}` (`layers` on
   // `CreateDrawingRequest` → `CreateDrawingRequestLayer`) and the inline-model
   // extractor (`extractInlineModelsFromProperties`) emits a model of that name.
+  // When a sibling property would take that singular name the values use
+  // `<field>_value` instead (`<Parent><Field>Value`, see `elementContextName`).
   if (schema.type === 'object' && !schema.properties) {
+    // `mapValueSchema` picks the value schema in this branch's precedence: a
+    // non-empty `additionalProperties` object, else the first
+    // `patternProperties` entry; `additionalProperties: {}` or `true` means
+    // "any value" and stays unknown.
     let valueType: TypeRef = { kind: 'primitive', type: 'unknown' };
-    if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
-      // Empty additionalProperties ({}) means "any value" — keep as unknown
-      const apKeys = Object.keys(schema.additionalProperties);
-      if (apKeys.length > 0) {
-        valueType = schemaToTypeRef(schema.additionalProperties as SchemaObject, contextName, parentModelName);
-      }
-    } else if (schema.patternProperties) {
-      // patternProperties: { "pattern": schema } → use the first pattern's schema as value type
-      const patterns = Object.values(schema.patternProperties);
-      if (patterns.length > 0) {
-        valueType = schemaToTypeRef(patterns[0], contextName, parentModelName);
-      }
+    const valueSchema = mapValueSchema(schema);
+    if (valueSchema) {
+      const valueContext = elementContext(contextName, 'value', siblingProperties, parentModelName, valueSchema);
+      valueType = schemaToTypeRef(valueSchema, valueContext, parentModelName);
     }
     return {
       kind: 'map',
@@ -1703,6 +1772,6 @@ export function schemaToTypeRef(schema: SchemaObject, contextName?: string, pare
   return { kind: 'primitive', type: 'unknown' };
 }
 
-import { qualifyInlineModelName } from './inline-models.js';
+import { collectProperties, elementContextName, mapValueSchema, qualifyInlineModelName } from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';
