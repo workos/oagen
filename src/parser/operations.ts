@@ -734,10 +734,17 @@ function buildOperation(
   const parameterGroups =
     queryParamGroups || bodyParamGroups ? [...(queryParamGroups ?? []), ...(bodyParamGroups ?? [])] : undefined;
 
+  // An empty or whitespace-only summary counts as absent, so it neither gets
+  // its own field nor leaks into the description as a blank first paragraph.
+  const summary = presentText(op.summary);
+
   return {
     operation: {
       name: inferOperationName(method, path, op.operationId, operationIdTransform),
-      description: buildDescription(op.summary, op.description),
+      // Keep the summary on its own so emitters can tell it apart from the
+      // description; the key is omitted (not set to undefined) when absent.
+      ...(summary !== undefined ? { summary } : {}),
+      description: buildDescription(summary, op.description),
       httpMethod: method,
       path,
       pathParams,
@@ -762,11 +769,24 @@ function buildOperation(
   };
 }
 
+/**
+ * Combine an operation's `summary` and `description` into one doc text.
+ * Empty or whitespace-only text counts as absent, so `summary: "List pets"`
+ * with `description: ""` yields `"List pets"` rather than `""`. Text that has
+ * content is kept verbatim, surrounding whitespace included.
+ */
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
-  if (summary && description && summary !== description) {
-    return `${summary}\n\n${description}`;
+  const presentSummary = presentText(summary);
+  const presentDescription = presentText(description);
+  if (presentSummary && presentDescription && presentSummary !== presentDescription) {
+    return `${presentSummary}\n\n${presentDescription}`;
   }
-  return description ?? summary;
+  return presentDescription ?? presentSummary;
+}
+
+/** The text itself when it has non-whitespace content, otherwise `undefined`. */
+function presentText(text: string | undefined): string | undefined {
+  return typeof text === 'string' && text.trim() !== '' ? text : undefined;
 }
 
 function extractParams(
