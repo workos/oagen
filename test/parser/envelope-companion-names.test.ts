@@ -23,9 +23,37 @@ describe('resolveEnvelopeCompanionNames', () => {
 
     const models = resolveEnvelopeCompanionNames([a, b]);
 
-    expect(models.map((m) => m.name)).toEqual(['Pagination', 'Pagination']);
+    // One definition for the shared name; both operations point at it.
+    expect(models.map((m) => m.name)).toEqual(['Pagination']);
     expect(a.field.type).toEqual({ kind: 'model', name: 'Pagination' });
     expect(b.field.type).toEqual({ kind: 'model', name: 'Pagination' });
+  });
+
+  it("keeps the target's definition when stricter copies fold onto it, whatever their order", () => {
+    const required = companion('ListA', 'Pagination', [{ name: 'next', type: str, required: true }]);
+    const optional1 = companion('ListB', 'Pagination', [{ name: 'next', type: str, required: false }]);
+    const optional2 = companion('ListC', 'Pagination', [{ name: 'next', type: str, required: false }]);
+
+    const models = resolveEnvelopeCompanionNames([required, optional1, optional2]);
+
+    // The optional shape is the majority target; the earlier, stricter copy folds onto it
+    // and must not become the shared definition just because it was declared first.
+    expect(models).toEqual([{ name: 'Pagination', fields: [{ name: 'next', type: str, required: false }] }]);
+    expect([required, optional1, optional2].map((c) => c.field.type)).toEqual(
+      Array(3).fill({ kind: 'model', name: 'Pagination' }),
+    );
+  });
+
+  it('emits nothing for copies folded onto a component; the component is the definition', () => {
+    const copy = companion('ListA', 'ListMetadata', [{ name: 'after', type: str, required: true }]);
+    const componentModels: Model[] = [
+      { name: 'ListMetadata', fields: [{ name: 'after', type: str, required: false }] },
+    ];
+
+    const models = resolveEnvelopeCompanionNames([copy], componentModels);
+
+    expect(models).toEqual([]);
+    expect(copy.field.type).toEqual({ kind: 'model', name: 'ListMetadata' });
   });
 
   it('keeps the minority shape under its operation name and gives the majority the bare name', () => {
@@ -35,8 +63,9 @@ describe('resolveEnvelopeCompanionNames', () => {
 
     const models = resolveEnvelopeCompanionNames([a, b, c]);
 
-    expect(models.map((m) => m.name)).toEqual(['Pagination', 'ListBPagination', 'Pagination']);
+    expect(models.map((m) => m.name)).toEqual(['Pagination', 'ListBPagination']);
     expect(b.field.type).toEqual({ kind: 'model', name: 'ListBPagination' });
+    expect(c.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
 
   it('breaks a tie in favour of the shape declared first', () => {

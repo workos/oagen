@@ -44,15 +44,21 @@ export interface EnvelopeCompanion {
  *   admits collapse onto it (the component stays as written); the others keep
  *   their operation-qualified name.
  * - Otherwise the most common exact shape (first declared, on a tie) becomes
- *   the target: it and every copy it admits take the bare name, and the merge
- *   pass folds the identical copies onto one model; any other copy keeps its
- *   operation-qualified name.
+ *   the target: it and every copy it admits take the bare name; any other
+ *   copy keeps its operation-qualified name.
+ *
+ * Only the target's definition survives a collapse. The admitted copies'
+ * models are dropped rather than handed to the merge pass, which keeps the
+ * first model of a name and would let a stricter copy declared earlier
+ * narrow the shared type for everyone.
  *
  * Enums declared inline in a companion stay operation-qualified, exactly like
  * enums declared inline in a parameter.
  */
 export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], componentModels?: Model[]): Model[] {
   const byBareName = new Map<string, EnvelopeCompanion[]>();
+  /** Copies folded onto another definition; their own models are not emitted. */
+  const folded = new Set<EnvelopeCompanion>();
   for (const companion of companions) {
     if (companion.models.length === 0) continue;
     const bare = companion.bareNames[0];
@@ -69,7 +75,7 @@ export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], c
     // references resolve through: a component resolves through the other
     // components, a copy through its own models, so a copy nesting the same
     // shape under its own qualified name still matches.
-    let target: { model: Model; map: Map<string, Model> };
+    let target: { model: Model; map: Map<string, Model>; owner?: EnvelopeCompanion };
     const component = componentMap.get(bare);
     if (component) {
       target = { model: component, map: componentMap };
@@ -83,16 +89,19 @@ export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], c
       }
       let best = { n: 0, first: group[0] };
       for (const entry of counts.values()) if (entry.n > best.n) best = entry;
-      target = { model: best.first.models[0], map: localMap(best.first) };
+      target = { model: best.first.models[0], map: localMap(best.first), owner: best.first };
     }
 
     // Decide every copy before renaming any: renaming the target repoints its
     // nested references to the bare names, which its map no longer resolves.
     const collapsing = group.filter((c) => admits(target.model, target.map, c.models[0], localMap(c), new Set()));
-    for (const companion of collapsing) renameCompanion(companion);
+    for (const companion of collapsing) {
+      renameCompanion(companion);
+      if (companion !== target.owner) folded.add(companion);
+    }
   }
 
-  return companions.flatMap((c) => c.models);
+  return companions.filter((c) => !folded.has(c)).flatMap((c) => c.models);
 }
 
 /** Rename a companion's models to their bare names and repoint every reference. */
