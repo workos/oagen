@@ -22,11 +22,14 @@ interface ApiSpec {
   models: Model[]; // Schema objects
   enums: Enum[]; // String enums
   auth?: AuthScheme[]; // Authentication schemes
+  security?: SecurityRequirementSet[]; // Document-level default requirements (see Operation.security)
   sdk: SdkBehavior; // Runtime policies (retry, errors, telemetry, etc.)
 }
 ```
 
 The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
+
+`security` is the document-level `security` list, in the same shape as `Operation.security`; every operation that declares no `security` of its own inherits it. It is `undefined` when the document declares none.
 
 ### SdkBehavior
 
@@ -141,7 +144,7 @@ type AuthScheme = { description?: string; schemeName: string } & (
 
 Emitters use `AuthScheme` to generate authentication configuration and client constructors. The `cookie` variant supports cookie-based API key authentication.
 
-`schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. `Operation.security[].schemeName` refers to the same key, so an emitter joins a per-operation requirement to its scheme with `spec.auth?.find((a) => a.schemeName === requirement.schemeName)`. The optional chaining matters: `auth` is `undefined` when the document declares no scheme the IR can represent, and a requirement can still name a scheme that was omitted (see below), so a missing match means "no SDK-level auth is known for this operation", not an error.
+`schemeName` is the key under `components.securitySchemes`, spelled exactly as in the document, and `description` is present only when the document declares one; entries keep the document's order. The requirements under `ApiSpec.security` and `Operation.security` refer to the same key, so an emitter joins a requirement to its scheme with `spec.auth?.find((a) => a.schemeName === requirement.schemeName)`. The optional chaining matters: `auth` is `undefined` when the document declares no scheme the IR can represent, and a requirement can still name a scheme that was omitted (see below), so a missing match means "no SDK-level auth is known for this operation", not an error.
 
 HTTP scheme names are matched case-insensitively (`Bearer`, `bearer`, and `BEARER` all yield `kind: "bearer"`). Security schemes the IR cannot represent (other `http` schemes such as `digest`, plus `openIdConnect` and `mutualTLS`) are omitted from `auth`, and the parser prints an `[oagen] Warning:` diagnostic naming the scheme.
 
@@ -170,10 +173,35 @@ interface PaginationMeta {
   limitParam?: string; // Limit param name (offset strategy only, e.g., "limit")
   dataPath?: string; // JSON path to the data array (e.g., "data", "results") — undefined means the response IS the data
   itemType: TypeRef; // Type of each item in the paginated list
+  envelopeFields?: Field[]; // Every envelope property besides the data array, in document order
 }
 ```
 
 Present on `Operation` when pagination is detected. The `strategy` discriminant tells emitters whether to generate cursor-based, offset-based, or link-header pagination helpers. The `dataPath` is dynamically detected from the response envelope — when `undefined`, emitters should treat the entire response as the data array or use their own default.
+
+When the parser recognizes an inline list envelope — one array property plus a companion that looks like pagination metadata — `Operation.response` becomes the bare array, and `envelopeFields` keeps everything else the envelope carries: the pagination companion (`list_metadata`, `pagination`, `has_more`, `total`, …) and any discriminant such as `object: "list"`. Each entry is an ordinary `Field` (wire name, type, `required`, description), so `dataPath` + `itemType` + `envelopeFields` together describe the full shape of what the endpoint returns, and an emitter can both type the response and read the page details it needs for the next request:
+
+```typescript
+// GET /customers → { customers: Customer[], pagination: Pagination }
+op.pagination = {
+  strategy: "offset",
+  param: "page",
+  limitParam: "limit",
+  dataPath: "customers",
+  itemType: { kind: "model", name: "Customer" },
+  envelopeFields: [
+    {
+      name: "pagination",
+      type: { kind: "model", name: "Pagination" },
+      required: true,
+    },
+  ],
+};
+```
+
+A companion that is an inline object is lifted to a model. The same envelope recurs on every list endpoint of an API, so copies that agree structurally share one model named from the property alone (`list_metadata` → `ListMetadata`, `pagination` → `Pagination`) rather than one per operation as list items are (`ListUsersItem`). The bare name is taken only where it cannot change another type's shape. A copy collapses onto a target only when the target admits every value the copy can hold: the same fields with the same types, where the target may be looser (optional where the copy requires, nullable where the copy is not) but never stricter. When a component model of that name exists, the copies it admits collapse onto the component as written; otherwise the most common shape becomes the target. Any other copy keeps its operation-qualified name (`ListUsersPagination`). An inline enum in a companion is qualified by operation exactly like a parameter enum (`ListUsersSortOrder`). Companions declared through an `allOf` `$ref` branch are resolved against the component schemas, and a companion declared by more than one branch merges both declarations. Models and enums reached only through `envelopeFields` count as referenced for emission, service assignment, compat scoping, and the differ's request/response direction.
+
+`envelopeFields` is absent when the response is a bare array, when the response is a `$ref` to a component schema (the wrapper model itself carries the companions), or when pagination was inferred from query parameters alone.
 
 The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagination (e.g., GitHub API).
 
@@ -218,7 +246,7 @@ interface Operation {
   injectIdempotencyKey: boolean; // true when spec declares Idempotency-Key header
   deprecated?: boolean;
   async?: boolean;
-  security?: SecurityRequirement[]; // Per-operation override of spec-level security
+  security?: SecurityRequirementSet[]; // Per-operation requirements; undefined inherits ApiSpec.security
 }
 
 interface SecurityRequirement {
@@ -226,6 +254,23 @@ interface SecurityRequirement {
   scopes: string[];
 }
 
+// One alternative: every scheme in the set is required together.
+type SecurityRequirementSet = SecurityRequirement[];
+```
+
+`security` mirrors the OpenAPI document instead of flattening it. Each requirement object in the document becomes one `SecurityRequirementSet` whose schemes must all be satisfied together ("all of"); the list of sets is satisfied by any one of them ("either of"); an empty set is an alternative that needs no credentials, which is how a document marks authentication optional. The field therefore distinguishes cases a flat list could not:
+
+| Document                                            | `Operation.security`                  | Meaning                                              |
+| --------------------------------------------------- | ------------------------------------- | ---------------------------------------------------- |
+| no `security` key                                   | `undefined`                           | inherit `ApiSpec.security`                           |
+| `security: []`                                      | `[]`                                  | no authentication                                    |
+| `security: [{ userToken: [] }, { partnerKey: [] }]` | `[[{ userToken }], [{ partnerKey }]]` | either scheme                                        |
+| `security: [{ userToken: [], partnerKey: [] }]`     | `[[{ userToken }, { partnerKey }]]`   | both schemes together                                |
+| `security: [{ userToken: [] }, {}]`                 | `[[{ userToken }], []]`               | `userToken`, or nothing (authentication is optional) |
+
+To resolve what an operation accepts, take `op.security ?? spec.security`; a result of `undefined` means the document declares no requirements at all. The same list shape applies to `ApiSpec.security`.
+
+```typescript
 interface SuccessResponse {
   statusCode: number;
   type: TypeRef;

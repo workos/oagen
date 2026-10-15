@@ -1674,8 +1674,8 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
 
 describe('extractOperations – Service.description from document tags (issue #192)', () => {
   const responses = { '200': { description: 'ok' } };
-  const withTags = (paths: Parameters<typeof extractOperations>[0], tags: Parameters<typeof extractOperations>[5]) =>
-    extractOperations(paths, undefined, undefined, undefined, undefined, tags).services;
+  const withTags = (paths: Parameters<typeof extractOperations>[0], tags: Parameters<typeof extractOperations>[6]) =>
+    extractOperations(paths, undefined, undefined, undefined, undefined, undefined, tags).services;
 
   it('gives a service the description of the tag it was named after', () => {
     const paths = {
