@@ -182,6 +182,18 @@ const NUMERIC_CONSTRAINT_KEYS = [
  * ignored rather than carried.
  */
 export function extractConstraints(schema: SchemaObject): Constraints | undefined {
+  const own = ownConstraints(schema);
+  if (own) return own;
+  // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
+  // collapses to `nullable<T>` in the IR, so that branch's keywords are the
+  // value's own. A `$ref` branch keeps its limits on the referenced model, and
+  // a genuine multi-variant union carries none.
+  const branch = singleNonNullBranch(schema);
+  return branch ? extractConstraints(branch) : undefined;
+}
+
+/** The keywords declared strictly on `schema`, normalized — without the nullable-branch fallback. */
+function ownConstraints(schema: SchemaObject): Constraints | undefined {
   const out: Constraints = {};
 
   const lower = normalizeBound(schema.minimum, schema.exclusiveMinimum);
@@ -200,14 +212,7 @@ export function extractConstraints(schema: SchemaObject): Constraints | undefine
 
   const dependentRequired = readDependentRequired(schema.dependentRequired);
   if (dependentRequired) out.dependentRequired = dependentRequired;
-  if (Object.keys(out).length > 0) return out;
-
-  // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
-  // collapses to `nullable<T>` in the IR, so that branch's keywords are the
-  // value's own. A `$ref` branch keeps its limits on the referenced model, and
-  // a genuine multi-variant union carries none.
-  const branch = singleNonNullBranch(schema);
-  return branch ? extractConstraints(branch) : undefined;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** The one non-null, non-`$ref` branch of a `oneOf`/`anyOf`, or `undefined` for anything else. */
@@ -1151,13 +1156,20 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
   // variant that's missing the shared `id` / `name` / `object` etc.
   const baseProperties: Record<string, SchemaObject> = {};
   const baseRequired = new Set<string>();
-  // Object-level keywords on the base members (maxProperties, ...) bind every
-  // variant instance under allOf semantics, so they ride along with the base
-  // properties and are conjoined with each variant's own below: on a shared
-  // keyword the stricter bound wins, since an instance must satisfy both.
-  let baseConstraints: Constraints | undefined;
+  // Shared limits every variant instance must satisfy under allOf semantics:
+  // the outer wrapper's own keywords, each base member's (through its allOf
+  // wrappers), and any written beside the `oneOf` itself — everything except
+  // the branches. They ride along with the base properties and are conjoined
+  // with each variant's own below, so on a shared keyword the stricter bound
+  // wins.
+  let baseConstraints = ownConstraints(schema);
   for (const subSchema of schema.allOf ?? []) {
-    if (subSchema.oneOf) continue; // the variant axis, handled below
+    if (subSchema.oneOf) {
+      // The variant axis: its branches are handled below, its own keywords
+      // bind all of them.
+      baseConstraints = combineConstraints(baseConstraints, ownConstraints(subSchema));
+      continue;
+    }
     const flat = subSchema.allOf ? flattenVariantForExtraction(subSchema) : subSchema;
     if (flat.properties) {
       for (const [k, v] of Object.entries(flat.properties)) {
@@ -1210,11 +1222,13 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
 }
 
 /**
- * A schema's own validation keywords conjoined with those of its inline
- * `allOf` members (recursively; a keyword declared at more than one level is
- * combined by combineConstraints, so the stricter bound wins). `$ref` members
- * keep their limits on the referenced model and `oneOf` / `anyOf` branches
- * are alternatives, so neither is walked.
+ * A schema's own validation keywords conjoined with those of its `allOf`
+ * members (recursively; a keyword declared at more than one level is combined
+ * by combineConstraints, so the stricter bound wins). A `$ref` member
+ * contributes the keywords written beside the reference — they belong to the
+ * member, not to its target — but the target itself is not followed: its
+ * limits stay on the referenced model. `oneOf` / `anyOf` branches are
+ * alternatives and are not walked.
  *
  * Used wherever the parser rebuilds one object schema out of `allOf` members
  * — component models, inline responses, request bodies, nested fields and
@@ -1224,7 +1238,6 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
 export function collectAllOfConstraints(schema: SchemaObject): Constraints | undefined {
   let out: Constraints | undefined;
   for (const member of schema.allOf ?? []) {
-    if (member.$ref) continue;
     out = combineConstraints(out, collectAllOfConstraints(member));
   }
   return combineConstraints(out, extractConstraints(schema));

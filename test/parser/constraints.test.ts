@@ -780,6 +780,95 @@ describe('combineConstraints', () => {
 describe('allOf rebuilds – constraints', () => {
   afterEach(() => clearSchemaNameTransform());
 
+  it('keeps keywords written beside a $ref member of a component allOf, without following the target', () => {
+    const { models } = extractSchemas({
+      Base: { type: 'object', maxProperties: 1, properties: { id: { type: 'string' } } },
+      Extended: {
+        allOf: [
+          { $ref: '#/components/schemas/Base', minProperties: 2 },
+          { type: 'object', maxProperties: 5, properties: { note: { type: 'string' } } },
+        ],
+      },
+    });
+    const byName = new Map(models.map((m) => [m.name, m]));
+    // The sibling belongs to the member; Base's own maxProperties: 1 stays on Base.
+    expect(byName.get('Extended')?.constraints).toEqual({ minProperties: 2, maxProperties: 5 });
+    expect(byName.get('Base')?.constraints).toEqual({ maxProperties: 1 });
+  });
+
+  it('keeps keywords written beside a $ref member of an inline allOf response', () => {
+    const paths = {
+      '/things': {
+        get: {
+          operationId: 'getThing',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/Base', minProperties: 2 },
+                      { type: 'object', maxProperties: 5, properties: { note: { type: 'string' } } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const componentSchemas = { Base: { type: 'object', maxProperties: 1, properties: { id: { type: 'string' } } } };
+    const { services, inlineModels } = extractOperations(paths, undefined, componentSchemas);
+    const response = services[0].operations[0].response;
+    const name = response.kind === 'model' ? response.name : undefined;
+    const model = inlineModels.find((m) => m.name === name);
+    expect(model?.fields.map((f) => f.name)).toEqual(['id', 'note']);
+    expect(model?.constraints).toEqual({ minProperties: 2, maxProperties: 5 });
+  });
+
+  it('gives every discriminated variant the outer wrapper’s and the oneOf member’s own limits', () => {
+    const { models } = extractSchemas({
+      Event: {
+        maxProperties: 3,
+        allOf: [
+          { type: 'object', properties: { id: { type: 'string' } } },
+          {
+            minProperties: 1,
+            dependentRequired: { note: ['id'] },
+            oneOf: [
+              {
+                type: 'object',
+                minProperties: 2,
+                maxProperties: 10,
+                properties: { event: { const: 'user.created' }, note: { type: 'string' } },
+              },
+              { type: 'object', properties: { event: { const: 'user.deleted' } } },
+            ],
+          },
+        ],
+      },
+    });
+    const byName = new Map(models.map((m) => [m.name, m]));
+    expect(byName.get('UserCreated')?.constraints).toEqual({
+      maxProperties: 3,
+      minProperties: 2,
+      dependentRequired: { note: ['id'] },
+    });
+    expect(byName.get('UserDeleted')?.constraints).toEqual({
+      maxProperties: 3,
+      minProperties: 1,
+      dependentRequired: { note: ['id'] },
+    });
+    // The union model itself carries the same shared set; the branches stay out.
+    expect(byName.get('Event')?.constraints).toEqual({
+      maxProperties: 3,
+      minProperties: 1,
+      dependentRequired: { note: ['id'] },
+    });
+  });
+
   it('carries an inline allOf response wrapper’s limits, conjoined with its members’', () => {
     const paths = {
       '/things': {
