@@ -152,14 +152,7 @@ HTTP scheme names are matched case-insensitively (`Bearer`, `bearer`, and `BEARE
 
 ```typescript
 type HttpMethod =
-  | "get"
-  | "post"
-  | "put"
-  | "patch"
-  | "delete"
-  | "head"
-  | "options"
-  | "trace";
+  "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace";
 ```
 
 All standard HTTP methods are supported. Emitters should handle `head`, `options`, and `trace` appropriately (e.g., HEAD returns no body).
@@ -232,11 +225,7 @@ interface Operation {
   cookieParams?: Parameter[]; // Present only when cookie params exist
   requestBody?: TypeRef;
   requestBodyEncoding?:
-    | "json"
-    | "form-data"
-    | "form-urlencoded"
-    | "binary"
-    | "text";
+    "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
