@@ -1756,3 +1756,92 @@ describe('operation summary', () => {
     expect(op.description).toBe('Returns every pet in the store, newest first.');
   });
 });
+
+describe('operation summary and description with empty or whitespace-only text', () => {
+  const responses = { '204': { description: 'ok' } };
+
+  it('treats an empty description as absent so description falls back to the summary', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: '',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets');
+  });
+
+  it('treats a whitespace-only description as absent so description falls back to the summary', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: '  \n\t',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets');
+  });
+
+  it('omits a whitespace-only summary from both summary and description', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: '  ',
+          description: 'Lists pets.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Lists pets.');
+  });
+
+  it('leaves description undefined and omits summary when both are whitespace-only', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: ' ',
+          description: '\n',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBeUndefined();
+  });
+
+  it('keeps surrounding whitespace on text that has content', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: 'Lists pets.\n',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets\n\nLists pets.\n');
+  });
+});
