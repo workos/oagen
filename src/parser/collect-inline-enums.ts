@@ -12,8 +12,8 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 
 /**
  * Collect inline enum definitions from operation parameters (query, path, header)
- * and response headers, and promote them to top-level enums so emitters can
- * generate typed enum files.
+ * list-envelope companion fields, and response headers, and promote them to
+ * top-level enums so emitters can generate typed enum files.
  */
 export function collectInlineEnumsFromOperations(services: Service[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
@@ -27,6 +27,9 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
         ...(op.cookieParams ?? []),
       ]) {
         collectInlineEnumFromRef(param.type, enums, enumNames);
+      }
+      for (const field of op.pagination?.envelopeFields ?? []) {
+        collectInlineEnumFromRef(field.type, enums, enumNames);
       }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at

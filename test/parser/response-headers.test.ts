@@ -13,7 +13,15 @@ type ComponentHeaders = Record<string, Record<string, unknown>>;
 
 /** Extract the only operation declared in an inline paths object. */
 function singleOperation(paths: Record<string, unknown>, componentHeaders?: ComponentHeaders): Operation {
-  const { services } = extractOperations(paths as never, undefined, undefined, undefined, undefined, componentHeaders);
+  const { services } = extractOperations(
+    paths as never,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    componentHeaders,
+  );
   const operations = services.flatMap((s) => s.operations);
   expect(operations).toHaveLength(1);
   return operations[0];

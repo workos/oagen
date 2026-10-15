@@ -6,6 +6,7 @@ export type {
   Service,
   Operation,
   SecurityRequirement,
+  SecurityRequirementSet,
   SuccessResponse,
   ResponseHeader,
   PaginationMeta,
