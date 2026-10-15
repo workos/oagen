@@ -174,6 +174,25 @@ export interface PaginationMeta {
   limitParam?: string;
   dataPath?: string;
   itemType: TypeRef;
+  /**
+   * Every property the list envelope carries besides the data array, in
+   * document order: the pagination companion (`list_metadata`, `pagination`,
+   * `has_more`, …) and any discriminant such as `object: "list"`. Together
+   * with `dataPath` and `itemType` this is the envelope's full shape, so an
+   * emitter can type what the endpoint returns and read the page details it
+   * needs for the next request without parsing the document itself.
+   *
+   * An inline companion object is lifted to a model. Because the same envelope
+   * recurs on every list endpoint of an API, copies that agree structurally
+   * share one model named from the property alone (`list_metadata` →
+   * `ListMetadata`, or the component schema of that name when one exists); a
+   * copy whose shape differs keeps an operation-qualified name
+   * (`ListUsersListMetadata`) so it can never change another type's shape.
+   *
+   * Absent when the response is a bare array, or when pagination was inferred
+   * from query parameters alone and no envelope was detected.
+   */
+  envelopeFields?: Field[];
 }
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
@@ -514,6 +533,11 @@ export function assignModelsToServices(
       if (op.pagination) {
         for (const name of collectModelRefs(op.pagination.itemType)) {
           referencedModels.add(name);
+        }
+        for (const field of op.pagination.envelopeFields ?? []) {
+          for (const name of collectModelRefs(field.type)) {
+            referencedModels.add(name);
+          }
         }
       }
     }

@@ -18,6 +18,7 @@ import { extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
+import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 
 interface PathItem {
   get?: OperationObject;
@@ -184,11 +185,13 @@ export function extractOperations(
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentModels?: Model[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
+  const envelopeCompanions: EnvelopeCompanion[] = [];
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -199,7 +202,11 @@ export function extractOperations(
 
       const serviceName = inferServiceName(path, op.tags?.[0]);
 
-      const { operation, inlineModels: opModels } = buildOperation(
+      const {
+        operation,
+        inlineModels: opModels,
+        envelopeCompanions: opCompanions,
+      } = buildOperation(
         method,
         path,
         op,
@@ -211,11 +218,16 @@ export function extractOperations(
         componentRequestBodies,
       );
       inlineModels.push(...opModels);
+      if (opCompanions) envelopeCompanions.push(...opCompanions);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
     }
   }
+
+  // Companion models of list envelopes are named once every list operation is
+  // known, so copies of one envelope shape can share a model.
+  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"
@@ -612,7 +624,7 @@ function buildOperation(
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
-): { operation: Operation; inlineModels: Model[] } {
+): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
@@ -686,6 +698,8 @@ function buildOperation(
     isPaginated,
     dataPath: responseDataPath,
     itemType: responseItemType,
+    envelopeFields,
+    envelopeCompanions,
   } = extractResponses(op.responses, op, path, method, componentSchemas);
   inlineModels.push(...reqBodyModels);
 
@@ -700,6 +714,7 @@ function buildOperation(
       limitParam: paginationFromParams?.limitParam,
       dataPath: responseDataPath ?? paginationFromParams?.dataPath,
       itemType,
+      envelopeFields,
     };
   } else if (paginationFromParams) {
     pagination = paginationFromParams;
@@ -743,6 +758,7 @@ function buildOperation(
       parameterGroups,
     },
     inlineModels,
+    envelopeCompanions,
   };
 }
 
@@ -1208,6 +1224,8 @@ function extractResponses(
   isPaginated: boolean;
   dataPath?: string;
   itemType?: TypeRef;
+  envelopeFields?: Field[];
+  envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
@@ -1215,6 +1233,8 @@ function extractResponses(
   let isPaginated = false;
   let dataPath: string | undefined;
   let itemType: TypeRef | undefined;
+  let envelopeFields: Field[] | undefined;
+  let envelopeCompanions: EnvelopeCompanion[] | undefined;
 
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
@@ -1235,6 +1255,8 @@ function extractResponses(
         isPaginated = result.isPaginated;
         dataPath = result.dataPath;
         itemType = result.itemType;
+        envelopeFields = result.envelopeFields;
+        envelopeCompanions = result.envelopeCompanions;
       } else if (resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
         if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
@@ -1281,5 +1303,15 @@ function extractResponses(
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
-  return { response, successResponses, errors, inlineModels, isPaginated, dataPath, itemType };
+  return {
+    response,
+    successResponses,
+    errors,
+    inlineModels,
+    isPaginated,
+    dataPath,
+    itemType,
+    envelopeFields,
+    envelopeCompanions,
+  };
 }

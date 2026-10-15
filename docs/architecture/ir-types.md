@@ -173,10 +173,35 @@ interface PaginationMeta {
   limitParam?: string; // Limit param name (offset strategy only, e.g., "limit")
   dataPath?: string; // JSON path to the data array (e.g., "data", "results") — undefined means the response IS the data
   itemType: TypeRef; // Type of each item in the paginated list
+  envelopeFields?: Field[]; // Every envelope property besides the data array, in document order
 }
 ```
 
 Present on `Operation` when pagination is detected. The `strategy` discriminant tells emitters whether to generate cursor-based, offset-based, or link-header pagination helpers. The `dataPath` is dynamically detected from the response envelope — when `undefined`, emitters should treat the entire response as the data array or use their own default.
+
+When the parser recognizes an inline list envelope — one array property plus a companion that looks like pagination metadata — `Operation.response` becomes the bare array, and `envelopeFields` keeps everything else the envelope carries: the pagination companion (`list_metadata`, `pagination`, `has_more`, `total`, …) and any discriminant such as `object: "list"`. Each entry is an ordinary `Field` (wire name, type, `required`, description), so `dataPath` + `itemType` + `envelopeFields` together describe the full shape of what the endpoint returns, and an emitter can both type the response and read the page details it needs for the next request:
+
+```typescript
+// GET /customers → { customers: Customer[], pagination: Pagination }
+op.pagination = {
+  strategy: "offset",
+  param: "page",
+  limitParam: "limit",
+  dataPath: "customers",
+  itemType: { kind: "model", name: "Customer" },
+  envelopeFields: [
+    {
+      name: "pagination",
+      type: { kind: "model", name: "Pagination" },
+      required: true,
+    },
+  ],
+};
+```
+
+A companion that is an inline object is lifted to a model. The same envelope recurs on every list endpoint of an API, so copies that agree structurally share one model named from the property alone (`list_metadata` → `ListMetadata`, `pagination` → `Pagination`) rather than one per operation as list items are (`ListUsersItem`). The bare name is taken only where it cannot change another type's shape. A copy collapses onto a target only when the target admits every value the copy can hold: the same fields with the same types, where the target may be looser (optional where the copy requires, nullable where the copy is not) but never stricter. When a component model of that name exists, the copies it admits collapse onto the component as written; otherwise the most common shape becomes the target. Any other copy keeps its operation-qualified name (`ListUsersPagination`). An inline enum in a companion is qualified by operation exactly like a parameter enum (`ListUsersSortOrder`). Companions declared through an `allOf` `$ref` branch are resolved against the component schemas, and a companion declared by more than one branch merges both declarations. Models and enums reached only through `envelopeFields` count as referenced for emission, service assignment, compat scoping, and the differ's request/response direction.
+
+`envelopeFields` is absent when the response is a bare array, when the response is a `$ref` to a component schema (the wrapper model itself carries the companions), or when pagination was inferred from query parameters alone.
 
 The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagination (e.g., GitHub API).
 

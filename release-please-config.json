@@ -5,7 +5,8 @@
     ".": {
       "release-type": "node",
       "changelog-path": "CHANGELOG.md",
-      "versioning": "default"
+      "versioning": "default",
+      "bump-minor-pre-major": true
     }
   }
 }
