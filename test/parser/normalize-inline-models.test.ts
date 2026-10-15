@@ -187,3 +187,57 @@ describe('collapseJsonSuffixModels', () => {
     expect(result).toHaveLength(2);
   });
 });
+
+describe('collapseJsonSuffixModels — pagination envelope fields', () => {
+  it('rewrites a list envelope companion ref when its Json-suffix model collapses', () => {
+    const models: Model[] = [
+      {
+        name: 'ListMetadata',
+        fields: [{ name: 'after', type: { kind: 'primitive', type: 'string' }, required: false }],
+      },
+      {
+        name: 'ListMetadataJson',
+        fields: [
+          { name: 'after', type: { kind: 'primitive', type: 'string' }, required: false },
+          { name: 'before', type: { kind: 'primitive', type: 'string' }, required: false },
+        ],
+      },
+    ];
+
+    const services: Service[] = [
+      {
+        name: 'Widgets',
+        operations: [
+          {
+            name: 'listWidgets',
+            httpMethod: 'get',
+            path: '/widgets',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+            errors: [],
+            injectIdempotencyKey: false,
+            pagination: {
+              strategy: 'cursor',
+              param: 'after',
+              dataPath: 'data',
+              itemType: { kind: 'primitive', type: 'string' },
+              envelopeFields: [
+                { name: 'list_metadata', type: { kind: 'model', name: 'ListMetadataJson' }, required: false },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = collapseJsonSuffixModels(models, services);
+
+    expect(result.map((m) => m.name)).toEqual(['ListMetadata']);
+    expect(services[0].operations[0].pagination?.envelopeFields?.[0].type).toEqual({
+      kind: 'model',
+      name: 'ListMetadata',
+    });
+  });
+});

@@ -2,5 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "github>workos/renovate-config:public"
+  ],
+  "packageRules": [
+    {
+      "description": "tree-sitter core and grammars are native addons with mutually incompatible peer ranges; upgrade them manually as one coordinated set.",
+      "matchPackageNames": ["/^tree-sitter/"],
+      "enabled": false
+    }
   ]
 }

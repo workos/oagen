@@ -1,7 +1,7 @@
 import type { Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema, resolveSchemaName } from './schemas.js';
+import { buildFieldFromSchema, isInlineObjectSchema, resolveSchemaName } from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -59,8 +59,9 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
 
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    // Direct inline object with properties (with or without explicit type: 'object')
-    if (fieldSchema.properties && (fieldSchema.type === 'object' || !fieldSchema.type)) {
+    // Direct inline object with properties (with or without explicit type: 'object',
+    // including the nullable `type: ['object', 'null']` form)
+    if (isInlineObjectSchema(fieldSchema)) {
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
       results.push(buildInlineModel(modelName, fieldSchema));
@@ -105,7 +106,7 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       }
     }
 
-    // oneOf containing objects — extract every inline object variant as a
+    // oneOf/anyOf containing objects — extract every inline object variant as a
     // model so each gets its own typed class. Variant 0 keeps the bare
     // qualified inline name (e.g. `ApiKeyCreatedDataOwner`); subsequent
     // variants are prefixed by their const-discriminator value via
@@ -113,10 +114,9 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
     // oneOf doesn't have a const-discriminator (single object variant + null
     // for nullable, or single object variant only), only variant 0 is
     // extracted and the bare name pattern preserves backward compat.
-    if (fieldSchema.oneOf) {
-      const inlineObjectVariants = fieldSchema.oneOf.filter(
-        (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
-      );
+    const unionVariants = fieldSchema.oneOf ?? fieldSchema.anyOf;
+    if (unionVariants) {
+      const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
