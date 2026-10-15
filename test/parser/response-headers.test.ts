@@ -7,9 +7,9 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
-import { collectResponseHeaders } from '../../src/ir/types.js';
+import { collectResponseHeaders, collectModelRefs } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
-import type { ApiSpec, Enum, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Model, Operation } from '../../src/ir/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/response-headers.yml');
@@ -65,6 +65,19 @@ describe('response headers', () => {
           },
         ]
       `);
+    });
+
+    it('materializes an object-shaped header into spec.models with no unresolved refs', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parseSpec(FIXTURE);
+      const op = spec.services.flatMap((s) => s.operations).find((o) => o.path === '/documents/{id}/meta')!;
+
+      expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+      const modelFields = (name: string) => spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+      expect(modelFields('DocumentsXMeta')).toEqual(['etag', 'origin']);
+      expect(modelFields('DocumentsXMetaOrigin')).toEqual(['region']);
+      const unresolved = warn.mock.calls.map((call) => String(call[0])).filter((m) => m.includes('Unresolved'));
+      expect(unresolved).toEqual([]);
     });
 
     it('resolves components/headers refs, including a header declared via content', async () => {
@@ -407,6 +420,212 @@ describe('response headers', () => {
 // one test's warnings never leak into the next test's assertions.
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('inline header models', () => {
+  function extract(responses: Record<string, unknown>): { op: Operation; inlineModels: Model[] } {
+    const { services, inlineModels } = extractOperations(getWithResponses(responses) as never);
+    return { op: services[0].operations[0], inlineModels };
+  }
+
+  /** Every model a header's type names must be among the extracted models. */
+  function expectHeaderModelsMaterialized(op: Operation, inlineModels: Model[]): void {
+    const names = new Set(inlineModels.map((m) => m.name));
+    for (const header of collectResponseHeaders(op)) {
+      for (const ref of collectModelRefs(header.type)) {
+        expect(names, `${header.name} names ${ref}`).toContain(ref);
+      }
+    }
+  }
+
+  it('materializes an object-shaped header declared via content, nested objects included', () => {
+    const { op, inlineModels } = extract({
+      '200': {
+        description: 'ok',
+        headers: {
+          'X-Meta': {
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    etag: { type: 'string' },
+                    origin: { type: 'object', properties: { region: { type: 'string' } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+    expect(inlineModels).toMatchInlineSnapshot(`
+      [
+        {
+          "description": undefined,
+          "fields": [
+            {
+              "default": undefined,
+              "deprecated": undefined,
+              "description": undefined,
+              "example": undefined,
+              "name": "etag",
+              "readOnly": undefined,
+              "required": false,
+              "type": {
+                "kind": "primitive",
+                "type": "string",
+              },
+              "writeOnly": undefined,
+            },
+            {
+              "default": undefined,
+              "deprecated": undefined,
+              "description": undefined,
+              "example": undefined,
+              "name": "origin",
+              "readOnly": undefined,
+              "required": false,
+              "type": {
+                "kind": "model",
+                "name": "DocumentsXMetaOrigin",
+              },
+              "writeOnly": undefined,
+            },
+          ],
+          "name": "DocumentsXMeta",
+        },
+        {
+          "description": undefined,
+          "fields": [
+            {
+              "default": undefined,
+              "deprecated": undefined,
+              "description": undefined,
+              "example": undefined,
+              "name": "region",
+              "readOnly": undefined,
+              "required": false,
+              "type": {
+                "kind": "primitive",
+                "type": "string",
+              },
+              "writeOnly": undefined,
+            },
+          ],
+          "name": "DocumentsXMetaOrigin",
+        },
+      ]
+    `);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  });
+
+  it('materializes the item model of an array-of-objects header', () => {
+    const { op, inlineModels } = extract({
+      '200': {
+        description: 'ok',
+        headers: {
+          'X-Tags': {
+            schema: { type: 'array', items: { type: 'object', properties: { key: { type: 'string' } } } },
+          },
+        },
+      },
+    });
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'array', items: { kind: 'model', name: 'DocumentsXTags' } });
+    expect(inlineModels.map((m) => m.name)).toEqual(['DocumentsXTags']);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  });
+
+  it('materializes every inline variant of a oneOf header', () => {
+    const { op, inlineModels } = extract({
+      '200': {
+        description: 'ok',
+        headers: {
+          'X-Owner': {
+            schema: {
+              oneOf: [
+                { type: 'object', properties: { type: { const: 'user' }, user_id: { type: 'string' } } },
+                { type: 'object', properties: { type: { const: 'team' }, team_id: { type: 'string' } } },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    expect(op.responseHeaders?.[0].type).toMatchInlineSnapshot(`
+      {
+        "compositionKind": "oneOf",
+        "discriminator": {
+          "mapping": {
+            "team": "TeamDocumentsXOwner",
+            "user": "DocumentsXOwner",
+          },
+          "property": "type",
+        },
+        "kind": "union",
+        "variants": [
+          {
+            "kind": "model",
+            "name": "DocumentsXOwner",
+          },
+          {
+            "kind": "model",
+            "name": "TeamDocumentsXOwner",
+          },
+        ],
+      }
+    `);
+    expect(inlineModels.map((m) => m.name)).toMatchInlineSnapshot(`
+      [
+        "DocumentsXOwner",
+        "TeamDocumentsXOwner",
+      ]
+    `);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  });
+
+  it('materializes an object-shaped header on an error response', () => {
+    const { op, inlineModels } = extract({
+      '200': { description: 'ok' },
+      '429': {
+        description: 'throttled',
+        headers: { 'X-Throttle': { schema: { type: 'object', properties: { reset_at: { type: 'integer' } } } } },
+      },
+    });
+
+    expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXThrottle' });
+    expect(inlineModels.map((m) => m.name)).toEqual(['DocumentsXThrottle']);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  });
+
+  it('keeps header models when a later 2xx body replaces the body inline models', () => {
+    const { op, inlineModels } = extract({
+      '200': {
+        description: 'ok',
+        headers: { 'X-Meta': { schema: { type: 'object', properties: { etag: { type: 'string' } } } } },
+      },
+      '201': {
+        description: 'created',
+        content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+      },
+    });
+
+    expect(inlineModels.map((m) => m.name)).toContain('DocumentsXMeta');
+    expectHeaderModelsMaterialized(op, inlineModels);
+  });
+
+  it('creates no model for a header whose schema is a $ref', () => {
+    const { op, inlineModels } = extract({
+      '200': { description: 'ok', headers: { 'X-Meta': { schema: { $ref: '#/components/schemas/Meta' } } } },
+    });
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(inlineModels).toEqual([]);
+  });
 });
 
 const baseOperation: Operation = {

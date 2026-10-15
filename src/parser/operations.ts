@@ -1284,12 +1284,17 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * Read a Response Object's `headers` map into IR response headers, resolving
  * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
  * survives so callers can leave the `headers` key off entirely.
+ *
+ * An object-shaped header schema (directly, inside an array, or as a oneOf
+ * variant) becomes a `ModelRef`, so the model it names is appended to
+ * `models` — otherwise the ref would dangle with nothing to emit.
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
   componentHeaders: Record<string, Record<string, unknown>> | undefined,
   operationLabel: string,
-  operationContext?: string,
+  operationContext: string | undefined,
+  models: Model[],
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
@@ -1306,9 +1311,14 @@ function extractResponseHeaders(
     // `content`, the first (only) media type's schema types the header.
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
-    const type: TypeRef = schema
-      ? schemaToTypeRef(schema, name, operationContext ? toPascalCase(operationContext) : undefined)
-      : { kind: 'primitive', type: 'string' };
+    const parentName = operationContext ? toPascalCase(operationContext) : undefined;
+    const type: TypeRef = schema ? schemaToTypeRef(schema, name, parentName) : { kind: 'primitive', type: 'string' };
+    // Materialize the models that `schemaToTypeRef` just named. Treating the
+    // header as a one-property object reuses the field-level extractor, whose
+    // names come from the same `qualifyInlineModelName(name, parent)` rule, so
+    // nested objects, array items, and oneOf variants all line up — the same
+    // trick the inline request-body path uses.
+    if (schema) extractInlineModelsFromProperties({ properties: { [name]: schema } }, models, parentName);
 
     result.push({
       name,
@@ -1365,12 +1375,15 @@ function extractResponses(
 
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
+  // Kept apart from `inlineModels`, which the latest 2xx body replaces
+  // wholesale below; merged once every status code has been read.
+  const headerModels: Model[] = [];
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429.
-    const headers = extractResponseHeaders(resp.headers, componentHeaders, opLabel, operationContext);
+    const headers = extractResponseHeaders(resp.headers, componentHeaders, opLabel, operationContext, headerModels);
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
@@ -1436,6 +1449,7 @@ function extractResponses(
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
+  if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
 
   return {
     response,

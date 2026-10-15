@@ -56,6 +56,33 @@ paths:
           headers:
             Retry-After:
               $ref: '#/components/headers/RetryAfter'
+  # An object-shaped header: its model must be materialized, nested object included.
+  /documents/{id}/meta:
+    get:
+      operationId: getDocumentMeta
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Meta:
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      etag:
+                        type: string
+                      origin:
+                        type: object
+                        properties:
+                          region:
+                            type: string
 components:
   schemas:
     Document:
