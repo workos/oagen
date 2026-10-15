@@ -785,7 +785,7 @@ function extractParams(
           ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
-        description: p.description,
+        description: firstDescription(p.description, p.schema?.description, refTarget?.description),
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
         default: p.schema?.default ?? refTarget?.default,
         example: p.example ?? p.schema?.example ?? refTarget?.example,
@@ -796,9 +796,20 @@ function extractParams(
 }
 
 /**
+ * First non-empty description in precedence order. A parameter that declares
+ * `description: ""` is treated as undocumented so its schema's text still
+ * surfaces, and the result is `undefined` rather than `""` when nothing in
+ * the chain is documented.
+ */
+function firstDescription(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.length > 0);
+}
+
+/**
  * If a parameter's schema is a `$ref` to `#/components/schemas/X`, return the
  * referenced component schema. Used to surface schema-level metadata (default,
- * example, deprecated) that wouldn't otherwise be visible at the param level.
+ * example, deprecated, description) that wouldn't otherwise be visible at the
+ * param level.
  *
  * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
  * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
