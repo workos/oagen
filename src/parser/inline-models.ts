@@ -57,8 +57,13 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
     }
   }
 
-  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
-    if (!fieldSchema) continue;
+  for (const [fieldName, rawFieldSchema] of Object.entries(properties)) {
+    if (!rawFieldSchema) continue;
+    // Dispatch on the shape `schemaToTypeRef` named: it strips nullable
+    // wrappers before deciding whether a field is an object, array, or map,
+    // so a nullable field must be unwrapped here the same way or its inline
+    // object / array items / map values are referenced but never extracted.
+    const fieldSchema = unwrapNullableSchema(rawFieldSchema);
     // Direct inline object with properties (with or without explicit type: 'object',
     // including the nullable `type: ['object', 'null']` form)
     if (isInlineObjectSchema(fieldSchema)) {
@@ -208,6 +213,45 @@ function mergeAllOfObjectSchema(schema: SchemaObject): SchemaObject {
   };
   visit(schema);
   return { type: 'object', properties, required, description: schema.description };
+}
+
+/**
+ * Strip the nullable wrappers `schemaToTypeRef` unwraps before it names
+ * anything — the OAS 3.1 `type: [X, 'null']` array, the OAS 3.0
+ * `nullable: true` flag, and a `oneOf`/`anyOf` with a single non-null
+ * variant — so extraction dispatches on the same shape the TypeRef was built
+ * from. The unwrap keeps `contextName`/`parentModelName` semantics intact:
+ * `schemaToTypeRef` passes both through each of these wrappers unchanged.
+ */
+function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
+  if (schema.$ref) return schema;
+  if (Array.isArray(schema.type)) {
+    const nonNullTypes = schema.type.filter((t) => t !== 'null');
+    if (nonNullTypes.length !== 1) return schema;
+    return unwrapNullableSchema({ ...schema, type: nonNullTypes[0], nullable: false });
+  }
+  if (schema.nullable && schema.type) {
+    return unwrapNullableSchema({ ...schema, nullable: false });
+  }
+  // `allOf` takes precedence over `oneOf`/`anyOf` in schemaToTypeRef, so only
+  // a bare union is a nullable wrapper candidate.
+  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
+  if (variants) {
+    const nullVariant = variants.find(isNullSchema);
+    const nonNullVariants = variants.filter((v) => v !== nullVariant);
+    const only = nonNullVariants[0];
+    if (nullVariant && nonNullVariants.length === 1 && only) {
+      return unwrapNullableSchema(only);
+    }
+  }
+  return schema;
+}
+
+/** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */
+function isNullSchema(schema: SchemaObject): boolean {
+  return (
+    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
+  );
 }
 
 /**

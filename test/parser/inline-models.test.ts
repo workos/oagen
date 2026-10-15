@@ -351,6 +351,71 @@ describe('extractInlineModelsFromProperties', () => {
   });
 });
 
+describe('nullable fields keep their inline models', () => {
+  const object: SchemaObject = { type: 'object', properties: { visible: { type: 'boolean' } } };
+  const fieldTypes = (ir: Awaited<ReturnType<typeof parseSpec>>, modelName: string): Record<string, unknown> =>
+    fieldTypesByModel(ir.models)[modelName] ?? {};
+
+  // Each form is what `schemaToTypeRef` unwraps as nullable; the extractor
+  // must see through the same wrapper or the model behind the reference is
+  // never emitted.
+  const forms: Array<{ form: string; openapi: string; wrap: (schema: SchemaObject) => SchemaObject }> = [
+    {
+      form: 'OAS 3.1 `type: [X, "null"]`',
+      openapi: '3.1.0',
+      wrap: (schema) => ({ ...schema, type: [schema.type as string, 'null'] }),
+    },
+    { form: 'OAS 3.0 `nullable: true`', openapi: '3.0.3', wrap: (schema) => ({ ...schema, nullable: true }) },
+    {
+      form: '`oneOf: [X, { type: "null" }]`',
+      openapi: '3.1.0',
+      wrap: (schema) => ({ oneOf: [schema, { type: 'null' }] }),
+    },
+  ];
+
+  it.each(forms)(
+    '$form: nullable object, array of objects, map of objects, and map of nullable objects',
+    async ({ openapi, wrap }) => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const ir = await parseTempSpec({
+          openapi,
+          info: { title: 'nullable', version: '1' },
+          paths: {},
+          components: {
+            schemas: {
+              Thing: {
+                type: 'object',
+                properties: {
+                  widget: wrap(object),
+                  shapes: wrap({ type: 'array', items: object }),
+                  layers: wrap({ type: 'object', additionalProperties: object }),
+                  tiles: { type: 'object', additionalProperties: wrap(object) },
+                },
+              },
+            },
+          },
+        });
+
+        expect(warnSpy).not.toHaveBeenCalled();
+        expect(fieldTypes(ir, 'Thing')).toEqual({
+          widget: { kind: 'nullable', inner: { kind: 'model', name: 'ThingWidget' } },
+          shapes: { kind: 'nullable', inner: { kind: 'array', items: { kind: 'model', name: 'ThingShape' } } },
+          layers: { kind: 'nullable', inner: { kind: 'map', valueType: { kind: 'model', name: 'ThingLayer' } } },
+          tiles: { kind: 'map', valueType: { kind: 'nullable', inner: { kind: 'model', name: 'ThingTile' } } },
+        });
+        const visible = { visible: { kind: 'primitive', type: 'boolean' } };
+        expect(fieldTypes(ir, 'ThingWidget')).toEqual(visible);
+        expect(fieldTypes(ir, 'ThingShape')).toEqual(visible);
+        expect(fieldTypes(ir, 'ThingLayer')).toEqual(visible);
+        expect(fieldTypes(ir, 'ThingTile')).toEqual(visible);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    },
+  );
+});
+
 describe('oneOf variants without a shared const field', () => {
   const byRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' } } };
   const bySide: SchemaObject = { type: 'object', properties: { side: { type: 'number' } } };
