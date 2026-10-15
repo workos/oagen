@@ -25,6 +25,9 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
       description: expand(service.description),
       operations: service.operations.map((op) => ({
         ...op,
+        // `summary` is optional and absent (not undefined) when the document
+        // declares none; only expand it when present so the key stays absent.
+        ...(op.summary ? { summary: expand(op.summary) } : {}),
         description: expand(op.description),
         pathParams: op.pathParams.map((p) => ({ ...p, description: expand(p.description) })),
         queryParams: op.queryParams.map((p) => ({ ...p, description: expand(p.description) })),

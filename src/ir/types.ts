@@ -70,6 +70,22 @@ export type SecurityRequirementSet = SecurityRequirement[];
 /** A single API operation (maps to an SDK method) */
 export interface Operation {
   name: string;
+  /**
+   * The document's `summary` alone. Present only when the OpenAPI operation
+   * declares one with non-whitespace content; an empty or whitespace-only
+   * summary is treated as absent. Read this to use the summary as a one-line
+   * label; `description` below still carries the combined form, so emitters
+   * that only print `description` are unchanged.
+   */
+  summary?: string;
+  /**
+   * Doc text for the operation. When the document declares both a `summary`
+   * and a `description` with content, this is `summary + "\n\n" + description`;
+   * when only one has content (or both are identical), this is that one. An
+   * empty or whitespace-only value is treated as absent, and text with content
+   * is kept verbatim. The parts are not separable from this field alone — use
+   * `summary` for that.
+   */
   description?: string;
   httpMethod: HttpMethod;
   path: string;

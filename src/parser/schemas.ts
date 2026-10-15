@@ -181,8 +181,8 @@ export function resolveExamples(levels: ExampleSource[]): ExampleSource {
 /**
  * If a schema is a `$ref` to `#/components/schemas/X`, return the referenced
  * component schema. Used to surface schema-level metadata (default, example,
- * examples, deprecated) that would otherwise be invisible at the field or
- * parameter level.
+ * examples, deprecated, description) that would otherwise be invisible at the
+ * field or parameter level.
  *
  * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
  * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`

@@ -594,6 +594,133 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
   });
 
+  it('falls back to the inline schema description when the param declares none', () => {
+    const paths = {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [
+            {
+              name: 'petId',
+              in: 'path' as const,
+              required: true,
+              schema: { type: 'string', description: 'The ID of the pet to retrieve' },
+            },
+          ],
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const petIdParam = services[0].operations[0].pathParams[0];
+    expect(petIdParam.name).toBe('petId');
+    expect(petIdParam.description).toBe('The ID of the pet to retrieve');
+  });
+
+  it('prefers the param-level description over the inline schema description', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'fields',
+              in: 'query' as const,
+              required: false,
+              description: 'The fields to include in the response',
+              schema: { type: 'string', description: 'A comma-separated list of field names' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].queryParams[0].description).toBe('The fields to include in the response');
+  });
+
+  it('hoists description from a referenced component schema onto the param', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: {
+        type: 'string',
+        enum: ['desc', 'asc'],
+        description: 'Sort order for the returned list',
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    const orderParam = services[0].operations[0].queryParams[0];
+    expect(orderParam.name).toBe('order');
+    expect(orderParam.description).toBe('Sort order for the returned list');
+  });
+
+  it('falls through an empty param description to the schema description', () => {
+    const paths = {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [
+            {
+              name: 'petId',
+              in: 'path' as const,
+              required: true,
+              description: '',
+              schema: { type: 'string', description: 'The ID of the pet to retrieve' },
+            },
+          ],
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].pathParams[0].description).toBe('The ID of the pet to retrieve');
+  });
+
+  it('leaves description undefined when every level in the chain is empty', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              description: '',
+              schema: { $ref: '#/components/schemas/PaginationOrder', description: '' },
+            },
+          ],
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: { type: 'string', enum: ['desc', 'asc'], description: '' },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    expect(services[0].operations[0].queryParams[0].description).toBeUndefined();
+  });
+
   it('resolves an operation-level parameter $ref into components/parameters', () => {
     const paths = {
       '/domains': {
@@ -2074,5 +2201,179 @@ describe('extractOperations – request-body fields fall back to a referenced co
       { name: 'direction', example: 'asc', examples: undefined },
     ]);
     expect(body?.fields[1]).not.toHaveProperty('examples');
+  });
+});
+
+describe('operation summary', () => {
+  const responses = { '204': { description: 'ok' } };
+
+  it('keeps summary on its own and folds it into description when both are declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets\n\nReturns every pet in the store, newest first.');
+  });
+
+  it('keeps summary and mirrors it into description when only summary is declared', () => {
+    const paths = {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          summary: 'Create a pet',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('Create a pet');
+    expect(op.description).toBe('Create a pet');
+  });
+
+  it('omits the summary key when only description is declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
+  });
+
+  it('omits the summary key and leaves description undefined when neither is declared', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBeUndefined();
+  });
+
+  it('omits the summary key when the declared summary is an empty string', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: '',
+          description: 'Returns every pet in the store, newest first.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
+  });
+});
+
+describe('operation summary and description with empty or whitespace-only text', () => {
+  const responses = { '204': { description: 'ok' } };
+
+  it('treats an empty description as absent so description falls back to the summary', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: '',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets');
+  });
+
+  it('treats a whitespace-only description as absent so description falls back to the summary', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: '  \n\t',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets');
+  });
+
+  it('omits a whitespace-only summary from both summary and description', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: '  ',
+          description: 'Lists pets.',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBe('Lists pets.');
+  });
+
+  it('leaves description undefined and omits summary when both are whitespace-only', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: ' ',
+          description: '\n',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op).not.toHaveProperty('summary');
+    expect(op.description).toBeUndefined();
+  });
+
+  it('keeps surrounding whitespace on text that has content', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          summary: 'List pets',
+          description: 'Lists pets.\n',
+          responses,
+        },
+      },
+    };
+
+    const op = extractOperations(paths).services[0].operations[0];
+    expect(op.summary).toBe('List pets');
+    expect(op.description).toBe('List pets\n\nLists pets.\n');
   });
 });
