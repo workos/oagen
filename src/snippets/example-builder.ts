@@ -16,13 +16,15 @@ import type { ApiSpec, ArrayType, Constraints, Enum, Field, MapType, Model, Para
  * author's value is the better illustration, and a snippet is not a
  * validator. Only generated values are shaped by `constraints`:
  *
- *   - Numbers start at the inclusive `minimum`, else one step past the
- *     `exclusiveMinimum`, else at the inclusive `maximum`, else one step
- *     below the `exclusiveMaximum`, else `1`; a step is `multipleOf` when
- *     declared, otherwise `1`. The result is rounded up to the next
- *     `multipleOf` and kept integral for `integer`. When the bounds are
- *     contradictory (the candidate overshoots the upper bound) the lower
- *     bound is returned as is.
+ *   - Numbers are chosen to satisfy every declared bound and `multipleOf`:
+ *     with only a lower bound, the smallest value at or just past it (rounded
+ *     up to the next multiple); with only an upper bound, the largest value
+ *     at or just below it (rounded down); with both, the smallest integer
+ *     inside for `integer` and the midpoint for `number`, snapped to a
+ *     multiple inside the range; with none, `1` (or the first multiple).
+ *     Only when no value can satisfy the limits together (contradictory
+ *     bounds, or no multiple between them) is the lower bound returned as
+ *     is.
  *   - Plain strings are padded (by repeating the sample) to `minLength` and
  *     truncated to `maxLength`; format-driven values (`date-time`, `email`,
  *     `uuid`, ...) are never touched. A `pattern` is not synthesized: the
@@ -30,13 +32,19 @@ import type { ApiSpec, ArrayType, Constraints, Enum, Field, MapType, Model, Para
  *     from an arbitrary regex is out of scope.
  *   - Arrays emit `max(1, minItems)` items capped at `maxItems` (an explicit
  *     `maxItems: 0` gives `[]`). Under `uniqueItems`, generated primitives
- *     vary by index (strings get the index appended, numbers get it added)
- *     so the items are distinct; enum, literal and model items are not
- *     varied.
+ *     vary by index (strings get the index appended, numbers get it added,
+ *     booleans alternate — so a unique boolean array holds at most two
+ *     items); enum, literal and model items are not varied.
  *   - Maps emit `max(1, minProperties)` entries capped at `maxProperties`:
  *     one entry keeps the `key` name, more are `key1`, `key2`, ...
  *   - Model-level `minProperties` / `maxProperties` are ignored: every
  *     non-deprecated, non-readOnly field is emitted anyway.
+ *
+ * Snippets are illustrative, so generation has a size budget: at most
+ * {@link MAX_GENERATED_LENGTH} characters per string and
+ * {@link MAX_GENERATED_ITEMS} items per array or entries per map. A
+ * `minLength`, `minItems` or `minProperties` above the budget yields the
+ * capped size — a readable sample rather than a conforming one.
  *
  * Limits nested inside array items or map values are not carried by the
  * IR, so items and values are generated unconstrained.
@@ -59,6 +67,10 @@ export interface ExampleBuilder {
 }
 
 const MAX_DEPTH = 6;
+/** Longest generated string; a larger `minLength` is capped here. */
+export const MAX_GENERATED_LENGTH = 64;
+/** Most generated array items or map entries; a larger `minItems` / `minProperties` is capped here. */
+export const MAX_GENERATED_ITEMS = 8;
 
 export function createExampleBuilder(spec: ApiSpec): ExampleBuilder {
   const modelsByName = new Map<string, Model>();
@@ -68,8 +80,8 @@ export function createExampleBuilder(spec: ApiSpec): ExampleBuilder {
 
   /**
    * `seed` distinguishes sibling items of a `uniqueItems` array: it is
-   * appended to generated strings and added to generated numbers. `0` leaves
-   * the value as is.
+   * appended to generated strings, added to generated numbers and alternates
+   * generated booleans. `0` leaves the value as is.
    */
   function buildForType(type: TypeRef, depth: number, constraints?: Constraints, seed = 0): unknown {
     if (depth > MAX_DEPTH) return null;
@@ -102,8 +114,11 @@ export function createExampleBuilder(spec: ApiSpec): ExampleBuilder {
   }
 
   function arrayExample(type: ArrayType, depth: number, constraints?: Constraints): unknown[] {
-    const count = countWithin(constraints?.minItems, constraints?.maxItems);
+    let count = countWithin(constraints?.minItems, constraints?.maxItems);
     const vary = constraints?.uniqueItems === true && count > 1;
+    // Booleans only have two distinct values, so a unique boolean array
+    // cannot hold more than two items.
+    if (vary && isBooleanType(type.items)) count = Math.min(count, 2);
     const items: unknown[] = [];
     for (let i = 0; i < count; i++) {
       items.push(buildForType(type.items, depth + 1, undefined, vary ? i : 0));
@@ -156,9 +171,18 @@ export function createExampleBuilder(spec: ApiSpec): ExampleBuilder {
   };
 }
 
-/** `max(1, min)` capped at `max`; an explicit `max: 0` yields `0`. */
+/** True for a boolean primitive, looking through `nullable`. */
+function isBooleanType(type: TypeRef): boolean {
+  if (type.kind === 'nullable') return isBooleanType(type.inner);
+  return type.kind === 'primitive' && type.type === 'boolean';
+}
+
+/**
+ * `max(1, min)` capped at the size budget and then at `max`; an explicit
+ * `max: 0` yields `0`.
+ */
 function countWithin(min: number | undefined, max: number | undefined): number {
-  let count = Math.max(1, min ?? 0);
+  let count = Math.min(Math.max(1, min ?? 0), MAX_GENERATED_ITEMS);
   if (max !== undefined) count = Math.min(count, max);
   return Math.max(0, Math.floor(count));
 }
@@ -172,7 +196,7 @@ function primitiveExample(type: string, format: string | undefined, constraints?
     case 'number':
       return numberExample(false, constraints) + seed;
     case 'boolean':
-      return true;
+      return seed % 2 === 0;
     case 'unknown':
     default:
       return null;
@@ -182,9 +206,10 @@ function primitiveExample(type: string, format: string | undefined, constraints?
 const STRING_SAMPLE = 'string_example';
 
 /**
- * Format-driven samples are returned untouched. The plain sample is clamped
- * to `minLength` / `maxLength`; when both conflict, `maxLength` wins so the
- * result at least fits. A `pattern` is deliberately not honored.
+ * Format-driven samples are returned untouched. The plain sample is padded
+ * to `minLength` (within the size budget) and truncated to `maxLength`;
+ * when both conflict, `maxLength` wins so the result at least fits. A
+ * `pattern` is deliberately not honored.
  */
 function stringExample(format: string | undefined, constraints?: Constraints, seed = 0): string {
   if (format === 'date-time') return '2026-01-15T12:00:00.000Z';
@@ -195,8 +220,8 @@ function stringExample(format: string | undefined, constraints?: Constraints, se
 
   const suffix = seed > 0 ? String(seed) : '';
   let value = STRING_SAMPLE;
-  const minLength = constraints?.minLength;
-  if (minLength !== undefined && value.length + suffix.length < minLength) {
+  const minLength = Math.min(constraints?.minLength ?? 0, MAX_GENERATED_LENGTH);
+  if (value.length + suffix.length < minLength) {
     const missing = minLength - value.length - suffix.length;
     value += STRING_SAMPLE.repeat(Math.ceil(missing / STRING_SAMPLE.length)).slice(0, missing);
   }
@@ -208,32 +233,115 @@ function stringExample(format: string | undefined, constraints?: Constraints, se
   return (value + suffix).slice(0, maxLength ?? Infinity);
 }
 
+/** The tighter of an inclusive and an exclusive bound on one side, and whether that edge is exclusive. */
+interface Edge {
+  value: number;
+  exclusive: boolean;
+}
+
+function edge(inclusive: number | undefined, exclusive: number | undefined, side: 'low' | 'high'): Edge | undefined {
+  if (inclusive === undefined && exclusive === undefined) return undefined;
+  if (inclusive === undefined) return { value: exclusive!, exclusive: true };
+  if (exclusive === undefined) return { value: inclusive, exclusive: false };
+  // Both declared (legal in 3.1): the exclusive one is the tighter edge when
+  // it is at or inside the inclusive one.
+  const exclusiveIsTighter = side === 'low' ? exclusive >= inclusive : exclusive <= inclusive;
+  return exclusiveIsTighter ? { value: exclusive, exclusive: true } : { value: inclusive, exclusive: false };
+}
+
 /**
- * A number inside the declared bounds — see the `ExampleBuilder` doc for the
- * anchor order. `step` is `multipleOf` when declared, otherwise `1`, so one
- * step past an exclusive bound is itself a valid multiple.
+ * A number inside the declared bounds and on the declared `multipleOf` —
+ * see the `ExampleBuilder` doc for the anchor rules. Candidates are tried
+ * in order and the first that satisfies every limit wins; only when none
+ * does is the lower bound returned as is.
  */
 function numberExample(integer: boolean, constraints?: Constraints): number {
   if (!constraints) return 1;
-  const { minimum, exclusiveMinimum, maximum, exclusiveMaximum, multipleOf } = constraints;
-  const step = multipleOf !== undefined && multipleOf > 0 ? multipleOf : 1;
+  const multipleOf =
+    constraints.multipleOf !== undefined && constraints.multipleOf > 0 ? constraints.multipleOf : undefined;
+  const low = edge(constraints.minimum, constraints.exclusiveMinimum, 'low');
+  const high = edge(constraints.maximum, constraints.exclusiveMaximum, 'high');
 
-  const lower = minimum ?? (exclusiveMinimum !== undefined ? exclusiveMinimum + step : undefined);
-  const upper = maximum ?? (exclusiveMaximum !== undefined ? exclusiveMaximum - step : undefined);
+  // How far to move off an exclusive edge: the multiple when there is one,
+  // one for integers, half the range when both sides are bounded, else one.
+  const step = multipleOf ?? (integer ? 1 : low && high ? (high.value - low.value) / 2 : 1);
 
-  let candidate = lower ?? upper ?? 1;
-  if (multipleOf !== undefined && multipleOf > 0) candidate = ceilToMultiple(candidate, multipleOf);
-  if (integer && !Number.isInteger(candidate)) candidate = Math.ceil(candidate);
-  if (upper !== undefined && candidate > upper) {
-    // Contradictory bounds (or a multipleOf that cannot fit): fall back to the
-    // lower bound rather than inventing a value outside every limit.
-    return lower ?? candidate;
+  const pastLow = (): number => {
+    const l = low!;
+    if (multipleOf !== undefined) {
+      const v = ceilToMultiple(l.value, multipleOf);
+      return l.exclusive && v <= l.value ? trim(v + multipleOf) : v;
+    }
+    if (integer) return l.exclusive ? Math.floor(l.value) + 1 : Math.ceil(l.value);
+    return l.exclusive ? trim(l.value + step) : l.value;
+  };
+  const belowHigh = (): number => {
+    const h = high!;
+    if (multipleOf !== undefined) {
+      const v = floorToMultiple(h.value, multipleOf);
+      return h.exclusive && v >= h.value ? trim(v - multipleOf) : v;
+    }
+    if (integer) return h.exclusive ? Math.ceil(h.value) - 1 : Math.floor(h.value);
+    return h.exclusive ? trim(h.value - step) : h.value;
+  };
+
+  const candidates: number[] = [];
+  if (low && high) {
+    if (integer) {
+      candidates.push(pastLow());
+    } else {
+      const mid = (low.value + high.value) / 2;
+      candidates.push(multipleOf !== undefined ? roundToMultiple(mid, multipleOf) : trim(mid), pastLow(), belowHigh());
+    }
+  } else if (low) {
+    candidates.push(pastLow());
+  } else if (high) {
+    candidates.push(belowHigh());
+  } else {
+    candidates.push(multipleOf !== undefined ? ceilToMultiple(1, multipleOf) : 1);
   }
-  return candidate;
+
+  for (const v of candidates) {
+    if (satisfies(v, constraints, integer, multipleOf)) return v;
+  }
+  // Nothing satisfies every limit at once: contradictory bounds, or no
+  // multiple between them. Fall back to the lower bound rather than inventing
+  // a value that violates every limit; the snippet stays illustrative.
+  if (!low) return candidates[0];
+  const lower = low.exclusive ? trim(low.value + step) : low.value;
+  return integer ? Math.ceil(lower) : lower;
 }
 
-/** Smallest multiple of `m` that is >= `value`, with floating-point noise trimmed. */
+function satisfies(v: number, c: Constraints, integer: boolean, multipleOf: number | undefined): boolean {
+  if (!Number.isFinite(v)) return false;
+  if (integer && !Number.isInteger(v)) return false;
+  if (c.minimum !== undefined && v < c.minimum) return false;
+  if (c.exclusiveMinimum !== undefined && v <= c.exclusiveMinimum) return false;
+  if (c.maximum !== undefined && v > c.maximum) return false;
+  if (c.exclusiveMaximum !== undefined && v >= c.exclusiveMaximum) return false;
+  if (multipleOf !== undefined) {
+    const q = v / multipleOf;
+    if (Math.abs(q - Math.round(q)) > 1e-9) return false;
+  }
+  return true;
+}
+
+/** Smallest multiple of `m` that is >= `value`. */
 function ceilToMultiple(value: number, m: number): number {
-  const k = Math.ceil(value / m - 1e-9);
-  return Number((k * m).toPrecision(12));
+  return trim(Math.ceil(value / m - 1e-9) * m);
+}
+
+/** Largest multiple of `m` that is <= `value`. */
+function floorToMultiple(value: number, m: number): number {
+  return trim(Math.floor(value / m + 1e-9) * m);
+}
+
+/** Nearest multiple of `m` to `value`. */
+function roundToMultiple(value: number, m: number): number {
+  return trim(Math.round(value / m) * m);
+}
+
+/** Trim floating-point noise (`0.30000000000000004` → `0.3`). */
+function trim(value: number): number {
+  return Number(value.toPrecision(12));
 }

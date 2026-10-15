@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createExampleBuilder } from '../../src/snippets/example-builder.js';
+import { createExampleBuilder, MAX_GENERATED_ITEMS, MAX_GENERATED_LENGTH } from '../../src/snippets/example-builder.js';
 import type { ApiSpec, Field, Model, Parameter } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -220,5 +220,77 @@ describe('snippets/example-builder: constraints', () => {
     expect(builder.forParameter({ ...base, default: 50 })).toBe(50);
     expect(builder.forParameter({ ...base, default: 50, example: 25 })).toBe(25);
     expect(builder.forParameter({ name: 'q', type: string, required: false })).toBe('string_example');
+  });
+});
+
+describe('snippets/example-builder: size budget, satisfiable numbers, unique booleans', () => {
+  const builder = createExampleBuilder(makeSpec());
+  const integer = { kind: 'primitive', type: 'integer' } as const;
+  const number = { kind: 'primitive', type: 'number' } as const;
+  const string = { kind: 'primitive', type: 'string' } as const;
+  const boolean = { kind: 'primitive', type: 'boolean' } as const;
+
+  it('caps generated strings, arrays and maps at the size budget instead of allocating the minimum', () => {
+    const long = builder.forType(string, { minLength: 1_000_000_000 }) as string;
+    expect(long.length).toBe(MAX_GENERATED_LENGTH);
+    expect(long.startsWith('string_examplestring_example')).toBe(true);
+    // The budget caps the padding; maxLength still truncates below it.
+    expect((builder.forType(string, { minLength: 1_000_000, maxLength: 10 }) as string).length).toBe(10);
+
+    const items = builder.forType({ kind: 'array', items: integer }, { minItems: 1_000_000_000 }) as unknown[];
+    expect(items.length).toBe(MAX_GENERATED_ITEMS);
+    expect(builder.forType({ kind: 'array', items: integer }, { minItems: 1_000_000, maxItems: 3 })).toEqual([1, 1, 1]);
+
+    const entries = builder.forType({ kind: 'map', valueType: integer }, { minProperties: 1_000_000_000 });
+    expect(Object.keys(entries as object)).toHaveLength(MAX_GENERATED_ITEMS);
+    expect(
+      Object.keys(
+        builder.forType({ kind: 'map', valueType: integer }, { minProperties: 99, maxProperties: 2 }) as object,
+      ),
+    ).toEqual(['key1', 'key2']);
+  });
+
+  it('rounds down to the previous multiple when the anchor is an upper bound', () => {
+    expect(builder.forType(integer, { maximum: 5, multipleOf: 2 })).toBe(4);
+    expect(builder.forType(integer, { exclusiveMaximum: 5, multipleOf: 2 })).toBe(4);
+    expect(builder.forType(integer, { exclusiveMaximum: 4, multipleOf: 2 })).toBe(2);
+    expect(builder.forType(number, { maximum: 1, multipleOf: 0.3 })).toBe(0.9);
+  });
+
+  it('picks a value strictly inside exclusive bounds', () => {
+    expect(builder.forType(number, { exclusiveMinimum: 0, exclusiveMaximum: 1 })).toBe(0.5);
+    expect(builder.forType(integer, { exclusiveMinimum: 0, exclusiveMaximum: 2 })).toBe(1);
+    expect(builder.forType(number, { exclusiveMinimum: 0, maximum: 0.25 })).toBe(0.125);
+    expect(builder.forType(integer, { exclusiveMinimum: 3, multipleOf: 2 })).toBe(4);
+  });
+
+  it('snaps to a multiple inside a two-sided range', () => {
+    expect(builder.forType(integer, { minimum: 3, maximum: 5, multipleOf: 2 })).toBe(4);
+    expect(builder.forType(number, { minimum: 3, maximum: 5, multipleOf: 2 })).toBe(4);
+    expect(builder.forType(number, { minimum: 0, maximum: 10 })).toBe(5);
+    expect(builder.forType(number, { minimum: 0, maximum: 10, multipleOf: 3 })).toBe(6);
+    expect(builder.forType(number, { minimum: 0.7, maximum: 0.8, multipleOf: 0.25 })).toBe(0.75);
+    expect(builder.forType(integer, { minimum: 0, maximum: 10 })).toBe(0);
+  });
+
+  it('returns the lower bound only when nothing can satisfy every limit at once', () => {
+    expect(builder.forType(integer, { minimum: 3, maximum: 4, multipleOf: 5 })).toBe(3);
+    expect(builder.forType(number, { minimum: 3, maximum: 4, multipleOf: 5 })).toBe(3);
+    expect(builder.forType(integer, { minimum: 10, maximum: 5 })).toBe(10);
+    expect(builder.forType(integer, { exclusiveMinimum: 4, exclusiveMaximum: 5 })).toBe(5);
+  });
+
+  it('alternates booleans under uniqueItems and caps a unique boolean array at two items', () => {
+    const booleans = { kind: 'array', items: boolean } as const;
+    expect(builder.forType(booleans, { minItems: 2, uniqueItems: true })).toEqual([true, false]);
+    expect(builder.forType(booleans, { minItems: 5, uniqueItems: true })).toEqual([true, false]);
+    expect(
+      builder.forType(
+        { kind: 'array', items: { kind: 'nullable', inner: boolean } },
+        { minItems: 3, uniqueItems: true },
+      ),
+    ).toEqual([true, false]);
+    expect(builder.forType(booleans, { minItems: 3 })).toEqual([true, true, true]);
+    expect(builder.forType(boolean)).toBe(true);
   });
 });
