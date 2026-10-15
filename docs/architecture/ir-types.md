@@ -236,9 +236,14 @@ interface Parameter {
   description?: string;
   deprecated?: boolean;
   default?: unknown;
-  example?: unknown;
+  example?: unknown; // The document's `example`, else `examples[0]`
+  examples?: unknown[]; // Every example value, in document order; only when non-empty
 }
 ```
+
+### Parameter Examples
+
+`example` and `examples` are read from the parameter itself first, then its inline `schema`, then the component schema its `$ref` points at. A parameter-level `examples` is an OpenAPI map of Example Objects, so each entry's `value` is taken in document order (entries with `$ref` or `externalValue` are skipped); a schema-level `examples` is the JSON Schema list and is taken as-is. `example` is the document's own `example` when present, otherwise the first entry of the resolved `examples`, so emitters that read only `example` still see a value for an OAS 3.1 document that uses `examples` alone.
 
 ### Idempotency Key
 
@@ -279,8 +284,14 @@ interface Field {
   writeOnly?: boolean;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown; // The schema's `example`, else `examples[0]`
+  examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
 }
 ```
+
+### Field Examples
+
+OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema gives neither has no `example` and no `examples` key.
 
 ## Enum
 

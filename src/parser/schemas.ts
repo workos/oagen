@@ -126,7 +126,28 @@ export interface SchemaObject {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
+  /** JSON Schema `examples` list; OAS 3.1 deprecates `example` in its favour. */
+  examples?: unknown[];
   [key: string]: unknown;
+}
+
+/**
+ * Narrow a raw `examples` value to a non-empty list, or undefined. Guards
+ * against documents that put an OAS Example Object map (or anything else)
+ * where JSON Schema expects an array, and against an empty list, so the IR
+ * carries `examples` only when there is at least one value.
+ */
+export function nonEmptyExamples(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Pick the single `example` the IR carries: the document's own `example`
+ * when it is set (including an explicit `null`), otherwise the first entry
+ * of the resolved `examples` list.
+ */
+export function pickExample(example: unknown, examples: unknown[] | undefined): unknown {
+  return example !== undefined ? example : examples?.[0];
 }
 
 export interface ExtractedSchemas {
@@ -522,6 +543,7 @@ export function buildFieldFromSchema(
   contextName: string,
   requiredSet: Set<string>,
 ): Field {
+  const examples = nonEmptyExamples(fieldSchema.examples);
   return {
     name: fieldName,
     type: schemaToTypeRef(fieldSchema, fieldName, contextName),
@@ -531,7 +553,10 @@ export function buildFieldFromSchema(
     writeOnly: fieldSchema.writeOnly || undefined,
     deprecated: fieldSchema.deprecated || undefined,
     default: fieldSchema.default,
-    example: fieldSchema.example,
+    example: pickExample(fieldSchema.example, examples),
+    // Only materialise the key when there is something to carry so existing
+    // inline snapshots of fields without examples stay byte-identical.
+    ...(examples ? { examples } : {}),
   };
 }
 

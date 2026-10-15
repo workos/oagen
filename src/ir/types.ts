@@ -161,7 +161,19 @@ export interface Parameter {
   description?: string;
   deprecated?: boolean;
   default?: unknown;
+  /**
+   * A single illustrative value. The document's `example` (on the parameter,
+   * its schema, or the schema its `$ref` points at) when present, otherwise
+   * the first entry of `examples`. Absent when the document gives neither.
+   */
   example?: unknown;
+  /**
+   * Every example value the document gives, in document order. Sourced from
+   * the parameter's `examples` map of Example Objects (each entry's `value`),
+   * or, failing that, the JSON Schema `examples` list on its schema. Present
+   * only when at least one value exists.
+   */
+  examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
 }
@@ -264,7 +276,18 @@ export interface Field {
   writeOnly?: boolean;
   deprecated?: boolean;
   default?: unknown;
+  /**
+   * A single illustrative value. The schema's `example` when present,
+   * otherwise the first entry of `examples`. Absent when the schema gives
+   * neither.
+   */
   example?: unknown;
+  /**
+   * Every example value the schema gives, in document order, from the JSON
+   * Schema `examples` list (OAS 3.1 deprecates `example` in its favour).
+   * Present only when the list has at least one entry.
+   */
+  examples?: unknown[];
 }
 
 /** Enum definition */

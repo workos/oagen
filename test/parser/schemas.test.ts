@@ -889,3 +889,78 @@ describe('extractSchemas – schemaNameTransform receives the original schema na
     }
   });
 });
+
+describe('extractSchemas – JSON Schema `examples` on fields (issue #189)', () => {
+  it('fills example from the first entry of examples and keeps every entry', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', examples: ['Rex', 'Bella'] },
+          age: { type: 'integer', examples: [3] },
+        },
+        required: ['name'],
+      },
+    });
+    const fields = models[0].fields.map(({ name, example, examples }) => ({ name, example, examples }));
+    expect(fields).toMatchInlineSnapshot(`
+      [
+        {
+          "example": "Rex",
+          "examples": [
+            "Rex",
+            "Bella",
+          ],
+          "name": "name",
+        },
+        {
+          "example": 3,
+          "examples": [
+            3,
+          ],
+          "name": "age",
+        },
+      ]
+    `);
+  });
+
+  it('prefers the schema example over examples for the single value', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        properties: { name: { type: 'string', example: 'Rexie', examples: ['Rex', 'Bella'] } },
+      },
+    });
+    const [name] = models[0].fields;
+    expect(name.example).toBe('Rexie');
+    expect(name.examples).toEqual(['Rex', 'Bella']);
+  });
+
+  it('keeps an explicit null example instead of falling back to examples', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        properties: { name: { type: ['string', 'null'], example: null, examples: ['Rex'] } },
+      },
+    });
+    const [name] = models[0].fields;
+    expect(name.example).toBeNull();
+    expect(name.examples).toEqual(['Rex']);
+  });
+
+  it('omits examples when the schema gives none, an empty list, or a non-list', () => {
+    const { models } = extractSchemas({
+      Pet: {
+        type: 'object',
+        properties: {
+          nickname: { type: 'string', example: 'Rexie' },
+          empty: { type: 'string', examples: [] },
+          // An OAS Example Object map where JSON Schema expects a list.
+          mapped: { type: 'string', examples: { one: { value: 'x' } } } as never,
+        },
+      },
+    });
+    for (const field of models[0].fields) expect(field).not.toHaveProperty('examples');
+    expect(models[0].fields.map((f) => f.example)).toEqual(['Rexie', undefined, undefined]);
+  });
+});

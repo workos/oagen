@@ -1671,3 +1671,212 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
     expect(() => extractOperations(paths)).toThrow(/Unresolved request body \$ref/);
   });
 });
+
+describe('extractOperations – parameter `examples` (issue #189)', () => {
+  const ok = { '200': { description: 'ok' } };
+  const projected = (params: Array<{ name: string; example?: unknown; examples?: unknown[] }>) =>
+    params.map(({ name, example, examples }) => ({ name, example, examples }));
+
+  it('fills a param example from its schema examples list', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            { name: 'species', in: 'query' as const, schema: { type: 'string', examples: ['dog', 'cat'] } },
+            { name: 'color', in: 'query' as const, schema: { type: 'string', example: 'brown' } },
+          ],
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const { queryParams } = services[0].operations[0];
+    expect(projected(queryParams)).toMatchInlineSnapshot(`
+      [
+        {
+          "example": "dog",
+          "examples": [
+            "dog",
+            "cat",
+          ],
+          "name": "species",
+        },
+        {
+          "example": "brown",
+          "examples": undefined,
+          "name": "color",
+        },
+      ]
+    `);
+    expect(queryParams[1]).not.toHaveProperty('examples');
+  });
+
+  it('prefers an explicit example over the examples list for the single value', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'on_param',
+              in: 'query' as const,
+              example: 'param',
+              schema: { type: 'string', example: 'schema', examples: ['list'] },
+            },
+            {
+              name: 'on_schema',
+              in: 'query' as const,
+              schema: { type: 'string', example: 'schema', examples: ['list'] },
+            },
+          ],
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(projected(services[0].operations[0].queryParams)).toEqual([
+      { name: 'on_param', example: 'param', examples: ['list'] },
+      { name: 'on_schema', example: 'schema', examples: ['list'] },
+    ]);
+  });
+
+  it('reads a parameter-level map of Example Objects in document order', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'species',
+              in: 'query' as const,
+              schema: { type: 'string' },
+              examples: {
+                dog: { summary: 'A dog', value: 'dog' },
+                shared: { $ref: '#/components/examples/Shared' },
+                remote: { externalValue: 'https://example.com/cat.json' },
+                blank: { summary: 'no inline value' },
+                none: { value: null },
+                cat: { value: 'cat' },
+              },
+            },
+          ],
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(projected(services[0].operations[0].queryParams)).toMatchInlineSnapshot(`
+      [
+        {
+          "example": "dog",
+          "examples": [
+            "dog",
+            null,
+            "cat",
+          ],
+          "name": "species",
+        },
+      ]
+    `);
+  });
+
+  it('prefers the parameter-level map over the schema examples list', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'species',
+              in: 'query' as const,
+              schema: { type: 'string', examples: ['schema'] },
+              examples: { one: { value: 'param' } },
+            },
+          ],
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(projected(services[0].operations[0].queryParams)).toEqual([
+      { name: 'species', example: 'param', examples: ['param'] },
+    ]);
+  });
+
+  it('falls through to the schema list when the map has no inline values', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            {
+              name: 'species',
+              in: 'query' as const,
+              schema: { type: 'string', examples: ['schema'] },
+              examples: { shared: { $ref: '#/components/examples/Shared' } },
+            },
+          ],
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(projected(services[0].operations[0].queryParams)).toEqual([
+      { name: 'species', example: 'schema', examples: ['schema'] },
+    ]);
+  });
+
+  it('falls back to the referenced component schema examples', () => {
+    const paths = {
+      '/organizations': {
+        get: {
+          operationId: 'listOrganizations',
+          parameters: [
+            {
+              name: 'order',
+              in: 'query' as const,
+              required: false,
+              schema: { $ref: '#/components/schemas/PaginationOrder' },
+            },
+          ],
+          responses: ok,
+        },
+      },
+    };
+    const componentSchemas = {
+      PaginationOrder: {
+        type: 'string',
+        enum: ['desc', 'asc'],
+        examples: ['desc', 'asc'],
+      },
+    };
+
+    const { services } = extractOperations(paths, undefined, componentSchemas);
+    const [order] = services[0].operations[0].queryParams;
+    expect(order.example).toBe('desc');
+    expect(order.examples).toEqual(['desc', 'asc']);
+  });
+
+  it('omits examples when neither the param nor its schema gives any', () => {
+    const paths = {
+      '/pets/{pet_id}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [{ name: 'pet_id', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          responses: ok,
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const [petId] = services[0].operations[0].pathParams;
+    expect(petId.example).toBeUndefined();
+    expect(petId).not.toHaveProperty('examples');
+  });
+});

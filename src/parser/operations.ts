@@ -14,7 +14,7 @@ import type {
 } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName } from './schemas.js';
+import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName, nonEmptyExamples, pickExample } from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -53,6 +53,19 @@ interface OperationObject {
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
 }
 
+/**
+ * An OAS Example Object, as the entries of a parameter's `examples` map.
+ * Only `value` is read; an entry that carries `$ref` or `externalValue`
+ * instead has no inline value to surface.
+ */
+interface ExampleObject {
+  summary?: string;
+  description?: string;
+  value?: unknown;
+  externalValue?: string;
+  $ref?: string;
+}
+
 interface ParameterObject {
   name: string;
   in: 'path' | 'query' | 'header' | 'cookie';
@@ -61,6 +74,8 @@ interface ParameterObject {
   schema?: SchemaObject;
   deprecated?: boolean;
   example?: unknown;
+  /** Parameter-level examples: a map of Example Objects, not a JSON Schema list. */
+  examples?: Record<string, ExampleObject>;
   style?: string;
   explode?: boolean;
 }
@@ -783,6 +798,12 @@ function extractParams(
     .filter((p) => p.in === location)
     .map((p) => {
       const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
+      // Same precedence as `example`: the parameter's own declaration wins,
+      // then its inline schema, then the component the schema refs.
+      const examples =
+        exampleObjectValues(p.examples) ??
+        nonEmptyExamples(p.schema?.examples) ??
+        nonEmptyExamples(refTarget?.examples);
       return {
         name: p.name,
         type: p.schema
@@ -792,11 +813,31 @@ function extractParams(
         description: p.description,
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
         default: p.schema?.default ?? refTarget?.default,
-        example: p.example ?? p.schema?.example ?? refTarget?.example,
+        example: pickExample(p.example ?? p.schema?.example ?? refTarget?.example, examples),
+        ...(examples ? { examples } : {}),
         style: p.style as Parameter['style'],
         explode: p.explode,
       };
     });
+}
+
+/**
+ * Flatten a parameter's `examples` map of Example Objects to the inline
+ * values it carries, in document order. Entries that point elsewhere
+ * (`$ref`, `externalValue`) or have no `value` are skipped; `null` is a
+ * legitimate value and kept. Returns undefined when nothing remains so the
+ * caller can fall through to the schema's `examples`.
+ */
+function exampleObjectValues(examples: Record<string, ExampleObject> | undefined): unknown[] | undefined {
+  if (!examples || typeof examples !== 'object' || Array.isArray(examples)) return undefined;
+  const values: unknown[] = [];
+  for (const entry of Object.values(examples)) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.$ref !== undefined || entry.externalValue !== undefined) continue;
+    if (entry.value === undefined) continue;
+    values.push(entry.value);
+  }
+  return values.length > 0 ? values : undefined;
 }
 
 /**
