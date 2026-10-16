@@ -407,8 +407,18 @@ function collectNestedInlineModels(
       const fieldSchema = findNestedFieldSchema(fieldName, parentSchema, schemas);
       if (!fieldSchema) return;
 
-      // Extract inline models from the field schema
-      const extracted = extractNestedSchema(modelRef.name, fieldSchema, schemas);
+      // Extract inline models from the field schema. A union's variants are
+      // named from the field's own qualified name — `extractModel` and
+      // `extractAllOfModel` type every field of a component, inherited ones
+      // included, under the component — which is also variant 0's name
+      // unless variant 0 took its title (`CircleDrawingShape`). Rebuild the
+      // base from the field rather than reading it off the ref, and keep the
+      // ref as the base only if the rebuilt one does not reproduce it.
+      const extracted = extractNestedSchema(
+        unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName),
+        fieldSchema,
+        schemas,
+      );
       for (const m of extracted) {
         if (!modelNames.has(m.name)) {
           models.push(m);
@@ -418,6 +428,20 @@ function collectNestedInlineModels(
       }
     },
   });
+}
+
+/**
+ * The base name `extractNestedSchema` should name a field's `oneOf` variants
+ * from: the field's qualified inline name when naming the variants from it
+ * yields `refName` (the ref the walk is resolving), else `refName` itself,
+ * which is right for every non-union field and for a union whose variant 0 is
+ * bare.
+ */
+function unionBaseName(refName: string, fieldName: string, fieldSchema: SchemaObject, parentModelName: string): string {
+  if (!fieldSchema.oneOf) return refName;
+  const fromField = qualifyInlineModelName(toPascalCase(fieldName), parentModelName);
+  const names = [...nameInlineVariants(fieldSchema.oneOf, fromField).values()];
+  return names.includes(refName) ? fromField : refName;
 }
 
 /**
@@ -488,36 +512,33 @@ function findNestedFieldSchema(
 
 /** Extract a model (and nested models) from an inline field schema. */
 function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
-  // Handle oneOf: extract each object variant as its own model
+  // Handle oneOf: extract each object variant as its own model. `name` is the
+  // union's base name (the field's qualified inline name), and the variants
+  // are named from it by `nameInlineVariants` — the one place that decides a
+  // variant's name — so they match the union TypeRef and the field extractor
+  // (`UserApiKeyOwner`, `CircleDrawingShape`, `DrawingShapeWithSide`, ...).
+  // Same inline-object test as `schemaToTypeRef` and the field extractor, so
+  // a `type: ['object', 'null']` variant is counted here too instead of
+  // letting the next variant claim its name.
   if (schema.oneOf) {
     const models: Model[] = [];
-
-    // Collect the inline object variants up front. When every variant pins
-    // the same property to a const value, we can derive meaningful names
-    // from the const (e.g. `UserApiKeyOwner` instead of `ApiKeyOwner2`)
-    // — much friendlier for SDK consumers than numeric suffixes.
-    // Same inline-object test as `schemaToTypeRef` and the field extractor,
-    // so a `type: ['object', 'null']` variant is counted (and numbered) here
-    // too instead of letting the next variant claim its name.
-    const inlineObjectVariants: SchemaObject[] = schema.oneOf.filter((v) => isInlineObjectSchema(v));
-    const constNamingDiscriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
+    const variantNames = nameInlineVariants(schema.oneOf, name);
 
     for (const variant of schema.oneOf) {
-      if (isInlineObjectSchema(variant)) {
-        // Name the variant first and build its fields under that name: an
-        // inline object nested under variant N is then referenced as
-        // `<VariantN>Child` (`ThingShape2Center`), which is the name the
-        // field extractor materializes it under — not `<Variant0>Child`.
-        const variantName = nameVariantModel(variant, name, models, constNamingDiscriminator);
-        const requiredSet = new Set(variant.required ?? []);
-        const siblings = collectProperties(variant);
-        const fields: Field[] = [];
-        for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
-          if (!fs) continue;
-          fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
-        }
-        models.push({ name: variantName, description: variant.description, fields });
+      const variantName = variantNames.get(variant);
+      if (variantName === undefined) continue;
+      // Build the variant's fields under its own name: an inline object
+      // nested under variant N is then referenced as `<VariantN>Child`
+      // (`ThingShapeWithSideCenter`), which is the name the field extractor
+      // materializes it under — not `<Variant0>Child`.
+      const requiredSet = new Set(variant.required ?? []);
+      const siblings = collectProperties(variant);
+      const fields: Field[] = [];
+      for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
+        if (!fs) continue;
+        fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
       }
+      models.push({ name: variantName, description: variant.description, fields });
     }
     return models;
   }
@@ -550,61 +571,176 @@ function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Recor
 }
 
 /**
- * Derive a meaningful name for a oneOf object variant past the first,
- * falling back to the numeric-suffix scheme (`Foo2`, `Foo3`) when no
- * better signal is available. The "better signal" is a const-valued
- * discriminator property that distinguishes one variant from the others.
- *
- * For a schema like `ApiKey.owner` whose oneOf has two variants — one
- * with `type: { const: "organization" }` and one with `type: { const:
- * "user" }` — this returns `ApiKeyOwner` for the first variant (the
- * baseline name that the union TypeRef will reference, so consumer-
- * visible typed fields stay backward-compatible) and `UserApiKeyOwner`
- * for the second instead of `ApiKeyOwner2`. SDK consumers reading the
- * generated types can tell the variants apart at a glance.
- *
- * The first variant always keeps the bare parent name because
- * `schemaToTypeRef` builds union variants whose model refs collapse to
- * `qualifyInlineModelName(field, parent)` — so the first model name
- * must match for the union's degenerate-collapse to land on a valid
- * type. Renaming variant 0 would orphan it.
- *
- * Falls back to numeric suffix when:
- *   - The variant has no discriminator property (no shared const
- *     property across all object variants), OR
- *   - The const value PascalCases to an empty/whitespace name, OR
- *   - The derived name collides with the parent name or an already-
- *     emitted variant name (numeric keeps uniqueness).
+ * The prefix a variant's `title` contributes to its name: the title trimmed
+ * and PascalCased, or null when there is no title or it PascalCases to
+ * nothing.
  */
-function nameVariantModel(
+function variantTitlePrefix(variant: SchemaObject): string | null {
+  const title = typeof variant['title'] === 'string' ? variant['title'].trim() : '';
+  return title ? toPascalCase(title) || null : null;
+}
+
+/** `<Prefix><Base>`, or `base` unchanged when it already starts with the prefix (no doubling). */
+function prefixedVariantName(prefix: string, base: string): string {
+  return base.startsWith(prefix) ? base : `${prefix}${base}`;
+}
+
+/**
+ * The properties `variant` declares that no other inline object variant of
+ * the same union declares, in the variant's own `properties` order.
+ */
+function distinguishingProperties(variant: SchemaObject, siblings: readonly SchemaObject[]): string[] {
+  const declaredElsewhere = new Set<string>();
+  for (const sibling of siblings) {
+    if (sibling === variant) continue;
+    for (const property of Object.keys(sibling.properties ?? {})) declaredElsewhere.add(property);
+  }
+  return Object.keys(variant.properties ?? {}).filter((property) => !declaredElsewhere.has(property));
+}
+
+/**
+ * Name an inline object variant of a `oneOf`/`anyOf` that has no better
+ * signal: it is not variant 0 (which keeps the union's base name) and no
+ * const discriminator gave it a prefix. The name is derived from the
+ * variant's own content, never from where it sits in the document (beyond
+ * its position among the variants, which only the final counter reads), so
+ * an SDK user can tell the variants apart and reordering them changes nothing
+ * but which one is variant 0. In order, taking the first candidate that is
+ * neither the base name nor a name already given to an earlier variant of
+ * the same union:
+ *
+ *   1. the variant's `title` (trimmed and PascalCased): `<Title><Base>`
+ *      (`CircleDrawingShape`), the same prefix form a const discriminator
+ *      produces, including the rule that a base already starting with the
+ *      prefix is not doubled (that candidate equals the base, so it falls
+ *      through); a title an earlier variant already took falls through too;
+ *   2. a distinguishing property — the first property, in the variant's own
+ *      order, that it declares and no other inline object variant declares:
+ *      `<Base>With<Property>` (`DrawingShapeWithSide`); a property that
+ *      PascalCases to nothing is skipped;
+ *   3. the position counter, `<Base><position + 1>` (`DrawingShape2`), which
+ *      now remains only for variants whose property sets are identical.
+ *
+ * `siblings` are the inline object variants of the union, this one included;
+ * `emitted` are the names already given to the earlier ones, in order. Every
+ * site that names a variant — the union TypeRef, the component-field,
+ * request-body and response extractors, and `mintedInlineNames` — goes
+ * through this function (via `nameInlineVariant`), so they cannot drift.
+ */
+export function nameUndiscriminatedVariant(
   variant: SchemaObject,
-  parentName: string,
-  alreadyEmitted: Model[],
+  siblings: readonly SchemaObject[],
+  base: string,
+  emitted: readonly string[],
+): string {
+  const taken = (candidate: string): boolean => candidate === base || emitted.includes(candidate);
+
+  const titlePrefix = variantTitlePrefix(variant);
+  if (titlePrefix !== null) {
+    const candidate = prefixedVariantName(titlePrefix, base);
+    if (!taken(candidate)) return candidate;
+  }
+
+  for (const property of distinguishingProperties(variant, siblings)) {
+    const word = toPascalCase(property);
+    if (!word) continue;
+    const candidate = `${base}With${word}`;
+    if (!taken(candidate)) return candidate;
+  }
+
+  for (let position = emitted.length + 1; ; position++) {
+    const candidate = `${base}${position}`;
+    if (!taken(candidate)) return candidate;
+  }
+}
+
+/**
+ * True when the union's inline object variants (two or more) each carry a
+ * title and no two titles PascalCase to the same prefix: the one case in
+ * which variant 0 is named from its title rather than keeping the base name.
+ */
+function allDistinctlyTitled(siblings: readonly SchemaObject[]): boolean {
+  if (siblings.length < 2) return false;
+  const prefixes = siblings.map(variantTitlePrefix);
+  return prefixes.every((prefix) => prefix !== null) && new Set(prefixes).size === prefixes.length;
+}
+
+/**
+ * The name of one inline object variant of a `oneOf`/`anyOf`, given the
+ * union's base name (the field's qualified inline name, e.g. `ApiKeyOwner`),
+ * the inline object variants of the union (`siblings`, this one included),
+ * the names already given to the earlier variants (`emitted`, in order), and
+ * the const-valued property that distinguishes the variants when there is
+ * one (`deriveConstNamingDiscriminator`).
+ *
+ * Variant 0 keeps the bare base name: the union TypeRef and every extractor
+ * reference it under that name, and a consumer's typed field keeps the name
+ * it always had. The one exception: when the union has no const discriminator
+ * and every variant carries a distinct title, variant 0 is named from its
+ * title like the others (`CircleDrawingShape` beside `SquareDrawingShape`)
+ * instead of being the only one left bare. Whether the union is discriminated
+ * is read from the variants themselves here, not from `discriminator`, so a
+ * caller forcing a property (an explicit `discriminator:` without `mapping:`)
+ * still agrees with the extractors on variant 0.
+ *
+ * A later variant takes `<ConstValue><Base>` from the discriminator
+ * (`UserApiKeyOwner`) when the value PascalCases to something and the name is
+ * neither the base nor already emitted, and otherwise falls to
+ * `nameUndiscriminatedVariant`: its title, a distinguishing property, then
+ * the position counter.
+ */
+export function nameInlineVariant(
+  variant: SchemaObject,
+  siblings: readonly SchemaObject[],
+  base: string,
+  emitted: readonly string[],
   discriminator: { property: string } | null,
 ): string {
-  // Variant 0 keeps the bare parent name so the union TypeRef's degenerate
-  // collapse target exists in the model registry.
-  if (alreadyEmitted.length === 0) return parentName;
+  if (emitted.length === 0) {
+    const undiscriminated = deriveConstNamingDiscriminator([...siblings]) === null;
+    const titlePrefix = undiscriminated && allDistinctlyTitled(siblings) ? variantTitlePrefix(variant) : null;
+    return titlePrefix === null ? base : prefixedVariantName(titlePrefix, base);
+  }
 
   if (discriminator) {
     const constValue = getConstPropertyValue(variant, discriminator.property);
-    if (constValue) {
-      const prefix = toPascalCase(constValue);
-      if (prefix) {
-        const candidate = parentName.startsWith(prefix) ? parentName : `${prefix}${parentName}`;
-        const collision = candidate === parentName || alreadyEmitted.some((m) => m.name === candidate);
-        if (!collision) return candidate;
-      }
+    const prefix = constValue ? toPascalCase(constValue) : '';
+    if (prefix) {
+      const candidate = prefixedVariantName(prefix, base);
+      if (candidate !== base && !emitted.includes(candidate)) return candidate;
     }
   }
-  return `${parentName}${alreadyEmitted.length + 1}`;
+  return nameUndiscriminatedVariant(variant, siblings, base, emitted);
+}
+
+/**
+ * Name every inline object variant of a `oneOf`/`anyOf` from the union's base
+ * name, keyed by variant schema identity; non-object and `$ref` variants get
+ * no entry. Positions are local to this variant list, so the union's TypeRef
+ * entries and the extracted models agree no matter what else has been
+ * extracted. This is the list-level entry point every site uses:
+ * `schemaToTypeRef` (via `nameInlineObjectVariants`), `extractNestedSchema`,
+ * `extractInlineModelDeep`, `extractInlineModelsFromProperties` and
+ * `mintedInlineNames`.
+ */
+export function nameInlineVariants(variants: readonly SchemaObject[], base: string): Map<SchemaObject, string> {
+  const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
+  const discriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
+  const emitted: string[] = [];
+  const names = new Map<SchemaObject, string>();
+  for (const variant of inlineObjectVariants) {
+    const name = nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator);
+    emitted.push(name);
+    names.set(variant, name);
+  }
+  return names;
 }
 
 /**
  * Returns a discriminator descriptor when every inline object variant in a
  * oneOf has a string-const value on the same property — the signature of a
  * discriminated union without an explicit `discriminator:` keyword. Used by
- * `nameVariantModel` to derive variant names from the const values.
+ * `nameInlineVariant` to derive variant names from the const values.
  *
  * Distinct from `detectConstPropertyDiscriminator` (which requires every
  * variant to carry a `$ref` or `title` so a name mapping can be built):
@@ -838,7 +974,7 @@ function mapVariantToDiscriminatorEntry(
  * Derive a discriminator value → variant model name mapping for an inline-
  * variant `oneOf` whose explicit `discriminator:` has no `mapping:` clause.
  *
- * Each variant model name is reproduced via `nameVariantModel` so it matches
+ * Each variant model name is reproduced via `nameInlineVariant` so it matches
  * what `extractNestedSchema` registered when it walked the same `oneOf` to
  * pull variants out as named models. Variant 0 keeps the bare parent name
  * (e.g. `ApiKeyOwner`); subsequent variants get a const-derived prefix
@@ -863,43 +999,32 @@ function deriveInlineVariantMapping(
   const baseInlineName = qualifyInlineModelName(toPascalCase(contextName), parentModelName);
   const namingDiscriminator = { property: discriminatorProperty };
   const mapping: Record<string, string> = {};
-  const emittedSoFar: Model[] = [];
+  const emitted: string[] = [];
   for (const variant of inlineObjectVariants) {
     const constValue = getConstPropertyValue(variant, discriminatorProperty);
     if (constValue === null) return null;
-    const variantName = nameVariantModel(variant, baseInlineName, emittedSoFar, namingDiscriminator);
+    const variantName = nameInlineVariant(variant, inlineObjectVariants, baseInlineName, emitted, namingDiscriminator);
     mapping[constValue] = variantName;
-    emittedSoFar.push({ name: variantName, fields: [] });
+    emitted.push(variantName);
   }
   return mapping;
 }
 
 /**
- * Name the inline object variants of a `oneOf`/`anyOf` exactly as the inline-
- * model extractors do (`nameOneOfVariant` in inline-models.ts, and
- * `extractNestedSchema` / `extractInlineModelDeep` here): variant 0 keeps the
- * qualified field name, later variants take a const-discriminator prefix when
- * every variant pins one, and otherwise a position-based suffix (`Shape`,
- * `Shape2`, `Shape3`). Positions are local to this variant list, so the
- * union's entries and the extracted models agree no matter what else has
- * been extracted. Returned keyed by variant schema identity.
+ * Name the inline object variants of a field's `oneOf`/`anyOf` exactly as the
+ * inline-model extractors do (`extractInlineModelsFromProperties` in
+ * inline-models.ts, and `extractNestedSchema` / `extractInlineModelDeep`
+ * here): the union's base name is the field's qualified inline name, and
+ * `nameInlineVariants` hands out the variant names from it. Returned keyed by
+ * variant schema identity.
  */
 function nameInlineObjectVariants(
   variants: SchemaObject[],
   contextName: string | undefined,
   parentModelName: string | undefined,
 ): Map<SchemaObject, string> {
-  const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
   const baseInlineName = qualifyInlineModelName(toPascalCase(contextName ?? 'UnknownModel'), parentModelName);
-  const namingDiscriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
-  const emitted: Model[] = [];
-  const names = new Map<SchemaObject, string>();
-  for (const variant of inlineObjectVariants) {
-    const name = nameVariantModel(variant, baseInlineName, emitted, namingDiscriminator);
-    emitted.push({ name, fields: [] });
-    names.set(variant, name);
-  }
-  return names;
+  return nameInlineVariants(variants, baseInlineName);
 }
 
 /**
@@ -1446,12 +1571,10 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     if (fieldSchema.oneOf) {
       const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
-        const baseQualified = qualifyNestedInlineName(name, fieldName);
-        const namingDisc = deriveConstNamingDiscriminator(inlineObjectVariants);
-        const emitted: Model[] = [];
+        const variantNames = nameInlineVariants(fieldSchema.oneOf, qualifyNestedInlineName(name, fieldName));
         for (const variant of inlineObjectVariants) {
-          const variantName = nameVariantModel(variant, baseQualified, emitted, namingDisc);
-          emitted.push({ name: variantName, fields: [] });
+          const variantName = variantNames.get(variant);
+          if (variantName === undefined) continue;
           nestedModels.push(...extractInlineModelDeep(variantName, variant, schemas));
           // A multi-type variant's array member types its items under the
           // variant's name (`<Variant>Item`); extract them there too. The
@@ -1628,7 +1751,7 @@ export function schemaToTypeRef(
     //   2. Explicit `discriminator:` with no `mapping:` — derive mapping from
     //      variants' const values on the discriminator property, pairing each
     //      to its inline-extracted variant model name (built the same way
-    //      `extractNestedSchema` names them via `nameVariantModel`). This
+    //      `extractNestedSchema` names them via `nameInlineVariant`). This
     //      covers `ApiKey.owner`-shaped schemas where the spec uses
     //      `discriminator: { propertyName: type }` but lists inline anonymous
     //      `oneOf` variants instead of `$ref` links.
@@ -1637,7 +1760,7 @@ export function schemaToTypeRef(
     //      `detectConstPropertyDiscriminator` covers this.
     //   4. As a last resort, when (3) doesn't apply because variants are
     //      inline anonymous objects, derive the same const → variant-model-
-    //      name mapping using `nameVariantModel`. This covers
+    //      name mapping using `nameInlineVariant`. This covers
     //      `ApiKeyCreatedData.owner`-shaped schemas (oneOf with inline
     //      const-discriminating variants but no `discriminator:` keyword).
     let resolvedDiscriminator: { property: string; mapping: Record<string, string> } | undefined;

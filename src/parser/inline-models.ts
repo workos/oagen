@@ -1,7 +1,13 @@
 import type { Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { buildFieldFromSchema, isInlineObjectSchema, resolveSchemaName, variantMemberSchemas } from './schemas.js';
+import {
+  buildFieldFromSchema,
+  isInlineObjectSchema,
+  nameInlineVariants,
+  resolveSchemaName,
+  variantMemberSchemas,
+} from './schemas.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -28,23 +34,26 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
 }
 
 /**
- * The inline model or enum name `schemaToTypeRef` would mint for `schema`
- * typed under `contextName` with `parentModelName`, or null when it mints
- * none (a `$ref`, a primitive, an array or map of those). Mirrors the naming
+ * The inline model or enum names `schemaToTypeRef` would mint for `schema`
+ * typed under `contextName` with `parentModelName`; empty when it mints none
+ * (a `$ref`, a primitive, an array or map of those). Mirrors the naming
  * branches of `schemaToTypeRef`: an inline object in any form it recognises
- * (`properties`, an `allOf` with object members, a `oneOf`/`anyOf` with an
- * inline object variant) takes `qualifyInlineModelName`; an inline enum, or
- * a `oneOf` of string consts that collapses into one, takes the parent-
- * prefixed enum name, which is never singularized; an array or map claims
- * whatever its items or values would.
+ * (`properties`, an `allOf` with object members) takes
+ * `qualifyInlineModelName`; a `oneOf`/`anyOf` mints one model per inline
+ * object variant, named exactly as the union references them
+ * (`nameInlineVariants`: `DrawingLayer`, `DrawingLayerWithOpacity`, or
+ * `CircleDrawingLayer` when every variant is titled); an inline enum, or a
+ * `oneOf` of string consts that collapses into one, takes the parent-prefixed
+ * enum name, which is never singularized; an array or map claims whatever its
+ * items or values would.
  */
-export function mintedInlineName(
+export function mintedInlineNames(
   contextName: string,
   schema: SchemaObject,
   parentModelName: string | undefined,
-): string | null {
+): string[] {
   const s = unwrapNullableSchema(schema);
-  if (s.$ref) return null;
+  if (s.$ref) return [];
   const base = toPascalCase(contextName);
   const modelName = (): string => qualifyInlineModelName(base, parentModelName);
   const enumName = (): string => {
@@ -53,26 +62,26 @@ export function mintedInlineName(
   };
   if (s.allOf) {
     const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
-    if (only) return mintedInlineName(contextName, only, parentModelName);
-    return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : null;
+    if (only) return mintedInlineNames(contextName, only, parentModelName);
+    return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? [modelName()] : [];
   }
   const variants = s.oneOf ?? s.anyOf;
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
-    if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    return nonNull.some((v) => isInlineObjectSchema(v)) ? modelName() : null;
+    if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return [enumName()];
+    return [...nameInlineVariants(nonNull, modelName()).values()];
   }
-  if (s.const !== undefined) return null;
-  if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return enumName();
+  if (s.const !== undefined) return [];
+  if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return [enumName()];
   // A plain boolean: the type guard would otherwise narrow `s` to `never` below.
   const inlineObject: boolean = isInlineObjectSchema(s);
-  if (inlineObject) return modelName();
-  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineName(contextName, s.items, parentModelName);
+  if (inlineObject) return [modelName()];
+  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineNames(contextName, s.items, parentModelName);
   if (s.type === 'object' && !s.properties) {
     const value = mapValueSchema(s);
-    return value ? mintedInlineName(contextName, value, parentModelName) : null;
+    return value ? mintedInlineNames(contextName, value, parentModelName) : [];
   }
-  return null;
+  return [];
 }
 
 /** Documentation keywords that do not shape a model; ignored by `schemaShapeKey` at a schema's own level. */
@@ -166,8 +175,9 @@ export function schemaShapeKey(schema: SchemaObject): string {
  *
  * When a sibling property of the same object would mint that very name —
  * `layer` as an inline object, an inline enum, an inline union with object
- * variants, or an array or map of such (`mintedInlineName`); a primitive
- * `email` beside `emails` claims nothing — the elements step aside to
+ * variants (any of whose variant names counts), or an array or map of such
+ * (`mintedInlineNames`); a primitive `email` beside `emails` claims nothing
+ * — the elements step aside to
  * `<field>_item` / `<field>_value`, which qualify to `<Parent><Field>Item` /
  * `<Parent><Field>Value` (`DrawingLayersItem`, `DrawingLayersValue`),
  * matching the `<Variant>Item` convention. Should a sibling mint that name
@@ -202,20 +212,20 @@ export function elementContextName(
   elementSchema: SchemaObject,
 ): string {
   if (!siblings) return fieldName;
-  const own = mintedInlineName(fieldName, elementSchema, parentModelName);
-  if (own === null) return fieldName;
+  const own = mintedInlineNames(fieldName, elementSchema, parentModelName);
+  if (own.length === 0) return fieldName;
 
   // Every inline name the other siblings mint, with the schemas minting it.
   const claimed = new Map<string, SchemaObject[]>();
   for (const [siblingName, siblingSchema] of siblings) {
     if (siblingName === fieldName) continue;
-    const minted = mintedInlineName(siblingName, siblingSchema, parentModelName);
-    if (minted === null) continue;
-    claimed.set(minted, [...(claimed.get(minted) ?? []), siblingSchema]);
+    for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) {
+      claimed.set(minted, [...(claimed.get(minted) ?? []), siblingSchema]);
+    }
   }
 
-  const rivals = claimed.get(own);
-  if (!rivals) return fieldName;
+  const rivals = [...new Set(own.flatMap((name) => claimed.get(name) ?? []))];
+  if (rivals.length === 0) return fieldName;
   const element = unwrapNullableSchema(elementSchema);
   const identical = (rival: SchemaObject): boolean => {
     const sibling = unwrapNullableSchema(rival);
@@ -231,8 +241,8 @@ export function elementContextName(
   for (let i = 0; ; i++) {
     const candidate =
       i === 0 ? `${fieldName}_${kind}` : i === 1 ? `${fieldName}_${fallback}` : `${fieldName}_${fallback}${i}`;
-    const minted = mintedInlineName(candidate, elementSchema, parentModelName);
-    if (minted === null || !claimed.has(minted)) return candidate;
+    const minted = mintedInlineNames(candidate, elementSchema, parentModelName);
+    if (minted.every((name) => !claimed.has(name))) return candidate;
   }
 }
 
@@ -428,13 +438,13 @@ export function extractInlineModelsFromProperties(
     }
 
     // oneOf/anyOf containing objects — extract every inline object variant as a
-    // model so each gets its own typed class. Variant 0 keeps the bare
-    // qualified inline name (e.g. `ApiKeyCreatedDataOwner`); subsequent
-    // variants are prefixed by their const-discriminator value via
-    // `nameOneOfVariant` (e.g. `UserApiKeyCreatedDataOwner`). When the
-    // oneOf doesn't have a const-discriminator (single object variant + null
-    // for nullable, or single object variant only), only variant 0 is
-    // extracted and the bare name pattern preserves backward compat.
+    // model so each gets its own typed class, under the names the union
+    // TypeRef references them by (`nameInlineVariants`, the one place that
+    // decides them): variant 0 keeps the bare qualified inline name
+    // (`ApiKeyCreatedDataOwner`), later variants take their const-
+    // discriminator value (`UserApiKeyCreatedDataOwner`), their title, a
+    // distinguishing property (`DrawingShapeWithSide`) or, for identical
+    // property sets, the position counter.
     const unionVariants = fieldSchema.oneOf ?? fieldSchema.anyOf;
     if (unionVariants) {
       const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
@@ -442,11 +452,10 @@ export function extractInlineModelsFromProperties(
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
-        const namingDiscProp = deriveOneOfNamingDiscriminator(inlineObjectVariants);
-        const emittedNames: string[] = [];
+        const variantNames = nameInlineVariants(unionVariants, modelName);
         for (const variant of inlineObjectVariants) {
-          const variantName = nameOneOfVariant(variant, modelName, emittedNames, namingDiscProp);
-          emittedNames.push(variantName);
+          const variantName = variantNames.get(variant);
+          if (variantName === undefined) continue;
           if (!existingNames.has(variantName)) {
             existingNames.add(variantName);
             results.push(buildInlineModel(variantName, variant, componentSchemas));
@@ -466,56 +475,6 @@ export function extractInlineModelsFromProperties(
       }
     }
   }
-}
-
-/** Find a single string-const-valued property shared by every variant whose
- *  values are all distinct — the implicit discriminator. Returns null when no
- *  such property exists. Mirrors `deriveConstNamingDiscriminator` in schemas.ts. */
-function deriveOneOfNamingDiscriminator(variants: SchemaObject[]): string | null {
-  if (variants.length < 2) return null;
-  const candidates = Object.keys(variants[0]?.properties ?? {});
-  for (const propName of candidates) {
-    const values = variants.map((v) => readConstString(v.properties?.[propName]));
-    if (values.some((v) => v === null)) continue;
-    if (new Set(values).size !== values.length) continue;
-    return propName;
-  }
-  return null;
-}
-
-function readConstString(prop: SchemaObject | undefined): string | null {
-  if (!prop) return null;
-  if (typeof prop.const === 'string') return prop.const;
-  if (Array.isArray(prop.enum) && prop.enum.length === 1 && typeof prop.enum[0] === 'string') {
-    return prop.enum[0];
-  }
-  return null;
-}
-
-/** Produce a per-variant model name. Variant 0 keeps the bare parent name;
- *  later variants are prefixed by the const-derived label. Mirrors
- *  `nameVariantModel` in schemas.ts. Falls back to a numeric suffix when no
- *  discriminator is available, the const value PascalCases to nothing, or
- *  the derived candidate collides with the parent or an already-emitted name. */
-function nameOneOfVariant(
-  variant: SchemaObject,
-  parentName: string,
-  alreadyEmitted: string[],
-  discriminatorProperty: string | null,
-): string {
-  if (alreadyEmitted.length === 0) return parentName;
-  if (discriminatorProperty) {
-    const constValue = readConstString(variant.properties?.[discriminatorProperty]);
-    if (constValue) {
-      const prefix = toPascalCase(constValue);
-      if (prefix) {
-        const candidate = parentName.startsWith(prefix) ? parentName : `${prefix}${parentName}`;
-        const collision = candidate === parentName || alreadyEmitted.includes(candidate);
-        if (!collision) return candidate;
-      }
-    }
-  }
-  return `${parentName}${alreadyEmitted.length + 1}`;
 }
 
 /** One property of a merged `allOf` field and the component it is inherited from (null: an inline member's own). */

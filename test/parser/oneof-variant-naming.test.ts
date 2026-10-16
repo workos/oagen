@@ -145,10 +145,11 @@ components:
     );
   });
 
-  it('falls back to numeric suffix when no shared const property distinguishes the variants', async () => {
+  it('names the variant by its distinguishing property when no shared const property distinguishes the variants', async () => {
     // No discriminator-style property — variants differ structurally
     // (different field sets) but neither has a `const` value pinning a
-    // shared property. Numeric-suffix scheme remains the safe fallback.
+    // shared property. The second variant is named after the property only
+    // it declares (`b`), not by a numeric suffix.
     await parseInline(
       `
 openapi: 3.1.0
@@ -186,16 +187,19 @@ components:
         const dataModels = ir.models.filter((m) => m.name.startsWith('ThingData'));
         const names = dataModels.map((m) => m.name);
         expect(names).toContain('ThingData');
-        // Second variant has no discriminator, so falls back to numeric suffix.
-        expect(names).toContain('ThingData2');
+        // Second variant has no discriminator, so it is named from its own
+        // distinguishing property.
+        expect(names).toContain('ThingDataWithB');
+        expect(names).not.toContain('ThingData2');
       },
     );
   });
 
-  it('falls back to numeric suffix when two variants have identical const values on the same property', async () => {
+  it('names the variant by its distinguishing property when two variants have identical const values on the same property', async () => {
     // The const-naming heuristic requires distinct values per variant — if
     // two variants both pin `type: organization`, naming both
-    // `OrganizationApiKeyOwner` would collide. Numeric suffix is safer.
+    // `OrganizationApiKeyOwner` would collide. The second variant is named
+    // after the property only it declares (`slug`) instead.
     await parseInline(
       `
 openapi: 3.1.0
@@ -235,9 +239,10 @@ components:
         const ownerModels = ir.models.filter((m) => m.name.includes('ResourceOwner'));
         const names = ownerModels.map((m) => m.name);
         expect(names).toContain('ResourceOwner');
-        // Same const value on both — we can't derive distinct names, so
-        // the fallback numeric suffix kicks in.
-        expect(names).toContain('ResourceOwner2');
+        // Same const value on both — we can't derive distinct names from it,
+        // so the second variant's own distinguishing property names it.
+        expect(names).toContain('ResourceOwnerWithSlug');
+        expect(names).not.toContain('ResourceOwner2');
       },
     );
   });
