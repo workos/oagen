@@ -3,7 +3,7 @@ import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
-import { collectProperties, extractInlineModelsFromProperties, qualifyInlineModelName } from './inline-models.js';
+import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -563,33 +563,15 @@ function extractInlineModel(
   }
 
   // Every nested inline model a field references — an inline object, array
-  // items, map values, an `allOf` merge, every `oneOf`/`anyOf` variant
-  // (numbered, const-prefixed, nullable, multi-type, with `<Variant>Item`
-  // members), with sibling-aware item/value names — comes from the same
-  // extractor that materializes them for component schemas and request
-  // bodies. `buildFieldFromSchema` above named the references through
-  // `schemaToTypeRef`; this names the models the same way, so they agree by
-  // construction instead of through a response-local copy of the rules.
+  // items, map values, an `allOf` merge or `$ref` augmentation, every
+  // `oneOf`/`anyOf` variant (numbered, const-prefixed, nullable, multi-type,
+  // with `<Variant>Item` members), with sibling-aware item/value names —
+  // comes from the same extractor that materializes them for component
+  // schemas and request bodies. `buildFieldFromSchema` above named the
+  // references through `schemaToTypeRef`; this names the models the same way,
+  // so they agree by construction instead of through a response-local copy of
+  // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
-
-  // The one shape that extractor leaves to the `$ref` path: an `allOf` that
-  // augments a referenced component with inline properties. The field is
-  // typed as the augmentation model `<Parent><Field>`, so merge the inline
-  // members into a model of that name here, as the response path always has.
-  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
-    if (!fieldSchema?.allOf || !fieldSchema.allOf.some((sub) => sub.$ref)) continue;
-    const mergedProperties: Record<string, SchemaObject | undefined> = {};
-    const mergedRequired: string[] = [];
-    for (const sub of fieldSchema.allOf) {
-      if (sub.properties) Object.assign(mergedProperties, sub.properties);
-      if (sub.required) mergedRequired.push(...sub.required);
-    }
-    if (Object.keys(mergedProperties).length === 0) continue;
-    const nestedName = qualifyInlineModelName(toPascalCase(fieldName), name);
-    if (nestedModels.some((m) => m.name === nestedName)) continue;
-    const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
-    nestedModels.push(...extractInlineModel(nestedName, merged, componentSchemas));
-  }
 
   return [{ name, description: schema.description, fields }, ...nestedModels];
 }

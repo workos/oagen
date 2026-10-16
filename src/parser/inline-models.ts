@@ -373,18 +373,40 @@ export function extractInlineModelsFromProperties(
       }
     }
 
-    // Inline object expressed via `allOf` (no $ref / oneOf / anyOf members).
-    // schemaToTypeRef collapses such a field into a single merged model ref, so
-    // materialize that model — otherwise the ref dangles exactly like a direct
-    // inline object would. An `allOf` containing a `$ref` is the augmentation
-    // case resolved through the ref path and is intentionally left alone here.
-    if (fieldSchema.allOf && fieldSchema.allOf.every((s) => !s.$ref && !s.oneOf && !s.anyOf)) {
-      const merged = mergeAllOfObjectSchema(fieldSchema);
-      if (Object.keys(merged.properties ?? {}).length > 0) {
-        const baseName = toPascalCase(fieldName);
-        const modelName = qualifyInlineModelName(baseName, parentName);
+    // A field expressed via `allOf`. Mirror the four outcomes of the allOf
+    // branch in `schemaToTypeRef` exactly:
+    //  - a `$ref` member plus an inline object member: the field is typed as
+    //    the augmentation model `<Parent><Field>`, so merge the referenced
+    //    component(s) and the inline members into that model and recurse into
+    //    it (`mergeAllOfObjectSchema` resolves the refs against
+    //    `componentSchemas`);
+    //  - `$ref` members only: a plain reference to the first component,
+    //    nothing to materialize;
+    //  - a single non-`$ref` member: unwrapped and typed as the field itself,
+    //    so re-enter with it as the field (same siblings);
+    //  - several inline members with properties: one merged model.
+    if (fieldSchema.allOf) {
+      const members = fieldSchema.allOf;
+      const emitMerged = (): void => {
+        const merged = mergeAllOfObjectSchema(fieldSchema, componentSchemas);
+        if (Object.keys(merged.properties ?? {}).length === 0) return;
+        const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
         results.push(buildInlineModel(modelName, merged, componentSchemas));
         extractInlineModelsFromProperties(merged, results, modelName, componentSchemas);
+      };
+      const only = members.length === 1 ? members[0] : undefined;
+      if (members.some((m) => m.$ref)) {
+        if (members.some((m) => !m.$ref && (m.properties || m.type === 'object'))) emitMerged();
+      } else if (only) {
+        extractInlineModelsFromProperties(
+          { properties: { [fieldName]: only } },
+          results,
+          parentName,
+          componentSchemas,
+          siblings,
+        );
+      } else if (members.some((m) => m.properties)) {
+        emitMerged();
       }
     }
 
@@ -483,13 +505,26 @@ function nameOneOfVariant(
  * Merge the object members of an `allOf` (recursively) into a single
  * object-shaped schema, so an inline object expressed via `allOf` can be
  * materialized as one model — mirroring how schemaToTypeRef collapses such a
- * field into a single merged model ref. Earlier members win on key conflicts,
- * matching the merge order used elsewhere in the parser.
+ * field into a single merged model ref. A `$ref` member is resolved against
+ * `componentSchemas` by its component name, as `extractAllOfModel` does, and
+ * merged like an inline member, so an augmentation
+ * (`allOf: [{ $ref }, { properties }]`) carries the component's properties
+ * and `required` as well as the inline ones; an unresolvable ref contributes
+ * nothing. Earlier members win on key conflicts, matching the merge order
+ * used elsewhere in the parser.
  */
-function mergeAllOfObjectSchema(schema: SchemaObject): SchemaObject {
+function mergeAllOfObjectSchema(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): SchemaObject {
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
+  const seen = new Set<SchemaObject>();
   const visit = (s: SchemaObject): void => {
+    if (seen.has(s)) return;
+    seen.add(s);
+    if (s.$ref) {
+      const target = componentSchemas?.[s.$ref.split('/').pop() ?? ''];
+      if (target) visit(target);
+      return;
+    }
     if (s.properties) {
       for (const [key, value] of Object.entries(s.properties)) {
         if (value && !(key in properties)) properties[key] = value;

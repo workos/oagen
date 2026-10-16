@@ -1750,3 +1750,172 @@ describe('inline response objects materialize every variant, item and value mode
     expect(types['SquareListThingsResponseShape']).toEqual({ kind: { kind: 'literal', value: 'square' }, side: num });
   });
 });
+
+describe('a field augmenting a $ref component via allOf gets its model in every context', () => {
+  const str = { kind: 'primitive', type: 'string' };
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const components: Record<string, SchemaObject> = {
+    Base: {
+      type: 'object',
+      required: ['id'],
+      properties: { id: { type: 'string' }, meta: { type: 'object', properties: { tag: { type: 'string' } } } },
+    },
+    Other: { type: 'object', properties: { note: { type: 'string' } } },
+  };
+  const augmented: SchemaObject = {
+    allOf: [{ $ref: '#/components/schemas/Base' }, { properties: { extra: { type: 'string' } } }],
+  };
+  const id: SchemaObject = { type: 'string' };
+  const info = { title: 'augmentation', version: '1' };
+
+  /** Every `{ kind: 'model', name }` anywhere inside a value. */
+  function modelRefsAnywhere(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => modelRefsAnywhere(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      for (const v of Object.values(record)) modelRefsAnywhere(v, out);
+    }
+    return out;
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  /** Every ref resolves; every model other than a component is referenced. */
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = modelRefsAnywhere(ir.services.flatMap((s) => s.operations));
+    for (const m of ir.models) modelRefsAnywhere(m.fields, referenced);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  /** The merged augmentation model: the component's fields first, then the inline ones. */
+  const mergedFields = (detail: string) => ({ id: str, meta: model(`${detail}Meta`), extra: str });
+
+  const withComponents = (schemas: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {},
+    components: { schemas: { ...components, ...schemas } },
+  });
+  const operation = (operationId: string, body: SchemaObject | null, response: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/things': {
+        post: {
+          operationId,
+          ...(body ? { requestBody: { content: { 'application/json': { schema: body } } } } : {}),
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema: response } } } },
+        },
+      },
+    },
+    components: { schemas: components },
+  });
+
+  it('on a component schema field', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponents({ Thing: { type: 'object', properties: { id, detail: augmented } } }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Thing']).toEqual({ id: str, detail: model('ThingDetail') });
+    expect(types['ThingDetail']).toEqual(mergedFields('ThingDetail'));
+    expect(types['ThingDetailMeta']).toEqual({ tag: str });
+    expect(ir.models.find((m) => m.name === 'ThingDetail')?.fields.find((f) => f.name === 'id')?.required).toBe(true);
+    expectConsistent(ir, ['Base', 'Other', 'Thing']);
+  });
+
+  it('on an inline request-body field', async () => {
+    const ir = await parseWithoutWarnings(
+      operation(
+        'createThing',
+        { type: 'object', properties: { id, detail: augmented } },
+        { type: 'object', properties: { ok: { type: 'boolean' } } },
+      ),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['CreateThingRequest']).toEqual({ id: str, detail: model('CreateThingRequestDetail') });
+    expect(types['CreateThingRequestDetail']).toEqual(mergedFields('CreateThingRequestDetail'));
+    expectConsistent(ir, ['Base', 'Other']);
+  });
+
+  it('on an inline response field, and two levels down (the reported case)', async () => {
+    const ir = await parseWithoutWarnings(
+      operation('getDrawing', null, {
+        type: 'object',
+        properties: {
+          id,
+          detail: augmented,
+          canvas: { type: 'object', properties: { name: { type: 'string' }, detail: augmented } },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['GetDrawingResponse']).toEqual({
+      id: str,
+      detail: model('GetDrawingResponseDetail'),
+      canvas: model('GetDrawingResponseCanvas'),
+    });
+    expect(types['GetDrawingResponseDetail']).toEqual(mergedFields('GetDrawingResponseDetail'));
+    expect(types['GetDrawingResponseCanvas']).toEqual({ name: str, detail: model('GetDrawingResponseCanvasDetail') });
+    expect(types['GetDrawingResponseCanvasDetail']).toEqual(mergedFields('GetDrawingResponseCanvasDetail'));
+    expectConsistent(ir, ['Base', 'Other']);
+  });
+
+  it('stays a plain reference when the allOf holds only $refs', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponents({
+        Thing: {
+          type: 'object',
+          properties: {
+            id,
+            one: { allOf: [{ $ref: '#/components/schemas/Base' }] },
+            two: { allOf: [{ $ref: '#/components/schemas/Base' }, { $ref: '#/components/schemas/Other' }] },
+          },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Thing']).toEqual({ id: str, one: model('Base'), two: model('Base') });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Base', 'BaseMeta', 'Other', 'Thing']);
+    expectConsistent(ir, ['Base', 'Other', 'Thing']);
+  });
+
+  it('inside an array item and inside a oneOf variant', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponents({
+        Thing: {
+          type: 'object',
+          properties: {
+            id,
+            items: { type: 'array', items: { type: 'object', properties: { detail: augmented } } },
+            shape: {
+              oneOf: [
+                { type: 'object', properties: { detail: augmented } },
+                { type: 'object', properties: { side: { type: 'number' } } },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ThingItem']).toEqual({ detail: model('ThingItemDetail') });
+    expect(types['ThingItemDetail']).toEqual(mergedFields('ThingItemDetail'));
+    expect(types['ThingShape']).toEqual({ detail: model('ThingShapeDetail') });
+    expect(types['ThingShapeDetail']).toEqual(mergedFields('ThingShapeDetail'));
+    expect(types['ThingShape2']).toEqual({ side: num });
+    expectConsistent(ir, ['Base', 'Other', 'Thing']);
+  });
+});
