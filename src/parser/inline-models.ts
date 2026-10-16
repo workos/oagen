@@ -4,6 +4,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   constraintsEntry,
+  deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
   nameInlineVariantEntries,
@@ -608,9 +609,14 @@ export function extractInlineModelsFromProperties(
       } else if (only) {
         // The wrapper's own keywords, conjoined with the member's, are the
         // field's limits (see extractConstraints), so they ride along with the
-        // unwrapped member and its model carries the same constraints.
+        // unwrapped member and its model carries the same constraints. Its
+        // `deprecated` is the wrapper's alone, as `Field.deprecated` reads it.
         extractInlineModelsFromProperties(
-          { properties: { [fieldName]: { ...only, ...extractConstraints(fieldSchema) } } },
+          {
+            properties: {
+              [fieldName]: withWrapperDeprecation({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
+            },
+          },
           results,
           parentName,
           componentSchemas,
@@ -677,6 +683,8 @@ interface MergedAllOf {
   description: string | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
+  /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
+  deprecated: boolean | undefined;
 }
 
 /**
@@ -724,7 +732,13 @@ function mergeAugmentation(
   visit(schema, null);
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
-  return { properties, required, description: schema.description, constraints: extractConstraints(schema) };
+  return {
+    properties,
+    required,
+    description: schema.description,
+    constraints: extractConstraints(schema),
+    deprecated: schema.deprecated || undefined,
+  };
 }
 
 /**
@@ -753,6 +767,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     name,
     description: merged.description,
     fields,
+    ...(merged.deprecated ? { deprecated: true } : {}),
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
   };
 }
@@ -802,7 +817,20 @@ function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
 function unwrapNullableField(schema: SchemaObject): SchemaObject {
   const inner = unwrapNullableSchema(schema);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return { ...inner, ...extractConstraints(schema) };
+  return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
+}
+
+/**
+ * `inner` carrying the wrapper's `deprecated` in place of its own. A wrapper
+ * the parser collapses — a nullable `oneOf`/`anyOf`, a single-member `allOf`
+ * — is the field's schema, and `Field.deprecated` reads only that top-level
+ * keyword, so the model built from what it unwraps to carries the same flag
+ * the field does: the wrapper's, never the branch's or the member's own.
+ */
+function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
+  const result: SchemaObject = { ...inner, ...deprecatedEntry(wrapper) };
+  if (!wrapper.deprecated) delete result.deprecated;
+  return result;
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */
@@ -838,5 +866,5 @@ function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?:
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
-  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
+  return { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) };
 }

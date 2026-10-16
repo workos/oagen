@@ -201,6 +201,9 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     if (jsonModel.constraints || baseModel.constraints) {
       baseModel.constraints = { ...baseModel.constraints, ...jsonModel.constraints };
     }
+    // `deprecated` is deliberately not carried over: it names the type the SDK
+    // exposes, and that is `baseModel.name`, which keeps its own flag. A
+    // deprecated `<Name>Json` folded into a live `<Name>` leaves `<Name>` live.
     toRemove.add(jsonModel.name);
     rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name);
     console.warn(

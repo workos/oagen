@@ -5,6 +5,7 @@ import {
   schemaToTypeRef,
   buildFieldFromSchema,
   constraintsEntry,
+  deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
 } from './schemas.js';
@@ -472,6 +473,8 @@ function extractDirectResource(
         type: 'object',
         properties: mergedProperties,
         required: mergedRequired,
+        // The wrapper's own flag, as for a component `allOf` model.
+        ...deprecatedEntry(schema),
         ...extractConstraints(schema),
       };
       // Fields merged from a $ref carry the referenced model's const
@@ -590,5 +593,8 @@ function extractInlineModel(
   // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) },
+    ...nestedModels,
+  ];
 }

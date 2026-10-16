@@ -250,6 +250,15 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
   return constraints ? { constraints } : {};
 }
 
+/**
+ * `{ deprecated: true }` when `schema` says so, `{}` otherwise — spread into
+ * a Model or Enum so the key stays absent rather than present-but-false. Read
+ * the way `Field.deprecated` is: only the schema's own top-level keyword.
+ */
+export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } {
+  return schema.deprecated ? { deprecated: true } : {};
+}
+
 /** Keywords where the stricter of two declarations is the larger value. */
 const MIN_KEYS = ['minimum', 'exclusiveMinimum', 'minLength', 'minItems', 'minContains', 'minProperties'] as const;
 /** Keywords where the stricter of two declarations is the smaller value. */
@@ -760,7 +769,13 @@ function extractNestedSchema(
         if (!fs) continue;
         fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
       }
-      models.push({ name: variantName, description: variant.description, fields, ...constraintsEntry(variant) });
+      models.push({
+        name: variantName,
+        description: variant.description,
+        fields,
+        ...deprecatedEntry(variant),
+        ...constraintsEntry(variant),
+      });
     }
     return models;
   }
@@ -774,7 +789,7 @@ function extractNestedSchema(
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }];
+    return [{ name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) }];
   }
 
   // Handle array with inline items
@@ -786,7 +801,15 @@ function extractNestedSchema(
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.items.description, fields, ...constraintsEntry(schema.items) }];
+    return [
+      {
+        name,
+        description: schema.items.description,
+        fields,
+        ...deprecatedEntry(schema.items),
+        ...constraintsEntry(schema.items),
+      },
+    ];
   }
 
   return [];
@@ -1405,7 +1428,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
       ? (rawDefault as string | number)
       : undefined;
 
-  return { name, values, default: def };
+  return { name, values, default: def, ...deprecatedEntry(schema) };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   if (schema.allOf) {
@@ -1457,7 +1480,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     }
   }
 
-  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
+  return { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) };
 }
 
 function extractAllOfModel(
@@ -1550,6 +1573,10 @@ function extractAllOfModel(
     description: schema.description,
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
+    // Deprecation is the wrapper's own: a member's flag is not read — a `$ref`
+    // member's stays on the referenced model — as `Field.deprecated` ignores
+    // it on an allOf field.
+    ...deprecatedEntry(schema),
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
     // members keep theirs on the referenced model.
     ...constraintsEntry(schema),
@@ -1709,6 +1736,9 @@ function extractDiscriminatedAllOfVariantModels(
         type: 'object',
         properties: mergedProperties,
         required: [...mergedRequired],
+        // The variant's own flag only: the union's wrapper deprecates the
+        // dispatcher model, not the variants it dispatches to.
+        ...deprecatedEntry(variant),
         ...combineConstraints(baseConstraints, extractConstraints(variant)),
       };
 
@@ -1905,6 +1935,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
               type: 'object',
               properties: mergedProperties,
               required: mergedRequired,
+              ...deprecatedEntry(fieldSchema),
               ...extractConstraints(fieldSchema),
             },
             schemas,
@@ -1937,7 +1968,10 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     }
   }
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) },
+    ...nestedModels,
+  ];
 }
 
 function qualifyNestedInlineName(parentName: string, fieldName: string): string {

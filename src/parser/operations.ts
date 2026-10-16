@@ -25,6 +25,7 @@ import {
   resolveComponentSchemaRef,
   extractConstraints,
   constraintsEntry,
+  deprecatedEntry,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
@@ -1381,7 +1382,13 @@ function extractRequestBody(
       if (!fieldSchema) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
-    inlineModels.push({ name: contextName, description: undefined, fields, ...constraintsEntry(schema) });
+    inlineModels.push({
+      name: contextName,
+      description: undefined,
+      fields,
+      ...deprecatedEntry(schema),
+      ...constraintsEntry(schema),
+    });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
     // by this branch. Recurse to materialize them, matching how component
@@ -1432,6 +1439,7 @@ function extractRequestBody(
           name: variantName,
           description: variant.description,
           fields,
+          ...deprecatedEntry(variant),
           ...constraintsEntry(variant),
         });
         extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);
@@ -1540,6 +1548,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     properties,
     required: requiredFields,
     ...(schema.description ? { description: schema.description } : {}),
+    // The wrapper's deprecation is the body's; a variant's is not carried,
+    // since its fields are merged away into the one body model.
+    ...deprecatedEntry(schema),
     // The wrapper's own keywords bind every branch, so they ride along; the
     // variants' keywords are alternatives and are not carried.
     ...extractConstraints(schema),
