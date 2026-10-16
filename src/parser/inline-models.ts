@@ -84,6 +84,31 @@ export function mintedInlineNames(
   return [];
 }
 
+/**
+ * The inline names the other properties of an object mint — every name
+ * `mintedInlineNames` yields for each sibling of `fieldName` — which a
+ * `oneOf`/`anyOf` under `fieldName` must not give one of its variants
+ * (`nameInlineVariants`): beside a `shape_with_side` object, the `{ side }`
+ * variant of `shape` cannot become `DrawingShapeWithSide`. Each sibling's
+ * names are read in isolation, without the reservations that sibling would
+ * itself apply, so the set depends on sibling names and content only and two
+ * unions beside each other cannot chase each other's names. Empty without a
+ * sibling set, as for a request body or response that is itself a union.
+ */
+export function reservedInlineNames(
+  fieldName: string,
+  siblings: ReadonlyMap<string, SchemaObject> | undefined,
+  parentModelName: string | undefined,
+): ReadonlySet<string> {
+  const reserved = new Set<string>();
+  if (!siblings) return reserved;
+  for (const [siblingName, siblingSchema] of siblings) {
+    if (siblingName === fieldName) continue;
+    for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) reserved.add(minted);
+  }
+  return reserved;
+}
+
 /** Documentation keywords that do not shape a model; ignored by `schemaShapeKey` at a schema's own level. */
 const DOC_KEYWORDS = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs', 'deprecated']);
 /** Keywords whose value maps NAMES (not keywords) to schemas: names are kept verbatim, values recurse as schemas. */
@@ -444,7 +469,9 @@ export function extractInlineModelsFromProperties(
     // (`ApiKeyCreatedDataOwner`), later variants take their const-
     // discriminator value (`UserApiKeyCreatedDataOwner`), their title, a
     // distinguishing property (`DrawingShapeWithSide`) or, for identical
-    // property sets, the position counter.
+    // property sets, the position counter — never a name a sibling property
+    // mints (`reservedInlineNames`), so no variant overwrites another
+    // field's model.
     const unionVariants = fieldSchema.oneOf ?? fieldSchema.anyOf;
     if (unionVariants) {
       const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
@@ -452,7 +479,11 @@ export function extractInlineModelsFromProperties(
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
-        const variantNames = nameInlineVariants(unionVariants, modelName);
+        const variantNames = nameInlineVariants(
+          unionVariants,
+          modelName,
+          reservedInlineNames(fieldName, siblings, parentName),
+        );
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;

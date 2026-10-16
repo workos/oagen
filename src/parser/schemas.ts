@@ -413,11 +413,16 @@ function collectNestedInlineModels(
       // included, under the component — which is also variant 0's name
       // unless variant 0 took its title (`CircleDrawingShape`). Rebuild the
       // base from the field rather than reading it off the ref, and keep the
-      // ref as the base only if the rebuilt one does not reproduce it.
+      // ref as the base only if the rebuilt one does not reproduce it. The
+      // variants also step around the names the component's other properties
+      // mint, as the field's TypeRef did, so derive that set from the same
+      // sibling set `extractModel` typed the field with.
+      const reserved = reservedInlineNames(fieldName, collectProperties(parentSchema, schemas), parentModelName);
       const extracted = extractNestedSchema(
-        unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName),
+        unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName, reserved),
         fieldSchema,
         schemas,
+        reserved,
       );
       for (const m of extracted) {
         if (!modelNames.has(m.name)) {
@@ -437,10 +442,16 @@ function collectNestedInlineModels(
  * which is right for every non-union field and for a union whose variant 0 is
  * bare.
  */
-function unionBaseName(refName: string, fieldName: string, fieldSchema: SchemaObject, parentModelName: string): string {
+function unionBaseName(
+  refName: string,
+  fieldName: string,
+  fieldSchema: SchemaObject,
+  parentModelName: string,
+  reserved: ReadonlySet<string>,
+): string {
   if (!fieldSchema.oneOf) return refName;
   const fromField = qualifyInlineModelName(toPascalCase(fieldName), parentModelName);
-  const names = [...nameInlineVariants(fieldSchema.oneOf, fromField).values()];
+  const names = [...nameInlineVariants(fieldSchema.oneOf, fromField, reserved).values()];
   return names.includes(refName) ? fromField : refName;
 }
 
@@ -510,8 +521,17 @@ function findNestedFieldSchema(
   return null;
 }
 
-/** Extract a model (and nested models) from an inline field schema. */
-function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
+/**
+ * Extract a model (and nested models) from an inline field schema. `reserved`
+ * holds the inline names the field's sibling properties mint
+ * (`reservedInlineNames`), which a `oneOf` variant must not take.
+ */
+function extractNestedSchema(
+  name: string,
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+  reserved: ReadonlySet<string> = NO_RESERVED,
+): Model[] {
   // Handle oneOf: extract each object variant as its own model. `name` is the
   // union's base name (the field's qualified inline name), and the variants
   // are named from it by `nameInlineVariants` — the one place that decides a
@@ -522,7 +542,7 @@ function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Recor
   // letting the next variant claim its name.
   if (schema.oneOf) {
     const models: Model[] = [];
-    const variantNames = nameInlineVariants(schema.oneOf, name);
+    const variantNames = nameInlineVariants(schema.oneOf, name, reserved);
 
     for (const variant of schema.oneOf) {
       const variantName = variantNames.get(variant);
@@ -619,7 +639,15 @@ function distinguishingProperties(variant: SchemaObject, siblings: readonly Sche
  *      `<Base>With<Property>` (`DrawingShapeWithSide`); a property that
  *      PascalCases to nothing is skipped;
  *   3. the position counter, `<Base><position + 1>` (`DrawingShape2`), which
- *      now remains only for variants whose property sets are identical.
+ *      now remains only for variants whose property sets are identical, and
+ *      which keeps counting past a taken name (`DrawingShape3`).
+ *
+ * Every candidate is also checked against `reserved`: the inline names the
+ * parent's other properties mint (`reservedInlineNames`), so a variant can
+ * never take a name another field's model already has — beside a
+ * `shape_with_side` object, the `{ side }` variant of `shape` is not
+ * `DrawingShapeWithSide` but the next candidate. Read from sibling names and
+ * content only, so document order plays no part.
  *
  * `siblings` are the inline object variants of the union, this one included;
  * `emitted` are the names already given to the earlier ones, in order. Every
@@ -632,8 +660,10 @@ export function nameUndiscriminatedVariant(
   siblings: readonly SchemaObject[],
   base: string,
   emitted: readonly string[],
+  reserved: ReadonlySet<string> = NO_RESERVED,
 ): string {
-  const taken = (candidate: string): boolean => candidate === base || emitted.includes(candidate);
+  const taken = (candidate: string): boolean =>
+    candidate === base || emitted.includes(candidate) || reserved.has(candidate);
 
   const titlePrefix = variantTitlePrefix(variant);
   if (titlePrefix !== null) {
@@ -653,6 +683,9 @@ export function nameUndiscriminatedVariant(
     if (!taken(candidate)) return candidate;
   }
 }
+
+/** No reserved names: for a union with no sibling properties (a request body or response that is itself a union). */
+const NO_RESERVED: ReadonlySet<string> = new Set();
 
 /**
  * True when the union's inline object variants (two or more) each carry a
@@ -685,9 +718,10 @@ function allDistinctlyTitled(siblings: readonly SchemaObject[]): boolean {
  *
  * A later variant takes `<ConstValue><Base>` from the discriminator
  * (`UserApiKeyOwner`) when the value PascalCases to something and the name is
- * neither the base nor already emitted, and otherwise falls to
+ * neither the base, nor already emitted, nor minted by one of the parent's
+ * other properties (`reserved`), and otherwise falls to
  * `nameUndiscriminatedVariant`: its title, a distinguishing property, then
- * the position counter.
+ * the position counter, each checked the same way.
  */
 export function nameInlineVariant(
   variant: SchemaObject,
@@ -695,6 +729,7 @@ export function nameInlineVariant(
   base: string,
   emitted: readonly string[],
   discriminator: { property: string } | null,
+  reserved: ReadonlySet<string> = NO_RESERVED,
 ): string {
   if (emitted.length === 0) {
     const undiscriminated = deriveConstNamingDiscriminator([...siblings]) === null;
@@ -707,10 +742,10 @@ export function nameInlineVariant(
     const prefix = constValue ? toPascalCase(constValue) : '';
     if (prefix) {
       const candidate = prefixedVariantName(prefix, base);
-      if (candidate !== base && !emitted.includes(candidate)) return candidate;
+      if (candidate !== base && !emitted.includes(candidate) && !reserved.has(candidate)) return candidate;
     }
   }
-  return nameUndiscriminatedVariant(variant, siblings, base, emitted);
+  return nameUndiscriminatedVariant(variant, siblings, base, emitted, reserved);
 }
 
 /**
@@ -718,18 +753,25 @@ export function nameInlineVariant(
  * name, keyed by variant schema identity; non-object and `$ref` variants get
  * no entry. Positions are local to this variant list, so the union's TypeRef
  * entries and the extracted models agree no matter what else has been
- * extracted. This is the list-level entry point every site uses:
- * `schemaToTypeRef` (via `nameInlineObjectVariants`), `extractNestedSchema`,
+ * extracted. `reserved` holds the inline names the parent's other properties
+ * mint (`reservedInlineNames`); every site that has a sibling set passes the
+ * same one, so the reference and the model step around them identically.
+ * This is the list-level entry point every site uses: `schemaToTypeRef` (via
+ * `nameInlineObjectVariants`), `extractNestedSchema`,
  * `extractInlineModelDeep`, `extractInlineModelsFromProperties` and
  * `mintedInlineNames`.
  */
-export function nameInlineVariants(variants: readonly SchemaObject[], base: string): Map<SchemaObject, string> {
+export function nameInlineVariants(
+  variants: readonly SchemaObject[],
+  base: string,
+  reserved: ReadonlySet<string> = NO_RESERVED,
+): Map<SchemaObject, string> {
   const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
   const discriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
   const emitted: string[] = [];
   const names = new Map<SchemaObject, string>();
   for (const variant of inlineObjectVariants) {
-    const name = nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator);
+    const name = nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator, reserved);
     emitted.push(name);
     names.set(variant, name);
   }
@@ -983,27 +1025,38 @@ function mapVariantToDiscriminatorEntry(
  * The "parent name" used here mirrors the one `collectNestedInlineModels`
  * passes to `extractNestedSchema`: it's the qualified inline model name
  * built from `contextName` (the field name) plus `parentModelName` (the
- * containing model). Returns null when any non-object variant is present
- * or when a variant lacks a const value on the discriminator property.
+ * containing model), and the names the field's sibling properties mint are
+ * reserved the same way (`siblingProperties`). Returns null when any
+ * non-object variant is present or when a variant lacks a const value on the
+ * discriminator property.
  */
 function deriveInlineVariantMapping(
   variants: SchemaObject[],
   discriminatorProperty: string,
   contextName: string | undefined,
   parentModelName: string | undefined,
+  siblingProperties: ReadonlyMap<string, SchemaObject> | undefined,
 ): Record<string, string> | null {
   if (variants.length === 0 || !contextName) return null;
   const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
   if (inlineObjectVariants.length !== variants.length) return null;
 
   const baseInlineName = qualifyInlineModelName(toPascalCase(contextName), parentModelName);
+  const reserved = reservedInlineNames(contextName, siblingProperties, parentModelName);
   const namingDiscriminator = { property: discriminatorProperty };
   const mapping: Record<string, string> = {};
   const emitted: string[] = [];
   for (const variant of inlineObjectVariants) {
     const constValue = getConstPropertyValue(variant, discriminatorProperty);
     if (constValue === null) return null;
-    const variantName = nameInlineVariant(variant, inlineObjectVariants, baseInlineName, emitted, namingDiscriminator);
+    const variantName = nameInlineVariant(
+      variant,
+      inlineObjectVariants,
+      baseInlineName,
+      emitted,
+      namingDiscriminator,
+      reserved,
+    );
     mapping[constValue] = variantName;
     emitted.push(variantName);
   }
@@ -1014,17 +1067,21 @@ function deriveInlineVariantMapping(
  * Name the inline object variants of a field's `oneOf`/`anyOf` exactly as the
  * inline-model extractors do (`extractInlineModelsFromProperties` in
  * inline-models.ts, and `extractNestedSchema` / `extractInlineModelDeep`
- * here): the union's base name is the field's qualified inline name, and
- * `nameInlineVariants` hands out the variant names from it. Returned keyed by
- * variant schema identity.
+ * here): the union's base name is the field's qualified inline name, the
+ * names the field's sibling properties mint are reserved
+ * (`reservedInlineNames`), and `nameInlineVariants` hands out the variant
+ * names from there. Returned keyed by variant schema identity.
  */
 function nameInlineObjectVariants(
   variants: SchemaObject[],
   contextName: string | undefined,
   parentModelName: string | undefined,
+  siblingProperties: ReadonlyMap<string, SchemaObject> | undefined,
 ): Map<SchemaObject, string> {
   const baseInlineName = qualifyInlineModelName(toPascalCase(contextName ?? 'UnknownModel'), parentModelName);
-  return nameInlineVariants(variants, baseInlineName);
+  const reserved =
+    contextName === undefined ? NO_RESERVED : reservedInlineNames(contextName, siblingProperties, parentModelName);
+  return nameInlineVariants(variants, baseInlineName, reserved);
 }
 
 /**
@@ -1571,7 +1628,11 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     if (fieldSchema.oneOf) {
       const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
-        const variantNames = nameInlineVariants(fieldSchema.oneOf, qualifyNestedInlineName(name, fieldName));
+        const variantNames = nameInlineVariants(
+          fieldSchema.oneOf,
+          qualifyNestedInlineName(name, fieldName),
+          reservedInlineNames(fieldName, siblings, name),
+        );
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;
@@ -1771,7 +1832,13 @@ export function schemaToTypeRef(
         Object.entries(explicitMapping).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
       );
       if (Object.keys(mapping).length === 0) {
-        const inlineMapping = deriveInlineVariantMapping(nonNullVariants, property, contextName, parentModelName);
+        const inlineMapping = deriveInlineVariantMapping(
+          nonNullVariants,
+          property,
+          contextName,
+          parentModelName,
+          siblingProperties,
+        );
         if (inlineMapping) mapping = inlineMapping;
       }
       resolvedDiscriminator = { property, mapping };
@@ -1787,6 +1854,7 @@ export function schemaToTypeRef(
             namingDisc.property,
             contextName,
             parentModelName,
+            siblingProperties,
           );
           if (inlineMapping) {
             resolvedDiscriminator = { property: namingDisc.property, mapping: inlineMapping };
@@ -1808,7 +1876,12 @@ export function schemaToTypeRef(
     // (`['object', 'string']`) keeps its other alternatives in a union — see
     // `inlineVariantTypeRef`. The extractor emits the model under the same
     // name in every case.
-    const inlineVariantNames = nameInlineObjectVariants(nonNullVariants, contextName, parentModelName);
+    const inlineVariantNames = nameInlineObjectVariants(
+      nonNullVariants,
+      contextName,
+      parentModelName,
+      siblingProperties,
+    );
     const variants: TypeRef[] = [];
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
@@ -1992,6 +2065,12 @@ export function schemaToTypeRef(
   return { kind: 'primitive', type: 'unknown' };
 }
 
-import { collectProperties, elementContextName, mapValueSchema, qualifyInlineModelName } from './inline-models.js';
+import {
+  collectProperties,
+  elementContextName,
+  mapValueSchema,
+  qualifyInlineModelName,
+  reservedInlineNames,
+} from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';

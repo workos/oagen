@@ -1,7 +1,7 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema, nameInlineVariants } from './schemas.js';
+import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 
@@ -474,23 +474,22 @@ function extractDirectResource(
     }
   }
 
-  // oneOf — delegate to schemaToTypeRef (returns union) but also extract inline models
-  // from object variants so the model refs resolve. A variant with a const
-  // string property is named after it; any other variant takes the name the
-  // union TypeRef built below references it by (`nameInlineVariants` from the
-  // context name: `ListThingsResponse`, then `ListThingsResponseWithSide`,
-  // ...), so every const-less variant gets its own model under that name.
+  // oneOf — delegate to schemaToTypeRef (returns union) and materialize the
+  // inline object variants through the field extractor, as a field of this
+  // name under no parent: it names them exactly as the union below references
+  // them (`nameInlineVariants` from the context name — `GetThingResponse`,
+  // `GetThingResponseWithSide`, `SquareGetThingResponse`), covers a nullable
+  // (`type: ['object', 'null']`) or multi-type variant that a plain
+  // `type === 'object'` test would skip, and recurses into everything nested
+  // under each variant, so the response never references a model the parser
+  // did not create.
   if (schema.oneOf) {
-    const variantNames = nameInlineVariants(schema.oneOf, toPascalCase(contextName));
-    for (const variant of schema.oneOf) {
-      if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const modelName = constDerivedModelName(variant) ?? variantNames.get(variant) ?? toPascalCase(contextName);
-        const existingNames = new Set(inlineModels.map((m) => m.name));
-        if (!existingNames.has(modelName)) {
-          inlineModels.push(...extractInlineModel(modelName, variant, componentSchemas));
-        }
-      }
-    }
+    extractInlineModelsFromProperties(
+      { properties: { [contextName]: schema } },
+      inlineModels,
+      undefined,
+      componentSchemas,
+    );
   }
 
   // Array with inline object items — extract the item model
@@ -523,12 +522,7 @@ function extractDirectResource(
 }
 
 function deriveModelName(schema: SchemaObject, fallback: string): string {
-  return constDerivedModelName(schema) ?? toPascalCase(fallback);
-}
-
-/** The name a schema's const string property gives it (`object`/`type` first), or null when it has none. */
-function constDerivedModelName(schema: SchemaObject): string | null {
-  if (!schema.properties) return null;
+  if (!schema.properties) return toPascalCase(fallback);
 
   // Prefer well-known discriminant properties for backward compatibility
   const preferred = ['object', 'type'];
@@ -546,7 +540,7 @@ function constDerivedModelName(schema: SchemaObject): string | null {
     }
   }
 
-  return null;
+  return toPascalCase(fallback);
 }
 
 /**
