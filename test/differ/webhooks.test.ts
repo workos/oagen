@@ -72,6 +72,7 @@ describe('diffSpecs — webhooks', () => {
         httpMethod: 'post',
         paramChanges: [],
         requestBodyChanged: true,
+        details: 'payload type changed',
         classification: 'breaking',
       },
     ]);
@@ -81,7 +82,79 @@ describe('diffSpecs — webhooks', () => {
     expect(lost.changes[0]).toMatchObject({
       kind: 'webhook-modified',
       requestBodyChanged: true,
+      details: 'payload removed',
       classification: 'breaking',
+    });
+
+    const gained = diffSpecs(spec([webhook({ requestBody: undefined })]), spec([webhook()]));
+    expect(gained.changes[0]).toMatchObject({
+      requestBodyChanged: true,
+      details: 'payload added',
+      classification: 'breaking',
+    });
+  });
+
+  it("reports a body requirement or encoding change under an unchanged payload type, from the receiver's side", () => {
+    const required = webhook({ requestBodyRequired: true, requestBodyEncoding: 'json' });
+    const optional = webhook({ requestBodyEncoding: 'json' });
+
+    const relaxed = diffSpecs(spec([required]), spec([optional]));
+    expect(relaxed.changes[0]).toMatchObject({
+      kind: 'webhook-modified',
+      requestBodyChanged: true,
+      details: 'body required → optional',
+      classification: 'breaking',
+    });
+
+    const tightened = diffSpecs(spec([optional]), spec([required]));
+    expect(tightened.changes[0]).toMatchObject({
+      requestBodyChanged: true,
+      details: 'body optional → required',
+      classification: 'additive',
+    });
+
+    const reencoded = diffSpecs(
+      spec([required]),
+      spec([webhook({ requestBodyRequired: true, requestBodyEncoding: 'form-urlencoded' })]),
+    );
+    expect(reencoded.changes[0]).toMatchObject({
+      requestBodyChanged: true,
+      details: 'encoding json → form-urlencoded',
+      classification: 'breaking',
+    });
+
+    const both = diffSpecs(spec([required]), spec([webhook({ requestBody: { kind: 'model', name: 'Other' } })]));
+    expect(both.changes[0]).toMatchObject({
+      details: 'payload type changed; encoding json → <none>; body required → optional',
+      classification: 'breaking',
+    });
+  });
+
+  it('matches parameters by location and name, so a header and a query parameter may share a name', () => {
+    const before = webhook({ headerParams: [header('delivery_id')], queryParams: [header('delivery_id')] });
+    const after = webhook({ headerParams: [], queryParams: [header('delivery_id')] });
+
+    const { changes } = diffSpecs(spec([before]), spec([after]));
+
+    expect(changes).toEqual([
+      {
+        kind: 'webhook-modified',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramChanges: [
+          { kind: 'param-removed', paramName: 'delivery_id', classification: 'breaking', paramLocation: 'header' },
+        ],
+        requestBodyChanged: false,
+        classification: 'breaking',
+      },
+    ]);
+
+    const cookie = diffSpecs(spec([webhook()]), spec([webhook({ cookieParams: [header('session')] })]));
+    expect(cookie.changes[0]).toMatchObject({
+      paramChanges: [
+        { kind: 'param-added', paramName: 'session', classification: 'additive', paramLocation: 'cookie' },
+      ],
+      classification: 'additive',
     });
   });
 
@@ -128,6 +201,7 @@ describe('diffSpecs — webhooks', () => {
       newDefault: 'b',
       details: 'default a → b',
     });
+    expect(change.paramChanges.every((pc) => pc.paramLocation === 'header')).toBe(true);
   });
 
   it('is additive when only additive parameter changes occur', () => {

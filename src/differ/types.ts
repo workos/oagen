@@ -27,8 +27,8 @@ export interface BehaviorChange {
   operationName: string;
   /** Parameter name (e.g. 'order', 'limit'). */
   paramName: string;
-  /** 'path' | 'query' | 'header'. */
-  paramLocation: 'path' | 'query' | 'header';
+  /** Where the parameter lives; kept in step with `ParamChange.paramLocation`. */
+  paramLocation: 'path' | 'query' | 'header' | 'cookie';
   /** Old default value as a string, or null if previously unset. */
   oldDefault: string | null;
   /** New default value as a string, or null if now unset. */
@@ -172,16 +172,21 @@ export interface WebhookRemoved {
 
 /**
  * Changes to a webhook the receiver already handles. Read from the receiver's
- * side: a payload type change breaks the handler's signature, and parameter
- * changes are classified the way a response's would be (see
- * `diffWebhookParams`).
+ * side: a payload type or encoding change breaks the handler's signature, a
+ * body that may now be absent breaks a handler that assumed one, and
+ * parameter changes are classified the way a response's would be (see
+ * `diffWebhookParams`). Every `ParamChange` carries its `paramLocation`,
+ * since a header and a query parameter may share a name.
  */
 export interface WebhookModified {
   kind: 'webhook-modified';
   name: string;
   httpMethod: string;
   paramChanges: ParamChange[];
+  /** True when the payload's type, encoding, or `requestBodyRequired` changed; `details` says which. */
   requestBodyChanged: boolean;
+  /** What changed about the body, e.g. `payload type changed; body required → optional`. */
+  details?: string;
   classification: 'additive' | 'breaking';
 }
 
@@ -199,7 +204,11 @@ export interface ParamChange {
   oldDefault?: string | null;
   /** For `param-default-changed`: serialized new default value, or `null` if now unset. */
   newDefault?: string | null;
-  /** For `param-default-changed`: 'query' | 'header' | 'path' — where the parameter lives. */
-  paramLocation?: 'path' | 'query' | 'header';
+  /**
+   * Where the parameter lives. Set on an operation's `param-default-changed`
+   * and on every change of a webhook parameter (whose header, query and
+   * cookie parameters may share a name).
+   */
+  paramLocation?: 'path' | 'query' | 'header' | 'cookie';
   details?: string;
 }
