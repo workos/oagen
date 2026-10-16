@@ -4,6 +4,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   isInlineObjectSchema,
+  nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
   variantMemberSchemas,
@@ -52,48 +53,77 @@ export function mintedInlineNames(
   schema: SchemaObject,
   parentModelName: string | undefined,
 ): string[] {
+  return mintedInlineNameEntries(contextName, schema, parentModelName).map((entry) => entry.name);
+}
+
+/**
+ * An inline name a schema mints, and whether it is context-free: a
+ * title-mapped variant's title (`nameInlineVariantEntries`) is the same
+ * whatever field, array or map the union sits under, where every other
+ * inline name embeds the context it is typed under.
+ */
+export interface MintedInlineName {
+  name: string;
+  contextFree: boolean;
+}
+
+/** `mintedInlineNames`, also telling for each name whether it is context-free. */
+export function mintedInlineNameEntries(
+  contextName: string,
+  schema: SchemaObject,
+  parentModelName: string | undefined,
+): MintedInlineName[] {
   const s = unwrapNullableSchema(schema);
   if (s.$ref) return [];
   const base = toPascalCase(contextName);
-  const modelName = (): string => qualifyInlineModelName(base, parentModelName);
-  const enumName = (): string => {
+  const modelName = (): MintedInlineName[] => [
+    { name: qualifyInlineModelName(base, parentModelName), contextFree: false },
+  ];
+  const enumName = (): MintedInlineName[] => {
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
-    return cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base;
+    return [
+      { name: cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base, contextFree: false },
+    ];
   };
   if (s.allOf) {
     const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
-    if (only) return mintedInlineNames(contextName, only, parentModelName);
-    return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? [modelName()] : [];
+    if (only) return mintedInlineNameEntries(contextName, only, parentModelName);
+    return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : [];
   }
   const variants = s.oneOf ?? s.anyOf;
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
-    if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return [enumName()];
-    return [...nameInlineVariants(s, modelName()).values()];
+    if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
+    return [...nameInlineVariantEntries(s, modelName()[0]!.name).values()];
   }
   if (s.const !== undefined) return [];
-  if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return [enumName()];
+  if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return enumName();
   // A plain boolean: the type guard would otherwise narrow `s` to `never` below.
   const inlineObject: boolean = isInlineObjectSchema(s);
-  if (inlineObject) return [modelName()];
-  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineNames(contextName, s.items, parentModelName);
+  if (inlineObject) return modelName();
+  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineNameEntries(contextName, s.items, parentModelName);
   if (s.type === 'object' && !s.properties) {
     const value = mapValueSchema(s);
-    return value ? mintedInlineNames(contextName, value, parentModelName) : [];
+    return value ? mintedInlineNameEntries(contextName, value, parentModelName) : [];
   }
   return [];
 }
 
 /**
- * The inline names the other properties of an object mint — every name
- * `mintedInlineNames` yields for each sibling of `fieldName` — which a
- * `oneOf`/`anyOf` under `fieldName` must not give one of its variants
- * (`nameInlineVariants`): beside a `shape_with_side` object, the `{ side }`
- * variant of `shape` cannot become `DrawingShapeWithSide`. Each sibling's
- * names are read in isolation, without the reservations that sibling would
- * itself apply, so the set depends on sibling names and content only and two
- * unions beside each other cannot chase each other's names. Empty without a
- * sibling set, as for a request body or response that is itself a union.
+ * The inline names the other properties of an object mint — every
+ * context-dependent name `mintedInlineNameEntries` yields for each sibling of
+ * `fieldName` — which a `oneOf`/`anyOf` under `fieldName` must not give one
+ * of its variants (`nameInlineVariants`): beside a `shape_with_side` object,
+ * the `{ side }` variant of `shape` cannot become `DrawingShapeWithSide`. A
+ * context-free name — a title-mapped variant's title — is not reserved: it
+ * names one shape wherever it appears, so a second union using the same title
+ * shares the model rather than stepping around it (a title that coincides
+ * with a context-dependent sibling name is still reserved, through that
+ * name). Each sibling's names are read in isolation, without the reservations
+ * that sibling would itself apply, so the set depends on sibling names and
+ * content only and two unions beside each other cannot chase each other's
+ * names. Empty without a sibling set, as for a request body or response that
+ * is itself a union.
  */
 export function reservedInlineNames(
   fieldName: string,
@@ -104,7 +134,9 @@ export function reservedInlineNames(
   if (!siblings) return reserved;
   for (const [siblingName, siblingSchema] of siblings) {
     if (siblingName === fieldName) continue;
-    for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) reserved.add(minted);
+    for (const minted of mintedInlineNameEntries(siblingName, siblingSchema, parentModelName)) {
+      if (!minted.contextFree) reserved.add(minted.name);
+    }
   }
   return reserved;
 }
@@ -224,6 +256,16 @@ export function schemaShapeKey(schema: SchemaObject): string {
  * deliberately departs from a literal one-model-per-field reading for the
  * identical case.
  *
+ * Only context-dependent names take part: a title-mapped variant's title
+ * (`MintedInlineName.contextFree`) is the same under every context, so no
+ * candidate could step away from it, and such a name is shared by design —
+ * two sibling arrays whose items carry the same titled variants both
+ * reference `Circle` and `Square` (`nameInlineVariants`). The search always
+ * terminates: it stops as soon as a candidate changes nothing about the names
+ * (`firstFreeElementContext`'s no-progress rule), and
+ * `MAX_ELEMENT_CONTEXT_ATTEMPTS` caps it as a backstop; both return the last
+ * candidate tried, deterministically.
+ *
  * Decided from sibling names and schema content alone, so document order
  * plays no part. `schemaToTypeRef` and every extractor call this with the
  * same sibling set (`collectProperties`); otherwise the reference and the
@@ -236,9 +278,46 @@ export function elementContextName(
   parentModelName: string | undefined,
   elementSchema: SchemaObject,
 ): string {
-  if (!siblings) return fieldName;
-  const own = mintedInlineNames(fieldName, elementSchema, parentModelName);
-  if (own.length === 0) return fieldName;
+  return elementContextDecision(fieldName, kind, siblings, parentModelName, elementSchema).context;
+}
+
+/** Why `elementContextDecision` settled on a context. */
+export type ElementContextReason =
+  /** No sibling set: nothing to decide. */
+  | 'no-siblings'
+  /** The elements mint no context-dependent name. */
+  | 'nothing-minted'
+  /** No sibling claims any name the elements mint. */
+  | 'unclaimed'
+  /** Every claimant is an inline object of the identical shape: one model is shared. */
+  | 'shared-shape'
+  /** A later candidate mints only unclaimed names. */
+  | 'free'
+  /** The names did not change from one candidate to the next, so no candidate can avoid the claim. */
+  | 'no-progress'
+  /** `MAX_ELEMENT_CONTEXT_ATTEMPTS` candidates were tried; the last one is kept. */
+  | 'cap';
+
+/** Hard cap on the candidates `firstFreeElementContext` tries; the no-progress rule stops it long before in practice. */
+export const MAX_ELEMENT_CONTEXT_ATTEMPTS = 256;
+
+/** `elementContextName`, with the reason it decided as it did (see `ElementContextReason`). */
+export function elementContextDecision(
+  fieldName: string,
+  kind: 'item' | 'value',
+  siblings: ReadonlyMap<string, SchemaObject> | undefined,
+  parentModelName: string | undefined,
+  elementSchema: SchemaObject,
+): { context: string; reason: ElementContextReason } {
+  if (!siblings) return { context: fieldName, reason: 'no-siblings' };
+  // The names the elements would mint under a context — the context-dependent
+  // ones only, since a context-free name is shared rather than stepped from.
+  const dependentNames = (candidate: string): string[] =>
+    mintedInlineNameEntries(candidate, elementSchema, parentModelName)
+      .filter((entry) => !entry.contextFree)
+      .map((entry) => entry.name);
+  const own = dependentNames(fieldName);
+  if (own.length === 0) return { context: fieldName, reason: 'nothing-minted' };
 
   // Every inline name the other siblings mint, with the schemas minting it.
   const claimed = new Map<string, SchemaObject[]>();
@@ -250,7 +329,7 @@ export function elementContextName(
   }
 
   const rivals = [...new Set(own.flatMap((name) => claimed.get(name) ?? []))];
-  if (rivals.length === 0) return fieldName;
+  if (rivals.length === 0) return { context: fieldName, reason: 'unclaimed' };
   const element = unwrapNullableSchema(elementSchema);
   const identical = (rival: SchemaObject): boolean => {
     const sibling = unwrapNullableSchema(rival);
@@ -260,15 +339,49 @@ export function elementContextName(
       schemaShapeKey(sibling) === schemaShapeKey(element)
     );
   };
-  if (rivals.every(identical)) return fieldName; // same shape: share the singular name
+  if (rivals.every(identical)) return { context: fieldName, reason: 'shared-shape' };
 
+  return firstFreeElementContext(fieldName, kind, new Set(claimed.keys()), dependentNames, own);
+}
+
+/**
+ * The first fallback context under which the elements mint no claimed name:
+ * `<field>_item` / `<field>_value`, then `<field>_array_item` /
+ * `<field>_member_value`, then `<field>_array_item2`, `…3`, ... (the way
+ * `variantMemberKeys` numbers a variant's members). `mint` gives the names
+ * under a candidate and `previous` those under the context tried before the
+ * first candidate. The search stops with `no-progress` as soon as a
+ * candidate mints the same names as the one before it — the names do not
+ * depend on the context, so no candidate can avoid the claim — and with
+ * `cap` after `maxAttempts` candidates; both keep the last candidate tried.
+ */
+export function firstFreeElementContext(
+  fieldName: string,
+  kind: 'item' | 'value',
+  claimed: ReadonlySet<string>,
+  mint: (candidate: string) => string[],
+  previous: readonly string[],
+  maxAttempts: number = MAX_ELEMENT_CONTEXT_ATTEMPTS,
+): { context: string; reason: ElementContextReason } {
   const fallback = kind === 'item' ? 'array_item' : 'member_value';
-  for (let i = 0; ; i++) {
-    const candidate =
+  let last = previous;
+  let candidate = fieldName;
+  for (let i = 0; i < maxAttempts; i++) {
+    candidate =
       i === 0 ? `${fieldName}_${kind}` : i === 1 ? `${fieldName}_${fallback}` : `${fieldName}_${fallback}${i}`;
-    const minted = mintedInlineNames(candidate, elementSchema, parentModelName);
-    if (minted.every((name) => !claimed.has(name))) return candidate;
+    const minted = mint(candidate);
+    if (minted.every((name) => !claimed.has(name))) return { context: candidate, reason: 'free' };
+    if (sameNames(minted, last)) return { context: candidate, reason: 'no-progress' };
+    last = minted;
   }
+  return { context: candidate, reason: 'cap' };
+}
+
+/** The same names, in any order. */
+function sameNames(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sortedB = [...b].sort();
+  return [...a].sort().every((name, i) => name === sortedB[i]);
 }
 
 /**

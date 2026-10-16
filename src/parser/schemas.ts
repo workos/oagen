@@ -767,7 +767,14 @@ export function nameInlineVariant(
  * the variant by that mapped name, so the title is the model name here too —
  * unless it is the base, already emitted, or reserved by a sibling, in which
  * case the variant falls back to the regular chain and the mapping, which is
- * read from this map, follows it.
+ * read from this map, follows it. Such a name is context-free: it is the
+ * same whatever field, array or map the union sits under, so it names one
+ * shape wherever it appears, as a component name would. A second union
+ * beside it using the same title therefore shares the model instead of
+ * stepping around it — `reservedInlineNames` does not reserve context-free
+ * names, and `elementContextName` never lets them drive an items/values
+ * step-aside, which no context could satisfy. `nameInlineVariantEntries`
+ * reports which names are context-free.
  *
  * This is the list-level entry point every site uses: `schemaToTypeRef` (via
  * `nameInlineObjectVariants`), `extractNestedSchema`,
@@ -779,24 +786,42 @@ export function nameInlineVariants(
   base: string,
   reserved: ReadonlySet<string> = NO_RESERVED,
 ): Map<SchemaObject, string> {
+  const names = new Map<SchemaObject, string>();
+  for (const [variant, entry] of nameInlineVariantEntries(union, base, reserved)) names.set(variant, entry.name);
+  return names;
+}
+
+/** A variant's model name, and whether it is context-free (a title-mapped union's title, see `nameInlineVariants`). */
+export interface InlineVariantName {
+  name: string;
+  contextFree: boolean;
+}
+
+/** `nameInlineVariants`, also telling for each name whether it is context-free. */
+export function nameInlineVariantEntries(
+  union: SchemaObject,
+  base: string,
+  reserved: ReadonlySet<string> = NO_RESERVED,
+): Map<SchemaObject, InlineVariantName> {
   const nonNullVariants = (union.oneOf ?? union.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
   const inlineObjectVariants = nonNullVariants.filter((v) => isInlineObjectSchema(v));
   const discriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
   const titleMapped =
     union.oneOf !== undefined && !union.discriminator && titleMappedDiscriminatorProperty(nonNullVariants) !== null;
   const emitted: string[] = [];
-  const names = new Map<SchemaObject, string>();
+  const entries = new Map<SchemaObject, InlineVariantName>();
   for (const variant of inlineObjectVariants) {
     let name: string | null = null;
     if (titleMapped) {
       const titled = resolveVariantModelName(variant);
       if (titled !== null && titled !== base && !emitted.includes(titled) && !reserved.has(titled)) name = titled;
     }
+    const contextFree = name !== null;
     name ??= nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator, reserved);
     emitted.push(name);
-    names.set(variant, name);
+    entries.set(variant, { name, contextFree });
   }
-  return names;
+  return entries;
 }
 
 /**

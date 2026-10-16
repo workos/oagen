@@ -4,7 +4,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
-import { extractInlineModelsFromProperties, extractInlineModelsFromSchemas } from '../../src/parser/inline-models.js';
+import {
+  MAX_ELEMENT_CONTEXT_ATTEMPTS,
+  elementContextDecision,
+  extractInlineModelsFromProperties,
+  extractInlineModelsFromSchemas,
+  firstFreeElementContext,
+} from '../../src/parser/inline-models.js';
 import { walkTypeRef, type Model } from '../../src/ir/types.js';
 
 // The two shapes from workos/oagen#187: an array whose `items.oneOf` lists
@@ -2970,21 +2976,13 @@ describe('title-mapped unions: the extracted models follow the discriminator map
     expectConsistent(ir, roots);
   });
 
-  it("two title-mapped unions beside each other reserve each other's titles, and the mapping follows", async () => {
+  it('two title-mapped unions beside each other share Circle and Square: a title names one shape', async () => {
     const ir = await parseWithoutWarnings(withComponents({ Drawing: obj({ shape: titled, marker: titled }) }));
     const types = fieldTypesByModel(ir.models);
-    const expected = (base: string) => ({
-      kind: 'union',
-      compositionKind: 'oneOf',
-      variants: [model(base), model(`Square${base}`)],
-      discriminator: { property: 'kind', mapping: { circle: base, square: `Square${base}` } },
-    });
-    expect(types['Drawing']).toEqual({ shape: expected('DrawingShape'), marker: expected('DrawingMarker') });
-    for (const base of ['DrawingShape', 'DrawingMarker']) {
-      expect(types[base]).toEqual(circleFields);
-      expect(types[`Square${base}`]).toEqual(squareFields);
-    }
-    expect(ir.models.some((m) => m.name === 'Circle' || m.name === 'Square')).toBe(false);
+    expect(types['Drawing']).toEqual({ shape: mapped, marker: mapped });
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Drawing', 'Square']);
     expectConsistent(ir, ['Drawing']);
   });
 
@@ -3190,5 +3188,202 @@ describe('sibling reservation reaches every context, including array items and m
     extractInlineModelsFromProperties({ properties: { markers } }, results, 'Drawing', undefined, undefined, reserved);
     expect(results.map((m) => m.name)).toEqual(['DrawingMarker', 'DrawingMarker2']);
     expect(fieldTypesByModel(results)['DrawingMarker2']).toEqual({ side: num });
+  });
+});
+
+describe('matching titles across sibling unions terminate and share one model (the title hang)', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const circle = obj({ kind: { type: 'string', const: 'circle' }, radius: n }, { title: 'Circle' });
+  const square = obj({ kind: { type: 'string', const: 'square' }, side: n }, { title: 'Square' });
+  const titled: SchemaObject = { oneOf: [circle, square] };
+  const plain: SchemaObject = { oneOf: [obj({ radius: n }), obj({ side: n })] };
+  const arr = (items: SchemaObject): SchemaObject => ({ type: 'array', items });
+  const map = (values: SchemaObject): SchemaObject => ({ type: 'object', additionalProperties: values });
+  const mapped = {
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: [model('Circle'), model('Square')],
+    discriminator: { property: 'kind', mapping: { circle: 'Circle', square: 'Square' } },
+  };
+  const circleFields = { kind: { kind: 'literal', value: 'circle' }, radius: num };
+  const squareFields = { kind: { kind: 'literal', value: 'square' }, side: num };
+
+  /** Every model ref and every discriminator mapping value, anywhere in a value. */
+  function refsIn(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => refsIn(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      const discriminator = record['discriminator'] as { mapping?: Record<string, string> } | undefined;
+      if (record['kind'] === 'union' && discriminator?.mapping)
+        Object.values(discriminator.mapping).forEach((v) => out.add(v));
+      Object.values(record).forEach((v) => refsIn(v, out));
+    }
+    return out;
+  }
+
+  /** Every reference and mapping value resolves to a model; every model other than `roots` is referenced. */
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = new Set<string>();
+    for (const m of ir.models) refsIn(m.fields, referenced);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      refsIn([op.requestBody, op.response, op.pagination?.envelopeFields], referenced);
+    }
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  const withDrawing = (properties: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info: { title: 'title hang', version: '1' },
+    paths: {},
+    components: { schemas: { Drawing: obj(properties) } },
+  });
+
+  // Each case parses (no hang), names deterministically, and the two unions
+  // share the title-named models: a title names one shape wherever it appears.
+  it.each<{ label: string; properties: Record<string, SchemaObject>; drawing: Record<string, unknown> }>([
+    {
+      label: 'the reported case: two sibling arrays of titled items',
+      properties: { shapes: arr(titled), markers: arr(titled) },
+      drawing: { shapes: { kind: 'array', items: mapped }, markers: { kind: 'array', items: mapped } },
+    },
+    {
+      label: 'two sibling maps of titled values',
+      properties: { layers: map(titled), tiles: map(titled) },
+      drawing: { layers: { kind: 'map', valueType: mapped }, tiles: { kind: 'map', valueType: mapped } },
+    },
+    {
+      label: 'two sibling unions at field level',
+      properties: { shape: titled, marker: titled },
+      drawing: { shape: mapped, marker: mapped },
+    },
+    {
+      label: 'a field, an array and a map, all with the same titled items',
+      properties: { shape: titled, shapes: arr(titled), layers: map(titled) },
+      drawing: { shape: mapped, shapes: { kind: 'array', items: mapped }, layers: { kind: 'map', valueType: mapped } },
+    },
+  ])('$label', async ({ properties, drawing }) => {
+    const ir = await parseWithoutWarnings(withDrawing(properties));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual(drawing);
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Drawing', 'Square']);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('context-free names never drive a step-aside, so the search is not even entered for them', () => {
+    expect(
+      elementContextDecision(
+        'shapes',
+        'item',
+        new Map([
+          ['shapes', arr(titled)],
+          ['markers', arr(titled)],
+        ]),
+        'Drawing',
+        titled,
+      ),
+    ).toEqual({ context: 'shapes', reason: 'nothing-minted' });
+    expect(
+      elementContextDecision(
+        'layers',
+        'value',
+        new Map([
+          ['layers', map(titled)],
+          ['tiles', map(titled)],
+        ]),
+        'Drawing',
+        titled,
+      ),
+    ).toEqual({ context: 'layers', reason: 'nothing-minted' });
+  });
+
+  it('the no-progress rule, not the attempt cap, stops a search whose names never change', () => {
+    const tried: string[] = [];
+    const constant = (candidate: string): string[] => {
+      tried.push(candidate);
+      return ['Circle', 'Square'];
+    };
+    expect(
+      firstFreeElementContext('shapes', 'item', new Set(['Circle', 'Square']), constant, ['Circle', 'Square']),
+    ).toEqual({ context: 'shapes_item', reason: 'no-progress' });
+    expect(tried).toEqual(['shapes_item']);
+    expect(tried.length).toBeLessThan(MAX_ELEMENT_CONTEXT_ATTEMPTS);
+
+    // The cap is only the last resort: names that keep changing but stay claimed.
+    const everClaimed = (candidate: string): string[] => ['Claimed', candidate];
+    expect(
+      firstFreeElementContext('shapes', 'item', new Set(['Claimed']), everClaimed, ['Claimed', 'shapes'], 5),
+    ).toEqual({
+      context: 'shapes_array_item4',
+      reason: 'cap',
+    });
+    // And a candidate that frees itself wins before either rule: the first
+    // candidate changes the names (so there is progress) but is still claimed,
+    // the second is free.
+    const freesAtSecond = (candidate: string): string[] => (candidate === 'shapes_item' ? ['Claimed'] : [candidate]);
+    expect(firstFreeElementContext('shapes', 'item', new Set(['Claimed']), freesAtSecond, ['DrawingShape'])).toEqual({
+      context: 'shapes_array_item',
+      reason: 'free',
+    });
+  });
+
+  it('a plain union among items still steps around a context-free title equal to its singular name, and terminates', async () => {
+    // `markers` is title-mapped with a variant titled "Drawing shape" — the
+    // context-free name `DrawingShape` — which is exactly what the plain
+    // items of `shapes` would be named: they step aside (`free`), while the
+    // title itself falls back because `shapes` mints `DrawingShape` in isolation.
+    const titledDrawingShape: SchemaObject = { oneOf: [{ ...circle, title: 'Drawing shape' }, square] };
+    const properties = { shapes: arr(plain), markers: arr(titledDrawingShape) };
+    expect(elementContextDecision('shapes', 'item', new Map(Object.entries(properties)), 'Drawing', plain)).toEqual({
+      context: 'shapes_item',
+      reason: 'free',
+    });
+
+    const ir = await parseWithoutWarnings(withDrawing(properties));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shapes: {
+        kind: 'array',
+        items: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('DrawingShapesItem'), model('DrawingShapesItemWithSide')],
+        },
+      },
+      markers: {
+        kind: 'array',
+        items: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('DrawingMarker'), model('Square')],
+          discriminator: { property: 'kind', mapping: { circle: 'DrawingMarker', square: 'Square' } },
+        },
+      },
+    });
+    expect(types['DrawingMarker']).toEqual(circleFields);
+    expect(types['DrawingShapesItemWithSide']).toEqual({ side: num });
+    expectConsistent(ir, ['Drawing']);
   });
 });
