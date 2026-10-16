@@ -16,11 +16,29 @@ export type AuthScheme = { description?: string; schemeName: string } & (
   | { kind: 'oauth2'; flows: Record<string, unknown> }
 );
 
-/** Root IR node representing the full API surface */
+/**
+ * A variable in a templated server URL (`https://{region}.api.example.com`),
+ * from the server's `variables` map.
+ */
+export interface ServerVariable {
+  /** Substituted for the placeholder when the caller picks no value; OpenAPI requires one. */
+  default: string;
+  /** The values the variable may take. Present only when the document declares a non-empty list. */
+  enum?: string[];
+  description?: string;
+}
+
 /** A server entry from the OpenAPI servers array */
 export interface ServerEntry {
+  /**
+   * As written in the document, placeholders included. `ApiSpec.baseUrl` is
+   * the first server's URL with its variables' defaults filled in; resolve any
+   * other entry the same way with `resolveServerUrl` from `ir/server-url.ts`.
+   */
   url: string;
   description?: string;
+  /** The template's variables, keyed by placeholder name. Present only when the document declares them. */
+  variables?: Record<string, ServerVariable>;
 }
 
 /** Root IR node representing the full API surface */

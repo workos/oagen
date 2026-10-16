@@ -7,16 +7,23 @@ The intermediate representation (IR) is the contract between the parser and all 
 ## Top-Level: ApiSpec
 
 ```typescript
-interface ServerEntry {
-  url: string;
+interface ServerVariable {
+  default: string; // Fills the placeholder when nothing else is chosen; OpenAPI requires it
+  enum?: string[]; // The values the variable may take; present only when declared (and non-empty)
   description?: string;
+}
+
+interface ServerEntry {
+  url: string; // As written, placeholders included: https://{region}.api.example.com
+  description?: string;
+  variables?: Record<string, ServerVariable>; // Keyed by placeholder name; present only when declared
 }
 
 interface ApiSpec {
   name: string; // From info.title
   version: string; // From info.version
   description?: string; // From info.description
-  baseUrl: string; // From servers[0].url
+  baseUrl: string; // servers[0].url with each variable's default filled in
   servers?: ServerEntry[]; // All servers from the spec
   services: Service[]; // Grouped operations
   models: Model[]; // Schema objects
@@ -27,7 +34,11 @@ interface ApiSpec {
 }
 ```
 
-The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
+The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always the first server's URL, resolved: each `{name}` placeholder is replaced by that variable's `default`, so a client built on `baseUrl` requests `https://eu.api.example.com/v1`, not `https://{region}.api.example.com/v1`.
+
+**Server variables.** `ServerEntry.url` keeps the template as written and `variables` carries what the document declares for it (same shape in OpenAPI 3.0 and 3.1), so an emitter can offer the choice — an environment or region picker — rather than only the default. There is no `resolvedUrl` on `ServerEntry`: `resolveServerUrl(server)` from `src/ir/server-url.ts` (exported from the package) returns `{ url, unresolved }` for any entry, which is exactly how the parser produced `baseUrl`. It is plain string scanning: a variable may appear more than once, the substituted value is not scanned again, and no pattern is built from the variable names.
+
+The parser checks every server, not only the first, and reports each problem once with an `[oagen] Warning:`: a variable without a usable `default` is omitted from `variables` (the IR requires one) and its placeholder stays in the URL; a placeholder that names no declared variable stays in the URL; a `default` outside the variable's `enum` is kept as written. A declared variable the URL never uses is kept without comment. `default` and `enum` entries are strings; a number or boolean (YAML reads `default: 8443` as a number) is carried as its text. `variables`, `enum` and `description` are absent, not `undefined`, when the document does not declare them.
 
 `security` is the document-level `security` list, in the same shape as `Operation.security`; every operation that declares no `security` of its own inherits it. It is `undefined` when the document declares none.
 

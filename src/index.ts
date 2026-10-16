@@ -3,6 +3,7 @@ export type {
   ApiSpec,
   AuthScheme,
   ServerEntry,
+  ServerVariable,
   Service,
   Operation,
   SecurityRequirement,
@@ -80,6 +81,10 @@ export type {
 } from './ir/sdk-behavior.js';
 
 export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
+
+// Server URL templates
+export type { ResolvedServerUrl } from './ir/server-url.js';
+export { resolveServerUrl } from './ir/server-url.js';
 
 // Errors
 export {
