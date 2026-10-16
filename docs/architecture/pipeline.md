@@ -39,15 +39,20 @@ Entry point: `parse.ts` → `parseSpec(specPath: string): Promise<ApiSpec>`
 
 If an `operationId` is present, it takes precedence. Names are inferred from HTTP method + path pattern:
 
-| Method | Path Pattern  | Inferred Name |
-| ------ | ------------- | ------------- |
-| GET    | `/users`      | `list`        |
-| GET    | `/users/{id}` | `get`         |
-| POST   | `/users`      | `create`      |
-| PUT    | `/users/{id}` | `update`      |
-| DELETE | `/users/{id}` | `delete`      |
+| Method | Path Pattern               | Inferred Name  |
+| ------ | -------------------------- | -------------- |
+| GET    | `/users`                   | `list`         |
+| GET    | `/users/{id}`              | `get`          |
+| POST   | `/users`                   | `create`       |
+| PUT    | `/users/{id}`              | `update`       |
+| DELETE | `/users/{id}`              | `delete`       |
+| GET    | `/store/pets`              | `listPets`     |
+| GET    | `/store/pets/{id}`         | `getPet`       |
+| POST   | `/store/pets/{id}/adopt`   | `adoptPet`     |
+| POST   | `/store/pets/{id}/photos`  | `createPhotos` |
+| POST   | `/accounts/users/{id}/ban` | `banUser`      |
 
-The collection vs. instance distinction is determined by whether the path ends with a `{param}` segment.
+The collection vs. instance distinction is determined by whether the path ends with a `{param}` segment. The resource is the last literal segment, dropped when it is the first segment (the service already carries it), and singularised for an instance operation (`pets` → `Pet`, `api_keys` → `ApiKey`, `addresses` → `Address`; `status` and other words that do not look plural are kept). A POST whose last segment is a literal that follows a `{param}` and does not end in `s` is an action: the segment is the verb and the singular parent resource is always appended (`adoptPet`), even when the parent is the first segment, so two actions with the same name on different resources do not collide. A plural literal after a `{param}` (`/users/{id}/photos`) is a nested collection and stays a `create`. A singleton noun after a `{param}` (`/users/{id}/avatar`) is misread as a verb; give it an `operationId`.
 
 ## Stage 2: Emit (`src/engine/`)
 

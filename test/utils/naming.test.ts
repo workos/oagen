@@ -8,6 +8,7 @@ import {
   stripBackendSuffixes,
   stripListItemMarkers,
   singularize,
+  singularizePathSegment,
   cleanSchemaName,
   ACRONYM_SET,
 } from '../../src/utils/naming.js';
@@ -148,6 +149,81 @@ describe('stripListItemMarkers', () => {
   });
   it('leaves clean names unchanged', () => {
     expect(stripListItemMarkers('Organization')).toBe('Organization');
+  });
+});
+
+describe('singularizePathSegment', () => {
+  it('drops a trailing s, including on short words', () => {
+    expect(singularizePathSegment('pets')).toBe('pet');
+    expect(singularizePathSegment('users')).toBe('user');
+    expect(singularizePathSegment('keys')).toBe('key');
+    expect(singularizePathSegment('ids')).toBe('id');
+    expect(singularizePathSegment('organizations')).toBe('organization');
+  });
+
+  it('turns -ies into -y, but keeps the ie of a short word', () => {
+    expect(singularizePathSegment('directories')).toBe('directory');
+    expect(singularizePathSegment('policies')).toBe('policy');
+    expect(singularizePathSegment('pies')).toBe('pie');
+  });
+
+  it('drops the es added to a sibilant stem', () => {
+    expect(singularizePathSegment('addresses')).toBe('address');
+    expect(singularizePathSegment('processes')).toBe('process');
+    expect(singularizePathSegment('statuses')).toBe('status');
+    expect(singularizePathSegment('buses')).toBe('bus');
+    expect(singularizePathSegment('boxes')).toBe('box');
+    expect(singularizePathSegment('indexes')).toBe('index');
+    expect(singularizePathSegment('batches')).toBe('batch');
+    expect(singularizePathSegment('branches')).toBe('branch');
+    expect(singularizePathSegment('hashes')).toBe('hash');
+  });
+
+  it('drops only the s when the stem itself ends in e', () => {
+    expect(singularizePathSegment('responses')).toBe('response');
+    expect(singularizePathSegment('licenses')).toBe('license');
+    expect(singularizePathSegment('releases')).toBe('release');
+    expect(singularizePathSegment('cases')).toBe('case');
+    expect(singularizePathSegment('warehouses')).toBe('warehouse');
+    expect(singularizePathSegment('uses')).toBe('use');
+    expect(singularizePathSegment('archives')).toBe('archive');
+  });
+
+  it('leaves alone anything that does not look plural', () => {
+    expect(singularizePathSegment('pet')).toBe('pet');
+    expect(singularizePathSegment('adopt')).toBe('adopt');
+    expect(singularizePathSegment('status')).toBe('status');
+    expect(singularizePathSegment('address')).toBe('address');
+    expect(singularizePathSegment('access')).toBe('access');
+    expect(singularizePathSegment('analysis')).toBe('analysis');
+    expect(singularizePathSegment('radius')).toBe('radius');
+    expect(singularizePathSegment('is')).toBe('is');
+    expect(singularizePathSegment('s')).toBe('s');
+    expect(singularizePathSegment('')).toBe('');
+  });
+
+  it('keeps invariant plurals', () => {
+    expect(singularizePathSegment('series')).toBe('series');
+    expect(singularizePathSegment('time_series')).toBe('time_series');
+    expect(singularizePathSegment('species')).toBe('species');
+    expect(singularizePathSegment('news')).toBe('news');
+  });
+
+  it('acts on the trailing word of a compound segment and preserves case', () => {
+    expect(singularizePathSegment('api_keys')).toBe('api_key');
+    expect(singularizePathSegment('auth-factors')).toBe('auth-factor');
+    expect(singularizePathSegment('email_addresses')).toBe('email_address');
+    expect(singularizePathSegment('authFactors')).toBe('authFactor');
+    expect(singularizePathSegment('Directories')).toBe('Directory');
+    expect(singularizePathSegment('STATUSES')).toBe('STATUS');
+  });
+
+  it('documents the irregular plurals it deliberately does not handle', () => {
+    expect(singularizePathSegment('people')).toBe('people');
+    expect(singularizePathSegment('children')).toBe('children');
+    expect(singularizePathSegment('data')).toBe('data');
+    expect(singularizePathSegment('menus')).toBe('menus');
+    expect(singularizePathSegment('apis')).toBe('apis');
   });
 });
 

@@ -173,6 +173,38 @@ export function singularize(word: string): string {
 }
 
 /**
+ * Conservative singularisation of a path segment, for naming an operation on
+ * one item of a collection: `pets` → `pet`, `api_keys` → `api_key`,
+ * `directories` → `directory`, `addresses` → `address`, `statuses` → `status`,
+ * `boxes` → `box`, `batches` → `batch`, `responses` → `response`.
+ *
+ * Suffix rules only, no dictionary, so anything that does not look plural is
+ * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`
+ * or `is` (`status`, `analysis`), or is an invariant plural (`series`).
+ * Case is preserved; only the trailing word of a compound segment matters.
+ *
+ * Deliberately not handled — a resource that stems wrong should carry an
+ * `operationId`: irregular plurals (`people`, `children`, `data`), `-ies`
+ * words whose singular keeps the `ie` (`cookies` → `cooky`), `-oes` (`heroes`
+ * → `heroe`), `-ches` nouns ending in `-che` (`caches` → `cach`), `-uses`
+ * nouns ending in `-use` (`excuses` → `excus`), plurals of `-u`/`-i` nouns
+ * (`menus`, `apis` are kept as they are) and acronyms (`sms` → `sm`).
+ */
+export function singularizePathSegment(segment: string): string {
+  const lower = segment.toLowerCase();
+  if (lower.length <= 2 || !lower.endsWith('s')) return segment;
+  if (lower.endsWith('series') || lower.endsWith('species') || lower.endsWith('news')) return segment;
+  if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is')) return segment;
+  // `directories` → `directory`; a short `-ies` word keeps its `ie` (`pies` → `pie`).
+  if (lower.endsWith('ies') && lower.length > 4) return segment.slice(0, -3) + 'y';
+  // An `es` added to a sibilant stem: `addresses`, `statuses`, `boxes`, `batches`,
+  // `hashes`. A vowel before `uses` is a plain `s` instead (`warehouses`).
+  if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower)) return segment.slice(0, -2);
+  if (lower.endsWith('xes') || lower.endsWith('ches') || lower.endsWith('shes')) return segment.slice(0, -2);
+  return segment.slice(0, -1);
+}
+
+/**
  * Compose all backend name cleaning transforms in order:
  * 1. Strip backend prefixes (Userland, Controller)
  * 2. Strip backend suffixes (Dto, DTO, Controller)

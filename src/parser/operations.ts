@@ -13,7 +13,13 @@ import type {
   PaginationMeta,
 } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import {
+  toPascalCase,
+  toCamelCase,
+  cleanSchemaName,
+  stripListItemMarkers,
+  singularizePathSegment,
+} from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -531,14 +537,18 @@ function inferOperationName(
   }
 
   // Fallback when no operationId is available — use method + path to build
-  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor"
+  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor",
+  // or "adoptPet" for a POST action on one item.
+  const action = method === 'post' ? inferPostAction(path) : null;
+  if (action) return toCamelCase(`${action.verb}_${action.resource}`);
   const verb = inferVerb(method, path);
   const resource = inferResourceFromPath(path);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
 }
 
 /**
- * Infer the CRUD verb from HTTP method and path shape.
+ * Infer the CRUD verb from HTTP method and path shape. A POST is `create`
+ * unless `inferPostAction` recognised it as an action first.
  */
 function inferVerb(method: HttpMethod, path: string): string {
   const segments = path.split('/').filter(Boolean);
@@ -567,12 +577,15 @@ function inferVerb(method: HttpMethod, path: string): string {
 
 /**
  * Extract a resource noun from the path for operation naming.
- * Uses the last non-param segment (the resource being operated on).
+ * Uses the last non-param segment (the resource being operated on). An item
+ * operation — the last literal segment is followed by a path parameter —
+ * addresses one entity, so its noun is singularised (`singularizePathSegment`).
  *
  * Examples:
  *   /accounts/users → "Users"
  *   /accounts/users/{id} → "User" (singular for item operations)
  *   /accounts/users/{id}/auth_factors → "AuthFactors"
+ *   /accounts/users/{id}/auth_factors/{factor_id} → "AuthFactor"
  *   /organizations/{id}/api_keys → "ApiKeys"
  *   /auth/authorize → "Authorize" (action endpoint)
  */
@@ -582,9 +595,11 @@ function inferResourceFromPath(path: string): string | null {
 
   // Find the last meaningful (non-param) segment
   let resourceSegment: string | null = null;
+  let isItem = false;
   for (let i = segments.length - 1; i >= 0; i--) {
     if (!segments[i].startsWith('{')) {
       resourceSegment = segments[i];
+      isItem = i < segments.length - 1;
       break;
     }
   }
@@ -593,7 +608,40 @@ function inferResourceFromPath(path: string): string | null {
   // Skip the service name (first segment) — it would be redundant
   if (resourceSegment === segments[0]) return null;
 
-  return toPascalCase(resourceSegment);
+  return toPascalCase(isItem ? singularizePathSegment(resourceSegment) : resourceSegment);
+}
+
+/**
+ * Recognise a POST action on one item: `/pets/{petId}/adopt`,
+ * `/owners/{o}/pets/{p}/vaccinate`. The last segment is a literal that follows
+ * a path parameter, so it names something done to that item rather than a
+ * collection to create into. The verb is the segment itself and the resource
+ * is the singular parent (`adopt` + `Pet`); the parent is kept even when it is
+ * the service segment so that `/pets/{id}/archive` and `/users/{id}/archive`
+ * under one tag do not both become `archive`.
+ *
+ * Not an action, so still a `create`: a literal ending in `s` after the
+ * parameter, which is read as a nested collection (`/orgs/{id}/api_keys`,
+ * and conservatively `/orders/{id}/status`); a literal with no parameter
+ * before it, which is indistinguishable from a nested collection
+ * (`/pets/search` looks like `/accounts/users/auth_factors`); and a path with
+ * no literal before the parameter (`/{id}/adopt`). A singleton noun after the
+ * parameter (`/users/{id}/avatar`) is misread as a verb; give it an
+ * `operationId`.
+ */
+function inferPostAction(path: string): { verb: string; resource: string } | null {
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 3) return null;
+  const last = segments[segments.length - 1];
+  if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
+  if (last.toLowerCase().endsWith('s')) return null;
+
+  for (let i = segments.length - 3; i >= 0; i--) {
+    if (!segments[i].startsWith('{')) {
+      return { verb: last, resource: toPascalCase(singularizePathSegment(segments[i])) };
+    }
+  }
+  return null;
 }
 
 /**
