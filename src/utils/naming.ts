@@ -181,7 +181,10 @@ export function singularize(word: string): string {
  * Suffix rules only, no dictionary, so anything that does not look plural is
  * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`
  * or `is` (`status`, `analysis`), or is an invariant plural (`series`).
- * Case is preserved; only the trailing word of a compound segment matters.
+ * Case is preserved — the rules only slice, except `-ies` → `-y`, whose `y`
+ * takes the case of the `ies` it replaces (`DIRECTORIES` → `DIRECTORY`, so
+ * splitWords still sees one word) — and only the trailing word of a compound
+ * segment matters.
  *
  * Deliberately not handled — a resource that stems wrong should carry an
  * `operationId`: irregular plurals (`people`, `children`, `data`), `-ies`
@@ -196,7 +199,9 @@ export function singularizePathSegment(segment: string): string {
   if (lower.endsWith('series') || lower.endsWith('species') || lower.endsWith('news')) return segment;
   if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is')) return segment;
   // `directories` → `directory`; a short `-ies` word keeps its `ie` (`pies` → `pie`).
-  if (lower.endsWith('ies') && lower.length > 4) return segment.slice(0, -3) + 'y';
+  if (lower.endsWith('ies') && lower.length > 4) {
+    return segment.slice(0, -3) + (segment.endsWith('IES') ? 'Y' : 'y');
+  }
   // An `es` added to a sibilant stem: `addresses`, `statuses`, `boxes`, `batches`,
   // `hashes`. A vowel before `uses` is a plain `s` instead (`warehouses`).
   if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower)) return segment.slice(0, -2);

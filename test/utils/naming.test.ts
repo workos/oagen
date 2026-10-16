@@ -218,6 +218,33 @@ describe('singularizePathSegment', () => {
     expect(singularizePathSegment('STATUSES')).toBe('STATUS');
   });
 
+  it('matches the case of the segment under every rule', () => {
+    // -ies → -y is the only rule that writes a letter; the y takes the case of
+    // the ies it replaces so an all-caps word stays one word for splitWords.
+    expect(singularizePathSegment('DIRECTORIES')).toBe('DIRECTORY');
+    expect(singularizePathSegment('directories')).toBe('directory');
+    expect(singularizePathSegment('Directories')).toBe('Directory');
+    expect(singularizePathSegment('PIES')).toBe('PIE');
+    // Every other rule only slices, so the segment's own case is kept.
+    expect(singularizePathSegment('ADDRESSES')).toBe('ADDRESS');
+    expect(singularizePathSegment('Addresses')).toBe('Address');
+    expect(singularizePathSegment('STATUSES')).toBe('STATUS');
+    expect(singularizePathSegment('Statuses')).toBe('Status');
+    expect(singularizePathSegment('BOXES')).toBe('BOX');
+    expect(singularizePathSegment('Boxes')).toBe('Box');
+    expect(singularizePathSegment('BATCHES')).toBe('BATCH');
+    expect(singularizePathSegment('Batches')).toBe('Batch');
+    expect(singularizePathSegment('HASHES')).toBe('HASH');
+    expect(singularizePathSegment('Hashes')).toBe('Hash');
+    expect(singularizePathSegment('RESPONSES')).toBe('RESPONSE');
+    expect(singularizePathSegment('Responses')).toBe('Response');
+    expect(singularizePathSegment('PETS')).toBe('PET');
+    expect(singularizePathSegment('Pets')).toBe('Pet');
+    expect(singularizePathSegment('STATUS')).toBe('STATUS');
+    expect(singularizePathSegment('SERIES')).toBe('SERIES');
+    expect(singularizePathSegment('API_KEYS')).toBe('API_KEY');
+  });
+
   it('documents the irregular plurals it deliberately does not handle', () => {
     expect(singularizePathSegment('people')).toBe('people');
     expect(singularizePathSegment('children')).toBe('children');
