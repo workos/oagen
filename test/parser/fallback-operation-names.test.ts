@@ -212,6 +212,31 @@ describe('fallback operation names (issue #210)', () => {
     expect(new Set(ops.map((op) => op.name)).size).toBe(ops.length);
   });
 
+  it('still tells two colliding operationIds apart when a fallback joins their group', () => {
+    const { services } = extractOperations({
+      '/store/featured/{id}': { get: { ...item('id'), operationId: 'get_pet' } },
+      '/store/rescues/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+      '/store/pets/{id}': { get: item('id') },
+    } as Parameters<typeof extractOperations>[0]);
+    const ops = services.flatMap((s) => s.operations);
+
+    expect(new Set(ops.map((op) => op.name)).size).toBe(3);
+    expect(ops.find((op) => op.path === '/store/pets/{id}')!.name).not.toBe('getPet');
+  });
+
+  it('keeps every name unique with two operationIds and two fallbacks in one group', () => {
+    const { services } = extractOperations({
+      '/store/featured/{id}': { get: { ...item('id'), operationId: 'get_pet' } },
+      '/store/rescues/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+      '/store/pets/{id}': { get: item('id') },
+      '/store/shelter/pets/{id}': { get: item('id') },
+    } as Parameters<typeof extractOperations>[0]);
+    const ops = services.flatMap((s) => s.operations);
+
+    expect(new Set(ops.map((op) => op.name)).size).toBe(4);
+    for (const op of ops.filter((o) => o.path.endsWith('pets/{id}'))) expect(op.name).not.toBe('getPet');
+  });
+
   it('still qualifies every operation when two operationIds collide with each other', () => {
     const { services } = extractOperations({
       '/store/pets/{id}': { get: { ...item('id'), operationId: 'getPet' } },

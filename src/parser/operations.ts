@@ -329,6 +329,9 @@ export function extractOperations(
   const headerModelRegistry: HeaderModelRegistry = new Map(
     (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
   );
+  // Headers with a schema are typed after the loop (materializeHeaderModels),
+  // when every inline model a header must not be confused with is known.
+  const pendingHeaderModels: PendingHeaderModel[] = [];
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -359,6 +362,7 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        pendingHeaderModels,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -375,6 +379,10 @@ export function extractOperations(
   // Companion models of list envelopes are named once every list operation is
   // known, so copies of one envelope shape can share a model.
   inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+
+  // Header models come last, named against every other inline model so that
+  // a header can never take a name a body model owns.
+  materializeHeaderModels(pendingHeaderModels, headerModelRegistry, inlineModels);
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"
@@ -659,9 +667,11 @@ function inferPostAction(path: string): { verb: string; resource: string } | nul
  * since they represent the same logical resource.
  *
  * A name taken from an `operationId` is the author's choice: when a
- * path-derived name (inferOperationName) collides with it, only the
- * path-named operations are qualified and the `operationId` keeps its name.
- * Only when `operationId`s collide with each other are all of them qualified.
+ * path-derived name (inferOperationName) collides with one `operationId`,
+ * only the path-named operations are qualified and the `operationId` keeps
+ * its name. When two or more `operationId`s collide with each other, every
+ * member of the group is qualified as before — a path-named operation in the
+ * group never stops explicit names from being told apart.
  */
 function disambiguateOperationNames(operations: Operation[], pathNamed: ReadonlySet<Operation>): void {
   // Group by name
@@ -680,7 +690,8 @@ function disambiguateOperationNames(operations: Operation[], pathNamed: Readonly
     const uniquePaths = new Set(group.map((op) => op.path));
     if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
 
-    const renamable = group.some((op) => pathNamed.has(op)) ? group.filter((op) => pathNamed.has(op)) : group;
+    const explicitCount = group.filter((op) => !pathNamed.has(op)).length;
+    const renamable = explicitCount === 1 ? group.filter((op) => pathNamed.has(op)) : group;
 
     for (const op of renamable) {
       const resource = inferResourceFromPath(op.path);
@@ -907,6 +918,7 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  pendingHeaderModels?: PendingHeaderModel[],
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -1004,6 +1016,7 @@ function buildOperation(
     serviceName: opContext,
     operationQualifier: headerOperationQualifier(op, operationName, pathModelBaseName, opContext),
     registry: headerModelRegistry,
+    pending: pendingHeaderModels,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -1715,6 +1728,23 @@ interface HeaderExtractionContext {
   /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
   operationQualifier: string;
   registry: HeaderModelRegistry;
+  /**
+   * When present, a header with a schema is typed later, by
+   * materializeHeaderModels, instead of as it is read: its model is then
+   * named once every inline body, response, nested, variant and
+   * envelope-companion model of the document is known, so it can never take
+   * a name one of those owns.
+   */
+  pending?: PendingHeaderModel[];
+}
+
+/** A header whose typing extractResponseHeaders deferred; `header.type` is filled in later. */
+interface PendingHeaderModel {
+  header: ResponseHeader;
+  schema: SchemaObject;
+  name: string;
+  statusCode: number;
+  ctx: HeaderExtractionContext;
 }
 
 /** Shape of a model, independent of field order: name, requiredness, and type of every field. */
@@ -1825,6 +1855,30 @@ function typeHeaderSchema(
 }
 
 /**
+ * Type the headers extractResponseHeaders deferred, in document order, once
+ * every inline model of the document is in `inlineModels`. Each of those
+ * names is reserved in the registry first, so a header model can never take
+ * a name a body, response, nested, variant or envelope-companion model owns
+ * — `POST /notes/{id}/pin` with a header named `Response` would otherwise
+ * name its header model `NotesByIdPinPostResponse`, the same as its response
+ * body, and the later merge by name would drop one of the two shapes. On such
+ * a clash the registry's other candidates apply (status code, then a numeric
+ * suffix). Header models are appended to `inlineModels` as they are named.
+ */
+function materializeHeaderModels(
+  pending: PendingHeaderModel[],
+  registry: HeaderModelRegistry,
+  inlineModels: Model[],
+): void {
+  for (const model of inlineModels) {
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
+  }
+  for (const job of pending) {
+    job.header.type = typeHeaderSchema(job.schema, job.name, job.statusCode, job.ctx, inlineModels);
+  }
+}
+
+/**
  * Read a Response Object's `headers` map into IR response headers, resolving
  * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
  * survives so callers can leave the `headers` key off entirely.
@@ -1855,17 +1909,19 @@ function extractResponseHeaders(
     // `content`, the first (only) media type's schema types the header.
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
-    const type: TypeRef = schema
-      ? typeHeaderSchema(schema, name, statusCode, ctx, models)
-      : { kind: 'primitive', type: 'string' };
-
-    result.push({
+    const responseHeader: ResponseHeader = {
       name,
-      type,
+      type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
       deprecated: header.deprecated || undefined,
-    });
+    };
+    if (schema && ctx.pending) {
+      ctx.pending.push({ header: responseHeader, schema, name, statusCode, ctx });
+    } else if (schema) {
+      responseHeader.type = typeHeaderSchema(schema, name, statusCode, ctx, models);
+    }
+    result.push(responseHeader);
   }
 
   return result.length > 0 ? result : undefined;
