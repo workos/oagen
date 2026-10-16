@@ -2556,3 +2556,124 @@ describe('operation summary and description with empty or whitespace-only text',
     expect(op.description).toBe('List pets\n\nLists pets.\n');
   });
 });
+
+describe('extractOperations – path-named services skip the API root (issue #209)', () => {
+  type Paths = NonNullable<Parameters<typeof extractOperations>[0]>;
+  const responses = { '200': { description: 'ok' } };
+  const get = { get: { responses } };
+  const getById = {
+    get: { parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }], responses },
+  };
+
+  /** `Service METHOD /path` for every operation, sorted. */
+  function grouped(paths: Paths): string[] {
+    return extractOperations(paths)
+      .services.flatMap((s) => s.operations.map((op) => `${s.name} ${op.httpMethod.toUpperCase()} ${op.path}`))
+      .sort();
+  }
+
+  it('names each service from the segment after a shared /api root (the issue repro)', () => {
+    const { services } = extractOperations({ '/api/notes': get, '/api/tags': get, '/api/users': get });
+    expect(
+      services.flatMap((s) =>
+        s.operations.map((op) => `${s.name} ${op.name} ${op.httpMethod.toUpperCase()} ${op.path}`),
+      ),
+    ).toEqual(['Notes listNotes GET /api/notes', 'Tags listTags GET /api/tags', 'Users listUsers GET /api/users']);
+  });
+
+  it('skips a two-segment root such as /api/v1', () => {
+    expect(grouped({ '/api/v1/notes': get, '/api/v1/notes/{id}': getById, '/api/v1/tags': get })).toEqual([
+      'Notes GET /api/v1/notes',
+      'Notes GET /api/v1/notes/{id}',
+      'Tags GET /api/v1/tags',
+    ]);
+  });
+
+  it.each(['api', 'API', 'rest', 'v1', 'v2beta1', '1.0', '2010-04-01'])('treats /%s as an API marker', (root) => {
+    expect(grouped({ [`/${root}/notes`]: get, [`/${root}/tags`]: get })).toEqual([
+      `Notes GET /${root}/notes`,
+      `Tags GET /${root}/tags`,
+    ]);
+  });
+
+  it('skips the shared prefix through its last marker', () => {
+    expect(grouped({ '/wiki/rest/api/content': get, '/wiki/rest/api/space': get })).toEqual([
+      'Content GET /wiki/rest/api/content',
+      'Space GET /wiki/rest/api/space',
+    ]);
+  });
+
+  it('keeps a shared prefix that carries no marker: it is the service, not noise', () => {
+    expect(grouped({ '/user_management/users': get, '/user_management/invitations': get })).toEqual([
+      'UserManagement GET /user_management/invitations',
+      'UserManagement GET /user_management/users',
+    ]);
+  });
+
+  it('keeps the module that follows the marker', () => {
+    expect(grouped({ '/api/user_management/users': get, '/api/user_management/invitations': get })).toEqual([
+      'UserManagement GET /api/user_management/invitations',
+      'UserManagement GET /api/user_management/users',
+    ]);
+  });
+
+  it('leaves a path that is the root itself under the root-named service', () => {
+    expect(grouped({ '/api': get, '/api/notes': get, '/api/tags': get })).toEqual([
+      'Api GET /api',
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('leaves a path whose root is followed by a parameter under the root-named service', () => {
+    expect(grouped({ '/api/{id}': getById, '/api/notes': get })).toEqual(['Api GET /api/{id}', 'Notes GET /api/notes']);
+  });
+
+  it('ends the shared run at a parameter', () => {
+    expect(grouped({ '/api/{tenant}/notes': get, '/api/{tenant}/tags': get })).toEqual([
+      'Api GET /api/{tenant}/notes',
+      'Api GET /api/{tenant}/tags',
+    ]);
+  });
+
+  it('skips nothing when one path sits outside the root', () => {
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': get })).toEqual([
+      'Api GET /api/notes',
+      'Api GET /api/tags',
+      'Health GET /health',
+    ]);
+  });
+
+  it('compares shared segments verbatim', () => {
+    expect(grouped({ '/API/notes': get, '/api/tags': get })).toEqual(['Api GET /API/notes', 'Api GET /api/tags']);
+  });
+
+  it('does not consult path items that declare no operation', () => {
+    expect(grouped({ '/health': {}, '/status': { parameters: [] }, '/api/notes': get, '/api/tags': get })).toEqual([
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('names a single-path document from the segment after the root', () => {
+    expect(grouped({ '/api/notes': get })).toEqual(['Notes GET /api/notes']);
+    expect(grouped({ '/api': get })).toEqual(['Api GET /api']);
+    expect(grouped({ '/{id}': getById })).toEqual(['Default GET /{id}']);
+  });
+
+  it('leaves tagged operations exactly as they were', () => {
+    const tagged = { get: { tags: ['labels'], responses } };
+    const alone = extractOperations({ '/api/tags': tagged }).services;
+    const { services } = extractOperations({ '/api/notes': get, '/api/tags': tagged });
+    expect(services.map((s) => s.name)).toEqual(['Notes', 'Labels']);
+    expect(services[1]).toEqual(alone[0]);
+  });
+
+  it('still groups a tag by raw first segment when deciding whether to split it', () => {
+    const tagged = { get: { tags: ['notes'], responses } };
+    expect(grouped({ '/api/notes': tagged, '/api/note_templates': tagged })).toEqual([
+      'Notes GET /api/note_templates',
+      'Notes GET /api/notes',
+    ]);
+  });
+});

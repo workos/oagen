@@ -304,6 +304,10 @@ export function extractOperations(
   // schema — can produce the same name, so the prefix for every such
   // operation is decided up front (see resolvePathModelBaseNames).
   const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+  // An API root every path sits under (`/api`, `/v1`) tells the services
+  // apart no better than nothing, so untagged operations skip it when their
+  // service is named from the path (see apiRootPrefixLength).
+  const apiRootLength = apiRootPrefixLength(paths);
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -328,7 +332,7 @@ export function extractOperations(
       if (!op) continue;
 
       const tag = op.tags?.[0];
-      const serviceName = inferServiceName(path, tag);
+      const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
 
       const {
@@ -469,15 +473,79 @@ function resolveServiceDescription(
   return undefined;
 }
 
-function inferServiceName(path: string, tag?: string): string {
+/**
+ * Words that mark where an API is mounted rather than naming a resource.
+ * Deliberately tiny: `mountRules` regroup whatever this does not cover.
+ */
+const API_MARKER_SEGMENTS: ReadonlySet<string> = new Set(['api', 'rest']);
+
+/**
+ * Whether a path segment marks the API root rather than naming a resource:
+ * one of API_MARKER_SEGMENTS in any case, or a version such as `v1`,
+ * `v2beta`, `1.0` or `2010-04-01`.
+ */
+function isApiMarkerSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return API_MARKER_SEGMENTS.has(lower) || /^v\d/.test(lower) || /^\d+([.-]\d+)*$/.test(lower);
+}
+
+/**
+ * How many leading path segments an untagged operation skips when its service
+ * is named from its path: the API root every path in the document sits under.
+ *
+ * Only segments every operation-bearing path shares are candidates. The shared
+ * run ends at the first `{param}` (`/api/{id}/notes` and `/api/{id}/tags`
+ * share only `api`) and at the first segment the paths spell differently —
+ * compared verbatim, so `/API/notes` and `/api/tags` share nothing. Of that
+ * run, the paths skip through its last API marker (see isApiMarkerSegment):
+ * `/api/v1/notes` loses `api/v1`, `/wiki/rest/api/content` loses
+ * `wiki/rest/api`, and `/api/user_management/users` loses `api` alone.
+ *
+ * A shared prefix without a marker is kept whole: `/user_management/users`
+ * and `/user_management/invitations` stay one `UserManagement` service. A
+ * module prefix every path shares is the service, not noise, and nothing but
+ * the word tells it from `/api`, so the word is what decides.
+ *
+ * Path items that declare no operation (an empty item, or one that only
+ * carries `parameters`) are not consulted: they produce no service, so they
+ * must not stop every other path from naming one.
+ */
+function apiRootPrefixLength(paths: Record<string, PathItem>): number {
+  const segmentLists = Object.entries(paths)
+    .filter(([, pathItem]) => HTTP_METHODS.some((method) => pathItem[method]))
+    .map(([path]) => path.split('/').filter(Boolean));
+  if (segmentLists.length === 0) return 0;
+  const [first, ...rest] = segmentLists;
+  let length = 0;
+  for (let i = 0; i < first.length; i++) {
+    const segment = first[i];
+    if (segment.startsWith('{') || !rest.every((segments) => segments[i] === segment)) break;
+    if (isApiMarkerSegment(segment)) length = i + 1;
+  }
+  return length;
+}
+
+/**
+ * The service an operation belongs to: its first tag, else a path segment.
+ *
+ * The path fallback takes the first literal segment after the API root every
+ * path in the document sits under (`apiRootLength`, see apiRootPrefixLength):
+ * `/widgets/{id}/sub` is `Widgets`, and so is `/api/widgets` when every path
+ * starts with `/api`, instead of the whole API collapsing into one `Api`
+ * service. When nothing literal follows the root — the path is the root
+ * itself, or a parameter comes next — the first segment names the service as
+ * it always did, so `/api` and `/api/{id}` land in `Api` rather than in
+ * `Default`.
+ */
+function inferServiceName(path: string, tag: string | undefined, apiRootLength: number): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
   // (e.g., "multi-factor-auth" for /auth/factors/* endpoints).
   if (tag) {
     return toPascalCase(tag);
   }
-  // Fallback: extract first meaningful path segment: /widgets/{id}/sub → "Widgets"
   const segments = path.split('/').filter(Boolean);
-  const first = segments[0] ?? 'Default';
+  const afterRoot = segments[apiRootLength];
+  const first = afterRoot !== undefined && !afterRoot.startsWith('{') ? afterRoot : (segments[0] ?? 'Default');
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
