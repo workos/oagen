@@ -105,10 +105,11 @@ export function mintedInlineNameEntries(
   }
   if (s.const !== undefined) return [];
   if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return enumName();
+  // An array in either form, read before `properties` as `schemaToTypeRef` does.
+  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineNameEntries(contextName, s.items, parentModelName);
   // A plain boolean: the type guard would otherwise narrow `s` to `never` below.
   const inlineObject: boolean = isInlineObjectSchema(s);
   if (inlineObject) return modelName();
-  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineNameEntries(contextName, s.items, parentModelName);
   if (s.type === 'object' && !s.properties) {
     const value = mapValueSchema(s);
     return value ? mintedInlineNameEntries(contextName, value, parentModelName) : [];
@@ -520,9 +521,13 @@ export function extractInlineModelsFromProperties(
     // so a nullable field must be unwrapped here the same way or its inline
     // object / array items / map values are referenced but never extracted.
     const fieldSchema = unwrapNullableField(rawFieldSchema);
+    // An array in either form `schemaToTypeRef` accepts — `type: 'array'`, or
+    // `items` with no `type` at all — which it reads before `properties`, so
+    // a schema carrying both is an array here too.
+    const arrayItems = (fieldSchema.type === 'array' || !fieldSchema.type) && fieldSchema.items;
     // Direct inline object with properties (with or without explicit type: 'object',
     // including the nullable `type: ['object', 'null']` form)
-    if (isInlineObjectSchema(fieldSchema)) {
+    if (!arrayItems && isInlineObjectSchema(fieldSchema)) {
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
       results.push(buildInlineModel(modelName, fieldSchema, componentSchemas));
@@ -538,10 +543,10 @@ export function extractInlineModelsFromProperties(
     // field itself, or `<field>_item` when a sibling would take the singular
     // name — so the branches in this function do the extraction with
     // byte-for-byte identical naming.
-    if (fieldSchema.type === 'array' && fieldSchema.items) {
-      const itemContext = elementContextName(fieldName, 'item', siblings, parentName, fieldSchema.items);
+    if (arrayItems) {
+      const itemContext = elementContextName(fieldName, 'item', siblings, parentName, arrayItems);
       extractInlineModelsFromProperties(
-        { properties: { [itemContext]: fieldSchema.items } },
+        { properties: { [itemContext]: arrayItems } },
         results,
         parentName,
         componentSchemas,

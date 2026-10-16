@@ -130,7 +130,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   applyFieldHints(finalModels, options?.fieldHints);
   collectInlineEnumsFromModels(finalModels, enums);
-  collectInlineEnumsFromOperations(services, enums);
+  collectInlineEnumsFromOperations(services, enums, finalModels, componentNames);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 

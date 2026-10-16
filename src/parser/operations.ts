@@ -313,13 +313,14 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
-  // One registry for the whole spec, seeded with the component models: a
-  // header model's name must not collide with a differently shaped component
-  // (a request body may already use `DocumentsXMeta`) or with another
-  // operation's header model, or the later merge would overwrite the first.
-  const headerModelRegistry: HeaderModelRegistry = new Map(
-    (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
-  );
+  // Header and secondary-body schemas are typed only after this loop, once
+  // every primary model is known (`resolveDeferredInlineTypes`): their names
+  // must not collide with a differently shaped component, request body or
+  // primary response of any operation, or the later merge would overwrite
+  // the first. `operationOf` remembers which operation minted each primary
+  // model, so a clash within one operation can be told from one across two.
+  const deferred: DeferredInlineType[] = [];
+  const operationOf = new Map<Model, string>();
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -349,9 +350,10 @@ export function extractOperations(
         componentRequestBodies,
         componentExamples,
         componentHeaders,
-        headerModelRegistry,
+        deferred,
       );
       inlineModels.push(...opModels);
+      for (const model of opModels) operationOf.set(model, toPascalCase(operation.name));
       if (opCompanions) envelopeCompanions.push(...opCompanions);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
@@ -365,6 +367,9 @@ export function extractOperations(
   // Companion models of list envelopes are named once every list operation is
   // known, so copies of one envelope shape can share a model.
   inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+
+  // Headers and secondary bodies are named last, against every name above.
+  inlineModels.push(...resolveDeferredInlineTypes(deferred, componentModels, inlineModels, operationOf));
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"
@@ -846,7 +851,7 @@ function buildOperation(
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
-  headerModelRegistry: HeaderModelRegistry = new Map(),
+  deferred: DeferredInlineType[] = [],
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -945,7 +950,7 @@ function buildOperation(
     componentSchemas,
     serviceName: opContext,
     operationQualifier: toPascalCase(operationName),
-    registry: headerModelRegistry,
+    deferred,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -1616,41 +1621,87 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
 }
 
 /**
- * Spec-wide record of every model name a header model must not silently
- * reuse: the component models (seeded up front) and each inline header model
- * materialized so far. The value carries the model's shape fingerprint, so a
- * header whose shape matches can share the name, and — for header models —
- * which operation produced it, so a collision inside one operation can be
- * told apart from one across operations.
+ * Spec-wide record of every model name a header or secondary-body model must
+ * not silently reuse: the component models, every inline model the
+ * operations mint for request bodies and primary responses, and each
+ * deferred model materialized so far. The value carries the model's shape
+ * fingerprint, so a schema whose shape matches can share the name, and the
+ * operation that minted it (none for a component or a shared envelope
+ * companion), so a collision inside one operation can be told apart from one
+ * across operations.
  */
-type HeaderModelRegistry = Map<string, { fingerprint: string; operation?: string }>;
+type ModelShapeRegistry = Map<string, { fingerprint: string; operation?: string }>;
 
-/** What response-header extraction needs from the operation and the spec. */
-interface HeaderExtractionContext {
+/**
+ * A header or secondary-body schema whose inline models are named only once
+ * every primary model of every operation is known
+ * (`resolveDeferredInlineTypes`), which then fills in `target.type`. Until
+ * then the target carries a placeholder.
+ */
+interface DeferredInlineType {
+  kind: 'header' | 'content';
+  schema: SchemaObject;
+  /** The bare name the models derive from: the header name, or the response stem + media type + role. */
+  name: string;
+  statusCode: number;
+  /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
+  operationQualifier: string;
+  /** Qualifies a header's names (`Documents` + `X-Meta` → `DocumentsXMeta`); a body has none. */
+  parentName?: string;
+  componentSchemas?: Record<string, SchemaObject>;
+  /** Names the schema in diagnostics: the header or media type, status code and operation. */
+  label: string;
+  target: { type: TypeRef };
+}
+
+/** What response header and body typing needs from the operation and the spec. */
+interface ResponseTypingContext {
   componentHeaders?: Record<string, Record<string, unknown>>;
-  /** Lets header models resolve `$ref` siblings and augmentations the way fields do. */
+  /** Lets inline models resolve `$ref` siblings and augmentations the way fields do. */
   componentSchemas?: Record<string, SchemaObject>;
   /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
   serviceName?: string;
   /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
   operationQualifier: string;
-  registry: HeaderModelRegistry;
+  /** Collects every schema whose models are named after the operations loop. */
+  deferred: DeferredInlineType[];
 }
 
-/** Shape of a model, independent of field order: name, requiredness, and type of every field. */
+/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'example', 'examples']);
+/** Model properties outside its shape: the name, its documentation, and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'fields']);
+
+/**
+ * Shape of a model, independent of field order, name and documentation:
+ * every field's name, type, requiredness, limits, default and access flags,
+ * plus the model's own limits, type parameters and discriminator. Two
+ * schemas share a model only when this agrees, so a body that repeats
+ * another's fields with a different `minLength` or `minProperties` keeps its
+ * own model and its own limits.
+ */
 function modelFingerprint(model: Model): string {
-  return model.fields
-    .map((f) => `${f.name}${f.required ? '!' : '?'}:${stableStringify(f.type)}`)
+  const fields = model.fields
+    .map((field) => `${field.name}:${stableStringify(omitKeys(field, FIELD_DOC_KEYS))}`)
     .sort()
     .join('|');
+  return `${fields}#${stableStringify(omitKeys(model, MODEL_IDENTITY_KEYS))}`;
 }
 
-/** `JSON.stringify` with object keys sorted, so equal shapes serialize equally. */
+/** The entries of `value` whose key is not in `keys` and whose value is set. */
+function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
+  );
+}
+
+/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
     return `{${entries.join(',')}}`;
@@ -1659,89 +1710,181 @@ function stableStringify(value: unknown): string {
 }
 
 /**
- * Type a header's schema and materialize the inline models it names, under a
+ * Name and materialize every deferred header and secondary-body schema, now
+ * that every primary model is known. The registry holds the component models
+ * first, then every inline model the operations minted — request bodies,
+ * primary response bodies with their nested objects and union variants,
+ * envelope companions — so no deferred schema can take one of their names
+ * for a different shape, whichever operation minted it; each resolved
+ * schema's own models join it in turn, in document order (path order, then
+ * ascending status code, headers before bodies), so the first owner of a
+ * name keeps it. Returns the models materialized, having set each target's
+ * `type`.
+ */
+function resolveDeferredInlineTypes(
+  deferred: readonly DeferredInlineType[],
+  componentModels: readonly Model[] | undefined,
+  inlineModels: readonly Model[],
+  operationOf: ReadonlyMap<Model, string>,
+): Model[] {
+  const registry: ModelShapeRegistry = new Map();
+  for (const model of componentModels ?? []) registry.set(model.name, { fingerprint: modelFingerprint(model) });
+  for (const model of inlineModels) {
+    if (registry.has(model.name)) continue;
+    registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
+  }
+  const models: Model[] = [];
+  for (const item of deferred) item.target.type = materializeUnderFreeName(item, registry, models);
+  return models;
+}
+
+/** How many `<name>2`, `<name>3`, ... candidates are tried before the hash. */
+const NUMERIC_NAME_CANDIDATES = 8;
+
+/**
+ * Type a deferred schema and materialize the inline models it names, under a
  * property name that does not collide with a different shape anywhere in the
  * spec.
  *
- * Header models are named from the service and header name alone, so an
- * inline `X-Meta` on a `Documents` operation is `DocumentsXMeta` — the same
- * name a component schema, or the same header on a 429 or on another
- * `Documents` operation, may already own with a different shape. Left alone,
- * the later merge keeps one definition for the name and every other
- * reference silently gets the wrong fields (a request body using the
- * component would even change type without any emitter reading headers).
+ * A header model is named from the service and header name alone, so an
+ * inline `X-Meta` on a `Documents` operation is `DocumentsXMeta`; a secondary
+ * body from the operation's response stem and media type,
+ * `RenderPetCardTextHtmlResponse`. Either is a name a component schema, a
+ * primary body, the same header on a 429 or another operation may already
+ * own with a different shape. Left alone, the later merge keeps one
+ * definition for the name and every other reference silently gets the wrong
+ * fields (a request body using the component would even change type without
+ * any emitter reading headers).
  *
- * The first owner of a name keeps it: component models are seeded before any
- * operation, operations are visited in path order, and a single operation's
- * responses in ascending status-code order (integer-like keys iterate that
- * way), so the lowest code wins regardless of where it appears in the
- * document. A later header with a different shape — at any depth, a nested
- * object that differs counts — is re-derived under the first free candidate:
+ * The first owner of a name keeps it (see `resolveDeferredInlineTypes`), and
+ * a later schema with a different shape — at any depth, a nested object that
+ * differs counts — is re-derived under the first free candidate:
  *
- *   1. the bare header name                `DocumentsXMeta`
- *   2. when the name is taken inside this operation, the status code
- *      (`DocumentsXMeta429`); when taken by a component or another
- *      operation, the operation (`DocumentsCreateDocumentXMeta`)
- *   3. the other of those two
- *   4. operation and status code            `DocumentsCreateDocumentXMeta429`
- *   5. a numeric suffix                     `DocumentsXMeta2`, `DocumentsXMeta3`, ...
+ *   1. the bare name                        `DocumentsXMeta`
+ *   2. the status code                      `DocumentsXMeta429`; for a header
+ *      whose name a component or another operation took, the operation first
+ *      (`DocumentsCreateDocumentXMeta`), then the status code, then both
+ *   3. a numeric suffix                     `DocumentsXMeta2` … `DocumentsXMeta9`
+ *   4. a six-character hash of the schema   `DocumentsXMeta5A7B1C`
  *
  * Both the type and the models come from the same property name, so nested
  * models (`DocumentsXMeta429Origin`) line up by construction. A shape
  * identical to the name's current owner shares it and materializes nothing
  * new, which is also how a header reuses a matching component model.
  *
- * Treating the header as a one-property object reuses the field-level
+ * A title-mapped union variant (`Circle`) is named from its title whatever
+ * the property name, so a new candidate alone would never free it. Every
+ * taken name is therefore also handed to the extractor as reserved, which
+ * makes such a variant fall back to its context-qualified name
+ * (`CircleDocumentsXMeta`, see `nameInlineVariants`); the candidate only
+ * advances when reserving changed nothing. Each round thus either reserves
+ * a name the finite registry owns or advances the finite candidate list, so
+ * the loop always ends: once the hash is taken too, the schema is typed
+ * under it anyway, the colliding names are left to their owners, and the
+ * clash is reported rather than looped on.
+ *
+ * Treating the schema as a one-property object reuses the field-level
  * extractor, whose names come from the same `qualifyInlineModelName(name,
  * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
  * path uses.
  */
-function typeHeaderSchema(
-  schema: SchemaObject,
-  name: string,
-  statusCode: number,
-  ctx: HeaderExtractionContext,
-  models: Model[],
-): TypeRef {
-  const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
+function materializeUnderFreeName(item: DeferredInlineType, registry: ModelShapeRegistry, models: Model[]): TypeRef {
+  const { schema, name, statusCode, operationQualifier, parentName, componentSchemas } = item;
   const byStatus = `${name}${statusCode}`;
-  const byOperation = `${ctx.operationQualifier}${name}`;
-  const byBoth = `${ctx.operationQualifier}${name}${statusCode}`;
-  let candidates = [name, byStatus, byOperation, byBoth];
+  const byOperation = `${operationQualifier}${name}`;
+  const byBoth = `${operationQualifier}${name}${statusCode}`;
+  let candidates = item.kind === 'header' ? [name, byStatus, byOperation, byBoth] : [name, byStatus];
+  const numeric = Array.from({ length: NUMERIC_NAME_CANDIDATES }, (_, i) => `${name}${i + 2}`);
+  const hashed = `${name}${schemaDisambiguator(schema)}`;
+  // Names other shapes own, reserved so a title-mapped variant steps around them.
+  const occupied = new Set<string>();
 
-  for (let attempt = 0; ; attempt++) {
-    const propertyName =
-      attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`;
+  type Trial = {
+    fingerprints: ReadonlyArray<readonly [Model, string]>;
+    collisions: Array<{ name: string; owner: { fingerprint: string; operation?: string } }>;
+  };
+  const attempt = (propertyName: string): Trial => {
     const trial: Model[] = [];
     extractInlineModelsFromProperties(
       { properties: { [propertyName]: schema } },
       trial,
       parentName,
-      ctx.componentSchemas,
+      componentSchemas,
+      undefined,
+      occupied,
     );
-
     const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
     const collisions = fingerprints.flatMap(([model, fingerprint]) => {
-      const registered = ctx.registry.get(model.name);
-      return registered !== undefined && registered.fingerprint !== fingerprint ? [registered] : [];
+      const owner = registry.get(model.name);
+      return owner !== undefined && owner.fingerprint !== fingerprint ? [{ name: model.name, owner }] : [];
     });
+    return { fingerprints, collisions };
+  };
+  const accept = (propertyName: string, { fingerprints, collisions }: Trial): TypeRef => {
     if (collisions.length > 0) {
-      // Decide the preference between candidates 2 and 3 from the bare name's
-      // owner: a clash within this operation reads best by status code, one
-      // with a component or another operation by operation name.
-      if (attempt === 0 && !collisions.every((c) => c.operation === ctx.operationQualifier)) {
-        candidates = [name, byOperation, byStatus, byBoth];
-      }
-      continue;
+      const taken = collisions.map((c) => `"${c.name}"`).join(', ');
+      console.warn(
+        `[oagen] Warning: No free model name for ${item.label}: ${taken} already name a different shape — keeping the existing definition`,
+      );
     }
-
     for (const [model, fingerprint] of fingerprints) {
-      if (ctx.registry.has(model.name)) continue;
-      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
+      if (registry.has(model.name)) continue;
+      registry.set(model.name, { fingerprint, operation: operationQualifier });
       models.push(model);
     }
-    return schemaToTypeRef(schema, propertyName, parentName);
+    return schemaToTypeRef(schema, propertyName, parentName, undefined, occupied);
+  };
+
+  let index = 0;
+  // The colliding names seen when the candidate last advanced: seeing the
+  // same set again means they do not depend on the candidate (a nested
+  // title-mapped variant, which no reservation reaches), so the schema
+  // settles on the earlier candidate rather than walking the rest.
+  let keyWhenAdvanced: string | undefined;
+  for (;;) {
+    const sequence = [...candidates, ...numeric, hashed];
+    const propertyName = sequence[index];
+    const result = attempt(propertyName);
+    if (result.collisions.length === 0) return accept(propertyName, result);
+
+    // Decide the preference between candidates 2 and 3 from the bare name's
+    // owner: a clash within this operation reads best by status code, one
+    // with a component, a primary body or another operation by operation name.
+    if (
+      item.kind === 'header' &&
+      index === 0 &&
+      !result.collisions.every((c) => c.owner.operation === operationQualifier)
+    ) {
+      candidates = [name, byOperation, byStatus, byBoth];
+    }
+    const fresh = result.collisions.filter((c) => !occupied.has(c.name));
+    if (fresh.length > 0) {
+      for (const c of fresh) occupied.add(c.name);
+      continue;
+    }
+    const key = result.collisions
+      .map((c) => c.name)
+      .sort()
+      .join(',');
+    if (key === keyWhenAdvanced) {
+      const settled = sequence[index - 1];
+      return accept(settled, attempt(settled));
+    }
+    keyWhenAdvanced = key;
+    index++;
+    if (index >= sequence.length) {
+      const last = sequence[sequence.length - 1];
+      return accept(last, attempt(last));
+    }
   }
+}
+
+/**
+ * The first six hex characters of the SHA-1 of a schema's shape, upper-cased
+ * so the name it ends stays a `toPascalCase` fixed point.
+ */
+function schemaDisambiguator(schema: SchemaObject): string {
+  return createHash('sha1').update(stableStringify(schema)).digest('hex').slice(0, 6).toUpperCase();
 }
 
 /**
@@ -1750,15 +1893,16 @@ function typeHeaderSchema(
  * survives so callers can leave the `headers` key off entirely.
  *
  * An object-shaped header schema (directly, inside an array, or as a oneOf
- * variant) becomes a `ModelRef`, so the model it names is appended to
- * `models` — otherwise the ref would dangle with nothing to emit.
+ * variant) becomes a `ModelRef`, so the model it names must be materialized
+ * — otherwise the ref would dangle with nothing to emit. That naming waits
+ * for every primary model (`resolveDeferredInlineTypes`), so a header with a
+ * schema is deferred and its `type` filled in then.
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
   operationLabel: string,
   statusCode: number,
-  ctx: HeaderExtractionContext,
-  models: Model[],
+  ctx: ResponseTypingContext,
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
@@ -1775,17 +1919,27 @@ function extractResponseHeaders(
     // `content`, the first (only) media type's schema types the header.
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
-    const type: TypeRef = schema
-      ? typeHeaderSchema(schema, name, statusCode, ctx, models)
-      : { kind: 'primitive', type: 'string' };
-
-    result.push({
+    const entry: ResponseHeader = {
       name,
-      type,
+      type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
       deprecated: header.deprecated || undefined,
-    });
+    };
+    if (schema) {
+      ctx.deferred.push({
+        kind: 'header',
+        schema,
+        name,
+        statusCode,
+        operationQualifier: ctx.operationQualifier,
+        parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
+        componentSchemas: ctx.componentSchemas,
+        label: `header ${name} on ${statusCode} of ${operationLabel}`,
+        target: entry,
+      });
+    }
+    result.push(entry);
   }
 
   return result.length > 0 ? result : undefined;
@@ -2108,6 +2262,8 @@ interface ContentModelNaming {
   /** `Response` for a success entry, `Error` for an error entry. */
   suffix: string;
   statusCode: number;
+  /** The operation in diagnostics: its operationId, else `METHOD /path`. */
+  label: string;
 }
 
 /**
@@ -2125,19 +2281,19 @@ function extractResponseContents(
   primaryContentType: string | undefined,
   primaryType: TypeRef | undefined,
   naming: ContentModelNaming,
-  ctx: HeaderExtractionContext,
-  models: Model[],
+  ctx: ResponseTypingContext,
 ): { contentTypes: string[]; contents: ResponseContent[] } | undefined {
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
   if (contentTypes.length === 0) return undefined;
-  const contents = contentTypes.map((contentType) => ({
-    contentType,
-    type:
+  const contents = contentTypes.map((contentType) => {
+    const entry: ResponseContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+    entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
-        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, models),
-  }));
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry);
+    return entry;
+  });
   return { contentTypes, contents };
 }
 
@@ -2149,22 +2305,34 @@ function extractResponseContents(
  * and one without a schema is `unknown`. The one addition is that an inline
  * object under such a media type is materialized — the primary pick's
  * `...Response` name belongs to the primary body, so this one is named after
- * its media type as well: `RenderPetCardTextHtmlResponse`.
+ * its media type as well: `RenderPetCardTextHtmlResponse`. That naming waits
+ * for every primary model (`resolveDeferredInlineTypes`), so a schema is
+ * deferred and `target.type` — returned here as a placeholder — filled in
+ * then.
  */
 function typeSecondaryContent(
   contentType: string,
   schema: SchemaObject | undefined,
   naming: ContentModelNaming,
-  ctx: HeaderExtractionContext,
-  models: Model[],
+  ctx: ResponseTypingContext,
+  target: ResponseContent,
 ): TypeRef {
   if (contentType === 'application/octet-stream' || contentType === 'application/pdf') {
     return { kind: 'primitive', type: 'string', format: 'binary' };
   }
   if (TEXT_RESPONSE_MEDIA_TYPES.includes(contentType)) return { kind: 'primitive', type: 'string' };
   if (!schema) return { kind: 'primitive', type: 'unknown' };
-  const name = `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`;
-  return typeContentSchema(schema, name, naming.statusCode, ctx, models);
+  ctx.deferred.push({
+    kind: 'content',
+    schema,
+    name: `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`,
+    statusCode: naming.statusCode,
+    operationQualifier: ctx.operationQualifier,
+    componentSchemas: ctx.componentSchemas,
+    label: `${contentType} on ${naming.statusCode} of ${naming.label}`,
+    target,
+  });
+  return target.type;
 }
 
 /**
@@ -2180,49 +2348,6 @@ function mediaTypeToken(contentType: string): string {
   return token.length > 0 ? token : 'Content';
 }
 
-/**
- * Type a secondary media type's schema and materialize the inline models it
- * names, the way `typeHeaderSchema` does for a header: the schema is
- * extracted as a one-property object whose property is `name`, so an inline
- * object becomes the model `name` and everything reachable through it — a
- * nested object, array items, map values, `oneOf` variants — is named exactly
- * as `schemaToTypeRef` names it. The name goes through the spec-wide shape
- * registry: a shape identical to the name's current owner shares it (the
- * same inline body on a 200 and a 201 yields one model), and a different
- * shape is re-derived under the status code (`...Response201`), then a
- * numeric suffix.
- */
-function typeContentSchema(
-  schema: SchemaObject,
-  name: string,
-  statusCode: number,
-  ctx: HeaderExtractionContext,
-  models: Model[],
-): TypeRef {
-  for (let attempt = 0; ; attempt++) {
-    const propertyName = attempt === 0 ? name : attempt === 1 ? `${name}${statusCode}` : `${name}${attempt}`;
-    const trial: Model[] = [];
-    extractInlineModelsFromProperties(
-      { properties: { [propertyName]: schema } },
-      trial,
-      undefined,
-      ctx.componentSchemas,
-    );
-    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
-    const collides = fingerprints.some(([model, fingerprint]) => {
-      const registered = ctx.registry.get(model.name);
-      return registered !== undefined && registered.fingerprint !== fingerprint;
-    });
-    if (collides) continue;
-    for (const [model, fingerprint] of fingerprints) {
-      if (ctx.registry.has(model.name)) continue;
-      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
-      models.push(model);
-    }
-    return schemaToTypeRef(schema, propertyName);
-  }
-}
-
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2230,7 +2355,7 @@ function extractResponses(
   path?: string,
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
-  headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
+  ctx: ResponseTypingContext = { operationQualifier: '', deferred: [] },
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
@@ -2261,12 +2386,8 @@ function extractResponses(
 
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
-  // Kept apart from `inlineModels`, which the latest 2xx body replaces
-  // wholesale below; merged once every status code has been read.
-  const headerModels: Model[] = [];
-  // Inline bodies declared only for a secondary media type, kept apart for
-  // the same reason; named from the operation's response stem.
-  const contentModels: Model[] = [];
+  // Names the inline body a secondary media type declares: this stem, the
+  // media type and the entry's role (`RenderPetCard` + `TextHtml` + `Response`).
   const contentModelBase = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
 
   for (const [statusCode, resp] of Object.entries(responses)) {
@@ -2275,8 +2396,7 @@ function extractResponses(
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
     // response no branch below keeps (`default`, 1xx) declares none worth
     // materializing models for.
-    const headers =
-      code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, headerContext, headerModels) : undefined;
+    const headers = code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, ctx) : undefined;
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
@@ -2327,9 +2447,8 @@ function extractResponses(
         resp.content,
         primaryContentType,
         extractedType,
-        { base: contentModelBase, suffix: 'Response', statusCode: code },
-        headerContext,
-        contentModels,
+        { base: contentModelBase, suffix: 'Response', statusCode: code, label: opLabel },
+        ctx,
       );
       allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }), ...contents });
     } else if (code >= 300 && code < 400) {
@@ -2340,9 +2459,8 @@ function extractResponses(
         resp.content,
         undefined,
         undefined,
-        { base: contentModelBase, suffix: 'Response', statusCode: code },
-        headerContext,
-        contentModels,
+        { base: contentModelBase, suffix: 'Response', statusCode: code, label: opLabel },
+        ctx,
       );
       allSuccessResponses.push({
         statusCode: code,
@@ -2357,9 +2475,8 @@ function extractResponses(
         resp.content,
         type ? 'application/json' : undefined,
         type,
-        { base: contentModelBase, suffix: 'Error', statusCode: code },
-        headerContext,
-        contentModels,
+        { base: contentModelBase, suffix: 'Error', statusCode: code, label: opLabel },
+        ctx,
       );
       // An error's `type` is its application/json body by definition, so the
       // lists are kept only when they say something `type` does not: another
@@ -2382,8 +2499,6 @@ function extractResponses(
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
-  if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
-  if (contentModels.length > 0) inlineModels = [...inlineModels, ...contentModels];
 
   return {
     response,

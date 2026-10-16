@@ -1,5 +1,5 @@
 import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectAlternateResponseContents } from '../ir/types.js';
+import { walkTypeRef, collectAlternateResponseContents, collectModelRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
@@ -13,11 +13,37 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 
 /**
  * Collect inline enum definitions from operation parameters (query, path, header)
- * list-envelope companion fields, and response headers, and promote them to
- * top-level enums so emitters can generate typed enum files.
+ * list-envelope companion fields, response headers and secondary response
+ * bodies, and promote them to top-level enums so emitters can generate typed
+ * enum files.
+ *
+ * `models` lets the walk continue into the models a header or secondary body
+ * references — the ones the parser materialized for them, never a component
+ * (`componentNames`), whose enums the model pass owns — so an enum nested in
+ * such a model gets the same collision-aware treatment as one at the top: a
+ * name a component enum already owns with other values is renamed, not
+ * silently given the component's values.
  */
-export function collectInlineEnumsFromOperations(services: Service[], enums: Enum[]): void {
+export function collectInlineEnumsFromOperations(
+  services: Service[],
+  enums: Enum[],
+  models: readonly Model[] = [],
+  componentNames: ReadonlySet<string> = new Set(),
+): void {
   const enumNames = new Set(enums.map((e) => e.name));
+  const modelsByName = new Map(models.map((model) => [model.name, model]));
+  // Each materialized model is visited once, under the first qualifier that reaches it.
+  const visited = new Set<string>();
+  const collectThroughModels = (type: TypeRef, qualifier: string | undefined): void => {
+    collectDistinctEnums(type, qualifier, enums, enumNames);
+    for (const name of collectModelRefs(type)) {
+      if (visited.has(name) || componentNames.has(name)) continue;
+      visited.add(name);
+      const model = modelsByName.get(name);
+      if (!model) continue;
+      for (const field of model.fields) collectThroughModels(field.type, qualifier);
+    }
+  };
   for (const service of services) {
     for (const op of service.operations) {
       for (const param of [
@@ -36,14 +62,14 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
-        for (const header of headers) collectDistinctEnums(header.type, qualifier, enums, enumNames);
+        for (const header of headers) collectThroughModels(header.type, qualifier);
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`) is typed like a response body, so its inline enums
       // are promoted the same way. Its name is already operation-qualified; a
       // clash with a different value set falls back to a numeric suffix.
       for (const content of collectAlternateResponseContents(op)) {
-        collectDistinctEnums(content.type, undefined, enums, enumNames);
+        collectThroughModels(content.type, undefined);
       }
     }
   }

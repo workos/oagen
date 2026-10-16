@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
@@ -11,6 +13,55 @@ import type { ApiSpec, Enum, Model, Operation, ResponseContent, Service, TypeRef
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/response-content-types.yml');
+
+/** Parse an inline OpenAPI document through the whole pipeline (models, enums, ref validation). */
+async function parseDocument(document: Record<string, unknown>): Promise<ApiSpec> {
+  const dir = mkdtempSync(join(tmpdir(), 'oagen-response-content-types-'));
+  try {
+    const file = join(dir, 'spec.json');
+    writeFileSync(file, JSON.stringify(document));
+    return await parseSpec(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** An OpenAPI 3.1 document with the given paths and component schemas. */
+function document(paths: Record<string, unknown>, schemas: Record<string, unknown> = {}): Record<string, unknown> {
+  return { openapi: '3.1.0', info: { title: 'Test', version: '1' }, paths, components: { schemas } };
+}
+
+/** A GET operation whose 200 declares the given content map (and headers, when given). */
+function getWith(
+  operationId: string,
+  content: Record<string, unknown>,
+  responses: Record<string, unknown> = {},
+  headers?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    get: {
+      operationId,
+      responses: { '200': { description: 'ok', ...(headers && { headers }), content }, ...responses },
+    },
+  };
+}
+
+const str = { type: 'string' };
+const obj = (properties: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+  type: 'object',
+  properties,
+  ...extra,
+});
+/** A title-mapped variant: a title and the `kind` const every variant pins (`titleMappedDiscriminatorProperty`). */
+const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+  title,
+  type: 'object',
+  properties: { kind: { const: kind }, ...properties },
+});
+/** A title-mapped `oneOf` of `Circle` and `Square`, with the given extra `Circle` properties. */
+const shapes = (circle: Record<string, unknown>, square: Record<string, unknown> = { side: str }) => ({
+  oneOf: [titled('Circle', 'circle', circle), titled('Square', 'square', square)],
+});
 
 /** Extract the only operation declared in an inline paths object. */
 function singleOperation(paths: Record<string, unknown>): { operation: Operation; inlineModels: Model[] } {
@@ -624,6 +675,576 @@ describe('response content types', () => {
       ]);
       // The ref itself is renamed, so the IR keeps pointing at the enum that was promoted.
       expect(second.name).toBe('Mode2');
+    });
+  });
+
+  describe('naming against every other model', () => {
+    const fieldNames = (spec: ApiSpec, name: string) =>
+      spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+    const vendor = (schema: unknown) => ({
+      'application/json': { schema: str },
+      'application/vnd.shape+json': { schema },
+    });
+
+    it(
+      'terminates when a title-mapped variant collides with a differently shaped component, qualifying the variant',
+      { timeout: 5000 },
+      async () => {
+        const spec = await parseDocument(
+          document(
+            { '/shapes': getWith('listShapes', vendor(shapes({ radius: str }))) },
+            { Circle: obj({ diameter: str }) },
+          ),
+        );
+        expect(findOp(spec, 'listShapes').responseContents?.[1].type).toMatchInlineSnapshot(`
+          {
+            "compositionKind": "oneOf",
+            "discriminator": {
+              "mapping": {
+                "circle": "CircleListShapesApplicationVndShapeJsonResponse",
+                "square": "Square",
+              },
+              "property": "kind",
+            },
+            "kind": "union",
+            "variants": [
+              {
+                "kind": "model",
+                "name": "CircleListShapesApplicationVndShapeJsonResponse",
+              },
+              {
+                "kind": "model",
+                "name": "Square",
+              },
+            ],
+          }
+        `);
+        expect(spec.models.filter((m) => m.name === 'Circle')).toHaveLength(1);
+        expect(fieldNames(spec, 'Circle')).toEqual(['diameter']);
+        expect(fieldNames(spec, 'CircleListShapesApplicationVndShapeJsonResponse')).toEqual(['kind', 'radius']);
+        expect(fieldNames(spec, 'Square')).toEqual(['kind', 'side']);
+      },
+    );
+
+    it(
+      "qualifies a variant whose title another operation's primary body uses for a different shape, and shares it for the same shape",
+      { timeout: 5000 },
+      async () => {
+        const spec = await parseDocument(
+          document({
+            '/a': getWith('getA', { 'application/json': { schema: shapes({ radius: str }) } }),
+            '/b': getWith('getB', vendor(shapes({ diameter: str }))),
+            '/c': getWith('getC', vendor(shapes({ radius: str }))),
+          }),
+        );
+        expect(spec.models.filter((m) => m.name === 'Circle')).toHaveLength(1);
+        expect(fieldNames(spec, 'Circle')).toEqual(['kind', 'radius']);
+        expect(findOp(spec, 'getB').responseContents?.[1].type).toMatchObject({
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'CircleGetBApplicationVndShapeJsonResponse' },
+            { kind: 'model', name: 'Square' },
+          ],
+        });
+        expect(fieldNames(spec, 'CircleGetBApplicationVndShapeJsonResponse')).toEqual(['kind', 'diameter']);
+        // The identical shape shares the primary body's model instead.
+        expect(findOp(spec, 'getC').responseContents?.[1].type).toMatchObject({
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'Circle' },
+            { kind: 'model', name: 'Square' },
+          ],
+        });
+        expect(spec.models.filter((m) => m.name.startsWith('CircleGetC'))).toHaveLength(0);
+        expect(spec.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+      },
+    );
+
+    it("keeps a primary body's titled variant when the vendor alternative of the same operation gives the title another shape", async () => {
+      const spec = await parseDocument(
+        document({
+          '/shapes': getWith('listShapes', {
+            'application/json': { schema: shapes({ radius: str }) },
+            'application/vnd.shape+json': { schema: shapes({ diameter: str }) },
+          }),
+        }),
+      );
+      expect(spec.models.filter((m) => m.name === 'Circle')).toHaveLength(1);
+      expect(fieldNames(spec, 'Circle')).toEqual(['kind', 'radius']);
+      expect(fieldNames(spec, 'CircleListShapesApplicationVndShapeJsonResponse')).toEqual(['kind', 'diameter']);
+      expect(findOp(spec, 'listShapes').response).toMatchObject({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'Circle' },
+          { kind: 'model', name: 'Square' },
+        ],
+      });
+    });
+
+    it("steps around another operation's primary response model whose name the derived name would take", async () => {
+      const spec = await parseDocument(
+        document({
+          '/a': getWith('getAApplicationVndXJson', { 'application/json': { schema: obj({ primary: str }) } }),
+          '/b': getWith('getA', {
+            'application/json': { schema: str },
+            'application/vnd.x+json': { schema: obj({ secondary: str }) },
+          }),
+        }),
+      );
+      expect(fieldNames(spec, 'GetAApplicationVndXJsonResponse')).toEqual(['primary']);
+      expect(findOp(spec, 'getA').responseContents?.[1].type).toEqual({
+        kind: 'model',
+        name: 'GetAApplicationVndXJsonResponse200',
+      });
+      expect(fieldNames(spec, 'GetAApplicationVndXJsonResponse200')).toEqual(['secondary']);
+    });
+
+    it(
+      'settles on the first candidate and reports, rather than looping, when a nested title-mapped variant cannot leave a taken name',
+      { timeout: 5000 },
+      async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const spec = await parseDocument(
+          document(
+            { '/shapes': getWith('listShapes', vendor(obj({ shape: shapes({ radius: str }) }))) },
+            { Circle: obj({ diameter: str }) },
+          ),
+        );
+        // The component keeps its name and shape; the body keeps its plain name.
+        expect(fieldNames(spec, 'Circle')).toEqual(['diameter']);
+        expect(findOp(spec, 'listShapes').responseContents?.[1].type).toEqual({
+          kind: 'model',
+          name: 'ListShapesApplicationVndShapeJsonResponse',
+        });
+        expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(
+          '[oagen] Warning: No free model name for application/vnd.shape+json on 200 of listShapes: "Circle" already name a different shape — keeping the existing definition',
+        );
+      },
+    );
+
+    it('types every array, map, nullable and composition form schemaToTypeRef accepts, materializing each inline object', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const item = obj({ id: str });
+      const spec = await parseDocument(
+        document(
+          {
+            '/things': getWith('listThings', {
+              'application/json': { schema: { $ref: '#/components/schemas/Thing' } },
+              'application/vnd.items-no-type+json': { schema: { items: item } },
+              'application/vnd.nullable-array+json': { schema: { type: ['array', 'null'], items: item } },
+              'application/vnd.nullable-flag-array+json': { schema: { type: 'array', nullable: true, items: item } },
+              'application/vnd.map+json': { schema: { type: 'object', additionalProperties: item } },
+              'application/vnd.nullable-map+json': { schema: { type: ['object', 'null'], additionalProperties: item } },
+              'application/vnd.map-no-type+json': { schema: { additionalProperties: item } },
+              'application/vnd.nullable-object+json': { schema: { type: ['object', 'null'], properties: { id: str } } },
+              'application/vnd.oneof-null+json': { schema: { oneOf: [item, { type: 'null' }] } },
+              'application/vnd.allof-single+json': { schema: { allOf: [item] } },
+              'application/vnd.allof-augmented+json': {
+                schema: { allOf: [{ $ref: '#/components/schemas/Thing' }, obj({ extra: str })] },
+              },
+              'application/vnd.anyof-objects+json': { schema: { anyOf: [obj({ a: str }), obj({ b: str })] } },
+              'application/vnd.nested+json': {
+                schema: obj({
+                  owner: obj({ name: str }),
+                  tags: { items: obj({ label: str }) },
+                  attrs: { type: 'object', additionalProperties: obj({ value: str }) },
+                }),
+              },
+            }),
+          },
+          { Thing: obj({ id: str }) },
+        ),
+      );
+      const op = findOp(spec, 'listThings');
+      const modelNames = new Set(spec.models.map((m) => m.name));
+      for (const content of collectAlternateResponseContents(op)) {
+        for (const name of collectModelRefs(content.type)) {
+          expect(modelNames, `${content.contentType} → ${name}`).toContain(name);
+        }
+      }
+      // validateModelRefs walks every model's fields too, so a nested dangling ref would show here.
+      expect(unresolvedWarnings(warn)).toEqual([]);
+      expect(op.responseContents?.slice(1).map((c) => [c.contentType, c.type])).toMatchInlineSnapshot(`
+        [
+          [
+            "application/vnd.items-no-type+json",
+            {
+              "items": {
+                "kind": "model",
+                "name": "ListThingsApplicationVndItemsNoTypeJsonResponse",
+              },
+              "kind": "array",
+            },
+          ],
+          [
+            "application/vnd.nullable-array+json",
+            {
+              "inner": {
+                "items": {
+                  "kind": "model",
+                  "name": "ListThingsApplicationVndNullableArrayJsonResponse",
+                },
+                "kind": "array",
+              },
+              "kind": "nullable",
+            },
+          ],
+          [
+            "application/vnd.nullable-flag-array+json",
+            {
+              "inner": {
+                "items": {
+                  "kind": "model",
+                  "name": "ListThingsApplicationVndNullableFlagArrayJsonResponse",
+                },
+                "kind": "array",
+              },
+              "kind": "nullable",
+            },
+          ],
+          [
+            "application/vnd.map+json",
+            {
+              "kind": "map",
+              "valueType": {
+                "kind": "model",
+                "name": "ListThingsApplicationVndMapJsonResponse",
+              },
+            },
+          ],
+          [
+            "application/vnd.nullable-map+json",
+            {
+              "inner": {
+                "kind": "map",
+                "valueType": {
+                  "kind": "model",
+                  "name": "ListThingsApplicationVndNullableMapJsonResponse",
+                },
+              },
+              "kind": "nullable",
+            },
+          ],
+          [
+            "application/vnd.map-no-type+json",
+            {
+              "kind": "primitive",
+              "type": "unknown",
+            },
+          ],
+          [
+            "application/vnd.nullable-object+json",
+            {
+              "inner": {
+                "kind": "model",
+                "name": "ListThingsApplicationVndNullableObjectJsonResponse",
+              },
+              "kind": "nullable",
+            },
+          ],
+          [
+            "application/vnd.oneof-null+json",
+            {
+              "inner": {
+                "kind": "model",
+                "name": "ListThingsApplicationVndOneofNullJsonResponse",
+              },
+              "kind": "nullable",
+            },
+          ],
+          [
+            "application/vnd.allof-single+json",
+            {
+              "kind": "model",
+              "name": "ListThingsApplicationVndAllofSingleJsonResponse",
+            },
+          ],
+          [
+            "application/vnd.allof-augmented+json",
+            {
+              "kind": "model",
+              "name": "ListThingsApplicationVndAllofAugmentedJsonResponse",
+            },
+          ],
+          [
+            "application/vnd.anyof-objects+json",
+            {
+              "compositionKind": "anyOf",
+              "kind": "union",
+              "variants": [
+                {
+                  "kind": "model",
+                  "name": "ListThingsApplicationVndAnyofObjectsJsonResponse",
+                },
+                {
+                  "kind": "model",
+                  "name": "ListThingsApplicationVndAnyofObjectsJsonResponseWithB",
+                },
+              ],
+            },
+          ],
+          [
+            "application/vnd.nested+json",
+            {
+              "kind": "model",
+              "name": "ListThingsApplicationVndNestedJsonResponse",
+            },
+          ],
+        ]
+      `);
+      expect(
+        spec.models.filter((m) => m.name.startsWith('ListThings')).map((m) => [m.name, m.fields.map((f) => f.name)]),
+      ).toMatchInlineSnapshot(`
+        [
+          [
+            "ListThingsApplicationVndItemsNoTypeJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNullableArrayJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNullableFlagArrayJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndMapJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNullableMapJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNullableObjectJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndOneofNullJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndAllofSingleJsonResponse",
+            [
+              "id",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndAllofAugmentedJsonResponse",
+            [
+              "id",
+              "extra",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndAnyofObjectsJsonResponse",
+            [
+              "a",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndAnyofObjectsJsonResponseWithB",
+            [
+              "b",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNestedJsonResponse",
+            [
+              "owner",
+              "tags",
+              "attrs",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNestedJsonResponseOwner",
+            [
+              "name",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNestedJsonResponseTags",
+            [
+              "label",
+            ],
+          ],
+          [
+            "ListThingsApplicationVndNestedJsonResponseAttr",
+            [
+              "value",
+            ],
+          ],
+        ]
+      `);
+    });
+
+    it('renames a nested enum of a secondary body whose name a component enum owns with other values', async () => {
+      const spec = await parseDocument(
+        document(
+          {
+            '/reports': getWith('getReport', {
+              'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+              'application/vnd.api+json': {
+                schema: obj({
+                  status: { type: 'string', enum: ['x', 'y'] },
+                  meta: obj({ level: { type: 'string', enum: ['low', 'high'] } }),
+                }),
+              },
+            }),
+          },
+          {
+            Report: obj({ id: str }),
+            GetReportApplicationVndApiJsonResponseStatus: { type: 'string', enum: ['a', 'b'] },
+            GetReportApplicationVndApiJsonResponseMetaLevel: { type: 'string', enum: ['one', 'two'] },
+          },
+        ),
+      );
+      const fieldType = (model: string, field: string) =>
+        spec.models.find((m) => m.name === model)?.fields.find((f) => f.name === field)?.type;
+      const values = (name: string) => spec.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+      expect(fieldType('GetReportApplicationVndApiJsonResponse', 'status')).toMatchObject({
+        kind: 'enum',
+        name: 'GetReportApplicationVndApiJsonResponseStatus2',
+      });
+      expect(fieldType('GetReportApplicationVndApiJsonResponseMeta', 'level')).toMatchObject({
+        kind: 'enum',
+        name: 'GetReportApplicationVndApiJsonResponseMetaLevel2',
+      });
+      // The component enums keep their values; the body's get their own names.
+      expect(values('GetReportApplicationVndApiJsonResponseStatus')).toEqual(['a', 'b']);
+      expect(values('GetReportApplicationVndApiJsonResponseStatus2')).toEqual(['x', 'y']);
+      expect(values('GetReportApplicationVndApiJsonResponseMetaLevel')).toEqual(['one', 'two']);
+      expect(values('GetReportApplicationVndApiJsonResponseMetaLevel2')).toEqual(['low', 'high']);
+    });
+
+    it("renames a nested enum of a header's model the same way", async () => {
+      // A singular service name, so the component's name survives cleanSchemaName
+      // unchanged and genuinely collides with the header model's field enum.
+      const spec = await parseDocument(
+        document(
+          {
+            '/inventory': getWith(
+              'getInventory',
+              { 'application/json': { schema: str } },
+              {},
+              { 'X-Meta': { schema: obj({ policy: { type: 'string', enum: ['fast', 'slow'] } }) } },
+            ),
+          },
+          { InventoryXMetaPolicy: { type: 'string', enum: ['retry', 'stop'] } },
+        ),
+      );
+      const meta = spec.models.find((m) => m.name === 'InventoryXMeta');
+      expect(meta?.fields[0].type).toMatchObject({ kind: 'enum', name: 'InventoryXMetaPolicy2' });
+      expect(spec.enums.find((e) => e.name === 'InventoryXMetaPolicy')?.values.map((v) => v.value)).toEqual([
+        'retry',
+        'stop',
+      ]);
+      expect(spec.enums.find((e) => e.name === 'InventoryXMetaPolicy2')?.values.map((v) => v.value)).toEqual([
+        'fast',
+        'slow',
+      ]);
+    });
+
+    it('keeps separate models for bodies whose fields differ only in their limits', () => {
+      const body = (minLength: number) => obj({ name: { type: 'string', minLength } });
+      const { operation, inlineModels } = singleOperation({
+        '/things': {
+          get: {
+            operationId: 'listThings',
+            responses: {
+              '200': { description: 'ok', content: vendor(body(1)) },
+              '201': { description: 'ok', content: vendor(body(5)) },
+            },
+          },
+        },
+      });
+      expect(operation.successResponses!.map((r) => r.contents![1].type)).toEqual([
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse' },
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse201' },
+      ]);
+      expect(inlineModels.map((m) => [m.name, m.fields[0].constraints])).toEqual([
+        ['ListThingsApplicationVndShapeJsonResponse', { minLength: 1 }],
+        ['ListThingsApplicationVndShapeJsonResponse201', { minLength: 5 }],
+      ]);
+    });
+
+    it('keeps separate models for bodies that differ only in their own limits', () => {
+      const body = (minProperties: number) => obj({ name: str }, { minProperties });
+      const { operation, inlineModels } = singleOperation({
+        '/things': {
+          get: {
+            operationId: 'listThings',
+            responses: {
+              '200': { description: 'ok', content: vendor(body(1)) },
+              '201': { description: 'ok', content: vendor(body(2)) },
+            },
+          },
+        },
+      });
+      expect(operation.successResponses!.map((r) => r.contents![1].type)).toEqual([
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse' },
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse201' },
+      ]);
+      expect(inlineModels.map((m) => [m.name, m.constraints])).toEqual([
+        ['ListThingsApplicationVndShapeJsonResponse', { minProperties: 1 }],
+        ['ListThingsApplicationVndShapeJsonResponse201', { minProperties: 2 }],
+      ]);
+    });
+
+    it('keeps separate header models for headers that differ only in their limits', () => {
+      const meta = (maxLength: number) => ({ schema: obj({ etag: { type: 'string', maxLength } }) });
+      const { operation, inlineModels } = singleOperation({
+        '/documents': {
+          get: {
+            operationId: 'listDocuments',
+            responses: {
+              '200': { description: 'ok', headers: { 'X-Meta': meta(10) } },
+              '429': { description: 'throttled', headers: { 'X-Meta': meta(20) } },
+            },
+          },
+        },
+      });
+      expect(operation.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+      expect(operation.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta429' });
+      expect(inlineModels.map((m) => [m.name, m.fields[0].constraints])).toEqual([
+        ['DocumentsXMeta', { maxLength: 10 }],
+        ['DocumentsXMeta429', { maxLength: 20 }],
+      ]);
+    });
+
+    it('shares one model for bodies whose shapes differ only in documentation', () => {
+      const body = (description: string) => obj({ name: { type: 'string', description } });
+      const { operation, inlineModels } = singleOperation({
+        '/things': {
+          get: {
+            operationId: 'listThings',
+            responses: {
+              '200': { description: 'ok', content: vendor(body('The name.')) },
+              '201': { description: 'ok', content: vendor(body('Its name.')) },
+            },
+          },
+        },
+      });
+      expect(operation.successResponses!.map((r) => r.contents![1].type)).toEqual([
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse' },
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse' },
+      ]);
+      expect(inlineModels).toHaveLength(1);
     });
   });
 });
