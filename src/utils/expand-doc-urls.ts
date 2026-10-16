@@ -17,6 +17,13 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
     return description.replace(/\(\/([^)]*)\)/g, `(${base}/$1)`);
   }
 
+  // A response's `description` is an optional key that is absent (not
+  // undefined) when the document declares none; expand it in place and leave
+  // an entry without one untouched so its shape is unchanged.
+  function expandResponse<T extends { description?: string }>(response: T): T {
+    return response.description ? { ...response, description: expand(response.description) } : response;
+  }
+
   return {
     ...spec,
     description: expand(spec.description),
@@ -29,6 +36,11 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
         // declares none; only expand it when present so the key stays absent.
         ...(op.summary ? { summary: expand(op.summary) } : {}),
         description: expand(op.description),
+        // Response descriptions follow the same rule as `summary`: expanded
+        // when present, and the keys stay absent otherwise.
+        ...(op.responseDescription ? { responseDescription: expand(op.responseDescription) } : {}),
+        ...(op.successResponses ? { successResponses: op.successResponses.map(expandResponse) } : {}),
+        errors: op.errors.map(expandResponse),
         pathParams: op.pathParams.map((p) => ({ ...p, description: expand(p.description) })),
         queryParams: op.queryParams.map((p) => ({ ...p, description: expand(p.description) })),
         bodyOwnedQueryParams: op.bodyOwnedQueryParams?.map((p) => ({ ...p, description: expand(p.description) })),
