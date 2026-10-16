@@ -1800,8 +1800,12 @@ describe('a field augmenting a $ref component via allOf gets its model in every 
     expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
   }
 
-  /** The merged augmentation model: the component's fields first, then the inline ones. */
-  const mergedFields = (detail: string) => ({ id: str, meta: model(`${detail}Meta`), extra: str });
+  /**
+   * The merged augmentation model: the component's fields first, typed as
+   * the component types them (`meta` stays `BaseMeta`, no copy under the
+   * merged model's name), then the inline ones.
+   */
+  const mergedFields = (_detail: string) => ({ id: str, meta: model('BaseMeta'), extra: str });
 
   const withComponents = (schemas: Record<string, SchemaObject>) => ({
     openapi: '3.1.0',
@@ -1831,7 +1835,8 @@ describe('a field augmenting a $ref component via allOf gets its model in every 
     const types = fieldTypesByModel(ir.models);
     expect(types['Thing']).toEqual({ id: str, detail: model('ThingDetail') });
     expect(types['ThingDetail']).toEqual(mergedFields('ThingDetail'));
-    expect(types['ThingDetailMeta']).toEqual({ tag: str });
+    expect(types['BaseMeta']).toEqual({ tag: str });
+    expect(types['ThingDetailMeta']).toBeUndefined();
     expect(ir.models.find((m) => m.name === 'ThingDetail')?.fields.find((f) => f.name === 'id')?.required).toBe(true);
     expectConsistent(ir, ['Base', 'Other', 'Thing']);
   });
@@ -1917,5 +1922,136 @@ describe('a field augmenting a $ref component via allOf gets its model in every 
     expect(types['ThingShapeDetail']).toEqual(mergedFields('ThingShapeDetail'));
     expect(types['ThingShape2']).toEqual({ side: num });
     expectConsistent(ir, ['Base', 'Other', 'Thing']);
+  });
+});
+
+describe('a component that extends itself through a field stays finite', () => {
+  const str = { kind: 'primitive', type: 'string' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const info = { title: 'cycles', version: '1' };
+  const withComponents = (schemas: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {},
+    components: { schemas },
+  });
+
+  /** Every `{ kind: 'model', name }` anywhere inside a value. */
+  function modelRefsAnywhere(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => modelRefsAnywhere(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      for (const v of Object.values(record)) modelRefsAnywhere(v, out);
+    }
+    return out;
+  }
+
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = modelRefsAnywhere(ir.services.flatMap((s) => s.operations));
+    for (const m of ir.models) modelRefsAnywhere(m.fields, referenced);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  it('the reported self-reference: Base.child extends Base, terminates, inherits, and points back at BaseChild', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(
+        withComponents({
+          Base: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              meta: { type: 'object', properties: { tag: { type: 'string' } } },
+              child: { allOf: [{ $ref: '#/components/schemas/Base' }, { properties: { extra: { type: 'string' } } }] },
+            },
+          },
+        }),
+      );
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Base']).toEqual({ id: str, meta: model('BaseMeta'), child: model('BaseChild') });
+      expect(types['BaseChild']).toEqual({ id: str, meta: model('BaseMeta'), child: model('BaseChild'), extra: str });
+      expect(types['BaseMeta']).toEqual({ tag: str });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['Base', 'BaseChild', 'BaseMeta']);
+      expectConsistent(ir, ['Base']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a two-component cycle: A.child extends B and B.child extends A', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(
+        withComponents({
+          A: {
+            type: 'object',
+            properties: {
+              a: { type: 'string' },
+              child: { allOf: [{ $ref: '#/components/schemas/B' }, { properties: { x: { type: 'string' } } }] },
+            },
+          },
+          B: {
+            type: 'object',
+            properties: {
+              b: { type: 'string' },
+              child: { allOf: [{ $ref: '#/components/schemas/A' }, { properties: { y: { type: 'string' } } }] },
+            },
+          },
+        }),
+      );
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      expect(types['A']).toEqual({ a: str, child: model('AChild') });
+      expect(types['AChild']).toEqual({ b: str, child: model('BChild'), x: str });
+      expect(types['B']).toEqual({ b: str, child: model('BChild') });
+      expect(types['BChild']).toEqual({ a: str, child: model('AChild'), y: str });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['A', 'AChild', 'B', 'BChild']);
+      expectConsistent(ir, ['A', 'B']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('refuses to resolve a component already being extended, keeps the inline fields, and says so once', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(
+        withComponents({
+          A: {
+            type: 'object',
+            properties: {
+              a: { type: 'string' },
+              child: {
+                allOf: [
+                  { $ref: '#/components/schemas/A' },
+                  {
+                    properties: {
+                      again: {
+                        allOf: [{ $ref: '#/components/schemas/A' }, { properties: { z: { type: 'string' } } }],
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      );
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]?.[0]).toContain(
+        '"AChildAgain" extends component "A" from inside an extension of "A"',
+      );
+      const types = fieldTypesByModel(ir.models);
+      expect(types['AChild']).toEqual({ a: str, child: model('AChild'), again: model('AChildAgain') });
+      expect(types['AChildAgain']).toEqual({ z: str });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['A', 'AChild', 'AChildAgain']);
+      expectConsistent(ir, ['A']);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

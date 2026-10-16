@@ -291,12 +291,38 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
 }
 
 /**
+ * Guard state threaded through the extractor's recursion so no document can
+ * make it run away: the components whose `allOf` augmentation encloses the
+ * current level (a `$ref` to one of them is not resolved again), the nesting
+ * depth, and the warnings already printed for this extraction.
+ */
+interface ExtractionTrail {
+  ancestry: ReadonlySet<string>;
+  depth: number;
+  warned: Set<string>;
+}
+
+/** Deeper inline nesting than this is not materialized; a warning says so once. */
+const MAX_INLINE_DEPTH = 64;
+
+function newTrail(): ExtractionTrail {
+  return { ancestry: new Set(), depth: 0, warned: new Set() };
+}
+
+function warnOnce(trail: ExtractionTrail, key: string, message: string): void {
+  if (trail.warned.has(key)) return;
+  trail.warned.add(key);
+  console.warn(message);
+}
+
+/**
  * Walk a schema's properties and materialise every inline object as a model.
  * `componentSchemas` is optional and only feeds `buildFieldFromSchema`, so a
  * field that `$ref`s a component can take its `example`/`examples` from it;
  * callers without the component map at hand simply omit it.
  * `siblingProperties` is the parent object's full property set, for callers
  * that see more of it than this schema shows (see `elementContextName`).
+ * `trail` is internal recursion state; callers leave it out.
  */
 export function extractInlineModelsFromProperties(
   schema: SchemaObject,
@@ -304,7 +330,17 @@ export function extractInlineModelsFromProperties(
   parentName?: string,
   componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
+  trail: ExtractionTrail = newTrail(),
 ): void {
+  if (trail.depth > MAX_INLINE_DEPTH) {
+    warnOnce(
+      trail,
+      `depth:${parentName ?? ''}`,
+      `[oagen] Warning: Inline schemas under "${parentName ?? '(root)'}" nest deeper than ${MAX_INLINE_DEPTH} levels; deeper inline models are not materialized`,
+    );
+    return;
+  }
+  const next: ExtractionTrail = { ...trail, depth: trail.depth + 1 };
   const properties = schema.properties ?? {};
   const allOfSchemas = schema.allOf ?? [];
   // Every property the parent object exposes, so array items and map values
@@ -315,7 +351,7 @@ export function extractInlineModelsFromProperties(
 
   for (const sub of allOfSchemas) {
     if (sub.properties) {
-      extractInlineModelsFromProperties(sub, results, parentName, componentSchemas, siblings);
+      extractInlineModelsFromProperties(sub, results, parentName, componentSchemas, siblings, next);
     }
   }
 
@@ -332,7 +368,7 @@ export function extractInlineModelsFromProperties(
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
       results.push(buildInlineModel(modelName, fieldSchema, componentSchemas));
-      extractInlineModelsFromProperties(fieldSchema, results, modelName, componentSchemas);
+      extractInlineModelsFromProperties(fieldSchema, results, modelName, componentSchemas, undefined, next);
     }
 
     // Array: schemaToTypeRef types the items with the field's own context
@@ -351,6 +387,8 @@ export function extractInlineModelsFromProperties(
         results,
         parentName,
         componentSchemas,
+        undefined,
+        next,
       );
     }
 
@@ -369,6 +407,8 @@ export function extractInlineModelsFromProperties(
           results,
           parentName,
           componentSchemas,
+          undefined,
+          next,
         );
       }
     }
@@ -376,10 +416,16 @@ export function extractInlineModelsFromProperties(
     // A field expressed via `allOf`. Mirror the four outcomes of the allOf
     // branch in `schemaToTypeRef` exactly:
     //  - a `$ref` member plus an inline object member: the field is typed as
-    //    the augmentation model `<Parent><Field>`, so merge the referenced
-    //    component(s) and the inline members into that model and recurse into
-    //    it (`mergeAllOfObjectSchema` resolves the refs against
-    //    `componentSchemas`);
+    //    the augmentation model `<Parent><Field>`; merge the referenced
+    //    component(s) and the inline members into that model
+    //    (`mergeAugmentation`), with every inherited property typed under
+    //    its component — `Base.meta` stays `BaseMeta`, a self-reference
+    //    `Base.child` stays `BaseChild` — and only the inline members' own
+    //    properties qualified under the merged model and recursed into. The
+    //    component pass already materialized whatever the inherited
+    //    properties reference, so nothing is duplicated, and a component that
+    //    extends itself through a field simply points back at a model that
+    //    exists instead of unfolding forever;
     //  - `$ref` members only: a plain reference to the first component,
     //    nothing to materialize;
     //  - a single non-`$ref` member: unwrapped and typed as the field itself,
@@ -388,11 +434,24 @@ export function extractInlineModelsFromProperties(
     if (fieldSchema.allOf) {
       const members = fieldSchema.allOf;
       const emitMerged = (): void => {
-        const merged = mergeAllOfObjectSchema(fieldSchema, componentSchemas);
-        if (Object.keys(merged.properties ?? {}).length === 0) return;
+        const merged = mergeAugmentation(fieldSchema, componentSchemas, trail.ancestry);
         const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
-        results.push(buildInlineModel(modelName, merged, componentSchemas));
-        extractInlineModelsFromProperties(merged, results, modelName, componentSchemas);
+        for (const component of merged.cycles) {
+          warnOnce(
+            trail,
+            `cycle:${modelName}<${component}`,
+            `[oagen] Warning: "${modelName}" extends component "${component}" from inside an extension of "${component}"; the inherited fields are not repeated`,
+          );
+        }
+        if (merged.properties.length === 0) return;
+        results.push(buildMergedModel(modelName, merged, componentSchemas));
+        const own: Record<string, SchemaObject> = {};
+        for (const p of merged.properties) if (p.origin === null) own[p.name] = p.schema;
+        const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
+        extractInlineModelsFromProperties({ properties: own }, results, modelName, componentSchemas, mergedSiblings, {
+          ...next,
+          ancestry: new Set([...trail.ancestry, ...merged.components]),
+        });
       };
       const only = members.length === 1 ? members[0] : undefined;
       if (members.some((m) => m.$ref)) {
@@ -404,6 +463,7 @@ export function extractInlineModelsFromProperties(
           parentName,
           componentSchemas,
           siblings,
+          next,
         );
       } else if (members.some((m) => m.properties)) {
         emitMerged();
@@ -433,7 +493,7 @@ export function extractInlineModelsFromProperties(
           if (!existingNames.has(variantName)) {
             existingNames.add(variantName);
             results.push(buildInlineModel(variantName, variant, componentSchemas));
-            extractInlineModelsFromProperties(variant, results, variantName, componentSchemas);
+            extractInlineModelsFromProperties(variant, results, variantName, componentSchemas, undefined, next);
             // A multi-type variant (`type: ['object', 'array']`) types the
             // items of its array member under the variant's name
             // (`<Variant>Item`, see `variantMemberSchemas`); re-enter with
@@ -443,6 +503,8 @@ export function extractInlineModelsFromProperties(
               results,
               variantName,
               componentSchemas,
+              undefined,
+              next,
             );
           }
         }
@@ -501,40 +563,104 @@ function nameOneOfVariant(
   return `${parentName}${alreadyEmitted.length + 1}`;
 }
 
+/** One property of a merged `allOf` field and the component it is inherited from (null: an inline member's own). */
+interface MergedProperty {
+  name: string;
+  schema: SchemaObject;
+  origin: { name: string; schema: SchemaObject } | null;
+}
+
+interface MergedAllOf {
+  properties: MergedProperty[];
+  required: string[];
+  description: string | undefined;
+  /** Components resolved into this merge; they join the ancestry for the recursion into the inline members. */
+  components: string[];
+  /** Components left unresolved because they were already on the ancestry path. */
+  cycles: string[];
+}
+
 /**
- * Merge the object members of an `allOf` (recursively) into a single
- * object-shaped schema, so an inline object expressed via `allOf` can be
- * materialized as one model — mirroring how schemaToTypeRef collapses such a
- * field into a single merged model ref. A `$ref` member is resolved against
- * `componentSchemas` by its component name, as `extractAllOfModel` does, and
- * merged like an inline member, so an augmentation
- * (`allOf: [{ $ref }, { properties }]`) carries the component's properties
- * and `required` as well as the inline ones; an unresolvable ref contributes
- * nothing. Earlier members win on key conflicts, matching the merge order
- * used elsewhere in the parser.
+ * Merge an `allOf` field into one object shape, remembering where each
+ * property comes from. A `$ref` member is resolved against `componentSchemas`
+ * by its component name, as `extractAllOfModel` does, and contributes its
+ * properties — its own nested `allOf` chain included — tagged with that
+ * component's model name, so the merged model can type them exactly as the
+ * component's own model does; inline members contribute properties tagged as
+ * the merged model's own. `required` is collected from every member. Earlier
+ * members win on key conflicts, matching the merge order used elsewhere in
+ * the parser. A `$ref` to a component already on `ancestry` — an
+ * augmentation nested inside an augmentation of that same component — is not
+ * resolved and is reported in `cycles`; an unresolvable ref contributes
+ * nothing.
  */
-function mergeAllOfObjectSchema(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): SchemaObject {
-  const properties: Record<string, SchemaObject> = {};
+function mergeAugmentation(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  ancestry: ReadonlySet<string>,
+): MergedAllOf {
+  const properties: MergedProperty[] = [];
+  const seenNames = new Set<string>();
   const required: string[] = [];
+  const components: string[] = [];
+  const cycles: string[] = [];
   const seen = new Set<SchemaObject>();
-  const visit = (s: SchemaObject): void => {
+  const visit = (s: SchemaObject, origin: MergedProperty['origin']): void => {
     if (seen.has(s)) return;
     seen.add(s);
     if (s.$ref) {
-      const target = componentSchemas?.[s.$ref.split('/').pop() ?? ''];
-      if (target) visit(target);
+      const rawName = s.$ref.split('/').pop() ?? '';
+      const target = componentSchemas?.[rawName];
+      if (!target) return;
+      if (origin !== null) {
+        // A ref inside a component's own allOf chain: still that component's.
+        visit(target, origin);
+        return;
+      }
+      const name = resolveSchemaName(rawName);
+      if (ancestry.has(name)) {
+        cycles.push(name);
+        return;
+      }
+      components.push(name);
+      visit(target, { name, schema: target });
       return;
     }
-    if (s.properties) {
-      for (const [key, value] of Object.entries(s.properties)) {
-        if (value && !(key in properties)) properties[key] = value;
-      }
+    for (const [key, value] of Object.entries(s.properties ?? {})) {
+      if (!value || seenNames.has(key)) continue;
+      seenNames.add(key);
+      properties.push({ name: key, schema: value, origin });
     }
     if (s.required) required.push(...s.required);
-    if (s.allOf) for (const sub of s.allOf) visit(sub);
+    for (const sub of s.allOf ?? []) visit(sub, origin);
   };
-  visit(schema);
-  return { type: 'object', properties, required, description: schema.description };
+  visit(schema, null);
+  return { properties, required, description: schema.description, components, cycles };
+}
+
+/**
+ * Build the model for a merged `allOf` field. An inherited property is typed
+ * with its component as naming context and the component's own sibling set,
+ * so it carries the same TypeRef as in the component's model (`BaseMeta`,
+ * `BaseChild`, ...); the merged model's own properties are typed under its
+ * name with the full merged property set as siblings.
+ */
+function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: Record<string, SchemaObject>): Model {
+  const requiredSet = new Set(merged.required);
+  const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
+  const componentSiblings = new Map<string, Map<string, SchemaObject>>();
+  const fields = merged.properties.map((p) => {
+    if (p.origin === null) {
+      return buildFieldFromSchema(p.name, p.schema, name, requiredSet, componentSchemas, mergedSiblings);
+    }
+    let siblings = componentSiblings.get(p.origin.name);
+    if (!siblings) {
+      siblings = collectProperties(p.origin.schema, componentSchemas);
+      componentSiblings.set(p.origin.name, siblings);
+    }
+    return buildFieldFromSchema(p.name, p.schema, p.origin.name, requiredSet, componentSchemas, siblings);
+  });
+  return { name, description: merged.description, fields };
 }
 
 /**
