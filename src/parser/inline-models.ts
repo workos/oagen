@@ -339,7 +339,7 @@ export function extractInlineModelsFromProperties(
     // wrappers before deciding whether a field is an object, array, or map,
     // so a nullable field must be unwrapped here the same way or its inline
     // object / array items / map values are referenced but never extracted.
-    const fieldSchema = unwrapNullableSchema(rawFieldSchema);
+    const fieldSchema = unwrapNullableField(rawFieldSchema);
     // Direct inline object with properties (with or without explicit type: 'object',
     // including the nullable `type: ['object', 'null']` form)
     if (isInlineObjectSchema(fieldSchema)) {
@@ -651,6 +651,22 @@ function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
     }
   }
   return schema;
+}
+
+/**
+ * `unwrapNullableSchema` for a field, carrying the wrapper's limits onto the
+ * branch it unwraps to. The type-array and `nullable: true` forms unwrap by
+ * spreading, so every keyword survives; the union form swaps in the bare
+ * branch, which would drop a `minProperties` written beside
+ * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
+ * conjoins that wrapper's own keywords with its branch's as the field's
+ * limits, so the model built from the branch must carry the same ones or
+ * `Model.constraints` would omit what the field declares.
+ */
+function unwrapNullableField(schema: SchemaObject): SchemaObject {
+  const inner = unwrapNullableSchema(schema);
+  if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
+  return { ...inner, ...extractConstraints(schema) };
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */

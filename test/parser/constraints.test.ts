@@ -465,6 +465,44 @@ describe('extractSchemas – constraints', () => {
     expect(address?.fields[0].constraints).toEqual({ maxLength: 100 });
   });
 
+  it('carries a nullable wrapper’s own keywords onto the inline model built from its branch', () => {
+    const schemas = {
+      Thing: {
+        type: 'object',
+        properties: {
+          meta: {
+            minProperties: 2,
+            anyOf: [
+              {
+                type: 'object',
+                maxProperties: 4,
+                properties: { a: { type: 'string' }, b: { type: 'string' } },
+              },
+              { type: 'null' },
+            ],
+          },
+          // A keyword declared on both the wrapper and the branch keeps the stricter bound.
+          extra: {
+            maxProperties: 1,
+            oneOf: [{ type: 'null' }, { type: 'object', maxProperties: 3, properties: { k: { type: 'string' } } }],
+          },
+        },
+      },
+    };
+    const { models } = extractSchemas(schemas);
+    expect(models[0].fields.map((f) => [f.name, f.type.kind, f.constraints])).toEqual([
+      ['meta', 'nullable', { minProperties: 2, maxProperties: 4 }],
+      ['extra', 'nullable', { maxProperties: 1 }],
+    ]);
+    // The field extractor builds the models the fields reference; each
+    // carries the same conjoined limits as its field.
+    const inline = extractInlineModelsFromSchemas(schemas);
+    expect(inline.map((m) => [m.name, m.constraints])).toEqual([
+      ['ThingMeta', { minProperties: 2, maxProperties: 4 }],
+      ['ThingExtra', { maxProperties: 1 }],
+    ]);
+  });
+
   it('does not collect keywords nested inside array items', () => {
     const { models } = extractSchemas({
       Pet: {
@@ -560,6 +598,40 @@ describe('extractOperations – parameter constraints', () => {
     };
     const { services } = extractOperations(paths);
     expect(services[0].operations[0].pathParams[0].constraints).toEqual({ exclusiveMinimum: 0 });
+  });
+
+  it('carries a request body property’s nullable-wrapper limits onto its inline model', () => {
+    const paths = {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    meta: {
+                      minProperties: 2,
+                      anyOf: [
+                        { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } },
+                        { type: 'null' },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+    const { inlineModels } = extractOperations(paths);
+    expect(inlineModels.find((m) => m.name === 'CreatePetRequest')?.fields[0].constraints).toEqual({
+      minProperties: 2,
+    });
+    expect(inlineModels.find((m) => m.name === 'CreatePetRequestMeta')?.constraints).toEqual({ minProperties: 2 });
   });
 
   it('carries keywords on an inline request body model and its fields', () => {
