@@ -65,6 +65,8 @@ export function mintedInlineNames(
 export interface MintedInlineName {
   name: string;
   contextFree: boolean;
+  /** The variant schema a union variant's name was minted for; `reservedInlineNames` compares shapes through it. */
+  schema?: SchemaObject;
 }
 
 /** `mintedInlineNames`, also telling for each name whether it is context-free. */
@@ -94,7 +96,10 @@ export function mintedInlineNameEntries(
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    return [...nameInlineVariantEntries(s, modelName()[0]!.name).values()];
+    return [...nameInlineVariantEntries(s, modelName()[0]!.name)].map(([variant, entry]) => ({
+      ...entry,
+      schema: variant,
+    }));
   }
   if (s.const !== undefined) return [];
   if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return enumName();
@@ -110,20 +115,25 @@ export function mintedInlineNameEntries(
 }
 
 /**
- * The inline names the other properties of an object mint — every
- * context-dependent name `mintedInlineNameEntries` yields for each sibling of
- * `fieldName` — which a `oneOf`/`anyOf` under `fieldName` must not give one
- * of its variants (`nameInlineVariants`): beside a `shape_with_side` object,
- * the `{ side }` variant of `shape` cannot become `DrawingShapeWithSide`. A
- * context-free name — a title-mapped variant's title — is not reserved: it
- * names one shape wherever it appears, so a second union using the same title
- * shares the model rather than stepping around it (a title that coincides
- * with a context-dependent sibling name is still reserved, through that
- * name). Each sibling's names are read in isolation, without the reservations
- * that sibling would itself apply, so the set depends on sibling names and
- * content only and two unions beside each other cannot chase each other's
- * names. Empty without a sibling set, as for a request body or response that
- * is itself a union.
+ * The inline names the other properties of an object mint
+ * (`mintedInlineNameEntries`) which a `oneOf`/`anyOf` under `fieldName` must
+ * not give one of its variants (`nameInlineVariants`): beside a
+ * `shape_with_side` object, the `{ side }` variant of `shape` cannot become
+ * `DrawingShapeWithSide`. Every context-dependent sibling name is reserved.
+ * A context-free name — a title-mapped variant's title — names one shape
+ * wherever it appears, so it is shared, not reserved, when this field gives
+ * the same title a variant of the identical shape (`schemaShapeKey`:
+ * documentation keywords ignored, property names verbatim — the rule array
+ * items already use to share a singular sibling's model); a sibling giving
+ * the same title a different shape, or one this field does not use, reserves
+ * it, so this union's variant falls back to its context-qualified name. Each
+ * sibling's names are read in isolation, without the reservations that
+ * sibling would itself apply, so the set depends on sibling names and content
+ * only, two unions beside each other cannot chase each other's names, and
+ * the shape test is symmetric: when `Circle` means `{ radius }` on one side
+ * and `{ diameter }` on the other, both fall back (`CircleDrawingShape`,
+ * `CircleDrawingMarker`) and neither keeps the bare `Circle`. Empty without a
+ * sibling set, as for a request body or response that is itself a union.
  */
 export function reservedInlineNames(
   fieldName: string,
@@ -132,10 +142,28 @@ export function reservedInlineNames(
 ): ReadonlySet<string> {
   const reserved = new Set<string>();
   if (!siblings) return reserved;
+
+  // The shape this field gives each title it would keep, in isolation.
+  const ownShapes = new Map<string, string[]>();
+  const fieldSchema = siblings.get(fieldName);
+  if (fieldSchema) {
+    for (const own of mintedInlineNameEntries(fieldName, fieldSchema, parentModelName)) {
+      if (!own.contextFree || !own.schema) continue;
+      ownShapes.set(own.name, [...(ownShapes.get(own.name) ?? []), schemaShapeKey(own.schema)]);
+    }
+  }
+
   for (const [siblingName, siblingSchema] of siblings) {
     if (siblingName === fieldName) continue;
     for (const minted of mintedInlineNameEntries(siblingName, siblingSchema, parentModelName)) {
-      if (!minted.contextFree) reserved.add(minted.name);
+      if (!minted.contextFree) {
+        reserved.add(minted.name);
+        continue;
+      }
+      const shapes = ownShapes.get(minted.name);
+      const siblingShape = minted.schema ? schemaShapeKey(minted.schema) : undefined;
+      const identical = shapes !== undefined && siblingShape !== undefined && shapes.every((s) => s === siblingShape);
+      if (!identical) reserved.add(minted.name);
     }
   }
   return reserved;

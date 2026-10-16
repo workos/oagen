@@ -766,15 +766,23 @@ export function nameInlineVariant(
  * schema-name transform like a component), and `schemaToTypeRef` references
  * the variant by that mapped name, so the title is the model name here too —
  * unless it is the base, already emitted, or reserved by a sibling, in which
- * case the variant falls back to the regular chain and the mapping, which is
- * read from this map, follows it. Such a name is context-free: it is the
- * same whatever field, array or map the union sits under, so it names one
- * shape wherever it appears, as a component name would. A second union
- * beside it using the same title therefore shares the model instead of
- * stepping around it — `reservedInlineNames` does not reserve context-free
- * names, and `elementContextName` never lets them drive an items/values
- * step-aside, which no context could satisfy. `nameInlineVariantEntries`
- * reports which names are context-free.
+ * case the variant takes a context-qualified name (its title as a prefix on
+ * the base, `CircleDrawingMarker`, else a distinguishing property, else the
+ * counter) and the mapping, which is read from this map, follows it. A kept
+ * title is context-free: it is the same whatever field, array or map the
+ * union sits under, so it names one shape wherever it appears, as a
+ * component name would. A second union beside it using the same title for a
+ * variant of the identical shape (`schemaShapeKey`) therefore shares the
+ * model instead of stepping around it; a sibling giving the same title a
+ * different shape reserves it (`reservedInlineNames`), and since both sides
+ * read their siblings in isolation the decision is symmetric: when the
+ * shapes differ, both unions fall back to their context-qualified names
+ * (`CircleDrawingShape`, `CircleDrawingMarker`) and neither keeps the bare
+ * `Circle`; when they are identical, both keep `Circle` and one model is
+ * emitted. `elementContextName` never lets a context-free name drive an
+ * items/values step-aside, which no context could satisfy.
+ * `nameInlineVariantEntries` reports which names are context-free; a
+ * fallen-back title name is context-dependent.
  *
  * This is the list-level entry point every site uses: `schemaToTypeRef` (via
  * `nameInlineObjectVariants`), `extractNestedSchema`,
@@ -812,11 +820,24 @@ export function nameInlineVariantEntries(
   const entries = new Map<SchemaObject, InlineVariantName>();
   for (const variant of inlineObjectVariants) {
     let name: string | null = null;
+    let contextFree = false;
     if (titleMapped) {
       const titled = resolveVariantModelName(variant);
-      if (titled !== null && titled !== base && !emitted.includes(titled) && !reserved.has(titled)) name = titled;
+      if (titled !== null) {
+        if (titled !== base && !emitted.includes(titled) && !reserved.has(titled)) {
+          name = titled;
+          contextFree = true;
+        } else {
+          // The title is taken (by a sibling's model, by a sibling's variant
+          // of a different shape, or by an earlier variant of this union):
+          // the variant takes a context-qualified name instead — its title
+          // as a prefix on the base (`CircleDrawingMarker`), else a
+          // distinguishing property, else the counter — and the mapping,
+          // read from this map, follows.
+          name = nameUndiscriminatedVariant(variant, inlineObjectVariants, base, emitted, reserved);
+        }
+      }
     }
-    const contextFree = name !== null;
     name ??= nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator, reserved);
     emitted.push(name);
     entries.set(variant, { name, contextFree });
