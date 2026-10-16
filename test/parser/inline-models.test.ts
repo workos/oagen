@@ -2016,7 +2016,49 @@ describe('a component that extends itself through a field stays finite', () => {
     }
   });
 
-  it('refuses to resolve a component already being extended, keeps the inline fields, and says so once', async () => {
+  it('reusing a component in nested augmentations is not a cycle: every level inherits the full field list', async () => {
+    // Greptile's case: `Thing.detail` extends `Base` and adds `again`, which
+    // extends `Base` too. The inner model keeps `id` and its `required` flag.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(
+        withComponents({
+          Base: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+          Thing: {
+            type: 'object',
+            properties: {
+              detail: {
+                allOf: [
+                  { $ref: '#/components/schemas/Base' },
+                  {
+                    properties: {
+                      again: {
+                        allOf: [{ $ref: '#/components/schemas/Base' }, { properties: { z: { type: 'string' } } }],
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      );
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      expect(types['ThingDetail']).toEqual({ id: str, again: model('ThingDetailAgain') });
+      expect(types['ThingDetailAgain']).toEqual({ id: str, z: str });
+      for (const name of ['ThingDetail', 'ThingDetailAgain']) {
+        const idField = ir.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'id');
+        expect(idField?.required).toBe(true);
+      }
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['Base', 'Thing', 'ThingDetail', 'ThingDetailAgain']);
+      expectConsistent(ir, ['Base', 'Thing']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a component extending itself twice over still terminates, with no warning', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const ir = await parseTempSpec(
@@ -2041,15 +2083,47 @@ describe('a component that extends itself through a field stays finite', () => {
           },
         }),
       );
-      expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(warnSpy.mock.calls[0]?.[0]).toContain(
-        '"AChildAgain" extends component "A" from inside an extension of "A"',
-      );
+      expect(warnSpy).not.toHaveBeenCalled();
       const types = fieldTypesByModel(ir.models);
       expect(types['AChild']).toEqual({ a: str, child: model('AChild'), again: model('AChildAgain') });
-      expect(types['AChildAgain']).toEqual({ z: str });
+      expect(types['AChildAgain']).toEqual({ a: str, child: model('AChild'), z: str });
       expect(ir.models.map((m) => m.name).sort()).toEqual(['A', 'AChild', 'AChildAgain']);
       expectConsistent(ir, ['A']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a deliberately deep document (70 nested arrays of inline objects) parses with every reference resolved', async () => {
+    let items: SchemaObject = { type: 'object', properties: { leaf: { type: 'string' } } };
+    let expected: unknown = model('CreateThingRequestLevel');
+    for (let depth = 0; depth < 70; depth++) {
+      items = { type: 'array', items };
+      expected = { kind: 'array', items: expected };
+    }
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec({
+        openapi: '3.1.0',
+        info,
+        paths: {
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: {
+                content: { 'application/json': { schema: { type: 'object', properties: { level: items } } } },
+              },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      });
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      expect(types['CreateThingRequest']).toEqual({ level: expected });
+      expect(types['CreateThingRequestLevel']).toEqual({ leaf: str });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['CreateThingRequest', 'CreateThingRequestLevel']);
+      expectConsistent(ir, []);
     } finally {
       warnSpy.mockRestore();
     }
