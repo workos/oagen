@@ -21,7 +21,7 @@ import {
   resolveExamples,
   resolveComponentSchemaRef,
 } from './schemas.js';
-import { extractInlineModelsFromProperties } from './inline-models.js';
+import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
@@ -1234,10 +1234,11 @@ function extractRequestBody(
   // If the request body is an inline object with properties, extract it as a model
   if (schema.properties && (schema.type === 'object' || !schema.type)) {
     const requiredSet = new Set(schema.required ?? []);
+    const siblings = collectProperties(schema);
     const fields: Field[] = [];
     for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
       if (!fieldSchema) continue;
-      fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas));
+      fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
     inlineModels.push({ name: contextName, description: undefined, fields });
     // Nested inline objects (e.g. a `user` property that is itself an inline
@@ -1263,10 +1264,13 @@ function extractRequestBody(
       } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
         const variantName = deriveOneOfVariantName(variant, contextName, inlineModels);
         const requiredSet = new Set(variant.required ?? []);
+        const siblings = collectProperties(variant);
         const fields: Field[] = [];
         for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
           if (!fieldSchema) continue;
-          fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas));
+          fields.push(
+            buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
+          );
         }
         inlineModels.push({ name: variantName, description: variant.description, fields });
         extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);

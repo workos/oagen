@@ -1,9 +1,9 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
-import { toPascalCase, singularize, stripListItemMarkers } from '../utils/naming.js';
+import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
-import { extractInlineModelsFromProperties } from './inline-models.js';
+import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -268,10 +268,14 @@ function extractEnvelopeCompanions(
   const envelopeFields: Field[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
   const requiredSet = new Set(required);
+  // The companion is extracted from a one-property schema, so hand the
+  // extractor the envelope's full property list: array items and map values
+  // must step aside from a singular sibling exactly as the field does.
+  const siblings = collectProperties({ properties });
 
   for (const [key, propSchema] of Object.entries(properties)) {
     if (key === dataPath) continue;
-    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet, componentSchemas);
+    const field = buildFieldFromSchema(key, propSchema, operationName, requiredSet, componentSchemas, siblings);
     envelopeFields.push(field);
 
     // Both runs get the component map so a companion's `$ref` fields carry
@@ -279,10 +283,10 @@ function extractEnvelopeCompanions(
     // only feeds field metadata, so the two model lists still line up.
     const single: SchemaObject = { type: 'object', properties: { [key]: propSchema } };
     const models: Model[] = [];
-    extractInlineModelsFromProperties(single, models, operationName, componentSchemas);
+    extractInlineModelsFromProperties(single, models, operationName, componentSchemas, siblings);
     if (models.length === 0) continue;
     const bare: Model[] = [];
-    extractInlineModelsFromProperties(single, bare, undefined, componentSchemas);
+    extractInlineModelsFromProperties(single, bare, undefined, componentSchemas, siblings);
     envelopeCompanions.push({ field, models, bareNames: bare.map((m) => m.name) });
   }
 
@@ -536,28 +540,6 @@ function deriveModelName(schema: SchemaObject, fallback: string): string {
 }
 
 /**
- * Qualify a nested inline model name with its parent to avoid generic names.
- * e.g., parent="Connection" + field="domains" → "ConnectionDomain" (singularized)
- * Only qualifies when the field name alone would be too generic.
- */
-function qualifyNestedName(parentName: string, fieldName: string): string {
-  const pascalField = toPascalCase(fieldName);
-  // If the field name already starts with the parent name, don't double-prefix
-  if (pascalField.startsWith(parentName)) return pascalField;
-  // Qualify with parent and singularize:
-  // Connection + Domains → ConnectionDomains → singularize lead word → ConnectionDomain
-  const cleanParent = stripListItemMarkers(parentName);
-  const qualified = `${cleanParent}${pascalField}`;
-  // Singularize the trailing word: ConnectionDomains → ConnectionDomain
-  const match = qualified.match(/^(.+?)([A-Z][a-z]+s?)$/);
-  if (match && match[2]) {
-    const trailing = singularize(match[2]);
-    return match[1] + trailing;
-  }
-  return qualified;
-}
-
-/**
  * Materialise an inline response object (and every nested inline object
  * under it) as models. `componentSchemas` only feeds `buildFieldFromSchema`,
  * so a response field that `$ref`s a component takes the component's
@@ -574,55 +556,22 @@ function extractInlineModel(
   const properties = schema.properties ?? {};
   const nestedModels: Model[] = [];
 
+  const siblings = collectProperties(schema);
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas));
-
-    // Recursively extract nested inline objects — qualify with parent name
-    // to avoid generic names like "Domains" when multiple parents have a "domains" field.
-    // `isInlineObjectSchema` also admits the nullable `type: ['object', 'null']`
-    // form, which schemaToTypeRef turns into a nullable model reference.
-    if (isInlineObjectSchema(fieldSchema)) {
-      const nestedName = qualifyNestedName(name, fieldName);
-      nestedModels.push(...extractInlineModel(nestedName, fieldSchema, componentSchemas));
-    }
-    if (fieldSchema.type === 'array' && fieldSchema.items) {
-      const items = fieldSchema.items;
-      if (isInlineObjectSchema(items)) {
-        const nestedName = qualifyNestedName(name, fieldName);
-        nestedModels.push(...extractInlineModel(nestedName, items, componentSchemas));
-      }
-    }
-    // Handle allOf with inline object properties — merge into a single nested model
-    if (fieldSchema.allOf) {
-      const mergedProperties: Record<string, SchemaObject | undefined> = {};
-      const mergedRequired: string[] = [];
-      for (const sub of fieldSchema.allOf) {
-        if (sub.properties) Object.assign(mergedProperties, sub.properties);
-        if (sub.required) mergedRequired.push(...sub.required);
-      }
-      if (Object.keys(mergedProperties).length > 0) {
-        const nestedName = qualifyNestedName(name, fieldName);
-        const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
-        const existingNames = new Set(nestedModels.map((m) => m.name));
-        if (!existingNames.has(nestedName)) {
-          nestedModels.push(...extractInlineModel(nestedName, merged, componentSchemas));
-        }
-      }
-    }
-    // Handle oneOf/anyOf containing inline objects — extract the first non-null object variant
-    const variants = fieldSchema.oneOf ?? fieldSchema.anyOf;
-    if (variants) {
-      const objectVariant = variants.find((v) => isInlineObjectSchema(v));
-      if (objectVariant) {
-        const nestedName = qualifyNestedName(name, fieldName);
-        const existingNames = new Set(nestedModels.map((m) => m.name));
-        if (!existingNames.has(nestedName)) {
-          nestedModels.push(...extractInlineModel(nestedName, objectVariant, componentSchemas));
-        }
-      }
-    }
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
+
+  // Every nested inline model a field references — an inline object, array
+  // items, map values, an `allOf` merge or `$ref` augmentation, every
+  // `oneOf`/`anyOf` variant (numbered, const-prefixed, nullable, multi-type,
+  // with `<Variant>Item` members), with sibling-aware item/value names —
+  // comes from the same extractor that materializes them for component
+  // schemas and request bodies. `buildFieldFromSchema` above named the
+  // references through `schemaToTypeRef`; this names the models the same way,
+  // so they agree by construction instead of through a response-local copy of
+  // the rules.
+  extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
   return [{ name, description: schema.description, fields }, ...nestedModels];
 }
