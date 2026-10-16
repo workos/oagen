@@ -10,6 +10,7 @@ import type {
   LiteralType,
   Model,
   Enum,
+  Operation,
 } from '../../src/ir/types.js';
 import {
   walkTypeRef,
@@ -125,6 +126,28 @@ describe('IR types', () => {
     };
     expect(e.values).toHaveLength(2);
     expect(e.values[0].name).toBe('ACTIVE');
+  });
+
+  it('constructs an Operation whose responses carry descriptions', () => {
+    const op: Operation = {
+      name: 'getPet',
+      httpMethod: 'get',
+      path: '/pets/{id}',
+      pathParams: [],
+      queryParams: [],
+      headerParams: [],
+      response: { kind: 'model', name: 'Pet' },
+      responseDescription: 'The pet, with its owner.',
+      successResponses: [
+        { statusCode: 200, type: { kind: 'model', name: 'Pet' }, description: 'The pet, with its owner.' },
+        { statusCode: 304, type: { kind: 'primitive', type: 'unknown' } },
+      ],
+      errors: [{ statusCode: 404, description: 'Not found.' }, { statusCode: 500 }],
+      injectIdempotencyKey: false,
+    };
+    expect(op.responseDescription).toBe(op.successResponses?.[0].description);
+    expect(op.successResponses?.[1].description).toBeUndefined();
+    expect(op.errors.map((e) => e.description)).toEqual(['Not found.', undefined]);
   });
 
   it('constructs a full ApiSpec', () => {

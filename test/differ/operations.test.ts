@@ -488,3 +488,29 @@ describe('diffOperations', () => {
     }
   });
 });
+
+describe('diffOperations response descriptions', () => {
+  it('ignores a changed response description, the way a changed operation description is ignored', () => {
+    const old: Operation = {
+      ...getUser,
+      description: 'Get a user.',
+      responseDescription: 'A user.',
+      errors: [{ statusCode: 404, description: 'Not found.' }],
+    };
+    const modified: Operation = {
+      ...getUser,
+      description: 'Fetch a user.',
+      responseDescription: 'The user, with its organization.',
+      errors: [{ statusCode: 404, description: 'No user has that id.' }],
+    };
+
+    expect(diffOperations('Users', [old], [modified])).toEqual([]);
+  });
+
+  it('ignores a response description appearing or disappearing', () => {
+    const described: Operation = { ...getUser, responseDescription: 'The user.' };
+
+    expect(diffOperations('Users', [getUser], [described])).toEqual([]);
+    expect(diffOperations('Users', [described], [getUser])).toEqual([]);
+  });
+});
