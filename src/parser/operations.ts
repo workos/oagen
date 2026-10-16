@@ -26,7 +26,7 @@ import {
   extractConstraints,
   constraintsEntry,
   deprecatedEntry,
-  unwrapNullableField,
+  collapsedNullableBranch,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
@@ -1411,9 +1411,10 @@ function extractRequestBody(
     const contentNamed: string[] = [];
     // A nullable body (`oneOf: [object, null]`) is one schema: the model built
     // from its object branch takes the wrapper's `deprecated` and limits, as
-    // every other nullable unwrap gives it (`unwrapNullableField`). The null
-    // branch still makes the body nullable below.
-    const collapsed = unwrapNullableField(schema);
+    // every other nullable unwrap gives it (`collapsedNullableBranch`). The
+    // null branch still makes the body nullable below. A multi-variant union,
+    // nullable or not, is not collapsed: every variant is built as written.
+    const branch = collapsedNullableBranch(schema);
 
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
@@ -1432,7 +1433,7 @@ function extractRequestBody(
         );
         const variantName = named.name;
         if (named.fromContent) contentNamed.push(variantName);
-        const source = collapsed === schema ? variant : collapsed;
+        const source = branch ?? variant;
         const requiredSet = new Set(source.required ?? []);
         const siblings = collectProperties(source);
         const fields: Field[] = [];

@@ -8,7 +8,7 @@ import {
   deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
-  unwrapNullableField,
+  collapsedNullableBranch,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
@@ -381,9 +381,9 @@ function extractWrappedResource(
       const modelName = deriveModelName(objectVariant, resourceName);
       // `oneOf: [object, null]` is a nullable wrapper: the model built from
       // its one branch takes the wrapper's `deprecated` and limits, as every
-      // other nullable unwrap gives it (`unwrapNullableField`).
-      const collapsed = unwrapNullableField(propSchema);
-      const source = collapsed === propSchema ? objectVariant : collapsed;
+      // other nullable unwrap gives it (`collapsedNullableBranch`); a
+      // multi-variant union's variant is built as written.
+      const source = collapsedNullableBranch(propSchema) ?? objectVariant;
       inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
       const hasNullVariant = propSchema.oneOf.some(

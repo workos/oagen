@@ -32,6 +32,30 @@ const specDoc = (schemas: Record<string, unknown>, paths: Record<string, unknown
   components: { schemas },
 });
 
+/** `name → { deprecated, fields }`, so a model that lost its fields is visible beside its flag. */
+const shapes = (models: Model[]) =>
+  Object.fromEntries(models.map((m) => [m.name, { deprecated: m.deprecated, fields: m.fields.map((f) => f.name) }]));
+
+/** A GET operation whose 200 response wraps `data` in a one-property object (a wrapped resource). */
+const wrappedResource = (data: Record<string, unknown>, operationId: string) => ({
+  get: {
+    operationId,
+    responses: {
+      '200': {
+        description: 'ok',
+        content: { 'application/json': { schema: { type: 'object', required: ['data'], properties: { data } } } },
+      },
+    },
+  },
+});
+
+/** An inline resource pinned by an `object` const, as a wrapped resource's variant. */
+const constResource = (name: string, extra: Record<string, unknown> = {}) => ({
+  type: 'object',
+  properties: { object: { const: name }, k: { type: 'string' } },
+  ...extra,
+});
+
 describe('deprecatedEntry', () => {
   it('yields { deprecated: true } only when the schema says so', () => {
     expect(deprecatedEntry({ deprecated: true })).toEqual({ deprecated: true });
@@ -346,6 +370,60 @@ describe('extractOperations – deprecated', () => {
       }
     `);
   });
+
+  it('builds every variant of a nullable multi-variant union body and wrapped resource as written', () => {
+    // `type: ['object', 'null']` beside a multi-variant `oneOf` unwraps to a
+    // copy that still carries the union; it is not a branch, so each variant
+    // is built from itself, keeps its fields and its own flag, and the
+    // wrapper's flag is not carried onto it.
+    const { inlineModels } = extractOperations({
+      '/a': body(
+        {
+          deprecated: true,
+          type: ['object', 'null'],
+          oneOf: [
+            obj({ properties: { kind: { const: 'a' }, k: { type: 'string' } } }),
+            obj({ deprecated: true, properties: { kind: { const: 'b' }, k: { type: 'string' } } }),
+          ],
+        },
+        'createA',
+      ),
+      '/c': wrappedResource(
+        {
+          deprecated: true,
+          type: ['object', 'null'],
+          oneOf: [constResource('thing_x'), constResource('thing_y', { deprecated: true })],
+        },
+        'getC',
+      ),
+    });
+    for (const m of inlineModels) expect(m.fields.length, m.name).toBeGreaterThan(0);
+    expect(shapes(inlineModels)).toMatchInlineSnapshot(`
+      {
+        "ACreateARequest": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "k",
+          ],
+        },
+        "BCreateARequest": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "k",
+          ],
+        },
+        "ThingX": {
+          "deprecated": undefined,
+          "fields": [
+            "object",
+            "k",
+          ],
+        },
+      }
+    `);
+  });
 });
 
 describe('collapseJsonSuffixModels – deprecated', () => {
@@ -561,6 +639,154 @@ describe('parseSpec – deprecated', () => {
         "ThingPlain": undefined,
         "ThingTags": true,
         "ThingTagsBranch": undefined,
+      }
+    `);
+  });
+
+  it('builds every variant of a nullable multi-variant union property with its fields and its own flag', async () => {
+    const circle = obj({ properties: { kind: { const: 'circle' }, r: { type: 'number' } } });
+    const square = obj({ deprecated: true, properties: { kind: { const: 'square' }, side: { type: 'number' } } });
+    const file = await writeSpec(
+      'union.json',
+      specDoc({
+        Thing: {
+          type: 'object',
+          properties: {
+            shape: { deprecated: true, type: ['object', 'null'], oneOf: [circle, square] },
+            outer: {
+              type: 'object',
+              properties: { shape: { deprecated: true, type: ['object', 'null'], oneOf: [circle, square] } },
+            },
+            // The single-branch form, even beside a type array, still
+            // collapses onto its one branch with the wrapper's flag.
+            maybe: { deprecated: true, type: ['object', 'null'], oneOf: [obj(), { type: 'null' }] },
+          },
+        },
+      }),
+    );
+    const spec = await parseSpec(file);
+    for (const m of spec.models) expect(m.fields.length, m.name).toBeGreaterThan(0);
+    expect(shapes(spec.models)).toMatchInlineSnapshot(`
+      {
+        "SquareThingOuterShape": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "SquareThingShape": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "Thing": {
+          "deprecated": undefined,
+          "fields": [
+            "shape",
+            "outer",
+            "maybe",
+          ],
+        },
+        "ThingMaybe": {
+          "deprecated": true,
+          "fields": [
+            "k",
+          ],
+        },
+        "ThingOuter": {
+          "deprecated": undefined,
+          "fields": [
+            "shape",
+          ],
+        },
+        "ThingOuterShape": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+        "ThingShape": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+      }
+    `);
+    // The wrapper's flag stays on the field that declares the union.
+    const thing = spec.models.find((m) => m.name === 'Thing')!;
+    expect(thing.fields.find((f) => f.name === 'shape')?.deprecated).toBe(true);
+  });
+
+  it('builds every variant of a nullable multi-variant union inside a discriminated variant as written', async () => {
+    const circle = obj({ properties: { kind: { const: 'circle' }, r: { type: 'number' } } });
+    const square = obj({ deprecated: true, properties: { kind: { const: 'square' }, side: { type: 'number' } } });
+    const file = await writeSpec(
+      'variant-union.json',
+      specDoc({
+        Event: {
+          allOf: [
+            { type: 'object', properties: { id: { type: 'string' } } },
+            {
+              oneOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    event: { const: 'user.created' },
+                    shape: { deprecated: true, type: ['object', 'null'], oneOf: [circle, square] },
+                  },
+                },
+                { type: 'object', properties: { event: { const: 'user.deleted' } } },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const spec = await parseSpec(file);
+    for (const m of spec.models) expect(m.fields.length, m.name).toBeGreaterThan(0);
+    expect(shapes(spec.models)).toMatchInlineSnapshot(`
+      {
+        "Event": {
+          "deprecated": undefined,
+          "fields": [
+            "id",
+          ],
+        },
+        "SquareUserCreatedShape": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "UserCreated": {
+          "deprecated": undefined,
+          "fields": [
+            "id",
+            "event",
+            "shape",
+          ],
+        },
+        "UserCreatedShape": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+        "UserDeleted": {
+          "deprecated": undefined,
+          "fields": [
+            "id",
+            "event",
+          ],
+        },
       }
     `);
   });

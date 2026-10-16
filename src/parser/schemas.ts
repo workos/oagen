@@ -305,12 +305,37 @@ export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
  * extractor, `extractNestedSchema`, `extractInlineModelDeep`, the request-body
  * and wrapped-response paths — goes through this one function, so the
  * copies they produce agree and the inline-model merges cannot keep a wrongly
- * flagged one. Returns `schema` itself when there is nothing to unwrap.
+ * flagged one. Returns `schema` itself when there is nothing to unwrap, and a
+ * copy whenever a wrapper was stripped — a copy that still carries the union
+ * when a multi-variant `oneOf`/`anyOf` sits beside `type: [X, 'null']`, so
+ * identity with `schema` does not tell whether a union collapsed to one
+ * branch; `collapsedNullableBranch` does.
  */
 export function unwrapNullableField(schema: SchemaObject): SchemaObject {
   const inner = unwrapNullableSchema(schema);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
   return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
+}
+
+/**
+ * The one branch a nullable `oneOf`/`anyOf` wrapper collapses to, carrying
+ * the wrapper's `deprecated` and limits (`unwrapNullableField`), or
+ * `undefined` when `schema` is not such a wrapper: not a union, or a union
+ * with more than one non-null variant — nullable or not, including
+ * `type: ['object', 'null']` beside a multi-variant `oneOf`, whose unwrap is
+ * a copy that still carries the union. A multi-variant union is never
+ * collapsed: each variant is its own schema, built as itself with its own
+ * flag, and the wrapper's stays on the field. The sites that build a model
+ * from a union's variants substitute the branch this returns for the one
+ * variant it stands for, and otherwise build every variant as written.
+ */
+export function collapsedNullableBranch(schema: SchemaObject): SchemaObject | undefined {
+  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
+  if (!variants) return undefined;
+  const nullVariant = variants.find(isNullSchema);
+  if (!nullVariant || variants.filter((v) => v !== nullVariant).length !== 1) return undefined;
+  const branch = unwrapNullableField(schema);
+  return branch.oneOf || branch.anyOf ? undefined : branch;
 }
 
 /**
@@ -823,15 +848,15 @@ function extractNestedSchema(
     const variantNames = nameInlineVariants(schema, name, reserved);
     // A nullable wrapper (one non-null branch beside `null`) is the field's
     // schema: the model built from its branch takes the wrapper's `deprecated`
-    // and limits (`unwrapNullableField`), exactly as the field extractor
-    // builds the same model, so the two copies agree. A genuine multi-variant
-    // union is not collapsed; each variant is its own schema.
-    const collapsed = unwrapNullableField(schema);
+    // and limits (`collapsedNullableBranch`), exactly as the field extractor
+    // builds the same model, so the two copies agree. A multi-variant union,
+    // nullable or not, is not collapsed: every variant is built as written.
+    const branch = collapsedNullableBranch(schema);
 
     for (const variant of schema.oneOf) {
       const variantName = variantNames.get(variant);
       if (variantName === undefined) continue;
-      const source = collapsed === schema ? variant : collapsed;
+      const source = branch ?? variant;
       // Build the variant's fields under its own name: an inline object
       // nested under variant N is then referenced as `<VariantN>Child`
       // (`ThingShapeWithSideCenter`), which is the name the field extractor
@@ -2027,14 +2052,13 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
           reservedInlineNames(fieldName, siblings, name),
         );
         // A nullable wrapper's one branch is built with the wrapper's
-        // `deprecated` and limits, as everywhere else (`unwrapNullableField`).
-        const collapsed = unwrapNullableField(fieldSchema);
+        // `deprecated` and limits, as everywhere else; a multi-variant union's
+        // variants are built as written (`collapsedNullableBranch`).
+        const branch = collapsedNullableBranch(fieldSchema);
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;
-          nestedModels.push(
-            ...extractInlineModelDeep(variantName, collapsed === fieldSchema ? variant : collapsed, schemas),
-          );
+          nestedModels.push(...extractInlineModelDeep(variantName, branch ?? variant, schemas));
           // A multi-type variant's array member types its items under the
           // variant's name (`<Variant>Item`); extract them there too. The
           // synthetic wrapper model is dropped, only its nested models kept.
