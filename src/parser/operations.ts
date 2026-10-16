@@ -7,6 +7,7 @@ import type {
   TypeRef,
   ErrorResponse,
   SuccessResponse,
+  ResponseHeader,
   Model,
   Field,
   PaginationMeta,
@@ -191,8 +192,81 @@ function resolveRequestBodyRef(
   return current;
 }
 
+/**
+ * A Header Object as it appears in a Response Object's `headers` map. Per OAS
+ * it carries either `schema` or a single-entry `content` map, never both.
+ */
+interface HeaderObject {
+  description?: string;
+  required?: boolean;
+  deprecated?: boolean;
+  schema?: SchemaObject;
+  content?: Record<string, { schema?: SchemaObject }>;
+}
+
+/**
+ * A header entry as written in the spec: an inline Header Object or a
+ * Reference Object into `components/headers`. The bundler never inlines those
+ * refs (`dereference: false`), so they must be resolved before use. In OAS 3.1
+ * a Reference Object may carry its own `description`, which overrides the
+ * referenced component's.
+ */
+type RawHeaderObject = HeaderObject | { $ref: string; description?: string };
+
+/**
+ * Resolve a raw response header to a concrete Header Object, following `$ref`
+ * chains into `components/headers` with a cycle guard.
+ *
+ * Unlike parameters and request bodies, a header that cannot be resolved is
+ * warned about and dropped rather than failing the parse: a response header
+ * is informational, so losing one costs an emitter a typed accessor, not a
+ * wire contract, and should not block generating the rest of the SDK.
+ */
+function resolveHeaderRef(
+  raw: RawHeaderObject,
+  componentHeaders: Record<string, Record<string, unknown>> | undefined,
+  headerName: string,
+  operationContext: string,
+): HeaderObject | undefined {
+  const seenRefs = new Set<string>();
+  let current: RawHeaderObject = raw;
+  // Each ref in a chain overrides whatever it points at, so the outermost
+  // sibling `description` wins over any inner one and over the component's.
+  let description: string | undefined;
+
+  while ('$ref' in current) {
+    if (description === undefined && typeof current.description === 'string') description = current.description;
+    if (seenRefs.has(current.$ref)) {
+      console.warn(
+        `[oagen] Warning: Circular header $ref chain starting at "${current.$ref}" for response header ` +
+          `"${headerName}" in ${operationContext}. Skipping the header.`,
+      );
+      return undefined;
+    }
+    seenRefs.add(current.$ref);
+
+    // Match the whole pointer, not just its last token: a ref into any other
+    // section must not resolve off a same-named header component.
+    const match = /^#\/components\/headers\/(.+)$/.exec(current.$ref);
+    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
+    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    const resolved = refName ? componentHeaders?.[refName] : undefined;
+    if (!resolved) {
+      console.warn(
+        `[oagen] Warning: Unresolved header $ref "${current.$ref}" for response header "${headerName}" ` +
+          `in ${operationContext}: no matching entry under components/headers. Skipping the header.`,
+      );
+      return undefined;
+    }
+    current = resolved as unknown as RawHeaderObject;
+  }
+
+  return description === undefined ? current : { ...current, description };
+}
+
 interface ResponseObject {
   description?: string;
+  headers?: Record<string, RawHeaderObject>;
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
@@ -218,6 +292,7 @@ export function extractOperations(
   componentModels?: Model[],
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
+  componentHeaders?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -234,6 +309,13 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
+  // One registry for the whole spec, seeded with the component models: a
+  // header model's name must not collide with a differently shaped component
+  // (a request body may already use `DocumentsXMeta`) or with another
+  // operation's header model, or the later merge would overwrite the first.
+  const headerModelRegistry: HeaderModelRegistry = new Map(
+    (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
+  );
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -262,6 +344,8 @@ export function extractOperations(
         componentParameters,
         componentRequestBodies,
         componentExamples,
+        componentHeaders,
+        headerModelRegistry,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -757,8 +841,11 @@ function buildOperation(
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentExamples?: Record<string, Record<string, unknown>>,
+  componentHeaders?: Record<string, Record<string, unknown>>,
+  headerModelRegistry: HeaderModelRegistry = new Map(),
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
-  const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
+  const opLabel = operationLabel(op, path, method);
+  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
@@ -838,6 +925,7 @@ function buildOperation(
   );
   const {
     response,
+    responseHeaders,
     successResponses,
     errors,
     inlineModels,
@@ -846,7 +934,13 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, pathModelBaseName, componentSchemas);
+  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
+    componentHeaders,
+    componentSchemas,
+    serviceName: opContext,
+    operationQualifier: toPascalCase(operationName),
+    registry: headerModelRegistry,
+  });
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -886,7 +980,7 @@ function buildOperation(
 
   return {
     operation: {
-      name: inferOperationName(method, path, op.operationId, operationIdTransform),
+      name: operationName,
       // Keep the summary on its own so emitters can tell it apart from the
       // description; the key is omitted (not set to undefined) when absent.
       ...(summary !== undefined ? { summary } : {}),
@@ -901,6 +995,8 @@ function buildOperation(
       requestBody,
       requestBodyEncoding,
       response,
+      // Added only when present so operations without headers keep their shape.
+      ...(responseHeaders && { responseHeaders }),
       successResponses,
       errors,
       pagination,
@@ -1457,6 +1553,187 @@ function deriveOneOfVariantName(
   return name;
 }
 
+/** Human-readable label for an operation in diagnostics: its operationId, else `METHOD /path`. */
+function operationLabel(op: OperationObject | undefined, path: string, method: HttpMethod): string {
+  return op?.operationId ?? `${method.toUpperCase()} ${path}`;
+}
+
+/**
+ * Spec-wide record of every model name a header model must not silently
+ * reuse: the component models (seeded up front) and each inline header model
+ * materialized so far. The value carries the model's shape fingerprint, so a
+ * header whose shape matches can share the name, and — for header models —
+ * which operation produced it, so a collision inside one operation can be
+ * told apart from one across operations.
+ */
+type HeaderModelRegistry = Map<string, { fingerprint: string; operation?: string }>;
+
+/** What response-header extraction needs from the operation and the spec. */
+interface HeaderExtractionContext {
+  componentHeaders?: Record<string, Record<string, unknown>>;
+  /** Lets header models resolve `$ref` siblings and augmentations the way fields do. */
+  componentSchemas?: Record<string, SchemaObject>;
+  /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
+  serviceName?: string;
+  /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
+  operationQualifier: string;
+  registry: HeaderModelRegistry;
+}
+
+/** Shape of a model, independent of field order: name, requiredness, and type of every field. */
+function modelFingerprint(model: Model): string {
+  return model.fields
+    .map((f) => `${f.name}${f.required ? '!' : '?'}:${stableStringify(f.type)}`)
+    .sort()
+    .join('|');
+}
+
+/** `JSON.stringify` with object keys sorted, so equal shapes serialize equally. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+/**
+ * Type a header's schema and materialize the inline models it names, under a
+ * property name that does not collide with a different shape anywhere in the
+ * spec.
+ *
+ * Header models are named from the service and header name alone, so an
+ * inline `X-Meta` on a `Documents` operation is `DocumentsXMeta` — the same
+ * name a component schema, or the same header on a 429 or on another
+ * `Documents` operation, may already own with a different shape. Left alone,
+ * the later merge keeps one definition for the name and every other
+ * reference silently gets the wrong fields (a request body using the
+ * component would even change type without any emitter reading headers).
+ *
+ * The first owner of a name keeps it: component models are seeded before any
+ * operation, operations are visited in path order, and a single operation's
+ * responses in ascending status-code order (integer-like keys iterate that
+ * way), so the lowest code wins regardless of where it appears in the
+ * document. A later header with a different shape — at any depth, a nested
+ * object that differs counts — is re-derived under the first free candidate:
+ *
+ *   1. the bare header name                `DocumentsXMeta`
+ *   2. when the name is taken inside this operation, the status code
+ *      (`DocumentsXMeta429`); when taken by a component or another
+ *      operation, the operation (`DocumentsCreateDocumentXMeta`)
+ *   3. the other of those two
+ *   4. operation and status code            `DocumentsCreateDocumentXMeta429`
+ *   5. a numeric suffix                     `DocumentsXMeta2`, `DocumentsXMeta3`, ...
+ *
+ * Both the type and the models come from the same property name, so nested
+ * models (`DocumentsXMeta429Origin`) line up by construction. A shape
+ * identical to the name's current owner shares it and materializes nothing
+ * new, which is also how a header reuses a matching component model.
+ *
+ * Treating the header as a one-property object reuses the field-level
+ * extractor, whose names come from the same `qualifyInlineModelName(name,
+ * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
+ * path uses.
+ */
+function typeHeaderSchema(
+  schema: SchemaObject,
+  name: string,
+  statusCode: number,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+): TypeRef {
+  const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
+  const byStatus = `${name}${statusCode}`;
+  const byOperation = `${ctx.operationQualifier}${name}`;
+  const byBoth = `${ctx.operationQualifier}${name}${statusCode}`;
+  let candidates = [name, byStatus, byOperation, byBoth];
+
+  for (let attempt = 0; ; attempt++) {
+    const propertyName =
+      attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`;
+    const trial: Model[] = [];
+    extractInlineModelsFromProperties(
+      { properties: { [propertyName]: schema } },
+      trial,
+      parentName,
+      ctx.componentSchemas,
+    );
+
+    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
+    const collisions = fingerprints.flatMap(([model, fingerprint]) => {
+      const registered = ctx.registry.get(model.name);
+      return registered !== undefined && registered.fingerprint !== fingerprint ? [registered] : [];
+    });
+    if (collisions.length > 0) {
+      // Decide the preference between candidates 2 and 3 from the bare name's
+      // owner: a clash within this operation reads best by status code, one
+      // with a component or another operation by operation name.
+      if (attempt === 0 && !collisions.every((c) => c.operation === ctx.operationQualifier)) {
+        candidates = [name, byOperation, byStatus, byBoth];
+      }
+      continue;
+    }
+
+    for (const [model, fingerprint] of fingerprints) {
+      if (ctx.registry.has(model.name)) continue;
+      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
+      models.push(model);
+    }
+    return schemaToTypeRef(schema, propertyName, parentName);
+  }
+}
+
+/**
+ * Read a Response Object's `headers` map into IR response headers, resolving
+ * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
+ * survives so callers can leave the `headers` key off entirely.
+ *
+ * An object-shaped header schema (directly, inside an array, or as a oneOf
+ * variant) becomes a `ModelRef`, so the model it names is appended to
+ * `models` — otherwise the ref would dangle with nothing to emit.
+ */
+function extractResponseHeaders(
+  headers: Record<string, RawHeaderObject> | undefined,
+  operationLabel: string,
+  statusCode: number,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+): ResponseHeader[] | undefined {
+  if (!headers) return undefined;
+
+  const result: ResponseHeader[] = [];
+  for (const [name, raw] of Object.entries(headers)) {
+    // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
+    // media type is already carried by the response's `content` map.
+    if (name.toLowerCase() === 'content-type') continue;
+
+    const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel);
+    if (!header) continue;
+
+    // A Header Object declares `schema` or a single-entry `content` map; with
+    // `content`, the first (only) media type's schema types the header.
+    const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
+    const schema = header.schema ?? contentSchema;
+    const type: TypeRef = schema
+      ? typeHeaderSchema(schema, name, statusCode, ctx, models)
+      : { kind: 'primitive', type: 'string' };
+
+    result.push({
+      name,
+      type,
+      required: header.required ?? false,
+      description: header.description,
+      deprecated: header.deprecated || undefined,
+    });
+  }
+
+  return result.length > 0 ? result : undefined;
+}
+
 /**
  * Build the prefix (`NotesByIdPinPost`) that names both inline models — the
  * request body (`…Request`) and the response (`…Response`) — of an operation
@@ -1664,9 +1941,13 @@ function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
   pathModelBaseName: string,
+  path?: string,
+  method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
+  headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
 ): {
   response: TypeRef;
+  responseHeaders?: ResponseHeader[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   inlineModels: Model[];
@@ -1678,6 +1959,7 @@ function extractResponses(
 } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let responseHeaders: ResponseHeader[] | undefined;
   let inlineModels: Model[] = [];
   let isPaginated = false;
   let dataPath: string | undefined;
@@ -1688,9 +1970,19 @@ function extractResponses(
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
   const allSuccessResponses: SuccessResponse[] = [];
+  const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
+  // Kept apart from `inlineModels`, which the latest 2xx body replaces
+  // wholesale below; merged once every status code has been read.
+  const headerModels: Model[] = [];
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
+    // Headers belong to the status code they are declared on, success or
+    // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
+    // response no branch below keeps (`default`, 1xx) declares none worth
+    // materializing models for.
+    const headers =
+      code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, headerContext, headerModels) : undefined;
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
@@ -1728,14 +2020,18 @@ function extractResponses(
           }
         }
       }
-      allSuccessResponses.push({ statusCode: code, type: extractedType });
+      allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
     } else if (code >= 300 && code < 400) {
       // 3xx redirects — include so emitter can detect redirect endpoints
-      allSuccessResponses.push({ statusCode: code, type: { kind: 'primitive', type: 'unknown' } });
+      allSuccessResponses.push({
+        statusCode: code,
+        type: { kind: 'primitive', type: 'unknown' },
+        ...(headers && { headers }),
+      });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
-      errors.push({ statusCode: code, type });
+      errors.push({ statusCode: code, type, ...(headers && { headers }) });
     }
   }
 
@@ -1745,12 +2041,15 @@ function extractResponses(
     const primary =
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
+    responseHeaders = primary.headers;
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
+  if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
 
   return {
     response,
+    responseHeaders,
     successResponses,
     errors,
     inlineModels,

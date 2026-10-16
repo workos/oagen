@@ -696,3 +696,44 @@ describe('specDerivedNames — pagination envelope fields', () => {
     expect(names.has('Pagination')).toBe(true);
   });
 });
+
+describe('specDerivedNames — response headers', () => {
+  it('counts a type reached only through a response header as spec-derived', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Documents',
+          operations: [
+            {
+              name: 'downloadDocument',
+              httpMethod: 'get',
+              path: '/documents/{id}/download',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'primitive', type: 'string', format: 'binary' },
+              responseHeaders: [{ name: 'X-Meta', type: { kind: 'model', name: 'DownloadMeta' }, required: false }],
+              errors: [
+                {
+                  statusCode: 429,
+                  headers: [{ name: 'X-Throttle', type: { kind: 'model', name: 'ThrottleInfo' }, required: false }],
+                },
+              ],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('DownloadMeta')).toBe(true);
+    expect(names.has('ThrottleInfo')).toBe(true);
+  });
+});
