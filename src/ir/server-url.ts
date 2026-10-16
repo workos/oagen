@@ -52,8 +52,9 @@ export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>)
     }
 
     url += template.slice(cursor, open);
-    // `hasOwn` rather than a bare lookup: a placeholder named `constructor`
-    // must not resolve to Object.prototype's.
+    // Own keys only: a placeholder named `constructor` or `__proto__` resolves
+    // when the document declares that variable (the parser defines it as an own
+    // data property), never to Object.prototype's member of that name.
     if (Object.hasOwn(variables, name)) {
       url += variables[name].default;
     } else {

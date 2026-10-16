@@ -347,6 +347,61 @@ ${minimalPaths}`);
     expect(warnings()).toEqual([]);
   });
 
+  it('keeps variables named like Object.prototype members and resolves them', async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+servers:
+  - url: https://{__proto__}.example.com/{constructor}/{hasOwnProperty}/{toString}
+    variables:
+      __proto__: { default: eu, enum: [eu, us] }
+      constructor: { default: ctor }
+      hasOwnProperty: { default: own }
+      toString: { default: str }
+${minimalPaths}`);
+
+    expect(ir.baseUrl).toBe('https://eu.example.com/ctor/own/str');
+
+    const variables = ir.servers![0].variables!;
+    // Own data properties on an ordinary object: `__proto__` is a key, not the prototype.
+    expect(Object.getPrototypeOf(variables)).toBe(Object.prototype);
+    expect(Object.keys(variables)).toEqual(['__proto__', 'constructor', 'hasOwnProperty', 'toString']);
+    expect(Object.hasOwn(variables, '__proto__')).toBe(true);
+    expect(variables['__proto__']).toStrictEqual({ default: 'eu', enum: ['eu', 'us'] });
+    expect(variables['constructor']).toStrictEqual({ default: 'ctor' });
+    expect(variables['hasOwnProperty']).toStrictEqual({ default: 'own' });
+    expect(variables['toString']).toStrictEqual({ default: 'str' });
+
+    // Survives serialization as data, the way `oagen parse` prints the IR.
+    const roundTripped = JSON.parse(JSON.stringify(variables)) as Record<string, unknown>;
+    expect(Object.hasOwn(roundTripped, '__proto__')).toBe(true);
+    expect(roundTripped['__proto__']).toEqual({ default: 'eu', enum: ['eu', 'us'] });
+
+    expect(warnings()).toEqual([]);
+  });
+
+  it('keeps a __proto__ variable from a JSON document too', async () => {
+    // Raw JSON text, since an object literal with `__proto__:` would set the
+    // prototype and JSON.stringify would never write the key.
+    const specFile = path.join(tmpDir, 'spec.json');
+    await fs.writeFile(
+      specFile,
+      '{"openapi":"3.1.0","info":{"title":"repro","version":"1"},' +
+        '"servers":[{"url":"https://{__proto__}.example.com/{constructor}",' +
+        '"variables":{"__proto__":{"default":"eu"},"constructor":{"default":"ctor"}}}],' +
+        '"paths":{"/pets":{"get":{"operationId":"listPets","responses":{"204":{"description":"ok"}}}}}}',
+      'utf-8',
+    );
+    const ir = await parseSpec(specFile);
+
+    expect(ir.baseUrl).toBe('https://eu.example.com/ctor');
+    const variables = ir.servers![0].variables!;
+    expect(Object.keys(variables)).toEqual(['__proto__', 'constructor']);
+    expect(variables['__proto__']).toStrictEqual({ default: 'eu' });
+    expect(variables['constructor']).toStrictEqual({ default: 'ctor' });
+    expect(warnings()).toEqual([]);
+  });
+
   it('yields an empty baseUrl and no servers when the document declares none', async () => {
     const ir = await parseYaml(`
 openapi: '3.1.0'

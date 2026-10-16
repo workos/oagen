@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveServerUrl } from '../../src/ir/server-url.js';
+import type { ServerVariable } from '../../src/ir/types.js';
 
 /**
  * Covers `resolveServerUrl` in isolation: how a server URL template and its
@@ -122,5 +123,34 @@ describe('resolveServerUrl', () => {
       variables: { prefix: { default: '' } },
     });
     expect(resolved).toEqual({ url: 'https://api.example.com/v1', unresolved: [] });
+  });
+
+  it('resolves variables named like Object.prototype members when they are own keys', () => {
+    // Object.fromEntries defines own data properties, `__proto__` included —
+    // the same way the parser materializes `ServerEntry.variables`.
+    const variables: Record<string, ServerVariable> = Object.fromEntries<ServerVariable>([
+      ['__proto__', { default: 'eu' }],
+      ['constructor', { default: 'ctor' }],
+      ['hasOwnProperty', { default: 'own' }],
+      ['toString', { default: 'str' }],
+    ]);
+    expect(Object.hasOwn(variables, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(variables)).toBe(Object.prototype);
+
+    const resolved = resolveServerUrl({
+      url: 'https://{__proto__}.example.com/{constructor}/{hasOwnProperty}/{toString}/{__proto__}',
+      variables,
+    });
+    expect(resolved).toEqual({ url: 'https://eu.example.com/ctor/own/str/eu', unresolved: [] });
+  });
+
+  it('does not resolve `{__proto__}` from the prototype chain', () => {
+    // In an object literal `__proto__:` sets the prototype rather than an own
+    // key, so this map declares nothing as far as the resolver is concerned.
+    const variables = { __proto__: { default: 'eu' } } as Record<string, ServerVariable>;
+    expect(Object.hasOwn(variables, '__proto__')).toBe(false);
+
+    const resolved = resolveServerUrl({ url: 'https://{__proto__}.example.com', variables });
+    expect(resolved).toEqual({ url: 'https://{__proto__}.example.com', unresolved: ['__proto__'] });
   });
 });

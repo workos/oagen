@@ -59,13 +59,18 @@ function buildServerEntry(raw: unknown): ServerEntry | undefined {
   const entry: ServerEntry = { url, description: typeof raw.description === 'string' ? raw.description : undefined };
 
   const declared = isRecord(raw.variables) ? raw.variables : {};
-  const variables: Record<string, ServerVariable> = {};
+  // Collected in a Map and materialized with Object.fromEntries, which defines
+  // own data properties: `variables[name] = …` on a plain object would set its
+  // prototype instead when the document names a variable `__proto__`. The
+  // result is still an ordinary object, so `Object.keys`, JSON and snapshots
+  // see nothing unusual.
+  const variables = new Map<string, ServerVariable>();
   for (const [name, value] of Object.entries(declared)) {
     const variable = buildServerVariable(url, name, value);
-    if (variable) variables[name] = variable;
+    if (variable) variables.set(name, variable);
   }
   // Absent, not `undefined`, when the document declares none (or none usable).
-  if (Object.keys(variables).length > 0) entry.variables = variables;
+  if (variables.size > 0) entry.variables = Object.fromEntries(variables);
 
   for (const name of resolveServerUrl(entry).unresolved) {
     // A declared variable that was omitted above has already been reported.
