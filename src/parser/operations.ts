@@ -12,7 +12,8 @@ import type {
   Field,
   PaginationMeta,
 } from '../ir/types.js';
-import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
+import { createHash } from 'node:crypto';
+import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -295,6 +296,12 @@ export function extractOperations(
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
+  // Operations without an operationId name their inline models from the
+  // path, and two distinct paths — or a path and an operationId or component
+  // schema — can produce the same name, so the prefix for every such
+  // operation is decided up front (see resolvePathModelBaseNames).
+  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
@@ -319,6 +326,7 @@ export function extractOperations(
 
       const tag = op.tags?.[0];
       const serviceName = inferServiceName(path, tag);
+      const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
 
       const {
         operation,
@@ -329,6 +337,7 @@ export function extractOperations(
         path,
         op,
         pathLevelParams,
+        pathModelBaseName,
         operationIdTransform,
         serviceName,
         componentSchemas,
@@ -482,6 +491,26 @@ function inferServiceName(path: string, tag?: string): string {
  */
 function normalizeOperationIdForNaming(operationId: string): string {
   return operationId.replace(/\[\d+\]\s*$/, '');
+}
+
+/**
+ * The inline request body or response model name of an operation that has an
+ * `operationId`. The single source of that name: extractRequestBody and
+ * deriveResponseName use it to name, resolvePathModelBaseNames to reserve.
+ */
+function operationIdModelName(operationId: string, suffix: 'Request' | 'Response'): string {
+  return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
+}
+
+/**
+ * The stem every model derived from an `operationId` starts with: its
+ * `Request` and `Response` models, a list's `Item`, nested inline models under
+ * those (`…ResponseOwner`) and envelope companions (`…ListMetadata`). Every
+ * step of cleanSchemaName is a global replace or acts on the leading word, so
+ * this is a true prefix of each of those names. Used to reserve them all.
+ */
+function operationIdModelBase(operationId: string): string {
+  return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)));
 }
 
 function inferOperationName(
@@ -805,6 +834,7 @@ function buildOperation(
   path: string,
   op: OperationObject,
   pathLevelParams: RawParameterObject[],
+  pathModelBaseName: string,
   operationIdTransform?: (id: string) => string,
   serviceName?: string,
   componentSchemas?: Record<string, SchemaObject>,
@@ -889,6 +919,7 @@ function buildOperation(
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
     requestBodyObject,
     op,
+    pathModelBaseName,
     reqBodyModels,
     componentSchemas,
   );
@@ -903,7 +934,7 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, path, method, componentSchemas, {
+  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
     componentHeaders,
     componentSchemas,
     serviceName: opContext,
@@ -1290,6 +1321,7 @@ function collectBodyPropertyNames(
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
+  pathModelBaseName: string,
   inlineModels: Model[],
   componentSchemas?: Record<string, SchemaObject>,
 ): { body?: TypeRef; encoding?: RequestBodyEncoding } {
@@ -1310,10 +1342,12 @@ function extractRequestBody(
     return {};
   }
 
-  const rawName = op?.operationId
-    ? toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Request'
-    : 'RequestBody';
-  const contextName = cleanSchemaName(rawName);
+  // Without an operationId, name the body from the operation's path-derived
+  // prefix (see derivePathModelBaseName) so two operations don't share one
+  // inline body model. Every operationId-less body used to be `RequestBody`,
+  // and only the largest survived deduplication — every other operation was
+  // left pointing at a model with someone else's fields.
+  const contextName = op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
@@ -1358,7 +1392,7 @@ function extractRequestBody(
       } else if (variant.type === 'null') {
         // skip null variant in union, handle separately
       } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const variantName = deriveOneOfVariantName(variant, contextName, inlineModels);
+        const variantName = deriveOneOfVariantName(variant, contextName, inlineModels, Boolean(op?.operationId));
         const requiredSet = new Set(variant.required ?? []);
         const siblings = collectProperties(variant);
         const fields: Field[] = [];
@@ -1478,28 +1512,42 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
   };
 }
 
-/** Derive a unique variant name for a oneOf inline model. */
-function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existingModels: Model[]): string {
+/**
+ * Derive a unique variant name for a oneOf inline model.
+ *
+ * `fromOperationId` says where `baseName` came from. An operationId-derived
+ * base is already in cleanSchemaName form and its variants go through
+ * resolveSchemaName, so they follow the same project-level naming policy as
+ * component schemas. A path-derived base is used verbatim: it is deliberately
+ * not cleaned (see derivePathModelBaseName) and resolvePathModelBaseNames
+ * reserves names by that exact prefix, so cleaning a variant here would let it
+ * slip past the reservation — `NotesPostRequest` became `NotePostRequest` and
+ * collided with a component of that name.
+ */
+function deriveOneOfVariantName(
+  variant: SchemaObject,
+  baseName: string,
+  existingModels: Model[],
+  fromOperationId: boolean,
+): string {
+  const finalize = (name: string): string => (fromOperationId ? resolveSchemaName(name) : name);
   // Try to use a distinguishing property (e.g., "grant_type" field's const/enum value)
   if (variant.properties) {
     for (const [, propSchema] of Object.entries(variant.properties)) {
       if (propSchema?.const && typeof propSchema.const === 'string') {
         const derivedName = toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
-        // Const-derived request variants are IR models too, so they must use
-        // the same project-level naming policy as component schemas.
-        return resolveSchemaName(derivedName);
+        return finalize(derivedName);
       }
     }
   }
-  // Fallback: append a numeric suffix
+  // Fallback: append a numeric suffix. Finalize before suffixing so every
+  // candidate stays in the same namespace as the rest of the IR.
   const existingNames = new Set(existingModels.map((m) => m.name));
-  // Apply the transform before suffixing so every fallback candidate stays in
-  // the same post-schemaNameTransform namespace as the rest of the IR.
-  const transformedBaseName = resolveSchemaName(baseName);
-  let name = transformedBaseName;
+  const finalBaseName = finalize(baseName);
+  let name = finalBaseName;
   let suffix = 2;
   while (existingNames.has(name)) {
-    name = `${transformedBaseName}${suffix}`;
+    name = `${finalBaseName}${suffix}`;
     suffix++;
   }
   return name;
@@ -1686,18 +1734,314 @@ function extractResponseHeaders(
   return result.length > 0 ? result : undefined;
 }
 
-function deriveResponseName(op: OperationObject | undefined, path: string, method: HttpMethod): string {
-  if (op?.operationId) {
-    return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(op.operationId)) + 'Response');
-  }
+/**
+ * Build the prefix (`NotesByIdPinPost`) that names both inline models — the
+ * request body (`…Request`) and the response (`…Response`) — of an operation
+ * that has no `operationId`, from the only thing that identifies it: its path
+ * and method.
+ *
+ * Every non-parameter segment is PascalCased in order and every parameter
+ * segment becomes `By` + PascalCase(param name); then the optional
+ * disambiguator and the method are appended. The whole is normalized with
+ * toPascalCase so it is a fixed point of that function: responses.ts re-cases
+ * the response name in `deriveModelName`, and without this step `POST /a/b`
+ * named its body `ABPostRequest` but its response `AbPostResponse`.
+ *
+ *   GET  /widgets                   → WidgetsGet
+ *   POST /notes                     → NotesPost
+ *   POST /notes/{id}/pin            → NotesByIdPinPost
+ *   GET  /users/{user_id}/sessions  → UsersByUserIdSessionsGet
+ *
+ * This tells the common path shapes apart (list vs. item, sibling and nested
+ * sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`,
+ * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/` all flatten to the
+ * same words. `resolvePathModelBaseNames` detects such collisions: the path
+ * spelled most plainly keeps the plain name and every other one gets a
+ * `disambiguator` derived from its raw path.
+ *
+ * A single-segment path keeps the name the old first-segment rule produced.
+ * The result is deliberately not passed through cleanSchemaName (the old
+ * fallback wasn't either): the segments are the resource names as the API
+ * spells them.
+ */
+export function derivePathModelBaseName(path: string, method: HttpMethod, disambiguator = ''): string {
   const segments = path.split('/').filter(Boolean);
-  const resource = segments[0] ?? 'Unknown';
-  return toPascalCase(resource) + toPascalCase(method) + 'Response';
+  const parts = segments.map((segment) =>
+    segment.startsWith('{') ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
+  );
+  const resource = parts.length > 0 ? parts.join('') : 'Unknown';
+  // `_` separators guarantee a word boundary on each side of the disambiguator
+  // and the method, whatever the resource ends with; splitWords drops them.
+  return toPascalCase([resource, disambiguator, method].filter(Boolean).join('_'));
+}
+
+/** `derivePathModelBaseName` plus the `Request` / `Response` suffix. */
+export function derivePathBasedName(
+  path: string,
+  method: HttpMethod,
+  suffix: 'Request' | 'Response',
+  disambiguator = '',
+): string {
+  return derivePathModelBaseName(path, method, disambiguator) + suffix;
+}
+
+/**
+ * Decide the path-derived model prefix of every operation that has no
+ * `operationId`, keyed by `${method} ${path}`.
+ *
+ * A prefix collides when two distinct raw paths with the same method flatten
+ * to it (see derivePathModelBaseName), or when a reserved name starts with
+ * it. The reserved names are every resolved component model name and, for
+ * every operation with an `operationId`, its model stem
+ * (operationIdModelBase). A prefix is the stem of several emitted names —
+ * `…Request`, `…Response`, a list's `…Item`, nested inline models such as
+ * `…ResponseOwner`, envelope companions such as `…ListMetadata` — so the
+ * check is on the stem, not on an enumeration of suffixes: an unnamed
+ * `GET /audit/events` must not overwrite `components/schemas/AuditEventsGetItem`
+ * any more than an unnamed `POST /audit/events` may overwrite the models of
+ * a `POST /legacy-audit` whose operationId is `auditEventsPost`. Reserved
+ * names never change.
+ *
+ * This is deliberately a superset: a component named `AuditEventsGetter`, or
+ * an operationId `auditEventsGetSummary`, also pushes `GET /audit/events`
+ * onto a hashed name although no emitted name would coincide. Determinism
+ * and never sharing a name wrongly matter more than the rare extra hash, and
+ * the reservation is unconditional — an inline body is never merged into a
+ * same-named component even when the shapes agree — so the rule stays
+ * simple and order-free. Every name derived from a path-based prefix uses it
+ * verbatim (body `oneOf` variants included; see deriveOneOfVariantName), and
+ * as a second line of defence the check also runs on the cleaned spellings
+ * of the prefix (see prefixSpellings), so `GET /notes` yields to a component
+ * `NoteGetItem` although its own item model is `NotesGetItem`. Names that
+ * embed the prefix behind a const value — a body `oneOf` variant pinning
+ * `kind: email` is `EmailTagsPostRequest`, a nested variant
+ * `<Const><Parent><Field>` — are checked too, with each const the operation
+ * can mint prepended to every spelling (see collectOperationConstPrefixes);
+ * the hash then lands inside those names as well (`EmailTags151Dd5PostRequest`).
+ *
+ * These names are types SDK users read and import, so a collision costs the
+ * plain name only where it must. Within a group of paths that flatten to one
+ * prefix, the path spelled most plainly (see pathDeviation: no trailing
+ * slash, `{id}` rather than a literal `by-id`) is canonical and keeps the
+ * plain prefix; every other path gets a six-character disambiguator, the
+ * start of the SHA-1 of its raw path, inserted before the method
+ * (`POST /foo-bar` next to `POST /foo/bar` → `FooBar546F12Post`). When two
+ * paths tie for plainest, or the prefix is reserved, nobody is canonical and
+ * every path in the group is disambiguated. The outcome depends only on the
+ * document's paths, operationIds and component names, never on their order,
+ * and a path that stops colliding returns to its plain name.
+ */
+function resolvePathModelBaseNames(
+  paths: Record<string, PathItem>,
+  componentModels?: Model[],
+  componentRequestBodies?: Record<string, Record<string, unknown>>,
+): Map<string, string> {
+  const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
+  const rawPathsByPlainName = new Map<string, Set<string>>();
+  const constPrefixesByPlainName = new Map<string, Set<string>>();
+  const reservedNames = new Set<string>();
+
+  for (const model of componentModels ?? []) {
+    reservedNames.add(model.name);
+  }
+
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op) continue;
+      if (op.operationId) {
+        reservedNames.add(operationIdModelBase(op.operationId));
+        continue;
+      }
+      const plain = derivePathModelBaseName(path, method);
+      candidates.push({ key: `${method} ${path}`, path, method, plain });
+      const rawPaths = rawPathsByPlainName.get(plain) ?? new Set<string>();
+      rawPaths.add(path);
+      rawPathsByPlainName.set(plain, rawPaths);
+      const constPrefixes = constPrefixesByPlainName.get(plain) ?? new Set<string>();
+      for (const prefix of collectOperationConstPrefixes(
+        op,
+        componentRequestBodies,
+        operationLabel(op, path, method),
+      )) {
+        constPrefixes.add(prefix);
+      }
+      constPrefixesByPlainName.set(plain, constPrefixes);
+    }
+  }
+
+  const reservedList = [...reservedNames];
+  const canonicalByPlainName = new Map<string, string | undefined>();
+  for (const [plain, rawPaths] of rawPathsByPlainName) {
+    // Every stem a name minted from this prefix can start with: the prefix in
+    // each of its cleaned spellings, and each const value the operation can
+    // prepend to it (`EmailTagsPostRequest` is `Email` + `TagsPost…`).
+    const spellings = prefixSpellings(plain);
+    const constPrefixes = ['', ...(constPrefixesByPlainName.get(plain) ?? [])];
+    const stems = constPrefixes.flatMap((constPrefix) => spellings.map((spelling) => constPrefix + spelling));
+    const reserved = stems.some((stem) => reservedList.some((name) => name.startsWith(stem)));
+    canonicalByPlainName.set(plain, reserved ? undefined : canonicalPath(rawPaths));
+  }
+
+  const resolved = new Map<string, string>();
+  for (const { key, path, method, plain } of candidates) {
+    const keepsPlainName = canonicalByPlainName.get(plain) === path;
+    resolved.set(key, keepsPlainName ? plain : derivePathModelBaseName(path, method, pathDisambiguator(path)));
+  }
+  return resolved;
+}
+
+/**
+ * The one path in a group that is spelled most plainly by pathDeviation, or
+ * undefined when two or more tie for it, so the choice never depends on the
+ * order the paths were written in.
+ */
+function canonicalPath(rawPaths: Iterable<string>): string | undefined {
+  let best: string | undefined;
+  let bestScore: [number, number] | undefined;
+  let tied = false;
+  for (const path of rawPaths) {
+    const score = pathDeviation(path);
+    const cmp = bestScore ? compareDeviation(score, bestScore) : -1;
+    if (cmp < 0) {
+      best = path;
+      bestScore = score;
+      tied = false;
+    } else if (cmp === 0) {
+      tied = true;
+    }
+  }
+  return tied ? undefined : best;
+}
+
+/**
+ * How far a raw path's spelling is from the plain prefix it flattens to:
+ * `[trailing slash, literal segments with any character outside a-z0-9]`,
+ * compared lexicographically. `/notes` scores [0, 0] and `/notes/` [1, 0];
+ * `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
+ */
+function pathDeviation(rawPath: string): [number, number] {
+  const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
+  const irregularSegments = rawPath
+    .split('/')
+    .filter(Boolean)
+    .filter((segment) => !segment.startsWith('{') && /[^a-z0-9]/.test(segment)).length;
+  return [trailingSlash, irregularSegments];
+}
+
+function compareDeviation(a: [number, number], b: [number, number]): number {
+  return a[0] - b[0] || a[1] - b[1];
+}
+
+/** The first six hex characters of the SHA-1 of a raw path. */
+function pathDisambiguator(rawPath: string): string {
+  return createHash('sha1').update(rawPath).digest('hex').slice(0, 6);
+}
+
+/**
+ * The spellings a path-based prefix could take if a name derived from it were
+ * run through one of the parser's cleaning steps: the prefix itself (every
+ * path-derived name uses it verbatim), cleanSchemaName's form (lead-word
+ * singularization plus backend and ListItem-marker stripping),
+ * resolveSchemaName's form (the same plus the project's schemaNameTransform),
+ * and stripListItemMarkers alone, which nested-model and inline-enum
+ * qualification apply to a parent name. Reserving by every spelling is the
+ * second line of defence behind "use the base verbatim": a cleaning step added
+ * later cannot let a derived name slip past the reservation. Empty spellings
+ * are dropped so a degenerate prefix cannot match every reserved name.
+ */
+function prefixSpellings(prefix: string): string[] {
+  const spellings = [prefix, cleanSchemaName(prefix), resolveSchemaName(prefix), stripListItemMarkers(prefix)];
+  return [...new Set(spellings)].filter((spelling) => spelling.length > 0);
+}
+
+/**
+ * The PascalCase const values an operationId-less operation can prepend to a
+ * name minted from its prefix, read from the schemas its request body and 2xx
+ * responses declare inline. A body `oneOf` variant pinning `kind: email`
+ * yields `EmailTagsPostRequest` (deriveOneOfVariantName); a nested
+ * `oneOf`/`anyOf` object variant yields `<Const><Parent><Field>`
+ * (nameOneOfVariant, nameVariantModel). Every string const or single-value
+ * enum of every inline object variant is collected, top level and nested — a
+ * superset of whichever property each of those picks as the discriminator, so
+ * the reservation can never be narrower than the naming. `$ref` targets are
+ * components with names of their own and are not followed. A request body
+ * `$ref` that cannot be resolved is left for buildOperation to report.
+ *
+ * Names that do not embed the prefix at all — a response `oneOf` variant
+ * named from its bare const (`Email`, see deriveModelName in responses.ts)
+ * or a `title`-mapped variant — are outside what a disambiguator can
+ * separate and are not reserved here.
+ */
+function collectOperationConstPrefixes(
+  op: OperationObject,
+  componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
+  opLabel: string,
+): Set<string> {
+  const prefixes = new Set<string>();
+  let body: RequestBodyObject | undefined;
+  try {
+    body = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
+  } catch {
+    body = undefined;
+  }
+  collectConstPrefixes(selectRequestBodyContent(body).schema, prefixes, 0);
+  for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
+    const code = parseInt(statusCode, 10);
+    if (code < 200 || code >= 300) continue;
+    for (const media of Object.values(response.content ?? {})) {
+      collectConstPrefixes(media?.schema, prefixes, 0);
+    }
+  }
+  return prefixes;
+}
+
+function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>, depth: number): void {
+  if (!schema || schema.$ref || depth > 16) return;
+  for (const variants of [schema.oneOf, schema.anyOf]) {
+    for (const variant of variants ?? []) {
+      if (variant.$ref || !variant.properties) continue;
+      for (const property of Object.values(variant.properties)) {
+        const value = constStringOf(property);
+        const prefix = value === null ? '' : toPascalCase(value);
+        if (prefix) out.add(prefix);
+      }
+    }
+  }
+  const children: Array<SchemaObject | undefined> = [
+    ...(schema.oneOf ?? []),
+    ...(schema.anyOf ?? []),
+    ...(schema.allOf ?? []),
+    schema.items,
+    ...Object.values(schema.properties ?? {}),
+    typeof schema.additionalProperties === 'object' ? schema.additionalProperties : undefined,
+  ];
+  for (const child of children) {
+    collectConstPrefixes(child, out, depth + 1);
+  }
+}
+
+/** A property's pinned string value: a string `const`, or a single-value string `enum`. */
+function constStringOf(property: SchemaObject | undefined): string | null {
+  if (!property) return null;
+  if (typeof property.const === 'string') return property.const;
+  if (Array.isArray(property.enum) && property.enum.length === 1 && typeof property.enum[0] === 'string') {
+    return property.enum[0];
+  }
+  return null;
+}
+
+function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {
+  if (op?.operationId) {
+    return operationIdModelName(op.operationId, 'Response');
+  }
+  return pathModelBaseName + 'Response';
 }
 
 function extractResponses(
-  responses?: Record<string, ResponseObject>,
-  op?: OperationObject,
+  responses: Record<string, ResponseObject> | undefined,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
   path?: string,
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
@@ -1745,7 +2089,7 @@ function extractResponses(
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
-        const contextName = deriveResponseName(op, path ?? '/', method ?? 'get');
+        const contextName = deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
         extractedType = result.response;
         // Keep track of inline models and pagination from the latest 2xx with a schema
@@ -1772,10 +2116,7 @@ function extractResponses(
           if (firstKey) {
             const firstContent = resp.content[firstKey];
             if (firstContent?.schema) {
-              extractedType = schemaToTypeRef(
-                firstContent.schema,
-                deriveResponseName(op, path ?? '/', method ?? 'get'),
-              );
+              extractedType = schemaToTypeRef(firstContent.schema, deriveResponseName(op, pathModelBaseName));
             }
           }
         }
