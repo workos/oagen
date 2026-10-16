@@ -9,12 +9,17 @@ import {
   resolveSchemaName,
 } from './schemas.js';
 import { extractOperations } from './operations.js';
+import { extractWebhooks } from './webhooks.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
 } from './normalize-inline-models.js';
-import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
+import {
+  collectInlineEnumsFromModels,
+  collectInlineEnumsFromOperations,
+  collectInlineEnumsFromWebhooks,
+} from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
@@ -74,12 +79,15 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     security?: RawSecurityRequirements;
     tags?: Array<{ name?: string; description?: string }>;
     paths?: Record<string, unknown>;
+    webhooks?: unknown;
+    'x-webhooks'?: unknown;
     components?: {
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
       examples?: Record<string, unknown>;
       headers?: Record<string, unknown>;
+      pathItems?: Record<string, unknown>;
       securitySchemes?: Record<string, SecuritySchemeObject>;
     };
   };
@@ -110,7 +118,24 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
   );
 
-  const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
+  // Webhooks are read while the schema-name transform is still active, like
+  // operations, so a payload's `$ref`s resolve to the same names as a field's.
+  // Their inline models are named against every model decided so far, so a
+  // payload never takes a component's or an operation's model name.
+  const { webhooks, inlineModels: webhookInlineModels } = extractWebhooks(
+    spec.webhooks,
+    {
+      schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+      parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
+      requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+      examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
+      pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
+    },
+    [...models, ...inlineModels].map((model) => model.name),
+  );
+  warnOnLegacyWebhooks(spec['x-webhooks']);
+
+  const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels]);
 
   // Extract inline models from model field definitions (objects/arrays with properties).
   // schemaNameTransform is kept active so inline child names use the
@@ -127,10 +152,11 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   );
   clearSchemaNameTransform();
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames);
-  const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
+  const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);
   collectInlineEnumsFromModels(finalModels, enums);
   collectInlineEnumsFromOperations(services, enums);
+  collectInlineEnumsFromWebhooks(webhooks, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
@@ -145,6 +171,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     baseUrl: serverEntries[0]?.url ?? '',
     servers: serverEntries.length > 0 ? serverEntries : undefined,
     services,
+    // Omitted, not an empty list, for a document without webhooks so its IR
+    // keeps the shape it had before the key existed.
+    ...(webhooks.length > 0 ? { webhooks } : {}),
     models: finalModels,
     enums,
     auth,
@@ -178,6 +207,21 @@ function applyFieldHints(
       if (domainName) field.domainName = domainName;
     }
   }
+}
+
+/**
+ * `x-webhooks` is the extension some OpenAPI 3.0 documents use for what 3.1
+ * standardized as the top-level `webhooks` map. The parser deliberately reads
+ * the standard key only: an extension has no agreed shape to parse, and
+ * reading it silently would make the IR depend on a convention the document
+ * never declared. A document that carries one is told so, once, so the
+ * omission is a visible choice rather than a quiet loss.
+ */
+function warnOnLegacyWebhooks(legacy: unknown): void {
+  if (typeof legacy !== 'object' || legacy === null) return;
+  console.warn(
+    '[oagen] Warning: `x-webhooks` is not read. Declare the webhooks under the top-level `webhooks` map (OpenAPI 3.1) to have them parsed.',
+  );
 }
 
 /** A `components.securitySchemes` entry as it appears in the OpenAPI document. */

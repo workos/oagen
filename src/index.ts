@@ -30,6 +30,8 @@ export type {
   Enum,
   EnumValue,
   ErrorResponse,
+  Webhook,
+  WebhookResponse,
 } from './ir/types.js';
 
 export {
@@ -43,6 +45,7 @@ export {
   validateModelHints,
   collectRequestBodyModels,
   collectResponseHeaders,
+  collectWebhookTypeRefs,
 } from './ir/types.js';
 
 // Operation resolution
@@ -120,6 +123,9 @@ export type {
   OperationAdded,
   OperationRemoved,
   OperationModified,
+  WebhookAdded,
+  WebhookRemoved,
+  WebhookModified,
   ParamChange,
 } from './differ/types.js';
 

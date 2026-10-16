@@ -1,5 +1,5 @@
-import type { Enum, Model, Operation, ResponseHeader, Service } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import type { Enum, Model, Operation, ResponseHeader, Service, Webhook } from '../ir/types.js';
+import { walkTypeRef, collectWebhookTypeRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
@@ -39,6 +39,20 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
         for (const header of headers) collectHeaderEnums(header, qualifier, enums, enumNames);
       }
     }
+  }
+}
+
+/**
+ * Promote the inline enums a webhook declares — on its header, query and
+ * cookie parameters, or as its payload itself — to top-level enums, exactly
+ * as `collectInlineEnumsFromOperations` does for an operation's parameters.
+ * A payload model's field enums are reached through `spec.models` by
+ * `collectInlineEnumsFromModels`, since the model is materialized there.
+ */
+export function collectInlineEnumsFromWebhooks(webhooks: Webhook[], enums: Enum[]): void {
+  const enumNames = new Set(enums.map((e) => e.name));
+  for (const webhook of webhooks) {
+    for (const ref of collectWebhookTypeRefs(webhook)) collectInlineEnumFromRef(ref, enums, enumNames);
   }
 }
 
