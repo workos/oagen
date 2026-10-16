@@ -291,10 +291,15 @@ interface Parameter {
   default?: unknown;
   example?: unknown; // The document's `example`, else `examples[0]`
   examples?: unknown[]; // Every example value, in document order; only when non-empty
+  style?: "form" | "simple" | "label" | "matrix";
+  explode?: boolean;
+  constraints?: Constraints; // Validation keywords; see Constraints below
 }
 ```
 
 `Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
+
+A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
 
 ### Parameter Examples
 
@@ -340,6 +345,7 @@ interface Model {
   description?: string;
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
+  constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
 }
 
 interface Field {
@@ -353,6 +359,7 @@ interface Field {
   default?: unknown;
   example?: unknown; // The schema's `example`, else `examples[0]`
   examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
+  constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
 }
 ```
 
@@ -370,6 +377,50 @@ If two inline models still resolve to the same name with different fields or fie
 ### Field Examples
 
 OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does. A field whose schema (and `$ref` target, if any) gives neither has no `example` and no `examples` key.
+
+### Constraints
+
+JSON Schema's validation keywords are carried on `Field`, `Parameter` and `Model` so an emitter can document a value's limits ("at most 100"), check a value before sending it, or keep a generated example within range. `type`, `enum`, `const` and `required` already have their own place in the IR and are not repeated here.
+
+```typescript
+interface Constraints {
+  // numbers
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  multipleOf?: number;
+  // strings
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string; // ECMA-262 regex, verbatim from the document
+  // arrays
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean; // present only when true
+  minContains?: number;
+  maxContains?: number;
+  // objects
+  minProperties?: number;
+  maxProperties?: number;
+  dependentRequired?: Record<string, string[]>;
+}
+```
+
+Every member is optional and present only when the document declares it. A schema with no validation keyword yields no `constraints` key at all, so `field.constraints?.maxLength` is the idiomatic read. The parser ignores a keyword whose value has the wrong type (a string `maxLength`, say) rather than carrying it.
+
+**OAS 3.0 → 3.1 normalization.** OpenAPI 3.1 (JSON Schema 2020-12) gives `exclusiveMinimum` / `exclusiveMaximum` as the bound itself; OpenAPI 3.0 spells them as booleans that make `minimum` / `maximum` exclusive. Both versions are parsed, and the IR always uses the 3.1 shape:
+
+| Document (3.0)                             | IR                                         |
+| ------------------------------------------ | ------------------------------------------ |
+| `minimum: 0, exclusiveMinimum: true`       | `{ exclusiveMinimum: 0 }` (no `minimum`)   |
+| `maximum: 100, exclusiveMaximum: true`     | `{ exclusiveMaximum: 100 }` (no `maximum`) |
+| `minimum: 0, exclusiveMinimum: false`      | `{ minimum: 0 }`                           |
+| `exclusiveMinimum: true` with no `minimum` | nothing                                    |
+
+A 3.1 document's numeric form passes through unchanged, including the legal-but-unusual case of an inclusive and an exclusive bound on the same side.
+
+**Scope.** The keywords declared on the field, parameter or model schema are collected, conjoined with those of its inline `allOf` members: the parser unwraps a single-member `allOf`, so `{ allOf: [{ type: string, maxLength: 3 }] }` is a string field carrying `{ maxLength: 3 }`, and a `$ref` member contributes the keywords written beside the reference while the referenced model keeps its own. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried. The one exception is a nullable wrapper — a `oneOf`/`anyOf` with exactly one non-null, non-`$ref` branch, which the IR collapses to `nullable<T>` — whose branch keywords are conjoined with the wrapper's own (and its `allOf` members'), so `anyOf: [{ type: string, maxLength: 8 }, { type: "null" }]` gives `{ maxLength: 8 }` and `{ allOf: [{ maxLength: 30 }], anyOf: [{ type: string, minLength: 20 }, { type: "null" }] }` gives `{ maxLength: 30, minLength: 20 }`, and an inline model built from that branch carries the same conjoined keywords, so `minProperties` written beside `anyOf: [{ type: object, … }, { type: "null" }]` reaches both the field and its model. Limits on a general multi-variant union are not carried. Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` field gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model — a component, or an inline response, request body or field the parser rebuilds from `allOf` members — it is the wrapper's keywords conjoined with its members' (the stricter bound wins; a `$ref` member contributes the keywords written beside the reference, while the referenced model keeps its own). A variant model of a discriminated `allOf` + `oneOf` union conjoins the shared keywords — the outer wrapper's, the base members' and any written beside the `oneOf` — with the variant's own the way `allOf` does — an instance must satisfy both, so the larger `min*` and the smaller `max*` win and `dependentRequired` maps are unioned per property.
 
 ## Enum
 

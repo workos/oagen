@@ -195,6 +195,12 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
   const toRemove = new Set<string>();
   for (const { jsonModel, baseModel } of mergeCandidates) {
     baseModel.fields = jsonModel.fields;
+    // The base model now describes the Json schema's shape, so carry that
+    // schema's own limits (minProperties, dependentRequired, ...) with the
+    // fields; the base's keywords fill in wherever the Json model is silent.
+    if (jsonModel.constraints || baseModel.constraints) {
+      baseModel.constraints = { ...baseModel.constraints, ...jsonModel.constraints };
+    }
     toRemove.add(jsonModel.name);
     rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name);
     console.warn(

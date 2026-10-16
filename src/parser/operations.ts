@@ -22,6 +22,8 @@ import {
   nonEmptyExamples,
   resolveExamples,
   resolveComponentSchemaRef,
+  extractConstraints,
+  constraintsEntry,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
@@ -1059,6 +1061,13 @@ function extractParams(
         { example: p.schema?.example, examples: nonEmptyExamples(p.schema?.examples) },
         { example: refTarget?.example, examples: nonEmptyExamples(refTarget?.examples) },
       ]);
+      // Like default/example, fall back per value: the `$ref` target's keywords
+      // sit under the parameter's own, so `{ $ref: Limit, minimum: 5 }` narrows
+      // one bound without discarding the target's others. The alias also becomes
+      // a fieldless model, but a parameter should be readable on its own.
+      const own = p.schema ? extractConstraints(p.schema) : undefined;
+      const inherited = refTarget ? extractConstraints(refTarget) : undefined;
+      const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
       return {
         name: p.name,
         type: p.schema
@@ -1072,6 +1081,7 @@ function extractParams(
         ...(examples ? { examples } : {}),
         style: p.style as Parameter['style'],
         explode: p.explode,
+        ...(constraints ? { constraints } : {}),
       };
     });
 }
@@ -1370,7 +1380,7 @@ function extractRequestBody(
       if (!fieldSchema) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
-    inlineModels.push({ name: contextName, description: undefined, fields });
+    inlineModels.push({ name: contextName, description: undefined, fields, ...constraintsEntry(schema) });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
     // by this branch. Recurse to materialize them, matching how component
@@ -1402,7 +1412,12 @@ function extractRequestBody(
             buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
           );
         }
-        inlineModels.push({ name: variantName, description: variant.description, fields });
+        inlineModels.push({
+          name: variantName,
+          description: variant.description,
+          fields,
+          ...constraintsEntry(variant),
+        });
         extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);
         variants.push({ kind: 'model', name: variantName });
       } else {
@@ -1509,6 +1524,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     properties,
     required: requiredFields,
     ...(schema.description ? { description: schema.description } : {}),
+    // The wrapper's own keywords bind every branch, so they ride along; the
+    // variants' keywords are alternatives and are not carried.
+    ...extractConstraints(schema),
   };
 }
 

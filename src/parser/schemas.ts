@@ -1,4 +1,4 @@
-import type { Model, Enum, EnumValue, Field, TypeRef } from '../ir/types.js';
+import type { Model, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import {
   toPascalCase,
@@ -128,7 +128,209 @@ export interface SchemaObject {
   example?: unknown;
   /** JSON Schema `examples` list; OAS 3.1 deprecates `example` in its favour. */
   examples?: unknown[];
+  // JSON Schema validation vocabulary. An exclusive bound is the bound itself
+  // in OAS 3.1 and, in OAS 3.0, a boolean that makes `minimum` / `maximum`
+  // exclusive; extractConstraints() normalizes both to the 3.1 shape.
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number | boolean;
+  exclusiveMaximum?: number | boolean;
+  multipleOf?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  minContains?: number;
+  maxContains?: number;
+  minProperties?: number;
+  maxProperties?: number;
+  dependentRequired?: Record<string, string[]>;
   [key: string]: unknown;
+}
+
+/** Validation keywords copied through unchanged when they hold a number. */
+const NUMERIC_CONSTRAINT_KEYS = [
+  'multipleOf',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'minContains',
+  'maxContains',
+  'minProperties',
+  'maxProperties',
+] as const;
+
+/**
+ * Collect the JSON Schema validation keywords declared directly on `schema`
+ * into a `Constraints` object, or `undefined` when it declares none — so a
+ * schema without limits yields no `constraints` key on its IR node at all.
+ *
+ * Numeric bounds are normalized to the OAS 3.1 shape. OAS 3.0 spells an
+ * exclusive bound as `exclusiveMinimum: true` beside `minimum: n`; that pair
+ * becomes `exclusiveMinimum: n` with no `minimum`. A boolean `false`, or a
+ * `true` with no bound to apply to, is dropped. The 3.1 numeric form passes
+ * through, including the legal-but-unusual case of both an inclusive and an
+ * exclusive bound on the same side. `uniqueItems: false` restates the default
+ * and is dropped too.
+ *
+ * Only the schema's own keywords are read: limits nested inside array `items`
+ * or map values are not collected. The one exception is a nullable wrapper —
+ * a `oneOf`/`anyOf` with a single non-null, non-`$ref` branch — that declares
+ * none itself: it takes that branch's keywords, since the IR collapses it to
+ * `nullable<T>`. Values of the wrong type (a string `maxLength`, say) are
+ * ignored rather than carried.
+ */
+export function extractConstraints(schema: SchemaObject): Constraints | undefined {
+  // The schema's own keywords conjoined with its `allOf` members' (recursively;
+  // a keyword declared at more than one level is combined by
+  // combineConstraints, so the stricter bound wins). schemaToTypeRef unwraps a
+  // single-member `allOf`, so `{ allOf: [{ type: 'string', maxLength: 3 }] }`
+  // is a string whose limit is the value's own; a `$ref` member contributes
+  // the keywords written beside the reference, but the target itself is not
+  // followed — its limits stay on the referenced model.
+  let out = ownConstraints(schema);
+  for (const member of schema.allOf ?? []) out = combineConstraints(out, extractConstraints(member));
+  // A nullable wrapper — `oneOf`/`anyOf` with exactly one non-null branch —
+  // collapses to `nullable<T>` in the IR, so that branch's keywords are the
+  // value's own too and conjoin with the rest. A `$ref` branch keeps its
+  // limits on the referenced model, and a genuine multi-variant union carries
+  // none.
+  const branch = singleNonNullBranch(schema);
+  return branch ? combineConstraints(out, extractConstraints(branch)) : out;
+}
+
+/** The keywords declared strictly on `schema`, normalized — without the nullable-branch fallback. */
+function ownConstraints(schema: SchemaObject): Constraints | undefined {
+  const out: Constraints = {};
+
+  const lower = normalizeBound(schema.minimum, schema.exclusiveMinimum);
+  if (lower.inclusive !== undefined) out.minimum = lower.inclusive;
+  if (lower.exclusive !== undefined) out.exclusiveMinimum = lower.exclusive;
+  const upper = normalizeBound(schema.maximum, schema.exclusiveMaximum);
+  if (upper.inclusive !== undefined) out.maximum = upper.inclusive;
+  if (upper.exclusive !== undefined) out.exclusiveMaximum = upper.exclusive;
+
+  for (const key of NUMERIC_CONSTRAINT_KEYS) {
+    const value = schema[key];
+    if (typeof value === 'number') out[key] = value;
+  }
+  if (typeof schema.pattern === 'string') out.pattern = schema.pattern;
+  if (schema.uniqueItems === true) out.uniqueItems = true;
+
+  const dependentRequired = readDependentRequired(schema.dependentRequired);
+  if (dependentRequired) out.dependentRequired = dependentRequired;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The one non-null, non-`$ref` branch of a `oneOf`/`anyOf`, or `undefined` for anything else. */
+function singleNonNullBranch(schema: SchemaObject): SchemaObject | undefined {
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (!variants) return undefined;
+  const nonNull = variants.filter((v) => !isNullSchema(v));
+  return nonNull.length === 1 && !nonNull[0].$ref ? nonNull[0] : undefined;
+}
+
+/** True for the `{ type: 'null' }` / `{ type: ['null'] }` branch of a nullable wrapper. */
+function isNullSchema(schema: SchemaObject): boolean {
+  return (
+    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
+  );
+}
+
+/**
+ * `{ constraints }` when `schema` declares any validation keyword, `{}`
+ * otherwise — spread into an IR node so the key stays absent rather than
+ * present-but-undefined.
+ */
+export function constraintsEntry(schema: SchemaObject): { constraints?: Constraints } {
+  const constraints = extractConstraints(schema);
+  return constraints ? { constraints } : {};
+}
+
+/** Keywords where the stricter of two declarations is the larger value. */
+const MIN_KEYS = ['minimum', 'exclusiveMinimum', 'minLength', 'minItems', 'minContains', 'minProperties'] as const;
+/** Keywords where the stricter of two declarations is the smaller value. */
+const MAX_KEYS = ['maximum', 'exclusiveMaximum', 'maxLength', 'maxItems', 'maxContains', 'maxProperties'] as const;
+
+/**
+ * Conjoin two constraint sets the way `allOf` conjoins schemas: an instance
+ * must satisfy both, so every `min*` takes the larger value, every `max*` the
+ * smaller, `uniqueItems` holds if either side demands it, and
+ * `dependentRequired` merges per property with the union of its names
+ * (deduplicated, `a`'s order first). A keyword declared on one side only is
+ * kept as is, and an absent side yields the other unchanged.
+ *
+ * `multipleOf` and `pattern` keep `a`'s value when the two differ: a true
+ * conjunction would need the least common multiple, or a lookahead regex
+ * joining both patterns, and neither is worth carrying into the IR.
+ *
+ * Not for the parameter `$ref` fallback in extractParams: keywords written
+ * beside a `$ref` override the target's there, which is a different operation.
+ */
+export function combineConstraints(a: Constraints | undefined, b: Constraints | undefined): Constraints | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const out: Constraints = { ...a, ...b };
+  for (const key of MIN_KEYS) {
+    const [x, y] = [a[key], b[key]];
+    if (x !== undefined && y !== undefined) out[key] = Math.max(x, y);
+  }
+  for (const key of MAX_KEYS) {
+    const [x, y] = [a[key], b[key]];
+    if (x !== undefined && y !== undefined) out[key] = Math.min(x, y);
+  }
+  if (a.uniqueItems || b.uniqueItems) out.uniqueItems = true;
+  if (a.multipleOf !== undefined && b.multipleOf !== undefined) out.multipleOf = a.multipleOf;
+  if (a.pattern !== undefined && b.pattern !== undefined) out.pattern = a.pattern;
+  if (a.dependentRequired && b.dependentRequired) {
+    out.dependentRequired = unionDependentRequired(a.dependentRequired, b.dependentRequired);
+  }
+  return out;
+}
+
+/** Per-property union of two `dependentRequired` maps, deduplicated and keeping `a`'s order first. */
+function unionDependentRequired(a: Record<string, string[]>, b: Record<string, string[]>): Record<string, string[]> {
+  const merged = new Map<string, string[]>();
+  for (const [property, names] of Object.entries(a)) merged.set(property, [...names]);
+  for (const [property, names] of Object.entries(b)) {
+    const existing = merged.get(property);
+    if (!existing) {
+      merged.set(property, [...names]);
+      continue;
+    }
+    for (const name of names) if (!existing.includes(name)) existing.push(name);
+  }
+  return Object.fromEntries(merged);
+}
+
+/**
+ * Resolve one side's bound from `minimum` / `maximum` plus its `exclusive*`
+ * companion into the OAS 3.1 shape: a numeric companion is the exclusive
+ * bound itself, `true` turns the inclusive bound into the exclusive one, and
+ * `false` or absent leaves the inclusive bound as is.
+ */
+function normalizeBound(inclusive: unknown, exclusive: unknown): { inclusive?: number; exclusive?: number } {
+  const bound = typeof inclusive === 'number' ? inclusive : undefined;
+  if (typeof exclusive === 'number') return { inclusive: bound, exclusive };
+  if (exclusive === true) return { exclusive: bound };
+  return { inclusive: bound };
+}
+
+/** Copy `dependentRequired` when it is an object whose values are string arrays; anything else is ignored. */
+function readDependentRequired(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries: [string, string[]][] = [];
+  for (const [property, deps] of Object.entries(value as Record<string, unknown>)) {
+    if (Array.isArray(deps) && deps.every((d): d is string => typeof d === 'string'))
+      entries.push([property, [...deps]]);
+  }
+  // Object.fromEntries creates an own property for every key. Assigning
+  // `out[property]` on a literal would instead set the prototype for a
+  // dependency named `__proto__` and silently drop it.
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 /**
@@ -516,7 +718,7 @@ function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Recor
           if (!fs) continue;
           fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
         }
-        models.push({ name: variantName, description: variant.description, fields });
+        models.push({ name: variantName, description: variant.description, fields, ...constraintsEntry(variant) });
       }
     }
     return models;
@@ -531,7 +733,7 @@ function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Recor
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.description, fields }];
+    return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }];
   }
 
   // Handle array with inline items
@@ -543,7 +745,7 @@ function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Recor
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.items.description, fields }];
+    return [{ name, description: schema.items.description, fields, ...constraintsEntry(schema.items) }];
   }
 
   return [];
@@ -716,6 +918,9 @@ export function buildFieldFromSchema(
     // Only materialise the key when there is something to carry so existing
     // inline snapshots of fields without examples stay byte-identical.
     ...(examples ? { examples } : {}),
+    // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
+    // a bare `$ref` declares none, and the referenced model carries its limits.
+    ...constraintsEntry(fieldSchema),
   };
 }
 
@@ -1009,7 +1214,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     }
   }
 
-  return { name, description: schema.description, fields };
+  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
 }
 
 function extractAllOfModel(
@@ -1102,6 +1307,9 @@ function extractAllOfModel(
     description: schema.description,
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
+    // The wrapper's own keywords conjoined with its inline members'; `$ref`
+    // members keep theirs on the referenced model.
+    ...constraintsEntry(schema),
   };
 }
 
@@ -1208,8 +1416,20 @@ function extractDiscriminatedAllOfVariantModels(
   // variant that's missing the shared `id` / `name` / `object` etc.
   const baseProperties: Record<string, SchemaObject> = {};
   const baseRequired = new Set<string>();
+  // Shared limits every variant instance must satisfy under allOf semantics:
+  // the outer wrapper's own keywords, each base member's (through its allOf
+  // wrappers), and any written beside the `oneOf` itself — everything except
+  // the branches. They ride along with the base properties and are conjoined
+  // with each variant's own below, so on a shared keyword the stricter bound
+  // wins.
+  let baseConstraints = ownConstraints(schema);
   for (const subSchema of schema.allOf ?? []) {
-    if (subSchema.oneOf) continue; // the variant axis, handled below
+    if (subSchema.oneOf) {
+      // The variant axis: its branches are handled below, its own keywords
+      // bind all of them.
+      baseConstraints = combineConstraints(baseConstraints, ownConstraints(subSchema));
+      continue;
+    }
     const flat = subSchema.allOf ? flattenVariantForExtraction(subSchema) : subSchema;
     if (flat.properties) {
       for (const [k, v] of Object.entries(flat.properties)) {
@@ -1217,6 +1437,7 @@ function extractDiscriminatedAllOfVariantModels(
       }
     }
     if (flat.required) for (const r of flat.required) baseRequired.add(r);
+    baseConstraints = combineConstraints(baseConstraints, extractConstraints(subSchema));
   }
 
   for (const subSchema of schema.allOf ?? []) {
@@ -1237,10 +1458,15 @@ function extractDiscriminatedAllOfVariantModels(
         if (v) mergedProperties[k] = v;
       }
       const mergedRequired = new Set<string>([...baseRequired, ...(flat.required ?? [])]);
+      // The variant's own keywords (read through its allOf wrappers, like its
+      // properties) conjoined with the base members'. They are already in the
+      // 3.1 shape, so spreading them into the rebuilt schema lets
+      // extractInlineModelDeep's constraintsEntry read them back unchanged.
       const merged: SchemaObject = {
         type: 'object',
         properties: mergedProperties,
         required: [...mergedRequired],
+        ...combineConstraints(baseConstraints, extractConstraints(variant)),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -1436,6 +1662,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
               type: 'object',
               properties: mergedProperties,
               required: mergedRequired,
+              ...extractConstraints(fieldSchema),
             },
             schemas,
           ),
@@ -1465,7 +1692,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     }
   }
 
-  return [{ name, description: schema.description, fields }, ...nestedModels];
+  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
 }
 
 function qualifyNestedInlineName(parentName: string, fieldName: string): string {

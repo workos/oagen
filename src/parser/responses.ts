@@ -1,7 +1,13 @@
 import type { TypeRef, Model, Field } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema, isInlineObjectSchema } from './schemas.js';
+import {
+  schemaToTypeRef,
+  buildFieldFromSchema,
+  constraintsEntry,
+  extractConstraints,
+  isInlineObjectSchema,
+} from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 
@@ -460,7 +466,14 @@ function extractDirectResource(
     }
 
     if (Object.keys(mergedProperties).length > 0) {
-      const merged: SchemaObject = { type: 'object', properties: mergedProperties, required: mergedRequired };
+      // Carry the wrapper's limits, conjoined with its inline members', so the
+      // rebuilt schema still declares what an instance must satisfy.
+      const merged: SchemaObject = {
+        type: 'object',
+        properties: mergedProperties,
+        required: mergedRequired,
+        ...extractConstraints(schema),
+      };
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
       // would collide with the component model, so keep the context name.
@@ -573,5 +586,5 @@ function extractInlineModel(
   // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
-  return [{ name, description: schema.description, fields }, ...nestedModels];
+  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
 }
