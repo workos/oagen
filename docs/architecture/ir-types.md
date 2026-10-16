@@ -290,6 +290,7 @@ interface Parameter {
 `Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
 
 A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
+
 ### Parameter Examples
 
 `example` and `examples` are read from three levels in order: the parameter itself, then its inline `schema`, then the component schema its `$ref` points at. A parameter-level `examples` is an OpenAPI map of Example Objects, so each entry's `value` is taken in document order; a `$ref` entry is resolved against `components.examples` (a dangling ref is skipped with a warning), and an `externalValue` entry is skipped. A schema-level `examples` is the JSON Schema list and is taken as-is.
