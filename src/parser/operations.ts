@@ -300,7 +300,7 @@ export function extractOperations(
   // path, and two distinct paths — or a path and an operationId or component
   // schema — can produce the same name, so the prefix for every such
   // operation is decided up front (see resolvePathModelBaseNames).
-  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels);
+  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -1812,7 +1812,12 @@ export function derivePathBasedName(
  * verbatim (body `oneOf` variants included; see deriveOneOfVariantName), and
  * as a second line of defence the check also runs on the cleaned spellings
  * of the prefix (see prefixSpellings), so `GET /notes` yields to a component
- * `NoteGetItem` although its own item model is `NotesGetItem`.
+ * `NoteGetItem` although its own item model is `NotesGetItem`. Names that
+ * embed the prefix behind a const value — a body `oneOf` variant pinning
+ * `kind: email` is `EmailTagsPostRequest`, a nested variant
+ * `<Const><Parent><Field>` — are checked too, with each const the operation
+ * can mint prepended to every spelling (see collectOperationConstPrefixes);
+ * the hash then lands inside those names as well (`EmailTags151Dd5PostRequest`).
  *
  * These names are types SDK users read and import, so a collision costs the
  * plain name only where it must. Within a group of paths that flatten to one
@@ -1826,9 +1831,14 @@ export function derivePathBasedName(
  * document's paths, operationIds and component names, never on their order,
  * and a path that stops colliding returns to its plain name.
  */
-function resolvePathModelBaseNames(paths: Record<string, PathItem>, componentModels?: Model[]): Map<string, string> {
+function resolvePathModelBaseNames(
+  paths: Record<string, PathItem>,
+  componentModels?: Model[],
+  componentRequestBodies?: Record<string, Record<string, unknown>>,
+): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
+  const constPrefixesByPlainName = new Map<string, Set<string>>();
   const reservedNames = new Set<string>();
 
   for (const model of componentModels ?? []) {
@@ -1848,13 +1858,28 @@ function resolvePathModelBaseNames(paths: Record<string, PathItem>, componentMod
       const rawPaths = rawPathsByPlainName.get(plain) ?? new Set<string>();
       rawPaths.add(path);
       rawPathsByPlainName.set(plain, rawPaths);
+      const constPrefixes = constPrefixesByPlainName.get(plain) ?? new Set<string>();
+      for (const prefix of collectOperationConstPrefixes(
+        op,
+        componentRequestBodies,
+        operationLabel(op, path, method),
+      )) {
+        constPrefixes.add(prefix);
+      }
+      constPrefixesByPlainName.set(plain, constPrefixes);
     }
   }
 
   const reservedList = [...reservedNames];
   const canonicalByPlainName = new Map<string, string | undefined>();
   for (const [plain, rawPaths] of rawPathsByPlainName) {
-    const reserved = prefixSpellings(plain).some((spelling) => reservedList.some((name) => name.startsWith(spelling)));
+    // Every stem a name minted from this prefix can start with: the prefix in
+    // each of its cleaned spellings, and each const value the operation can
+    // prepend to it (`EmailTagsPostRequest` is `Email` + `TagsPost…`).
+    const spellings = prefixSpellings(plain);
+    const constPrefixes = ['', ...(constPrefixesByPlainName.get(plain) ?? [])];
+    const stems = constPrefixes.flatMap((constPrefix) => spellings.map((spelling) => constPrefix + spelling));
+    const reserved = stems.some((stem) => reservedList.some((name) => name.startsWith(stem)));
     canonicalByPlainName.set(plain, reserved ? undefined : canonicalPath(rawPaths));
   }
 
@@ -1928,6 +1953,82 @@ function pathDisambiguator(rawPath: string): string {
 function prefixSpellings(prefix: string): string[] {
   const spellings = [prefix, cleanSchemaName(prefix), resolveSchemaName(prefix), stripListItemMarkers(prefix)];
   return [...new Set(spellings)].filter((spelling) => spelling.length > 0);
+}
+
+/**
+ * The PascalCase const values an operationId-less operation can prepend to a
+ * name minted from its prefix, read from the schemas its request body and 2xx
+ * responses declare inline. A body `oneOf` variant pinning `kind: email`
+ * yields `EmailTagsPostRequest` (deriveOneOfVariantName); a nested
+ * `oneOf`/`anyOf` object variant yields `<Const><Parent><Field>`
+ * (nameOneOfVariant, nameVariantModel). Every string const or single-value
+ * enum of every inline object variant is collected, top level and nested — a
+ * superset of whichever property each of those picks as the discriminator, so
+ * the reservation can never be narrower than the naming. `$ref` targets are
+ * components with names of their own and are not followed. A request body
+ * `$ref` that cannot be resolved is left for buildOperation to report.
+ *
+ * Names that do not embed the prefix at all — a response `oneOf` variant
+ * named from its bare const (`Email`, see deriveModelName in responses.ts)
+ * or a `title`-mapped variant — are outside what a disambiguator can
+ * separate and are not reserved here.
+ */
+function collectOperationConstPrefixes(
+  op: OperationObject,
+  componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
+  opLabel: string,
+): Set<string> {
+  const prefixes = new Set<string>();
+  let body: RequestBodyObject | undefined;
+  try {
+    body = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
+  } catch {
+    body = undefined;
+  }
+  collectConstPrefixes(selectRequestBodyContent(body).schema, prefixes, 0);
+  for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
+    const code = parseInt(statusCode, 10);
+    if (code < 200 || code >= 300) continue;
+    for (const media of Object.values(response.content ?? {})) {
+      collectConstPrefixes(media?.schema, prefixes, 0);
+    }
+  }
+  return prefixes;
+}
+
+function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>, depth: number): void {
+  if (!schema || schema.$ref || depth > 16) return;
+  for (const variants of [schema.oneOf, schema.anyOf]) {
+    for (const variant of variants ?? []) {
+      if (variant.$ref || !variant.properties) continue;
+      for (const property of Object.values(variant.properties)) {
+        const value = constStringOf(property);
+        const prefix = value === null ? '' : toPascalCase(value);
+        if (prefix) out.add(prefix);
+      }
+    }
+  }
+  const children: Array<SchemaObject | undefined> = [
+    ...(schema.oneOf ?? []),
+    ...(schema.anyOf ?? []),
+    ...(schema.allOf ?? []),
+    schema.items,
+    ...Object.values(schema.properties ?? {}),
+    typeof schema.additionalProperties === 'object' ? schema.additionalProperties : undefined,
+  ];
+  for (const child of children) {
+    collectConstPrefixes(child, out, depth + 1);
+  }
+}
+
+/** A property's pinned string value: a string `const`, or a single-value string `enum`. */
+function constStringOf(property: SchemaObject | undefined): string | null {
+  if (!property) return null;
+  if (typeof property.const === 'string') return property.const;
+  if (Array.isArray(property.enum) && property.enum.length === 1 && typeof property.enum[0] === 'string') {
+    return property.enum[0];
+  }
+  return null;
 }
 
 function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {

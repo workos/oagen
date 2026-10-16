@@ -764,6 +764,118 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  /** Every model name referenced anywhere inside a TypeRef (or any nested value). */
+  const modelRefsIn = (value: unknown, out: string[] = []): string[] => {
+    if (Array.isArray(value)) value.forEach((v) => modelRefsIn(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record.kind === 'model' && typeof record.name === 'string') out.push(record.name);
+      Object.values(record).forEach((v) => modelRefsIn(v, out));
+    }
+    return out;
+  };
+
+  const constVariants = (first: string, second: string) => ({
+    oneOf: [
+      { type: 'object', properties: { kind: { type: 'string', const: 'email' }, [first]: { type: 'string' } } },
+      { type: 'object', properties: { kind: { type: 'string', const: 'sms' }, [second]: { type: 'string' } } },
+    ],
+  });
+
+  it('reserves const-prefixed body variants: EmailTagsPostRequest beside an unnamed POST /tags with email/sms variants', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = {
+      ...api({
+        '/tags': {
+          post: { requestBody: jsonBody(constVariants('to', 'number')), responses: { '204': { description: 'ok' } } },
+        },
+      }),
+      components: { schemas: { EmailTagsPostRequest: inlineObject({ x: { type: 'string' } }) } },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    const variants = variantNamesOf(ops[0].requestBody)!;
+    expect(variants).toMatchInlineSnapshot(`
+      [
+        "EmailTagsA96599PostRequest",
+        "SmsTagsA96599PostRequest",
+      ]
+    `);
+
+    // The component keeps its fields; the hash lands inside the const-prefixed names.
+    expect(fieldsOf(models, 'EmailTagsPostRequest')).toEqual(['x']);
+    expect(variants).not.toContain('EmailTagsPostRequest');
+    expect(fieldsOf(models, variants[0])).toEqual(['kind', 'to']);
+    expect(fieldsOf(models, variants[1])).toEqual(['kind', 'number']);
+    for (const name of modelRefsIn(ops[0].requestBody)) expect(models.some((m) => m.name === name)).toBe(true);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('reserves const-prefixed response variants: SmsTagsGetResponsePayload beside an unnamed GET /tags', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = {
+      ...api({
+        '/tags': {
+          get: {
+            responses: {
+              // Two properties: a lone `payload` would be read as a single-resource
+              // wrapper by responses.ts and unwrapped to its first variant.
+              '200': jsonResponse({
+                type: 'object',
+                properties: { id: { type: 'string' }, payload: constVariants('to', 'number') },
+              }),
+            },
+          },
+        },
+      }),
+      components: { schemas: { SmsTagsGetResponsePayload: inlineObject({ x: { type: 'string' } }) } },
+    };
+
+    // Read the payload union from the raw IR: summarizeAll keeps only field names.
+    const { ops, models, payloadVariants } = await parseInline(spec, (ir) => {
+      const summary = summarizeAll(ir);
+      const responseModel = ir.models.find((m) => m.name === summary.ops[0].response);
+      return { ...summary, payloadVariants: modelRefsIn(responseModel?.fields ?? []) };
+    });
+    const [op] = ops;
+    expect([op.response, payloadVariants]).toMatchInlineSnapshot(`
+      [
+        "TagsA96599GetResponse",
+        [
+          "TagsA96599GetResponsePayload",
+          "SmsTagsA96599GetResponsePayload",
+        ],
+      ]
+    `);
+
+    // The nested variants are `<Parent>Payload` and `Sms<Parent>Payload`, both carrying the hash.
+    expect(payloadVariants).toHaveLength(2);
+    expect(fieldsOf(models, 'SmsTagsGetResponsePayload')).toEqual(['x']);
+    expect(payloadVariants).not.toContain('SmsTagsGetResponsePayload');
+    for (const name of [op.response as string, ...payloadVariants]) {
+      expect(models.some((m) => m.name === name)).toBe(true);
+    }
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves const-prefixed names plain when no reserved name claims them', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = {
+      ...api({
+        '/tags': {
+          post: { requestBody: jsonBody(constVariants('to', 'number')), responses: { '204': { description: 'ok' } } },
+        },
+      }),
+      components: { schemas: { Unrelated: inlineObject({ x: { type: 'string' } }) } },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    expect(variantNamesOf(ops[0].requestBody)).toEqual(['EmailTagsPostRequest', 'SmsTagsPostRequest']);
+    expect(fieldsOf(models, 'EmailTagsPostRequest')).toEqual(['kind', 'to']);
+    expect(fieldsOf(models, 'SmsTagsPostRequest')).toEqual(['kind', 'number']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('normalizes so request and response prefixes agree (/a/b, /v2/x/y)', async () => {
     const op = {
       post: {
