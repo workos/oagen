@@ -145,6 +145,8 @@ export interface OperationModified {
   paginatedChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
+  /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
+  fallbackResponsesChanged: boolean;
   classification: 'additive' | 'breaking';
 }
 

@@ -113,6 +113,7 @@ Emitters should handle these additional variants introduced for open-source read
 - **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`
 - **Multiple responses:** Optional `successResponses: SuccessResponse[]` on `Operation` when more than one 2xx exists
 - **Response headers:** Optional `responseHeaders: ResponseHeader[]` on `Operation` (the primary response's headers) and `headers: ResponseHeader[]` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares at least one
+- **Fallback responses:** Optional `defaultResponse: DefaultResponse` (the `default` response) and `rangeResponses: RangeResponse[]` (`1XX`–`5XX`) on `Operation`, present only when the spec declares them; resolve a status as the explicit entry, then its range, then `defaultResponse`. Neither feeds `response` or `errors`
 - **Idempotency:** `injectIdempotencyKey` is now spec-driven (true only when the spec declares an `Idempotency-Key` header)
 
 ## OperationPlan

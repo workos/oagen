@@ -1,6 +1,7 @@
 import type { Enum, Model, Operation, ResponseHeader, Service } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
+import { STATUS_RANGE_LABELS } from './responses.js';
 
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
@@ -60,6 +61,12 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
   }
   for (const error of op.errors) {
     if (error.headers) groups.push({ headers: error.headers, qualifier: String(error.statusCode) });
+  }
+  // A fallback response has no status code to qualify by; its label
+  // (`Default`, `ClientError`) is what names its inline models too.
+  if (op.defaultResponse?.headers) groups.push({ headers: op.defaultResponse.headers, qualifier: 'Default' });
+  for (const range of op.rangeResponses ?? []) {
+    if (range.headers) groups.push({ headers: range.headers, qualifier: STATUS_RANGE_LABELS[range.range] });
   }
   return groups;
 }

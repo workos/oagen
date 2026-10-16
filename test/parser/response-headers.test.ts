@@ -676,7 +676,7 @@ describe('inline header models', () => {
     expect(inlineModels).toEqual([]);
   });
 
-  it('creates no model for a header on a response no branch keeps (default)', () => {
+  it('materializes a header model on the default response, which is kept apart from the primary (#214)', () => {
     const { op, inlineModels } = extract({
       '200': { description: 'ok' },
       default: {
@@ -686,7 +686,9 @@ describe('inline header models', () => {
     });
 
     expect('responseHeaders' in op).toBe(false);
-    expect(inlineModels).toEqual([]);
+    expect(op.defaultResponse?.headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+    expect(inlineModels.map((m) => m.name)).toEqual(['DocumentsXMeta']);
+    expectHeaderModelsMaterialized(op, inlineModels);
   });
 
   describe('same header name, different shapes', () => {

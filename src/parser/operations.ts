@@ -8,6 +8,9 @@ import type {
   ErrorResponse,
   SuccessResponse,
   ResponseHeader,
+  DefaultResponse,
+  RangeResponse,
+  StatusRange,
   Model,
   Field,
   PaginationMeta,
@@ -28,7 +31,7 @@ import {
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
-import { classifyAndExtractResponse } from './responses.js';
+import { classifyAndExtractResponse, extractFallbackResponseBody, STATUS_RANGE_LABELS } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 
@@ -501,7 +504,7 @@ function normalizeOperationIdForNaming(operationId: string): string {
  * `operationId`. The single source of that name: extractRequestBody and
  * deriveResponseName use it to name, resolvePathModelBaseNames to reserve.
  */
-function operationIdModelName(operationId: string, suffix: 'Request' | 'Response'): string {
+function operationIdModelName(operationId: string, suffix: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
 }
 
@@ -931,6 +934,8 @@ function buildOperation(
     responseHeaders,
     successResponses,
     errors,
+    defaultResponse,
+    rangeResponses,
     inlineModels,
     isPaginated,
     dataPath: responseDataPath,
@@ -1002,6 +1007,9 @@ function buildOperation(
       ...(responseHeaders && { responseHeaders }),
       successResponses,
       errors,
+      // Added only when present so operations without them keep their shape.
+      ...(defaultResponse && { defaultResponse }),
+      ...(rangeResponses && { rangeResponses }),
       pagination,
       injectIdempotencyKey: hasIdempotencyHeader,
       deprecated: op.deprecated || undefined,
@@ -1695,7 +1703,8 @@ function stableStringify(value: unknown): string {
 function typeHeaderSchema(
   schema: SchemaObject,
   name: string,
-  statusCode: number,
+  // A status code, or the label of a fallback response (`Default`, `ClientError`).
+  statusCode: number | string,
   ctx: HeaderExtractionContext,
   models: Model[],
 ): TypeRef {
@@ -1752,7 +1761,7 @@ function typeHeaderSchema(
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
   operationLabel: string,
-  statusCode: number,
+  statusCode: number | string,
   ctx: HeaderExtractionContext,
   models: Model[],
 ): ResponseHeader[] | undefined {
@@ -2091,6 +2100,106 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * `<Op>DefaultResponse`, `<Op>ClientErrorResponse`: a fallback body's inline
+ * model, named like the primary body's `<Op>Response` with the response's
+ * label (`Default`, or the word for its range) in between. Starts with the
+ * operation's stem, so `operationIdModelBase` reserves it with the rest.
+ */
+function deriveFallbackResponseName(op: OperationObject | undefined, pathModelBaseName: string, label: string): string {
+  if (op?.operationId) {
+    return operationIdModelName(op.operationId, `${label}Response`);
+  }
+  return `${pathModelBaseName}${label}Response`;
+}
+
+/**
+ * Where the fallback responses (`default`, `1XX`–`5XX`) of one operation
+ * land while its responses are read, with what typing their bodies and
+ * headers needs. Body models are kept apart from `inlineModels`, which the
+ * latest 2xx body replaces wholesale, and merged once every key is read.
+ */
+interface FallbackResponseSink {
+  op: OperationObject | undefined;
+  pathModelBaseName: string;
+  opLabel: string;
+  componentSchemas?: Record<string, SchemaObject>;
+  headerContext: HeaderExtractionContext;
+  /** Shared with the explicit status codes' headers: one registry, one list. */
+  headerModels: Model[];
+  /** The body models the fallback responses materialize. */
+  models: Model[];
+  defaultResponse?: DefaultResponse;
+  rangeResponses: RangeResponse[];
+}
+
+/** The range a key names, uppercased (`4xx` → `4XX`), or undefined when it names none. */
+function statusRangeOf(key: string): StatusRange | undefined {
+  const upper = key.toUpperCase();
+  const isRange = upper.length === 3 && upper.endsWith('XX') && upper[0] >= '1' && upper[0] <= '5';
+  return isRange ? (upper as StatusRange) : undefined;
+}
+
+/**
+ * Read a Responses Object key that is not a status code into `sink`, and
+ * say whether it was consumed: `default` and a range are kept; an `x-` key
+ * is a specification extension and carries no response; anything else
+ * OpenAPI does not define is warned about, then ignored, instead of being
+ * dropped silently. A numeric key returns false so the caller reads it as
+ * before — `parseInt` keeps `200`, `201 ` and the like exactly as they were.
+ */
+function readFallbackResponse(key: string, resp: ResponseObject, sink: FallbackResponseSink): boolean {
+  if (key.startsWith('x-')) return true;
+  const range = statusRangeOf(key);
+  if (key === 'default' || range) {
+    if (range && sink.rangeResponses.some((r) => r.range === range)) {
+      // `4XX` and `4xx` side by side: JSON allows the pair, OpenAPI does not.
+      console.warn(`[oagen] Warning: Duplicate "${range}" response on ${sink.opLabel}; keeping the first`);
+      return true;
+    }
+    const entry = extractFallbackResponse(resp, range ? STATUS_RANGE_LABELS[range] : 'Default', sink);
+    if (range) sink.rangeResponses.push({ range, ...entry });
+    else sink.defaultResponse = entry;
+    return true;
+  }
+  if (Number.isNaN(parseInt(key, 10))) {
+    console.warn(
+      `[oagen] Warning: Ignoring response key "${key}" on ${sink.opLabel}: not a status code, a 1XX–5XX range, or "default"`,
+    );
+    return true;
+  }
+  return false;
+}
+
+/** The body and headers of one fallback response; a key is left off when absent. */
+function extractFallbackResponse(resp: ResponseObject, label: string, sink: FallbackResponseSink): DefaultResponse {
+  const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.headerContext, sink.headerModels);
+  const schema = jsonResponseSchema(resp);
+  let type: TypeRef | undefined;
+  if (schema) {
+    const contextName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
+    const body = extractFallbackResponseBody(schema, contextName, sink.componentSchemas);
+    type = body.type;
+    sink.models.push(...body.inlineModels);
+  }
+  return { ...(type && { type }), ...(headers && { headers }) };
+}
+
+/**
+ * The schema of a response's JSON body: `application/json` first, else a
+ * `+json` media type (`application/problem+json` is the usual shape of a
+ * `default` error). Media type parameters (`; charset=utf-8`) are ignored.
+ * Other media types type nothing, as they do for `errors`.
+ */
+function jsonResponseSchema(resp: ResponseObject): SchemaObject | undefined {
+  const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  const essence = (mediaType: string): string => mediaType.split(';')[0].trim().toLowerCase();
+  const match =
+    entries.find(([mediaType]) => essence(mediaType) === 'application/json') ??
+    entries.find(([mediaType]) => essence(mediaType).endsWith('+json'));
+  return match?.[1].schema;
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2104,6 +2213,8 @@ function extractResponses(
   responseHeaders?: ResponseHeader[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
+  defaultResponse?: DefaultResponse;
+  rangeResponses?: RangeResponse[];
   inlineModels: Model[];
   isPaginated: boolean;
   dataPath?: string;
@@ -2128,8 +2239,21 @@ function extractResponses(
   // Kept apart from `inlineModels`, which the latest 2xx body replaces
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
+  const fallback: FallbackResponseSink = {
+    op,
+    pathModelBaseName,
+    opLabel,
+    componentSchemas,
+    headerContext,
+    headerModels,
+    models: [],
+    rangeResponses: [],
+  };
 
   for (const [statusCode, resp] of Object.entries(responses)) {
+    // `default` and `1XX`–`5XX` never parse as a status code (`parseInt('2XX')`
+    // is 2), so they are routed to their own fields before the numeric branches.
+    if (readFallbackResponse(statusCode, resp, fallback)) continue;
     const code = parseInt(statusCode, 10);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
@@ -2200,12 +2324,15 @@ function extractResponses(
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
   if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
+  if (fallback.models.length > 0) inlineModels = [...inlineModels, ...fallback.models];
 
   return {
     response,
     responseHeaders,
     successResponses,
     errors,
+    defaultResponse: fallback.defaultResponse,
+    rangeResponses: fallback.rangeResponses.length > 0 ? fallback.rangeResponses : undefined,
     inlineModels,
     isPaginated,
     dataPath,

@@ -9,6 +9,9 @@ export type {
   SecurityRequirementSet,
   SuccessResponse,
   ResponseHeader,
+  DefaultResponse,
+  RangeResponse,
+  StatusRange,
   PaginationMeta,
   HttpMethod,
   Parameter,
@@ -43,6 +46,7 @@ export {
   validateModelHints,
   collectRequestBodyModels,
   collectResponseHeaders,
+  collectFallbackResponseTypes,
 } from './ir/types.js';
 
 // Operation resolution

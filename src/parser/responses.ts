@@ -1,4 +1,4 @@
-import type { TypeRef, Model, Field } from '../ir/types.js';
+import type { TypeRef, Model, Field, StatusRange } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -34,6 +34,40 @@ export interface ResponseExtractionResult {
    * operation has been extracted.
    */
   envelopeCompanions?: EnvelopeCompanion[];
+}
+
+/**
+ * The word that stands in for a range key wherever a status code would
+ * qualify a name: the inline body model of a `4XX` response is
+ * `<Op>ClientErrorResponse`, its header models and enums `…ClientError`.
+ * The key itself cannot be used — `toPascalCase('4XX')` is `4Xx`.
+ */
+export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
+  '1XX': 'Informational',
+  '2XX': 'Success',
+  '3XX': 'Redirect',
+  '4XX': 'ClientError',
+  '5XX': 'ServerError',
+};
+
+/**
+ * Type the body of a fallback (`default` or `nXX`) response. A `$ref` is
+ * kept as the referenced model; an inline schema is materialized under
+ * `contextName` by the same extractor the primary body uses, nested inline
+ * objects and `oneOf` variants included, so the ref never dangles. List
+ * envelope and resource-wrapper detection are skipped on purpose: a fallback
+ * body is not what the SDK method returns, so it must not drive pagination.
+ */
+export function extractFallbackResponseBody(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { type: TypeRef; inlineModels: Model[] } {
+  if (schema.$ref) {
+    return { type: schemaToTypeRef(schema, contextName), inlineModels: [] };
+  }
+  const { response, inlineModels } = extractDirectResource(schema, contextName, componentSchemas);
+  return { type: response, inlineModels };
 }
 
 export function classifyAndExtractResponse(
