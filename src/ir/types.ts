@@ -23,11 +23,27 @@ export interface ServerEntry {
   description?: string;
 }
 
+/**
+ * A link to documentation outside the OpenAPI document (an External
+ * Documentation Object). Present on a node only when the document declares
+ * one with a non-blank `url`; an emitter can surface it in a doc comment (a
+ * JSDoc `@see`, say). `url` is exactly as written — OpenAPI allows a value
+ * relative to the document's own location, which the parser does not know, so
+ * it neither resolves nor rewrites it. `description` is present only when it
+ * has non-whitespace content.
+ */
+export interface ExternalDocs {
+  url: string;
+  description?: string;
+}
+
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
   name: string;
   version: string;
   description?: string;
+  /** The document's top-level `externalDocs`, when it declares a usable one. */
+  externalDocs?: ExternalDocs;
   baseUrl: string;
   servers?: ServerEntry[];
   services: Service[];
@@ -48,6 +64,13 @@ export interface ApiSpec {
 export interface Service {
   name: string;
   description?: string;
+  /**
+   * The `externalDocs` of the document tag the service is documented by,
+   * resolved by the same rule as `description` (a service named after a
+   * declared tag takes that tag's; a split-off service inherits from the tags
+   * its operations carry). Absent when no tag gives one.
+   */
+  externalDocs?: ExternalDocs;
   operations: Operation[];
 }
 
@@ -87,6 +110,8 @@ export interface Operation {
    * `summary` for that.
    */
   description?: string;
+  /** The operation's own `externalDocs`, when it declares a usable one. */
+  externalDocs?: ExternalDocs;
   httpMethod: HttpMethod;
   path: string;
   pathParams: Parameter[];
@@ -379,6 +404,8 @@ export interface TypeParam {
 export interface Model {
   name: string;
   description?: string;
+  /** The schema's `externalDocs`, when it declares a usable one. */
+  externalDocs?: ExternalDocs;
   fields: Field[];
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
@@ -447,6 +474,11 @@ export interface Enum {
   values: EnumValue[];
   /** Spec-level default value (the value of `default:` on the schema). Optional. */
   default?: string | number;
+  /**
+   * The component enum schema's `externalDocs`, when it declares a usable
+   * one. An enum lifted from an inline field schema carries none.
+   */
+  externalDocs?: ExternalDocs;
 }
 
 export interface EnumValue {

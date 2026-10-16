@@ -10,6 +10,7 @@ import {
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import { externalDocsEntry } from './external-docs.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -590,5 +591,14 @@ function extractInlineModel(
   // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    {
+      name,
+      description: schema.description,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...constraintsEntry(schema),
+    },
+    ...nestedModels,
+  ];
 }

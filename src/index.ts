@@ -2,6 +2,7 @@
 export type {
   ApiSpec,
   AuthScheme,
+  ExternalDocs,
   ServerEntry,
   Service,
   Operation,

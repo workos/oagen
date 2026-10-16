@@ -1,4 +1,4 @@
-import type { Constraints, Model, Field } from '../ir/types.js';
+import type { Constraints, ExternalDocs, Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -11,6 +11,7 @@ import {
   resolveSchemaName,
   variantMemberSchemas,
 } from './schemas.js';
+import { externalDocsEntry, readExternalDocs } from './external-docs.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -675,6 +676,8 @@ interface MergedAllOf {
   properties: MergedProperty[];
   required: string[];
   description: string | undefined;
+  /** The wrapper's own link, read like its description. */
+  externalDocs: ExternalDocs | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
 }
@@ -724,7 +727,13 @@ function mergeAugmentation(
   visit(schema, null);
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
-  return { properties, required, description: schema.description, constraints: extractConstraints(schema) };
+  return {
+    properties,
+    required,
+    description: schema.description,
+    externalDocs: readExternalDocs(schema.externalDocs),
+    constraints: extractConstraints(schema),
+  };
 }
 
 /**
@@ -752,6 +761,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
   return {
     name,
     description: merged.description,
+    ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
     fields,
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
   };
@@ -838,5 +848,11 @@ function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?:
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
-  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
+  return {
+    name,
+    description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
+    fields,
+    ...constraintsEntry(schema),
+  };
 }

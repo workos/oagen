@@ -18,6 +18,7 @@ import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from '
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
+import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 import type { SchemaNameTransform } from './schemas.js';
 
 /**
@@ -72,7 +73,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     info?: { title?: string; version?: string; description?: string };
     servers?: Array<{ url?: string; description?: string }>;
     security?: RawSecurityRequirements;
-    tags?: Array<{ name?: string; description?: string }>;
+    tags?: Array<{ name?: string; description?: string; externalDocs?: RawExternalDocs }>;
+    externalDocs?: RawExternalDocs;
     paths?: Record<string, unknown>;
     components?: {
       schemas?: Record<string, unknown>;
@@ -142,6 +144,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     name: spec.info?.title ?? 'Unknown API',
     version: spec.info?.version ?? '0.0.0',
     description: spec.info?.description,
+    // The document's own link; the key stays absent when it declares none.
+    ...externalDocsEntry(spec.externalDocs),
     baseUrl: serverEntries[0]?.url ?? '',
     servers: serverEntries.length > 0 ? serverEntries : undefined,
     services,
