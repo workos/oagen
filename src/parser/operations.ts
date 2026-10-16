@@ -18,6 +18,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
   buildFieldFromSchema,
+  nameInlineVariant,
   resolveSchemaName,
   nonEmptyExamples,
   resolveExamples,
@@ -1394,6 +1395,12 @@ function extractRequestBody(
   // and build a union type pointing to them by name.
   if (schema.oneOf) {
     const variants: TypeRef[] = [];
+    // The inline object variants of this union and the names its const-less
+    // variants have taken so far, for `deriveOneOfVariantName`.
+    const inlineObjectVariants = schema.oneOf.filter(
+      (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
+    );
+    const contentNamed: string[] = [];
 
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
@@ -1402,7 +1409,16 @@ function extractRequestBody(
       } else if (variant.type === 'null') {
         // skip null variant in union, handle separately
       } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const variantName = deriveOneOfVariantName(variant, contextName, inlineModels, Boolean(op?.operationId));
+        const named = deriveOneOfVariantName(
+          variant,
+          contextName,
+          inlineModels,
+          inlineObjectVariants,
+          contentNamed,
+          Boolean(op?.operationId),
+        );
+        const variantName = named.name;
+        if (named.fromContent) contentNamed.push(variantName);
         const requiredSet = new Set(variant.required ?? []);
         const siblings = collectProperties(variant);
         const fields: Field[] = [];
@@ -1531,7 +1547,23 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
 }
 
 /**
- * Derive a unique variant name for a oneOf inline model.
+ * Derive a unique variant name for a request-body `oneOf` inline model.
+ *
+ * A variant with a string-const property is named after it
+ * (`RadarEmailChallengeCodeSessionAuthenticateRequest`). Any other variant is
+ * named from its content by the same rule every inline union variant follows
+ * (`nameInlineVariant`): the first const-less variant keeps the body's name
+ * (or its title, when every inline variant of the union is titled), and each
+ * later one takes its title, a distinguishing property
+ * (`CreateThingRequestWithB`) or, when its property set repeats an earlier
+ * variant's, the position counter (`CreateThingRequest2`). `siblings` are the
+ * union's inline object variants and `contentNamed` the names its const-less
+ * variants have taken so far; `fromContent` tells the caller to record this
+ * one there. A clash with a model minted elsewhere still bumps the counter:
+ * on the base for a content-named variant (`CreateThingRequest2`), on the
+ * const-derived name for a const-named one (`FooCreateThingRequest2`) — so a
+ * variant titled `Foo` and a later one pinning `kind: foo` in the same body
+ * never share a model.
  *
  * `fromOperationId` says where `baseName` came from. An operationId-derived
  * base is already in cleanSchemaName form and its variants go through
@@ -1546,29 +1578,32 @@ function deriveOneOfVariantName(
   variant: SchemaObject,
   baseName: string,
   existingModels: Model[],
+  siblings: readonly SchemaObject[],
+  contentNamed: readonly string[],
   fromOperationId: boolean,
-): string {
+): { name: string; fromContent: boolean } {
   const finalize = (name: string): string => (fromOperationId ? resolveSchemaName(name) : name);
+  const existingNames = new Set(existingModels.map((m) => m.name));
+  // `name`, or `<stem><n>` counting from 2 while a model of that name exists.
+  const unique = (name: string, stem: string): string => {
+    let candidate = name;
+    for (let suffix = 2; existingNames.has(candidate); suffix++) candidate = `${stem}${suffix}`;
+    return candidate;
+  };
   // Try to use a distinguishing property (e.g., "grant_type" field's const/enum value)
   if (variant.properties) {
     for (const [, propSchema] of Object.entries(variant.properties)) {
       if (propSchema?.const && typeof propSchema.const === 'string') {
-        const derivedName = toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
-        return finalize(derivedName);
+        const derivedName = finalize(toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request');
+        return { name: unique(derivedName, derivedName), fromContent: false };
       }
     }
   }
-  // Fallback: append a numeric suffix. Finalize before suffixing so every
-  // candidate stays in the same namespace as the rest of the IR.
-  const existingNames = new Set(existingModels.map((m) => m.name));
+  // Finalize before naming so every candidate stays in the same namespace as
+  // the rest of the IR.
   const finalBaseName = finalize(baseName);
-  let name = finalBaseName;
-  let suffix = 2;
-  while (existingNames.has(name)) {
-    name = `${finalBaseName}${suffix}`;
-    suffix++;
-  }
-  return name;
+  const name = unique(nameInlineVariant(variant, siblings, finalBaseName, contentNamed, null), finalBaseName);
+  return { name, fromContent: true };
 }
 
 /** Human-readable label for an operation in diagnostics: its operationId, else `METHOD /path`. */

@@ -3,8 +3,15 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
-import { schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
-import { extractInlineModelsFromProperties, extractInlineModelsFromSchemas } from '../../src/parser/inline-models.js';
+import { nameInlineVariantEntries, schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
+import {
+  MAX_ELEMENT_CONTEXT_ATTEMPTS,
+  elementContextDecision,
+  extractInlineModelsFromProperties,
+  extractInlineModelsFromSchemas,
+  firstFreeElementContext,
+  mintedInlineNameEntries,
+} from '../../src/parser/inline-models.js';
 import { walkTypeRef, type Model } from '../../src/ir/types.js';
 
 // The two shapes from workos/oagen#187: an array whose `items.oneOf` lists
@@ -426,12 +433,12 @@ describe('oneOf variants without a shared const field', () => {
     return ((union as { variants: Array<{ name: string }> }).variants ?? []).map((v) => v.name);
   }
 
-  it('numbers the TypeRef variants by position, matching the extractor', () => {
+  it('names the TypeRef variants from their distinguishing property, matching the extractor', () => {
     const union = schemaToTypeRef({ oneOf: [byRadius, bySide, byPoints] }, 'shape', 'Drawing');
-    expect(unionVariantNames(union)).toEqual(['DrawingShape', 'DrawingShape2', 'DrawingShape3']);
+    expect(unionVariantNames(union)).toEqual(['DrawingShape', 'DrawingShapeWithSide', 'DrawingShapeWithPoints']);
     expect(unionVariantNames(schemaToTypeRef({ anyOf: [byRadius, bySide] }, 'shape', 'Drawing'))).toEqual([
       'DrawingShape',
-      'DrawingShape2',
+      'DrawingShapeWithSide',
     ]);
 
     const results: Model[] = [];
@@ -440,7 +447,11 @@ describe('oneOf variants without a shared const field', () => {
       results,
       'Drawing',
     );
-    expect(results.map((model) => model.name)).toEqual(['DrawingShape', 'DrawingShape2', 'DrawingShape3']);
+    expect(results.map((model) => model.name)).toEqual([
+      'DrawingShape',
+      'DrawingShapeWithSide',
+      'DrawingShapeWithPoints',
+    ]);
   });
 
   it('agrees at field level and array-item level in a component schema', async () => {
@@ -465,17 +476,21 @@ describe('oneOf variants without a shared const field', () => {
 
       expect(warnSpy).not.toHaveBeenCalled();
       const drawing = fieldTypesByModel(ir.models)['Drawing']!;
-      expect(unionVariantNames(drawing['shape'])).toEqual(['DrawingShape', 'DrawingShape2']);
-      expect(unionVariantNames(drawing['markers'])).toEqual(['DrawingMarker', 'DrawingMarker2']);
+      expect(unionVariantNames(drawing['shape'])).toEqual(['DrawingShape', 'DrawingShapeWithSide']);
+      expect(unionVariantNames(drawing['markers'])).toEqual(['DrawingMarker', 'DrawingMarkerWithSide']);
       expect(ir.models.map((model) => model.name).sort()).toEqual([
         'Drawing',
         'DrawingMarker',
-        'DrawingMarker2',
+        'DrawingMarkerWithSide',
         'DrawingShape',
-        'DrawingShape2',
+        'DrawingShapeWithSide',
       ]);
-      expect(fieldTypesByModel(ir.models)['DrawingShape2']).toEqual({ side: { kind: 'primitive', type: 'number' } });
-      expect(fieldTypesByModel(ir.models)['DrawingMarker2']).toEqual({ side: { kind: 'primitive', type: 'number' } });
+      expect(fieldTypesByModel(ir.models)['DrawingShapeWithSide']).toEqual({
+        side: { kind: 'primitive', type: 'number' },
+      });
+      expect(fieldTypesByModel(ir.models)['DrawingMarkerWithSide']).toEqual({
+        side: { kind: 'primitive', type: 'number' },
+      });
     } finally {
       warnSpy.mockRestore();
     }
@@ -509,11 +524,14 @@ describe('oneOf variants without a shared const field', () => {
 
       expect(warnSpy).not.toHaveBeenCalled();
       const body = fieldTypesByModel(ir.models)['CreateDrawingRequest']!;
-      expect(unionVariantNames(body['markers'])).toEqual(['CreateDrawingRequestMarker', 'CreateDrawingRequestMarker2']);
+      expect(unionVariantNames(body['markers'])).toEqual([
+        'CreateDrawingRequestMarker',
+        'CreateDrawingRequestMarkerWithSide',
+      ]);
       expect(ir.models.map((model) => model.name).sort()).toEqual([
         'CreateDrawingRequest',
         'CreateDrawingRequestMarker',
-        'CreateDrawingRequestMarker2',
+        'CreateDrawingRequestMarkerWithSide',
       ]);
     } finally {
       warnSpy.mockRestore();
@@ -527,7 +545,8 @@ describe('nullable inline union variants keep their wrapper', () => {
 
   // A variant that admits null on its own must be referenced as
   // `nullable<model>` under the name the extractor emits for it — with a
-  // const discriminator (`shape`) and without one (`markers`, numbered).
+  // const discriminator (`shape`) and without one (`markers`, named from the
+  // variant's distinguishing property).
   const forms: Array<{ form: string; openapi: string; wrap: (schema: SchemaObject) => SchemaObject }> = [
     { form: 'OAS 3.1 `type: ["object", "null"]`', openapi: '3.1.0', wrap: (s) => ({ ...s, type: ['object', 'null'] }) },
     { form: 'OAS 3.0 `nullable: true`', openapi: '3.0.3', wrap: (s) => ({ ...s, nullable: true }) },
@@ -571,14 +590,14 @@ describe('nullable inline union variants keep their wrapper', () => {
           compositionKind: 'oneOf',
           variants: [
             { kind: 'model', name: 'DrawingMarker' },
-            { kind: 'nullable', inner: { kind: 'model', name: 'DrawingMarker2' } },
+            { kind: 'nullable', inner: { kind: 'model', name: 'DrawingMarkerWithSide' } },
           ],
         },
       });
       expect(ir.models.map((model) => model.name).sort()).toEqual([
         'Drawing',
         'DrawingMarker',
-        'DrawingMarker2',
+        'DrawingMarkerWithSide',
         'DrawingShape',
         'SquareDrawingShape',
       ]);
@@ -586,7 +605,9 @@ describe('nullable inline union variants keep their wrapper', () => {
         kind: { kind: 'literal', value: 'square' },
         side: { kind: 'primitive', type: 'number' },
       });
-      expect(fieldTypesByModel(ir.models)['DrawingMarker2']).toEqual({ side: { kind: 'primitive', type: 'number' } });
+      expect(fieldTypesByModel(ir.models)['DrawingMarkerWithSide']).toEqual({
+        side: { kind: 'primitive', type: 'number' },
+      });
     } finally {
       warnSpy.mockRestore();
     }
@@ -599,7 +620,7 @@ describe('nullable inline union variants keep their wrapper', () => {
       compositionKind: 'anyOf',
       variants: [
         { kind: 'model', name: 'DrawingShape' },
-        { kind: 'nullable', inner: { kind: 'model', name: 'DrawingShape2' } },
+        { kind: 'nullable', inner: { kind: 'model', name: 'DrawingShapeWithSide' } },
       ],
     });
     const results: Model[] = [];
@@ -608,7 +629,7 @@ describe('nullable inline union variants keep their wrapper', () => {
       results,
       'Drawing',
     );
-    expect(results.map((model) => model.name)).toEqual(['DrawingShape', 'DrawingShape2']);
+    expect(results.map((model) => model.name)).toEqual(['DrawingShape', 'DrawingShapeWithSide']);
   });
 });
 
@@ -664,34 +685,45 @@ describe('nested inline objects under later union variants', () => {
         shape: {
           kind: 'union',
           compositionKind: 'oneOf',
-          variants: [{ kind: 'model', name: 'ThingShape' }, second('ThingShape2')],
+          variants: [{ kind: 'model', name: 'ThingShape' }, second('ThingShapeWithSide')],
         },
         markers: {
           kind: 'array',
           items: {
             kind: 'union',
             compositionKind: 'oneOf',
-            variants: [{ kind: 'model', name: 'ThingMarker' }, second('ThingMarker2')],
+            variants: [{ kind: 'model', name: 'ThingMarker' }, second('ThingMarkerWithSide')],
           },
         },
       });
       expect(types['ThingShape']).toEqual({ radius: num, center: { kind: 'model', name: 'ThingShapeCenter' } });
-      expect(types['ThingShape2']).toEqual({ side: num, center: { kind: 'model', name: 'ThingShape2Center' } });
+      expect(types['ThingShapeWithSide']).toEqual({
+        side: num,
+        center: { kind: 'model', name: 'ThingShapeWithSideCenter' },
+      });
       expect(types['ThingMarker']).toEqual({ radius: num, center: { kind: 'model', name: 'ThingMarkerCenter' } });
-      expect(types['ThingMarker2']).toEqual({ side: num, center: { kind: 'model', name: 'ThingMarker2Center' } });
-      for (const nested of ['ThingShapeCenter', 'ThingShape2Center', 'ThingMarkerCenter', 'ThingMarker2Center']) {
+      expect(types['ThingMarkerWithSide']).toEqual({
+        side: num,
+        center: { kind: 'model', name: 'ThingMarkerWithSideCenter' },
+      });
+      for (const nested of [
+        'ThingShapeCenter',
+        'ThingShapeWithSideCenter',
+        'ThingMarkerCenter',
+        'ThingMarkerWithSideCenter',
+      ]) {
         expect(types[nested]).toEqual(point);
       }
       expect(ir.models.map((model) => model.name).sort()).toEqual([
         'Thing',
         'ThingMarker',
-        'ThingMarker2',
-        'ThingMarker2Center',
         'ThingMarkerCenter',
+        'ThingMarkerWithSide',
+        'ThingMarkerWithSideCenter',
         'ThingShape',
-        'ThingShape2',
-        'ThingShape2Center',
         'ThingShapeCenter',
+        'ThingShapeWithSide',
+        'ThingShapeWithSideCenter',
       ]);
 
       // Every reference resolves, and no nested model is left orphaned.
@@ -720,14 +752,15 @@ describe('multi-type inline union variants keep their other types', () => {
 
   // The named ref stands in for the `object` member only; the string and
   // integer alternatives survive exactly as schemaToTypeRef builds them for a
-  // multi-type schema, and the numbered names are the extractor's.
+  // multi-type schema, and the names (from each variant's distinguishing
+  // property) are the extractor's.
   const expectedUnion = (base: string) => ({
     kind: 'union',
     compositionKind: 'oneOf',
     variants: [
       { kind: 'model', name: base },
-      { kind: 'union', variants: [{ kind: 'model', name: `${base}2` }, str] },
-      { kind: 'nullable', inner: { kind: 'union', variants: [{ kind: 'model', name: `${base}3` }, int] } },
+      { kind: 'union', variants: [{ kind: 'model', name: `${base}WithSide` }, str] },
+      { kind: 'nullable', inner: { kind: 'union', variants: [{ kind: 'model', name: `${base}WithPoints` }, int] } },
     ],
   });
 
@@ -759,9 +792,15 @@ describe('multi-type inline union variants keep their other types', () => {
       });
       for (const base of ['ThingShape', 'ThingMarker']) {
         expect(types[base]).toEqual({ radius: num, center: { kind: 'model', name: `${base}Center` } });
-        expect(types[`${base}2`]).toEqual({ side: num, center: { kind: 'model', name: `${base}2Center` } });
-        expect(types[`${base}3`]).toEqual({ points: int, center: { kind: 'model', name: `${base}3Center` } });
-        for (const suffix of ['', '2', '3']) {
+        expect(types[`${base}WithSide`]).toEqual({
+          side: num,
+          center: { kind: 'model', name: `${base}WithSideCenter` },
+        });
+        expect(types[`${base}WithPoints`]).toEqual({
+          points: int,
+          center: { kind: 'model', name: `${base}WithPointsCenter` },
+        });
+        for (const suffix of ['', 'WithSide', 'WithPoints']) {
           expect(types[`${base}${suffix}Center`]).toEqual({ x: num, y: num });
         }
       }
@@ -782,10 +821,10 @@ describe('multi-type inline union variants keep their other types', () => {
     expect(results.map((model) => model.name)).toEqual([
       'ThingShape',
       'ThingShapeCenter',
-      'ThingShape2',
-      'ThingShape2Center',
-      'ThingShape3',
-      'ThingShape3Center',
+      'ThingShapeWithSide',
+      'ThingShapeWithSideCenter',
+      'ThingShapeWithPoints',
+      'ThingShapeWithPointsCenter',
     ]);
     expect(schemaToTypeRef({ anyOf: variants }, 'shape', 'Thing')).toEqual({
       ...expectedUnion('ThingShape'),
@@ -846,8 +885,8 @@ describe('non-object members of multi-type union variants are named from the var
         items: { oneOf: [point, { type: 'object', properties: { label: { type: 'string' } } }] },
       },
       member: (v) =>
-        array({ kind: 'union', compositionKind: 'oneOf', variants: [model(`${v}Item`), model(`${v}Item2`)] }),
-      models: (v) => [`${v}Item`, `${v}Item2`],
+        array({ kind: 'union', compositionKind: 'oneOf', variants: [model(`${v}Item`), model(`${v}ItemWithLabel`)] }),
+      models: (v) => [`${v}Item`, `${v}ItemWithLabel`],
     },
     {
       label: 'array member with const-discriminated oneOf items',
@@ -922,25 +961,29 @@ describe('non-object members of multi-type union variants are named from the var
         return nullable ? { kind: 'nullable', inner: union } : union;
       };
       expect(types['Thing']).toEqual({
-        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model('ThingShape'), second('ThingShape2')] },
+        shape: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('ThingShape'), second('ThingShapeWithSide')],
+        },
         markers: array({
           kind: 'union',
           compositionKind: 'oneOf',
-          variants: [model('ThingMarker'), second('ThingMarker2')],
+          variants: [model('ThingMarker'), second('ThingMarkerWithSide')],
         }),
       });
-      expect(types['ThingShape2']).toEqual({ side: num });
-      expect(types['ThingMarker2']).toEqual({ side: num });
+      expect(types['ThingShapeWithSide']).toEqual({ side: num });
+      expect(types['ThingMarkerWithSide']).toEqual({ side: num });
       expect(ir.models.map((m) => m.name).sort()).toEqual(
         [
           'Gadget',
           'Thing',
           'ThingShape',
-          'ThingShape2',
-          ...models('ThingShape2'),
+          'ThingShapeWithSide',
+          ...models('ThingShapeWithSide'),
           'ThingMarker',
-          'ThingMarker2',
-          ...models('ThingMarker2'),
+          'ThingMarkerWithSide',
+          ...models('ThingMarkerWithSide'),
         ].sort(),
       );
       expect(ir.models.some((m) => m.name.endsWith('Value'))).toBe(false);
@@ -964,13 +1007,13 @@ describe('non-object members of multi-type union variants are named from the var
     );
     expect(results.map((m) => m.name)).toEqual([
       'ThingShape',
-      'ThingShape2',
-      'ThingShape2Item',
-      'ThingShape2ItemOrigin',
+      'ThingShapeWithSide',
+      'ThingShapeWithSideItem',
+      'ThingShapeWithSideItemOrigin',
     ]);
-    expect(fieldTypesByModel(results)['ThingShape2Item']).toEqual({
+    expect(fieldTypesByModel(results)['ThingShapeWithSideItem']).toEqual({
       x: num,
-      origin: model('ThingShape2ItemOrigin'),
+      origin: model('ThingShapeWithSideItemOrigin'),
     });
   });
 });
@@ -1059,14 +1102,18 @@ describe("synthetic member names never collide with the variant's own properties
       const types = fieldTypesByModel(ir.models);
       const second = (v: string) => ({ kind: 'union', variants: [model(v), member(v)] });
       expect(types['Thing']).toEqual({
-        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model('ThingShape'), second('ThingShape2')] },
+        shape: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('ThingShape'), second('ThingShapeWithSide')],
+        },
         markers: array({
           kind: 'union',
           compositionKind: 'oneOf',
-          variants: [model('ThingMarker'), second('ThingMarker2')],
+          variants: [model('ThingMarker'), second('ThingMarkerWithSide')],
         }),
       });
-      for (const v of ['ThingShape2', 'ThingMarker2']) {
+      for (const v of ['ThingShapeWithSide', 'ThingMarkerWithSide']) {
         expect(types[v]).toEqual(fields(v));
         for (const [name, modelFields] of Object.entries(nested(v))) {
           expect(types[name]).toEqual(modelFields);
@@ -1631,9 +1678,9 @@ describe('inline response objects materialize every variant, item and value mode
       properties: { id, shape: { oneOf: [byRadius, bySide] } },
       fields: (b) => ({
         id: str,
-        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model(`${b}Shape`), model(`${b}Shape2`)] },
+        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model(`${b}Shape`), model(`${b}ShapeWithSide`)] },
       }),
-      models: (b) => [`${b}Shape`, `${b}Shape2`],
+      models: (b) => [`${b}Shape`, `${b}ShapeWithSide`],
     },
     {
       label: 'a const-discriminated oneOf',
@@ -1657,10 +1704,10 @@ describe('inline response objects materialize every variant, item and value mode
         shape: {
           kind: 'union',
           compositionKind: 'oneOf',
-          variants: [model(`${b}Shape`), { kind: 'nullable', inner: model(`${b}Shape2`) }],
+          variants: [model(`${b}Shape`), { kind: 'nullable', inner: model(`${b}ShapeWithSide`) }],
         },
       }),
-      models: (b) => [`${b}Shape`, `${b}Shape2`],
+      models: (b) => [`${b}Shape`, `${b}ShapeWithSide`],
     },
     {
       label: 'an array whose items are a oneOf',
@@ -1669,10 +1716,14 @@ describe('inline response objects materialize every variant, item and value mode
         id: str,
         markers: {
           kind: 'array',
-          items: { kind: 'union', compositionKind: 'oneOf', variants: [model(`${b}Marker`), model(`${b}Marker2`)] },
+          items: {
+            kind: 'union',
+            compositionKind: 'oneOf',
+            variants: [model(`${b}Marker`), model(`${b}MarkerWithSide`)],
+          },
         },
       }),
-      models: (b) => [`${b}Marker`, `${b}Marker2`],
+      models: (b) => [`${b}Marker`, `${b}MarkerWithSide`],
     },
     {
       label: 'a map with inline object values',
@@ -1920,7 +1971,7 @@ describe('a field augmenting a $ref component via allOf gets its model in every 
     expect(types['ThingItemDetail']).toEqual(mergedFields('ThingItemDetail'));
     expect(types['ThingShape']).toEqual({ detail: model('ThingShapeDetail') });
     expect(types['ThingShapeDetail']).toEqual(mergedFields('ThingShapeDetail'));
-    expect(types['ThingShape2']).toEqual({ side: num });
+    expect(types['ThingShapeWithSide']).toEqual({ side: num });
     expectConsistent(ir, ['Base', 'Other', 'Thing']);
   });
 });
@@ -2127,5 +2178,1412 @@ describe('a component that extends itself through a field stays finite', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+describe('undiscriminated inline variants are named from their content', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const str = { kind: 'primitive', type: 'string' };
+  const int = { kind: 'primitive', type: 'integer' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const nullable = (inner: unknown) => ({ kind: 'nullable', inner });
+  const union = (variants: unknown[], compositionKind: 'oneOf' | 'anyOf' = 'oneOf') => ({
+    kind: 'union',
+    compositionKind,
+    variants,
+  });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const center = obj({ x: n, y: n });
+  const point = { x: num, y: num };
+  const byRadius = obj({ radius: n });
+  const bySide = obj({ side: n });
+  const byPoints = obj({ points: { type: 'integer' } });
+  const circle = obj({ radius: n, center }, { title: 'Circle' });
+  const square = obj({ side: n, center }, { title: 'Square' });
+
+  /** Every model name referenced from any model field or any operation's body or response. */
+  function referencedEverywhere(ir: Awaited<ReturnType<typeof parseSpec>>): Set<string> {
+    const names = new Set<string>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        if (record['kind'] === 'model' && typeof record['name'] === 'string') names.add(record['name']);
+        Object.values(record).forEach(visit);
+      }
+    };
+    for (const m of ir.models) visit(m.fields);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      visit([op.requestBody, op.response, op.pagination?.envelopeFields]);
+    }
+    return names;
+  }
+
+  /** Every reference resolves to a model, and every model other than `roots` is referenced. */
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = referencedEverywhere(ir);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  /** One union in four contexts: a component field, the items of a component array, an inline request-body field and an inline response field. */
+  const inFourContexts = (field: SchemaObject) => ({
+    openapi: '3.1.0',
+    info: { title: 'variant names', version: '1' },
+    paths: {
+      '/drawings': {
+        post: {
+          operationId: 'createDrawing',
+          requestBody: { content: { 'application/json': { schema: obj({ shape: field }) } } },
+          responses: { '204': { description: 'ok' } },
+        },
+        get: {
+          operationId: 'listDrawings',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: obj({ id: { type: 'string' }, shape: field }) } },
+            },
+          },
+        },
+      },
+    },
+    components: { schemas: { Drawing: obj({ shape: field, markers: { type: 'array', items: field } }) } },
+  });
+
+  type Case = {
+    label: string;
+    field: SchemaObject;
+    /** The field's TypeRef, given the union's base name. */
+    type: (base: string) => unknown;
+    /** The variant models and everything nested under them (name → fields), given the base name. */
+    models: (base: string) => Record<string, Record<string, unknown>>;
+  };
+  const titled = (b: string) => ({
+    [`Circle${b}`]: { radius: num, center: model(`Circle${b}Center`) },
+    [`Circle${b}Center`]: point,
+    [`Square${b}`]: { side: num, center: model(`Square${b}Center`) },
+    [`Square${b}Center`]: point,
+  });
+  const radiusAndSide = (b: string) => ({ [b]: { radius: num }, [`${b}WithSide`]: { side: num } });
+  const cases: Case[] = [
+    {
+      label: 'every variant titled: variant 0 takes its title too, and nested objects follow the variant',
+      field: { oneOf: [circle, square] },
+      type: (b) => union([model(`Circle${b}`), model(`Square${b}`)]),
+      models: titled,
+    },
+    {
+      label: 'no title: the distinguishing property',
+      field: { oneOf: [byRadius, bySide] },
+      type: (b) => union([model(b), model(`${b}WithSide`)]),
+      models: radiusAndSide,
+    },
+    {
+      label: 'anyOf too',
+      field: { anyOf: [byRadius, bySide] },
+      type: (b) => union([model(b), model(`${b}WithSide`)], 'anyOf'),
+      models: radiusAndSide,
+    },
+    {
+      label: 'a title on a later variant only; variant 0 stays bare',
+      field: { oneOf: [byRadius, { ...bySide, title: 'Square' }] },
+      type: (b) => union([model(b), model(`Square${b}`)]),
+      models: (b) => ({ [b]: { radius: num }, [`Square${b}`]: { side: num } }),
+    },
+    {
+      label: "a title equal to an earlier variant's: the second falls through to its distinguishing property",
+      field: { oneOf: [byRadius, { ...bySide, title: 'Square' }, { ...byPoints, title: 'Square' }] },
+      type: (b) => union([model(b), model(`Square${b}`), model(`${b}WithPoints`)]),
+      models: (b) => ({ [b]: { radius: num }, [`Square${b}`]: { side: num }, [`${b}WithPoints`]: { points: int } }),
+    },
+    {
+      label: 'identical property sets: the counter remains',
+      field: { oneOf: [byRadius, obj({ radius: { type: 'string' } })] },
+      type: (b) => union([model(b), model(`${b}2`)]),
+      models: (b) => ({ [b]: { radius: num }, [`${b}2`]: { radius: str } }),
+    },
+    {
+      label: "a property set that adds nothing to another variant's: the counter remains",
+      field: { oneOf: [obj({ radius: n, side: n }), bySide] },
+      type: (b) => union([model(b), model(`${b}2`)]),
+      models: (b) => ({ [b]: { radius: num, side: num }, [`${b}2`]: { side: num } }),
+    },
+    {
+      label: "the first distinguishing property in the variant's own order, skipping shared ones",
+      field: { oneOf: [obj({ shared: n, radius: n }), obj({ shared: n, side: n, extra: n })] },
+      type: (b) => union([model(b), model(`${b}WithSide`)]),
+      models: (b) => ({
+        [b]: { shared: num, radius: num },
+        [`${b}WithSide`]: { shared: num, side: num, extra: num },
+      }),
+    },
+    {
+      label: 'a nullable titled variant keeps its wrapper',
+      field: { oneOf: [circle, { ...square, type: ['object', 'null'] }] },
+      type: (b) => union([model(`Circle${b}`), nullable(model(`Square${b}`))]),
+      models: titled,
+    },
+    {
+      label: 'a nullable untitled variant keeps its wrapper',
+      field: { oneOf: [byRadius, { ...bySide, type: ['object', 'null'] }] },
+      type: (b) => union([model(b), nullable(model(`${b}WithSide`))]),
+      models: radiusAndSide,
+    },
+    {
+      label: 'a multi-type variant keeps its other type',
+      field: { oneOf: [byRadius, { ...bySide, type: ['object', 'string'] }] },
+      type: (b) => union([model(b), { kind: 'union', variants: [model(`${b}WithSide`), str] }]),
+      models: radiusAndSide,
+    },
+  ];
+
+  it.each(cases)(
+    '$label — on a component field, array items, a request body and an inline response',
+    async ({ field, type, models }) => {
+      const ir = await parseWithoutWarnings(inFourContexts(field));
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Drawing']!['shape']).toEqual(type('DrawingShape'));
+      expect(types['Drawing']!['markers']).toEqual({ kind: 'array', items: type('DrawingMarker') });
+      expect(types['CreateDrawingRequest']!['shape']).toEqual(type('CreateDrawingRequestShape'));
+      expect(types['ListDrawingsResponse']!['shape']).toEqual(type('ListDrawingsResponseShape'));
+      const expected = {
+        ...models('DrawingShape'),
+        ...models('DrawingMarker'),
+        ...models('CreateDrawingRequestShape'),
+        ...models('ListDrawingsResponseShape'),
+      };
+      for (const [name, fields] of Object.entries(expected)) expect(types[name], name).toEqual(fields);
+      expect(ir.models.map((m) => m.name).sort()).toEqual(
+        ['Drawing', 'CreateDrawingRequest', 'ListDrawingsResponse', ...Object.keys(expected)].sort(),
+      );
+      expectConsistent(ir, ['Drawing']);
+    },
+  );
+
+  it('a title that PascalCases to the base, or to a prefix of it, is not doubled and falls through', () => {
+    for (const title of ['Drawing shape', 'drawing_shape', 'Drawing']) {
+      const field: SchemaObject = { oneOf: [byRadius, { ...bySide, title }] };
+      expect(schemaToTypeRef(field, 'shape', 'Drawing')).toEqual(
+        union([model('DrawingShape'), model('DrawingShapeWithSide')]),
+      );
+      const results: Model[] = [];
+      extractInlineModelsFromProperties({ type: 'object', properties: { shape: field } }, results, 'Drawing');
+      expect(results.map((m) => m.name)).toEqual(['DrawingShape', 'DrawingShapeWithSide']);
+    }
+    // Variant 0 of an all-titled union is not doubled either.
+    const allTitled: SchemaObject = {
+      oneOf: [
+        { ...byRadius, title: 'Drawing shape' },
+        { ...bySide, title: 'Square' },
+      ],
+    };
+    expect(schemaToTypeRef(allTitled, 'shape', 'Drawing')).toEqual(
+      union([model('DrawingShape'), model('SquareDrawingShape')]),
+    );
+  });
+
+  it('reordering the variants changes nothing but which one is bare', async () => {
+    // Titled: the same names in either order.
+    const forward = await parseWithoutWarnings(inFourContexts({ oneOf: [circle, square] }));
+    const backward = await parseWithoutWarnings(inFourContexts({ oneOf: [square, circle] }));
+    expect(backward.models.map((m) => m.name).sort()).toEqual(forward.models.map((m) => m.name).sort());
+    expect(fieldTypesByModel(backward.models)['Drawing']!['shape']).toEqual(
+      union([model('SquareDrawingShape'), model('CircleDrawingShape')]),
+    );
+    // Untitled: the first is bare, the other is still named from its own property, never by a counter.
+    const radiusFirst = await parseWithoutWarnings(inFourContexts({ oneOf: [byRadius, bySide] }));
+    const sideFirst = await parseWithoutWarnings(inFourContexts({ oneOf: [bySide, byRadius] }));
+    expect(fieldTypesByModel(radiusFirst.models)['Drawing']!['shape']).toEqual(
+      union([model('DrawingShape'), model('DrawingShapeWithSide')]),
+    );
+    expect(fieldTypesByModel(sideFirst.models)['Drawing']!['shape']).toEqual(
+      union([model('DrawingShape'), model('DrawingShapeWithRadius')]),
+    );
+    expect(fieldTypesByModel(sideFirst.models)['DrawingShape']).toEqual({ side: num });
+    expect(fieldTypesByModel(sideFirst.models)['DrawingShapeWithRadius']).toEqual({ radius: num });
+    expectConsistent(sideFirst, ['Drawing']);
+  });
+
+  it('a const discriminator still wins over the distinguishing property, and a lone inline variant keeps the bare name', () => {
+    const labeled: SchemaObject = {
+      oneOf: [
+        obj({ kind: { type: 'string', const: 'circle' }, radius: n }),
+        obj({ kind: { type: 'string', const: 'square' }, side: n }),
+      ],
+    };
+    expect(schemaToTypeRef(labeled, 'shape', 'Drawing')).toMatchObject({
+      variants: [model('DrawingShape'), model('SquareDrawingShape')],
+    });
+    const results: Model[] = [];
+    extractInlineModelsFromProperties({ type: 'object', properties: { shape: labeled } }, results, 'Drawing');
+    expect(results.map((m) => m.name)).toEqual(['DrawingShape', 'SquareDrawingShape']);
+    // A single inline variant (titled or not) has nothing to be told apart from.
+    const lone: SchemaObject = { oneOf: [circle, { $ref: '#/components/schemas/Other' }] };
+    expect(schemaToTypeRef(lone, 'shape', 'Drawing')).toEqual(union([model('DrawingShape'), model('Other')]));
+  });
+
+  it('a union sibling claims every name its variants mint, so array items step aside only when one matches', async () => {
+    const visible = obj({ visible: { type: 'boolean' } });
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info: { title: 'siblings', version: '1' },
+      paths: {},
+      components: {
+        schemas: {
+          Drawing: obj({
+            layers: { type: 'array', items: visible },
+            // Mints DrawingLayer and DrawingLayerWithOpacity: `layers` steps aside.
+            layer: { oneOf: [visible, obj({ opacity: n })] },
+            tiles: { type: 'array', items: visible },
+            // Mints SolidDrawingTile and FadeDrawingTile only: `tiles` keeps DrawingTile.
+            tile: {
+              oneOf: [
+                obj({ visible: { type: 'boolean' } }, { title: 'Solid' }),
+                obj({ opacity: n }, { title: 'Fade' }),
+              ],
+            },
+          }),
+        },
+      },
+    });
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      layers: { kind: 'array', items: model('DrawingLayersItem') },
+      layer: union([model('DrawingLayer'), model('DrawingLayerWithOpacity')]),
+      tiles: { kind: 'array', items: model('DrawingTile') },
+      tile: union([model('SolidDrawingTile'), model('FadeDrawingTile')]),
+    });
+    expect(ir.models.map((m) => m.name).sort()).toEqual([
+      'Drawing',
+      'DrawingLayer',
+      'DrawingLayerWithOpacity',
+      'DrawingLayersItem',
+      'DrawingTile',
+      'FadeDrawingTile',
+      'SolidDrawingTile',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('a request body that is itself a oneOf names its const-less variants the same way', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info: { title: 'bodies', version: '1' },
+      paths: {
+        '/things': {
+          post: {
+            operationId: 'createThing',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    oneOf: [
+                      obj({ a: { type: 'string' } }),
+                      obj({ b: { type: 'string' } }),
+                      obj({ c: n }, { title: 'Third' }),
+                      obj({ kind: { type: 'string', const: 'keyed' }, d: n }),
+                      obj({ a: { type: 'string' } }, { description: 'the first shape again' }),
+                    ],
+                  },
+                },
+              },
+            },
+            responses: { '204': { description: 'ok' } },
+          },
+        },
+      },
+    });
+    const op = ir.services.flatMap((s) => s.operations)[0]!;
+    expect(op.requestBody).toEqual({
+      kind: 'union',
+      variants: [
+        model('CreateThingRequest'),
+        model('CreateThingRequestWithB'),
+        model('ThirdCreateThingRequest'),
+        model('KeyedCreateThingRequest'),
+        model('CreateThingRequest4'),
+      ],
+    });
+    const types = fieldTypesByModel(ir.models);
+    expect(types['CreateThingRequest']).toEqual({ a: str });
+    expect(types['CreateThingRequestWithB']).toEqual({ b: str });
+    expect(types['ThirdCreateThingRequest']).toEqual({ c: num });
+    expect(types['KeyedCreateThingRequest']).toEqual({ kind: { kind: 'literal', value: 'keyed' }, d: num });
+    expect(types['CreateThingRequest4']).toEqual({ a: str });
+    expectConsistent(ir, []);
+  });
+
+  it('a response that is itself a oneOf materializes every const-less variant under the name the union references', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info: { title: 'responses', version: '1' },
+      paths: {
+        '/thing': {
+          get: {
+            operationId: 'getThing',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': { schema: { oneOf: [byRadius, bySide, { ...byPoints, title: 'Scored' }] } },
+                },
+              },
+              '400': {
+                description: 'bad',
+                content: {
+                  'application/json': {
+                    schema: {
+                      anyOf: [
+                        obj({ message: { type: 'string' } }),
+                        obj({ message: { type: 'string' }, error: { type: 'string' } }),
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const op = ir.services.flatMap((s) => s.operations)[0]!;
+    expect(op.response).toEqual(
+      union([model('GetThingResponse'), model('GetThingResponseWithSide'), model('ScoredGetThingResponse')]),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['GetThingResponse']).toEqual({ radius: num });
+    expect(types['GetThingResponseWithSide']).toEqual({ side: num });
+    expect(types['ScoredGetThingResponse']).toEqual({ points: int });
+    expectConsistent(ir, []);
+    // Error unions are only typed, never extracted, but their variant names follow the same rule.
+    expect(op.errors).toEqual([
+      { statusCode: 400, type: union([model('Error400'), model('Error400WithError')], 'anyOf') },
+    ]);
+  });
+});
+
+describe("variant names step around the names the parent's other properties mint", () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const str = { kind: 'primitive', type: 'string' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const union = (variants: unknown[]) => ({ kind: 'union', compositionKind: 'oneOf', variants });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const byRadius = obj({ radius: n });
+  const bySide = obj({ side: n });
+  const labeled = obj({ label: { type: 'string' } });
+
+  /** Every model name referenced from any model field or any operation's body or response. */
+  function referencedEverywhere(ir: Awaited<ReturnType<typeof parseSpec>>): Set<string> {
+    const names = new Set<string>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        if (record['kind'] === 'model' && typeof record['name'] === 'string') names.add(record['name']);
+        Object.values(record).forEach(visit);
+      }
+    };
+    for (const m of ir.models) visit(m.fields);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      visit([op.requestBody, op.response, op.pagination?.envelopeFields]);
+    }
+    return names;
+  }
+
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = referencedEverywhere(ir);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  /** The same properties on a component, an inline request body and an inline response. */
+  const inThreeContexts = (properties: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info: { title: 'reserved names', version: '1' },
+    paths: {
+      '/drawings': {
+        post: {
+          operationId: 'createDrawing',
+          requestBody: { content: { 'application/json': { schema: obj(properties) } } },
+          responses: { '204': { description: 'ok' } },
+        },
+        get: {
+          operationId: 'listDrawings',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: obj({ id: { type: 'string' }, ...properties }) } },
+            },
+          },
+        },
+      },
+    },
+    components: { schemas: { Drawing: obj(properties) } },
+  });
+  const contexts: Array<[parent: string, base: string]> = [
+    ['Drawing', 'DrawingShape'],
+    ['CreateDrawingRequest', 'CreateDrawingRequestShape'],
+    ['ListDrawingsResponse', 'ListDrawingsResponseShape'],
+  ];
+
+  it('the reported case: a sibling `shape_with_side` object keeps `<Base>WithSide`, the variant takes the counter, in either order', async () => {
+    const shape: SchemaObject = { oneOf: [byRadius, bySide] };
+    for (const properties of [
+      { shape_with_side: labeled, shape },
+      { shape, shape_with_side: labeled },
+    ]) {
+      const ir = await parseWithoutWarnings(inThreeContexts(properties));
+      const types = fieldTypesByModel(ir.models);
+      for (const [parent, base] of contexts) {
+        expect(types[parent]!['shape_with_side']).toEqual(model(`${base}WithSide`));
+        expect(types[parent]!['shape']).toEqual(union([model(base), model(`${base}2`)]));
+        expect(types[`${base}WithSide`]).toEqual({ label: str });
+        expect(types[base]).toEqual({ radius: num });
+        expect(types[`${base}2`]).toEqual({ side: num });
+      }
+      expectConsistent(ir, ['Drawing']);
+    }
+  });
+
+  it('a title that collides with a sibling model falls through to the distinguishing property', async () => {
+    // The title "Drawing circle" prefixes the base to `DrawingCircleDrawingShape`,
+    // which is exactly what a sibling `circle_drawing_shape` object mints.
+    const ir = await parseWithoutWarnings(
+      inThreeContexts({
+        circle_drawing_shape: labeled,
+        shape: { oneOf: [byRadius, { ...bySide, title: 'Drawing circle' }] },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']!['circle_drawing_shape']).toEqual(model('DrawingCircleDrawingShape'));
+    expect(types['Drawing']!['shape']).toEqual(union([model('DrawingShape'), model('DrawingShapeWithSide')]));
+    expect(types['DrawingCircleDrawingShape']).toEqual({ label: str });
+    expect(types['DrawingShapeWithSide']).toEqual({ side: num });
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('a counter that collides with a sibling model keeps counting', async () => {
+    const ir = await parseWithoutWarnings(
+      inThreeContexts({
+        shape2: labeled,
+        shape: { oneOf: [byRadius, obj({ radius: { type: 'string' } })] },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    for (const [parent, base] of contexts) {
+      expect(types[parent]!['shape2']).toEqual(model(`${base}2`));
+      expect(types[parent]!['shape']).toEqual(union([model(base), model(`${base}3`)]));
+      expect(types[`${base}2`]).toEqual({ label: str });
+      expect(types[`${base}3`]).toEqual({ radius: str });
+    }
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('the reference and the extractor agree when handed the same sibling set', () => {
+    const properties: Record<string, SchemaObject> = {
+      shape_with_side: labeled,
+      shape: { oneOf: [byRadius, bySide] },
+    };
+    const siblings = new Map(Object.entries(properties));
+    expect(schemaToTypeRef(properties['shape']!, 'shape', 'Drawing', siblings)).toEqual(
+      union([model('DrawingShape'), model('DrawingShape2')]),
+    );
+    const results: Model[] = [];
+    extractInlineModelsFromProperties({ type: 'object', properties }, results, 'Drawing');
+    expect(results.map((m) => m.name)).toEqual(['DrawingShapeWithSide', 'DrawingShape', 'DrawingShape2']);
+  });
+});
+
+describe('a response that is itself a oneOf materializes every variant the union references', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const str = { kind: 'primitive', type: 'string' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const nullable = (inner: unknown) => ({ kind: 'nullable', inner });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const byRadius = obj({ radius: n });
+  const nullableBySide = obj({ side: n }, { type: ['object', 'null'] });
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  const operation = (operationId: string, schema: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'nullable response variants', version: '1' },
+    paths: {
+      '/things': {
+        get: {
+          operationId,
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
+        },
+      },
+    },
+  });
+
+  it('a direct response with a nullable second variant', async () => {
+    const ir = await parseWithoutWarnings(operation('getThing', { oneOf: [byRadius, nullableBySide] }));
+    const op = ir.services.flatMap((s) => s.operations)[0]!;
+    expect(op.response).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [model('GetThingResponse'), nullable(model('GetThingResponseWithSide'))],
+    });
+    const types = fieldTypesByModel(ir.models);
+    expect(types['GetThingResponse']).toEqual({ radius: num });
+    expect(types['GetThingResponseWithSide']).toEqual({ side: num });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['GetThingResponse', 'GetThingResponseWithSide']);
+  });
+
+  it('a list item whose union has a nullable second variant', async () => {
+    const ir = await parseWithoutWarnings(
+      operation('listThings', {
+        type: 'object',
+        properties: {
+          object: { type: 'string', const: 'list' },
+          data: { type: 'array', items: obj({ id: { type: 'string' }, shape: { oneOf: [byRadius, nullableBySide] } }) },
+          list_metadata: obj({ before: { type: 'string' }, after: { type: 'string' } }),
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ListThingsItem']).toEqual({
+      id: str,
+      shape: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [model('ListThingsItemShape'), nullable(model('ListThingsItemShapeWithSide'))],
+      },
+    });
+    expect(types['ListThingsItemShape']).toEqual({ radius: num });
+    expect(types['ListThingsItemShapeWithSide']).toEqual({ side: num });
+  });
+
+  it('const-named variants carry the names the union references, not bare const names', async () => {
+    const ir = await parseWithoutWarnings(
+      operation('getThing', {
+        oneOf: [
+          obj({ kind: { type: 'string', const: 'circle' }, radius: n }),
+          obj({ kind: { type: 'string', const: 'square' }, side: n }, { type: ['object', 'null'] }),
+        ],
+      }),
+    );
+    const op = ir.services.flatMap((s) => s.operations)[0]!;
+    expect(op.response).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [model('GetThingResponse'), nullable(model('SquareGetThingResponse'))],
+      discriminator: { property: 'kind', mapping: { circle: 'GetThingResponse', square: 'SquareGetThingResponse' } },
+    });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['GetThingResponse', 'SquareGetThingResponse']);
+    expect(fieldTypesByModel(ir.models)['SquareGetThingResponse']).toEqual({
+      kind: { kind: 'literal', value: 'square' },
+      side: num,
+    });
+  });
+});
+
+describe('title-mapped unions: the extracted models follow the discriminator mapping', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const str = { kind: 'primitive', type: 'string' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  // Every variant carries a title AND pins `kind`: the pre-existing
+  // title-mapped path names the discriminator mapping from the titles.
+  const circle = obj({ kind: { type: 'string', const: 'circle' }, radius: n }, { title: 'Circle' });
+  const square = obj({ kind: { type: 'string', const: 'square' }, side: n }, { title: 'Square' });
+  const titled: SchemaObject = { oneOf: [circle, square] };
+  const mapped = {
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: [model('Circle'), model('Square')],
+    discriminator: { property: 'kind', mapping: { circle: 'Circle', square: 'Square' } },
+  };
+  const circleFields = { kind: { kind: 'literal', value: 'circle' }, radius: num };
+  const squareFields = { kind: { kind: 'literal', value: 'square' }, side: num };
+
+  /** Every model ref and every discriminator mapping value, anywhere in a value. */
+  function refsIn(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => refsIn(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      const discriminator = record['discriminator'] as { mapping?: Record<string, string> } | undefined;
+      if (record['kind'] === 'union' && discriminator?.mapping)
+        Object.values(discriminator.mapping).forEach((v) => out.add(v));
+      Object.values(record).forEach((v) => refsIn(v, out));
+    }
+    return out;
+  }
+
+  /** Every reference and mapping value resolves to a model; every model other than `roots` is referenced. */
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = new Set<string>();
+    for (const m of ir.models) refsIn(m.fields, referenced);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      refsIn([op.requestBody, op.response, op.pagination?.envelopeFields], referenced);
+    }
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  const info = { title: 'title-mapped', version: '1' };
+  const withComponents = (schemas: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {},
+    components: { schemas },
+  });
+  const withGet = (operationId: string, schema: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/things': {
+        get: { operationId, responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } } },
+      },
+    },
+  });
+
+  it('as a direct response: the union, the mapping and the models all say Circle and Square', async () => {
+    const ir = await parseWithoutWarnings(withGet('getThing', titled));
+    const op = ir.services.flatMap((s) => s.operations)[0]!;
+    expect(op.response).toEqual(mapped);
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Square']);
+    expectConsistent(ir, []);
+  });
+
+  it('on a list item field', async () => {
+    const ir = await parseWithoutWarnings(
+      withGet(
+        'listThings',
+        obj({
+          object: { type: 'string', const: 'list' },
+          data: { type: 'array', items: obj({ id: { type: 'string' }, shape: titled }) },
+          list_metadata: obj({ before: { type: 'string' }, after: { type: 'string' } }),
+        }),
+      ),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ListThingsItem']).toEqual({ id: str, shape: mapped });
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expectConsistent(ir, []);
+  });
+
+  it.each([
+    {
+      label: 'a component field',
+      spec: withComponents({ Drawing: obj({ shape: titled }) }),
+      field: (types: Record<string, Record<string, unknown>>) => types['Drawing']!['shape'],
+      roots: ['Drawing'],
+    },
+    {
+      label: 'a request-body field',
+      spec: {
+        openapi: '3.1.0',
+        info,
+        paths: {
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: { content: { 'application/json': { schema: obj({ shape: titled }) } } },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      },
+      field: (types: Record<string, Record<string, unknown>>) => types['CreateThingRequest']!['shape'],
+      roots: [],
+    },
+    {
+      label: 'the items of an array',
+      spec: withComponents({ Drawing: obj({ markers: { type: 'array', items: titled } }) }),
+      field: (types: Record<string, Record<string, unknown>>) =>
+        (types['Drawing']!['markers'] as { items: unknown }).items,
+      roots: ['Drawing'],
+    },
+  ])('as $label', async ({ spec, field, roots }) => {
+    const ir = await parseWithoutWarnings(spec);
+    const types = fieldTypesByModel(ir.models);
+    expect(field(types)).toEqual(mapped);
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expectConsistent(ir, roots);
+  });
+
+  it('two title-mapped unions beside each other share Circle and Square: a title names one shape', async () => {
+    const ir = await parseWithoutWarnings(withComponents({ Drawing: obj({ shape: titled, marker: titled }) }));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({ shape: mapped, marker: mapped });
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Drawing', 'Square']);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('a title a sibling model already mints falls back to the title-prefixed base, and the mapping follows', async () => {
+    // The title "Thing circle" resolves to `ThingCircle`, exactly what the sibling `circle` object mints.
+    const ir = await parseWithoutWarnings(
+      withComponents({
+        Thing: obj({
+          circle: obj({ label: { type: 'string' } }),
+          shape: { oneOf: [{ ...circle, title: 'Thing circle' }, square] },
+        }),
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Thing']).toEqual({
+      circle: model('ThingCircle'),
+      shape: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [model('ThingCircleThingShape'), model('Square')],
+        discriminator: { property: 'kind', mapping: { circle: 'ThingCircleThingShape', square: 'Square' } },
+      },
+    });
+    expect(types['ThingCircle']).toEqual({ label: str });
+    expect(types['ThingCircleThingShape']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expectConsistent(ir, ['Thing']);
+  });
+});
+
+describe('sibling reservation reaches every context, including array items and map values', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const str = { kind: 'primitive', type: 'string' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const union = (variants: unknown[]) => ({ kind: 'union', compositionKind: 'oneOf', variants });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const plain: SchemaObject = { oneOf: [obj({ radius: n }), obj({ side: n })] };
+  const labeled = obj({ label: { type: 'string' } });
+
+  function referencedEverywhere(ir: Awaited<ReturnType<typeof parseSpec>>): Set<string> {
+    const names = new Set<string>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        if (record['kind'] === 'model' && typeof record['name'] === 'string') names.add(record['name']);
+        Object.values(record).forEach(visit);
+      }
+    };
+    for (const m of ir.models) visit(m.fields);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      visit([op.requestBody, op.response, op.pagination?.envelopeFields]);
+    }
+    return names;
+  }
+
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = referencedEverywhere(ir);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  const info = { title: 'reserved everywhere', version: '1' };
+  const withComponents = (schemas: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {},
+    components: { schemas },
+  });
+
+  /** `shape_with_side` beside the `shape` union, the sibling first and the sibling last. */
+  const orders: Array<[string, Record<string, SchemaObject>]> = [
+    ['sibling first', { shape_with_side: labeled, shape: plain }],
+    ['sibling last', { shape: plain, shape_with_side: labeled }],
+  ];
+
+  it.each(orders)('in a nested object, %s', async (_order, properties) => {
+    const ir = await parseWithoutWarnings(withComponents({ Drawing: obj({ inner: obj(properties) }) }));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['DrawingInner']).toMatchObject({
+      shape_with_side: model('DrawingInnerShapeWithSide'),
+      shape: union([model('DrawingInnerShape'), model('DrawingInnerShape2')]),
+    });
+    expect(types['DrawingInnerShapeWithSide']).toEqual({ label: str });
+    expect(types['DrawingInnerShape2']).toEqual({ side: num });
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it.each(orders)('in an array item object, %s', async (_order, properties) => {
+    const ir = await parseWithoutWarnings(
+      withComponents({ Drawing: obj({ items: { type: 'array', items: obj(properties) } }) }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['DrawingItem']).toMatchObject({
+      shape_with_side: model('DrawingItemShapeWithSide'),
+      shape: union([model('DrawingItemShape'), model('DrawingItemShape2')]),
+    });
+    expect(types['DrawingItemShapeWithSide']).toEqual({ label: str });
+    expect(types['DrawingItemShape2']).toEqual({ side: num });
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it.each(orders)('on a list-item envelope, %s', async (_order, properties) => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/things': {
+          get: {
+            operationId: 'listThings',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': {
+                    schema: obj({
+                      object: { type: 'string', const: 'list' },
+                      data: { type: 'array', items: obj({ id: { type: 'string' }, ...properties }) },
+                      list_metadata: obj({ before: { type: 'string' }, after: { type: 'string' } }),
+                    }),
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ListThingsItem']).toMatchObject({
+      shape_with_side: model('ListThingsItemShapeWithSide'),
+      shape: union([model('ListThingsItemShape'), model('ListThingsItemShape2')]),
+    });
+    expect(types['ListThingsItemShapeWithSide']).toEqual({ label: str });
+    expect(types['ListThingsItemShape2']).toEqual({ side: num });
+    expectConsistent(ir, []);
+  });
+
+  it('a union among array items, map values or nested array items steps around a sibling model too', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponents({
+        Drawing: obj({
+          marker_with_side: labeled,
+          markers: { type: 'array', items: plain },
+          layers: { type: 'object', additionalProperties: plain },
+          layer_with_side: labeled,
+          grid_with_side: labeled,
+          grids: { type: 'array', items: { type: 'array', items: plain } },
+        }),
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    // The sibling claims the singular name's `WithSide` candidate, so the
+    // items/values step aside to `<Field>Item` / `<Field>Value` and their
+    // variants are named from there; the sibling models keep their names.
+    expect(types['Drawing']).toEqual({
+      marker_with_side: model('DrawingMarkerWithSide'),
+      markers: { kind: 'array', items: union([model('DrawingMarkersItem'), model('DrawingMarkersItemWithSide')]) },
+      layers: { kind: 'map', valueType: union([model('DrawingLayersValue'), model('DrawingLayersValueWithSide')]) },
+      layer_with_side: model('DrawingLayerWithSide'),
+      grid_with_side: model('DrawingGridWithSide'),
+      grids: {
+        kind: 'array',
+        items: { kind: 'array', items: union([model('DrawingGridsItem'), model('DrawingGridsItemWithSide')]) },
+      },
+    });
+    for (const sibling of ['DrawingMarkerWithSide', 'DrawingLayerWithSide', 'DrawingGridWithSide']) {
+      expect(types[sibling]).toEqual({ label: str });
+    }
+    for (const second of ['DrawingMarkersItemWithSide', 'DrawingLayersValueWithSide', 'DrawingGridsItemWithSide']) {
+      expect(types[second]).toEqual({ side: num });
+    }
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('a reserved set handed down to array items is honored by the reference and the extractor alike', () => {
+    // With no sibling set in play nothing steps aside, so only the handed-down
+    // reservation keeps the `{ side }` variant off `DrawingMarkerWithSide`.
+    const markers: SchemaObject = { type: 'array', items: plain };
+    const reserved = new Set(['DrawingMarkerWithSide']);
+    expect(schemaToTypeRef(markers, 'markers', 'Drawing', undefined, reserved)).toEqual({
+      kind: 'array',
+      items: union([model('DrawingMarker'), model('DrawingMarker2')]),
+    });
+    const results: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { markers } }, results, 'Drawing', undefined, undefined, reserved);
+    expect(results.map((m) => m.name)).toEqual(['DrawingMarker', 'DrawingMarker2']);
+    expect(fieldTypesByModel(results)['DrawingMarker2']).toEqual({ side: num });
+  });
+});
+
+describe('matching titles across sibling unions terminate and share one model (the title hang)', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const circle = obj({ kind: { type: 'string', const: 'circle' }, radius: n }, { title: 'Circle' });
+  const square = obj({ kind: { type: 'string', const: 'square' }, side: n }, { title: 'Square' });
+  const titled: SchemaObject = { oneOf: [circle, square] };
+  const plain: SchemaObject = { oneOf: [obj({ radius: n }), obj({ side: n })] };
+  const arr = (items: SchemaObject): SchemaObject => ({ type: 'array', items });
+  const map = (values: SchemaObject): SchemaObject => ({ type: 'object', additionalProperties: values });
+  const mapped = {
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: [model('Circle'), model('Square')],
+    discriminator: { property: 'kind', mapping: { circle: 'Circle', square: 'Square' } },
+  };
+  const circleFields = { kind: { kind: 'literal', value: 'circle' }, radius: num };
+  const squareFields = { kind: { kind: 'literal', value: 'square' }, side: num };
+
+  /** Every model ref and every discriminator mapping value, anywhere in a value. */
+  function refsIn(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => refsIn(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      const discriminator = record['discriminator'] as { mapping?: Record<string, string> } | undefined;
+      if (record['kind'] === 'union' && discriminator?.mapping)
+        Object.values(discriminator.mapping).forEach((v) => out.add(v));
+      Object.values(record).forEach((v) => refsIn(v, out));
+    }
+    return out;
+  }
+
+  /** Every reference and mapping value resolves to a model; every model other than `roots` is referenced. */
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = new Set<string>();
+    for (const m of ir.models) refsIn(m.fields, referenced);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      refsIn([op.requestBody, op.response, op.pagination?.envelopeFields], referenced);
+    }
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  const withDrawing = (properties: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info: { title: 'title hang', version: '1' },
+    paths: {},
+    components: { schemas: { Drawing: obj(properties) } },
+  });
+
+  // Each case parses (no hang), names deterministically, and the two unions
+  // share the title-named models: a title names one shape wherever it appears.
+  it.each<{ label: string; properties: Record<string, SchemaObject>; drawing: Record<string, unknown> }>([
+    {
+      label: 'the reported case: two sibling arrays of titled items',
+      properties: { shapes: arr(titled), markers: arr(titled) },
+      drawing: { shapes: { kind: 'array', items: mapped }, markers: { kind: 'array', items: mapped } },
+    },
+    {
+      label: 'two sibling maps of titled values',
+      properties: { layers: map(titled), tiles: map(titled) },
+      drawing: { layers: { kind: 'map', valueType: mapped }, tiles: { kind: 'map', valueType: mapped } },
+    },
+    {
+      label: 'two sibling unions at field level',
+      properties: { shape: titled, marker: titled },
+      drawing: { shape: mapped, marker: mapped },
+    },
+    {
+      label: 'a field, an array and a map, all with the same titled items',
+      properties: { shape: titled, shapes: arr(titled), layers: map(titled) },
+      drawing: { shape: mapped, shapes: { kind: 'array', items: mapped }, layers: { kind: 'map', valueType: mapped } },
+    },
+  ])('$label', async ({ properties, drawing }) => {
+    const ir = await parseWithoutWarnings(withDrawing(properties));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual(drawing);
+    expect(types['Circle']).toEqual(circleFields);
+    expect(types['Square']).toEqual(squareFields);
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Drawing', 'Square']);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('context-free names never drive a step-aside, so the search is not even entered for them', () => {
+    expect(
+      elementContextDecision(
+        'shapes',
+        'item',
+        new Map([
+          ['shapes', arr(titled)],
+          ['markers', arr(titled)],
+        ]),
+        'Drawing',
+        titled,
+      ),
+    ).toEqual({ context: 'shapes', reason: 'nothing-minted' });
+    expect(
+      elementContextDecision(
+        'layers',
+        'value',
+        new Map([
+          ['layers', map(titled)],
+          ['tiles', map(titled)],
+        ]),
+        'Drawing',
+        titled,
+      ),
+    ).toEqual({ context: 'layers', reason: 'nothing-minted' });
+  });
+
+  it('the no-progress rule, not the attempt cap, stops a search whose names never change', () => {
+    const tried: string[] = [];
+    const constant = (candidate: string): string[] => {
+      tried.push(candidate);
+      return ['Circle', 'Square'];
+    };
+    expect(
+      firstFreeElementContext('shapes', 'item', new Set(['Circle', 'Square']), constant, ['Circle', 'Square']),
+    ).toEqual({ context: 'shapes_item', reason: 'no-progress' });
+    expect(tried).toEqual(['shapes_item']);
+    expect(tried.length).toBeLessThan(MAX_ELEMENT_CONTEXT_ATTEMPTS);
+
+    // The cap is only the last resort: names that keep changing but stay claimed.
+    const everClaimed = (candidate: string): string[] => ['Claimed', candidate];
+    expect(
+      firstFreeElementContext('shapes', 'item', new Set(['Claimed']), everClaimed, ['Claimed', 'shapes'], 5),
+    ).toEqual({
+      context: 'shapes_array_item4',
+      reason: 'cap',
+    });
+    // And a candidate that frees itself wins before either rule: the first
+    // candidate changes the names (so there is progress) but is still claimed,
+    // the second is free.
+    const freesAtSecond = (candidate: string): string[] => (candidate === 'shapes_item' ? ['Claimed'] : [candidate]);
+    expect(firstFreeElementContext('shapes', 'item', new Set(['Claimed']), freesAtSecond, ['DrawingShape'])).toEqual({
+      context: 'shapes_array_item',
+      reason: 'free',
+    });
+  });
+
+  it('a plain union among items still steps around a context-free title equal to its singular name, and terminates', async () => {
+    // `markers` is title-mapped with a variant titled "Drawing shape" — the
+    // context-free name `DrawingShape` — which is exactly what the plain
+    // items of `shapes` would be named: they step aside (`free`), while the
+    // title itself falls back because `shapes` mints `DrawingShape` in isolation.
+    const titledDrawingShape: SchemaObject = { oneOf: [{ ...circle, title: 'Drawing shape' }, square] };
+    const properties = { shapes: arr(plain), markers: arr(titledDrawingShape) };
+    expect(elementContextDecision('shapes', 'item', new Map(Object.entries(properties)), 'Drawing', plain)).toEqual({
+      context: 'shapes_item',
+      reason: 'free',
+    });
+
+    const ir = await parseWithoutWarnings(withDrawing(properties));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shapes: {
+        kind: 'array',
+        items: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('DrawingShapesItem'), model('DrawingShapesItemWithSide')],
+        },
+      },
+      markers: {
+        kind: 'array',
+        items: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('DrawingShapeDrawingMarker'), model('Square')],
+          discriminator: { property: 'kind', mapping: { circle: 'DrawingShapeDrawingMarker', square: 'Square' } },
+        },
+      },
+    });
+    expect(types['DrawingShapeDrawingMarker']).toEqual(circleFields);
+    expect(types['DrawingShapesItemWithSide']).toEqual({ side: num });
+    expectConsistent(ir, ['Drawing']);
+  });
+});
+
+describe('a title-named model is shared only between variants of the identical shape', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const circle = (fields: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { type: 'string', const: 'circle' }, ...fields }, { title: 'Circle' });
+  const square = (fields: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { type: 'string', const: 'square' }, ...fields }, { title: 'Square' });
+  const byRadius: SchemaObject = { oneOf: [circle({ radius: n }), square({ side: n })] };
+  const byDiameter: SchemaObject = { oneOf: [circle({ diameter: n }), square({ side: n })] };
+  const byArea: SchemaObject = { oneOf: [circle({ radius: n }), square({ area: n })] };
+  const arr = (items: SchemaObject): SchemaObject => ({ type: 'array', items });
+  const map = (values: SchemaObject): SchemaObject => ({ type: 'object', additionalProperties: values });
+  const unionOf = (first: string, second: string) => ({
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: [model(first), model(second)],
+    discriminator: { property: 'kind', mapping: { circle: first, square: second } },
+  });
+  const kind = (value: string) => ({ kind: { kind: 'literal', value } });
+
+  /** Every model ref and every discriminator mapping value, anywhere in a value. */
+  function refsIn(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => refsIn(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      const discriminator = record['discriminator'] as { mapping?: Record<string, string> } | undefined;
+      if (record['kind'] === 'union' && discriminator?.mapping)
+        Object.values(discriminator.mapping).forEach((v) => out.add(v));
+      Object.values(record).forEach((v) => refsIn(v, out));
+    }
+    return out;
+  }
+
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>, roots: string[]): void {
+    const referenced = new Set<string>();
+    for (const m of ir.models) refsIn(m.fields, referenced);
+    for (const op of ir.services.flatMap((s) => s.operations)) {
+      refsIn([op.requestBody, op.response, op.pagination?.envelopeFields], referenced);
+    }
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  const withDrawing = (properties: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info: { title: 'shared titles', version: '1' },
+    paths: {},
+    components: { schemas: { Drawing: obj(properties) } },
+  });
+
+  it('the reported case: Circle differs (radius vs diameter), so both unions fall back to a context-qualified Circle and share Square', async () => {
+    const ir = await parseWithoutWarnings(withDrawing({ shape: byRadius, marker: byDiameter }));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shape: unionOf('CircleDrawingShape', 'Square'),
+      marker: unionOf('CircleDrawingMarker', 'Square'),
+    });
+    expect(types['CircleDrawingShape']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['CircleDrawingMarker']).toEqual({ ...kind('circle'), diameter: num });
+    expect(types['Square']).toEqual({ ...kind('square'), side: num });
+    expect(ir.models.map((m) => m.name).sort()).toEqual([
+      'CircleDrawingMarker',
+      'CircleDrawingShape',
+      'Drawing',
+      'Square',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('identical shapes still share one model under the bare title', async () => {
+    const ir = await parseWithoutWarnings(withDrawing({ shape: byRadius, marker: byRadius }));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({ shape: unionOf('Circle', 'Square'), marker: unionOf('Circle', 'Square') });
+    expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Drawing', 'Square']);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('when only Square differs, Circle is shared and Square splits per union', async () => {
+    const ir = await parseWithoutWarnings(withDrawing({ shape: byRadius, marker: byArea }));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shape: unionOf('Circle', 'SquareDrawingShape'),
+      marker: unionOf('Circle', 'SquareDrawingMarker'),
+    });
+    expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['SquareDrawingShape']).toEqual({ ...kind('square'), side: num });
+    expect(types['SquareDrawingMarker']).toEqual({ ...kind('square'), area: num });
+    expect(ir.models.map((m) => m.name).sort()).toEqual([
+      'Circle',
+      'Drawing',
+      'SquareDrawingMarker',
+      'SquareDrawingShape',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it.each<{
+    label: string;
+    properties: Record<string, SchemaObject>;
+    drawing: Record<string, unknown>;
+    models: string[];
+  }>([
+    {
+      label: 'array items',
+      properties: { shapes: arr(byRadius), markers: arr(byDiameter) },
+      drawing: {
+        shapes: { kind: 'array', items: unionOf('CircleDrawingShape', 'Square') },
+        markers: { kind: 'array', items: unionOf('CircleDrawingMarker', 'Square') },
+      },
+      models: ['CircleDrawingMarker', 'CircleDrawingShape', 'Drawing', 'Square'],
+    },
+    {
+      label: 'map values',
+      properties: { layers: map(byRadius), tiles: map(byDiameter) },
+      drawing: {
+        layers: { kind: 'map', valueType: unionOf('CircleDrawingLayer', 'Square') },
+        tiles: { kind: 'map', valueType: unionOf('CircleDrawingTile', 'Square') },
+      },
+      models: ['CircleDrawingLayer', 'CircleDrawingTile', 'Drawing', 'Square'],
+    },
+    {
+      label: 'array items where only Square differs',
+      properties: { shapes: arr(byRadius), markers: arr(byArea) },
+      drawing: {
+        shapes: { kind: 'array', items: unionOf('Circle', 'SquareDrawingShape') },
+        markers: { kind: 'array', items: unionOf('Circle', 'SquareDrawingMarker') },
+      },
+      models: ['Circle', 'Drawing', 'SquareDrawingMarker', 'SquareDrawingShape'],
+    },
+  ])('the same under $label', async ({ properties, drawing, models }) => {
+    const ir = await parseWithoutWarnings(withDrawing(properties));
+    expect(fieldTypesByModel(ir.models)['Drawing']).toEqual(drawing);
+    expect(ir.models.map((m) => m.name).sort()).toEqual(models);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('the fallback names are context-dependent, so the items search still terminates without being entered', () => {
+    expect(
+      elementContextDecision(
+        'shapes',
+        'item',
+        new Map([
+          ['shapes', arr(byRadius)],
+          ['markers', arr(byDiameter)],
+        ]),
+        'Drawing',
+        byRadius,
+      ),
+    ).toEqual({ context: 'shapes', reason: 'nothing-minted' });
+    expect(
+      elementContextDecision(
+        'layers',
+        'value',
+        new Map([
+          ['layers', map(byRadius)],
+          ['tiles', map(byDiameter)],
+        ]),
+        'Drawing',
+        byRadius,
+      ),
+    ).toEqual({ context: 'layers', reason: 'nothing-minted' });
+  });
+
+  it('a kept title is reported context-free and a fallen-back one context-dependent', () => {
+    expect([...nameInlineVariantEntries(byRadius, 'DrawingShape', new Set(['Circle'])).values()]).toEqual([
+      { name: 'CircleDrawingShape', contextFree: false },
+      { name: 'Square', contextFree: true },
+    ]);
+    // In isolation, a title two variants of one union share falls back for the second.
+    const twice: SchemaObject = { oneOf: [circle({ radius: n }), circle({ diameter: n })] };
+    expect(
+      mintedInlineNameEntries('shape', twice, 'Drawing').map(({ name, contextFree }) => ({ name, contextFree })),
+    ).toEqual([
+      { name: 'Circle', contextFree: true },
+      { name: 'CircleDrawingShape', contextFree: false },
+    ]);
   });
 });

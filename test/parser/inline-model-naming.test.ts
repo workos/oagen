@@ -683,7 +683,7 @@ describe('path-derived names that would otherwise collide', () => {
         "/notes",
         [
           "Notes151Dd5PostRequest",
-          "Notes151Dd5PostRequest2",
+          "Notes151Dd5PostRequestWithD",
         ],
       ]
     `);
@@ -696,7 +696,7 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('keeps body oneOf variant names verbatim without a component: NotesPostRequest / NotesPostRequest2 and const-prefixed', async () => {
+  it('keeps body oneOf variant names verbatim without a component: NotesPostRequest / NotesPostRequestWithD and const-prefixed', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const numbered = {
       post: {
@@ -724,7 +724,7 @@ describe('path-derived names that would otherwise collide', () => {
       {
         "/notes": [
           "NotesPostRequest",
-          "NotesPostRequest2",
+          "NotesPostRequestWithD",
         ],
         "/tags": [
           "EmailTagsPostRequest",
@@ -733,13 +733,14 @@ describe('path-derived names that would otherwise collide', () => {
       }
     `);
 
-    // The union TypeRef and the materialized models agree, with the path base verbatim.
-    expect(byPath['/notes']).toEqual(['NotesPostRequest', 'NotesPostRequest2']);
+    // The union TypeRef and the materialized models agree, with the path base verbatim;
+    // the second const-less variant is named by its distinguishing property.
+    expect(byPath['/notes']).toEqual(['NotesPostRequest', 'NotesPostRequestWithD']);
     for (const name of [...byPath['/notes']!, ...byPath['/tags']!]) {
       expect(models.some((m) => m.name === name)).toBe(true);
     }
     expect(fieldsOf(models, 'NotesPostRequest')).toEqual(['a']);
-    expect(fieldsOf(models, 'NotesPostRequest2')).toEqual(['d']);
+    expect(fieldsOf(models, 'NotesPostRequestWithD')).toEqual(['d']);
     expect(warnSpy).not.toHaveBeenCalled();
   });
 

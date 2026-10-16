@@ -74,6 +74,78 @@ components:
     );
   });
 
+  it('keeps a const-named request-body variant distinct from one that already took its name', async () => {
+    // A const-less variant titled `Foo` takes `FooCreateThingRequest`; a later
+    // variant pinning `kind: foo` derives the same name and must step around
+    // it instead of emitting a second model under it. Two variants pinning
+    // the same const value step around each other the same way.
+    await parseInline(
+      `
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - title: Foo
+                  type: object
+                  properties:
+                    a: { type: string }
+                - title: Bar
+                  type: object
+                  properties:
+                    kind: { type: string, const: foo }
+                    b: { type: string }
+      responses:
+        '201': { description: created }
+  /tags:
+    post:
+      operationId: createTag
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    kind: { type: string, const: email }
+                    to: { type: string }
+                - type: object
+                  properties:
+                    kind: { type: string, const: email }
+                    cc: { type: string }
+      responses:
+        '201': { description: created }
+`,
+      (ir) => {
+        const bodies = Object.fromEntries(
+          ir.services
+            .flatMap((s) => s.operations)
+            .map((op) => [
+              op.name,
+              (op.requestBody as { variants?: Array<{ name?: string }> }).variants?.map((v) => v.name),
+            ]),
+        );
+        expect(bodies).toEqual({
+          createThing: ['FooCreateThingRequest', 'FooCreateThingRequest2'],
+          createTag: ['EmailCreateTagRequest', 'EmailCreateTagRequest2'],
+        });
+        const fieldsOf = (name: string) => ir.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+        expect(fieldsOf('FooCreateThingRequest')).toEqual(['a']);
+        expect(fieldsOf('FooCreateThingRequest2')).toEqual(['kind', 'b']);
+        expect(fieldsOf('EmailCreateTagRequest')).toEqual(['kind', 'to']);
+        expect(fieldsOf('EmailCreateTagRequest2')).toEqual(['kind', 'cc']);
+        const names = ir.models.map((m) => m.name);
+        expect(new Set(names).size).toBe(names.length);
+      },
+    );
+  });
+
   it('derives names from a const-property discriminator instead of using a numeric suffix', async () => {
     // Mirrors the workos/openapi-spec ApiKey.owner shape: an inline oneOf
     // whose object variants pin the same `type` property to distinct const
@@ -145,10 +217,11 @@ components:
     );
   });
 
-  it('falls back to numeric suffix when no shared const property distinguishes the variants', async () => {
+  it('names the variant by its distinguishing property when no shared const property distinguishes the variants', async () => {
     // No discriminator-style property — variants differ structurally
     // (different field sets) but neither has a `const` value pinning a
-    // shared property. Numeric-suffix scheme remains the safe fallback.
+    // shared property. The second variant is named after the property only
+    // it declares (`b`), not by a numeric suffix.
     await parseInline(
       `
 openapi: 3.1.0
@@ -186,16 +259,19 @@ components:
         const dataModels = ir.models.filter((m) => m.name.startsWith('ThingData'));
         const names = dataModels.map((m) => m.name);
         expect(names).toContain('ThingData');
-        // Second variant has no discriminator, so falls back to numeric suffix.
-        expect(names).toContain('ThingData2');
+        // Second variant has no discriminator, so it is named from its own
+        // distinguishing property.
+        expect(names).toContain('ThingDataWithB');
+        expect(names).not.toContain('ThingData2');
       },
     );
   });
 
-  it('falls back to numeric suffix when two variants have identical const values on the same property', async () => {
+  it('names the variant by its distinguishing property when two variants have identical const values on the same property', async () => {
     // The const-naming heuristic requires distinct values per variant — if
     // two variants both pin `type: organization`, naming both
-    // `OrganizationApiKeyOwner` would collide. Numeric suffix is safer.
+    // `OrganizationApiKeyOwner` would collide. The second variant is named
+    // after the property only it declares (`slug`) instead.
     await parseInline(
       `
 openapi: 3.1.0
@@ -235,9 +311,10 @@ components:
         const ownerModels = ir.models.filter((m) => m.name.includes('ResourceOwner'));
         const names = ownerModels.map((m) => m.name);
         expect(names).toContain('ResourceOwner');
-        // Same const value on both — we can't derive distinct names, so
-        // the fallback numeric suffix kicks in.
-        expect(names).toContain('ResourceOwner2');
+        // Same const value on both — we can't derive distinct names from it,
+        // so the second variant's own distinguishing property names it.
+        expect(names).toContain('ResourceOwnerWithSlug');
+        expect(names).not.toContain('ResourceOwner2');
       },
     );
   });

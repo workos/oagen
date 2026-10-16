@@ -487,18 +487,22 @@ function extractDirectResource(
     }
   }
 
-  // oneOf — delegate to schemaToTypeRef (returns union) but also extract inline models
-  // from object variants so the model refs resolve
+  // oneOf — delegate to schemaToTypeRef (returns union) and materialize the
+  // inline object variants through the field extractor, as a field of this
+  // name under no parent: it names them exactly as the union below references
+  // them (`nameInlineVariants` from the context name — `GetThingResponse`,
+  // `GetThingResponseWithSide`, `SquareGetThingResponse`), covers a nullable
+  // (`type: ['object', 'null']`) or multi-type variant that a plain
+  // `type === 'object'` test would skip, and recurses into everything nested
+  // under each variant, so the response never references a model the parser
+  // did not create.
   if (schema.oneOf) {
-    for (const variant of schema.oneOf) {
-      if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const modelName = deriveModelName(variant, contextName);
-        const existingNames = new Set(inlineModels.map((m) => m.name));
-        if (!existingNames.has(modelName)) {
-          inlineModels.push(...extractInlineModel(modelName, variant, componentSchemas));
-        }
-      }
-    }
+    extractInlineModelsFromProperties(
+      { properties: { [contextName]: schema } },
+      inlineModels,
+      undefined,
+      componentSchemas,
+    );
   }
 
   // Array with inline object items — extract the item model
