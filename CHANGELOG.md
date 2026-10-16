@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.31.0](https://github.com/workos/oagen/compare/v0.30.2...v0.31.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **parser:** name operationId-less inline models from the full path ([#201](https://github.com/workos/oagen/issues/201))
+* **parser:** group security requirements, carry document default ([#185](https://github.com/workos/oagen/issues/185))
+
+### Features
+
+* **parser:** carry scheme names on AuthScheme and accept HTTP Basic ([#178](https://github.com/workos/oagen/issues/178)) ([cc8267f](https://github.com/workos/oagen/commit/cc8267f28543a9a6b2d0c6f4d7581411eceea62f))
+* **parser:** carry validation keywords as constraints ([#202](https://github.com/workos/oagen/issues/202)) ([0b4dfef](https://github.com/workos/oagen/commit/0b4dfef2b1151803d24498754cb537c18726e2e4))
+* **parser:** group security requirements, carry document default ([#185](https://github.com/workos/oagen/issues/185)) ([a76dbdc](https://github.com/workos/oagen/commit/a76dbdc15ebb1a8686b3290ac7629ea1869234e6))
+* **parser:** keep an operation's summary as its own field ([#196](https://github.com/workos/oagen/issues/196)) ([6cb86e5](https://github.com/workos/oagen/commit/6cb86e54a6c6fb5e71163590384ec9bee42df989))
+* **parser:** keep declared response headers in the IR ([#200](https://github.com/workos/oagen/issues/200)) ([262e54d](https://github.com/workos/oagen/commit/262e54dbf5a387b4fb950823c0af7b001a680250))
+* **parser:** keep list-envelope companions on PaginationMeta ([#184](https://github.com/workos/oagen/issues/184)) ([3e8f5f3](https://github.com/workos/oagen/commit/3e8f5f3274f9354fff26dcfa6036db7c38481372))
+* **parser:** name undiscriminated variants from title or property ([#219](https://github.com/workos/oagen/issues/219)) ([f31503e](https://github.com/workos/oagen/commit/f31503ef7253a9fb2804a585c642cc176bee0dab))
+* **parser:** pass original schema name to schemaNameTransform ([#179](https://github.com/workos/oagen/issues/179)) ([829aea7](https://github.com/workos/oagen/commit/829aea7ce70c3a2165cd0f795ef93406d093abc7))
+* **parser:** read JSON Schema examples on fields and params ([#198](https://github.com/workos/oagen/issues/198)) ([7870f54](https://github.com/workos/oagen/commit/7870f54e1aa2c16f3486e0d04a6d109e0f85575e))
+* **parser:** set Service.description from document tags ([#197](https://github.com/workos/oagen/issues/197)) ([bbbdec8](https://github.com/workos/oagen/commit/bbbdec8d37ed457a63d7fde15046b4b4ed52c236))
+
+
+### Bug Fixes
+
+* **parser:** drop null enum members and carry nullability through enum refs ([#180](https://github.com/workos/oagen/issues/180)) ([6b21a8c](https://github.com/workos/oagen/commit/6b21a8c7207d028dd8470c195260b687a2de9082))
+* **parser:** extract array-oneOf and map-value inline models ([#199](https://github.com/workos/oagen/issues/199)) ([9ad2870](https://github.com/workos/oagen/commit/9ad28703cc2d9b7f8dbc8397c2a39610bf446b36))
+* **parser:** name operationId-less inline models from the full path ([#201](https://github.com/workos/oagen/issues/201)) ([67df628](https://github.com/workos/oagen/commit/67df6286e69cb7f6f6d998eca6a82ed8ccec38e5))
+* **parser:** read parameter description from its schema ([#195](https://github.com/workos/oagen/issues/195)) ([55bfbd8](https://github.com/workos/oagen/commit/55bfbd879d66011c21f65ee9fe1f1303f247f687))
+
 ## [0.30.2](https://github.com/workos/oagen/compare/v0.30.1...v0.30.2) (2026-09-10)
 
 
