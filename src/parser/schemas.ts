@@ -277,18 +277,28 @@ export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
   if (schema.nullable && schema.type) {
     return unwrapNullableSchema({ ...schema, nullable: false });
   }
-  // `allOf` takes precedence over `oneOf`/`anyOf` in schemaToTypeRef, so only
-  // a bare union is a nullable wrapper candidate.
+  // A nullable union collapses onto its one non-null variant — decided by
+  // `nullableUnionBranch`, the same definition `collapsedNullableBranch`
+  // checks, so the check and the unwrap cannot disagree.
+  const branch = nullableUnionBranch(schema);
+  return branch ? unwrapNullableSchema(branch) : schema;
+}
+
+/**
+ * The one variant a nullable `oneOf`/`anyOf` wrapper collapses to: what is
+ * left once every `null` variant (`isNullSchema` — `{ type: 'null' }` or
+ * `{ type: ['null'] }`, however many of either) is discarded, when at least
+ * one was and exactly one variant remains. The single definition of a
+ * nullable union wrapper on the model side, shared by `unwrapNullableSchema`
+ * and `collapsedNullableBranch`. `undefined` otherwise: no union, a union
+ * under `allOf` (which `schemaToTypeRef` gives precedence), no `null`
+ * variant, or more than one non-null variant.
+ */
+function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
   const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
-  if (variants) {
-    const nullVariant = variants.find(isNullSchema);
-    const nonNullVariants = variants.filter((v) => v !== nullVariant);
-    const only = nonNullVariants[0];
-    if (nullVariant && nonNullVariants.length === 1 && only) {
-      return unwrapNullableSchema(only);
-    }
-  }
-  return schema;
+  if (!variants) return undefined;
+  const nonNull = variants.filter((v) => !isNullSchema(v));
+  return nonNull.length === 1 && nonNull.length < variants.length ? nonNull[0] : undefined;
 }
 
 /**
@@ -323,22 +333,20 @@ export function unwrapNullableField(schema: SchemaObject): SchemaObject {
  * `undefined` when `schema` is not such a wrapper: not a union, or a union
  * with more than one non-null variant — nullable or not, including
  * `type: ['object', 'null']` beside a multi-variant `oneOf`. Decided at the
- * wrapper's level alone: the union collapses iff discarding its `null`
- * variants leaves exactly one, whatever that variant contains — a branch's
- * own nested `oneOf`/`anyOf` (a union of constraint sets beside its
- * properties, say) is the branch's business and is built as written, flag
- * and limits carried. A multi-variant union is never collapsed: each variant
- * is its own schema, built as itself with its own flag, and the wrapper's
- * stays on the field. The sites that build a model from a union's variants
- * substitute the branch this returns for the one variant it stands for, and
- * otherwise build every variant as written.
+ * wrapper's level alone, by `nullableUnionBranch` — the very definition
+ * `unwrapNullableSchema` collapses by, so the check and the unwrap cannot
+ * disagree: the union collapses iff discarding every `null` variant, however
+ * many and however spelled, leaves exactly one, whatever that variant
+ * contains — a branch's own nested `oneOf`/`anyOf` (a union of constraint
+ * sets beside its properties, say) is the branch's business and is built as
+ * written, flag and limits carried. A multi-variant union is never
+ * collapsed: each variant is its own schema, built as itself with its own
+ * flag, and the wrapper's stays on the field. The sites that build a model
+ * from a union's variants substitute the branch this returns for the one
+ * variant it stands for, and otherwise build every variant as written.
  */
 export function collapsedNullableBranch(schema: SchemaObject): SchemaObject | undefined {
-  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
-  if (!variants) return undefined;
-  const nonNull = variants.filter((v) => !isNullSchema(v));
-  if (nonNull.length !== 1 || nonNull.length === variants.length) return undefined;
-  return unwrapNullableField(schema);
+  return nullableUnionBranch(schema) ? unwrapNullableField(schema) : undefined;
 }
 
 /**

@@ -932,4 +932,106 @@ describe('parseSpec – deprecated', () => {
       ['two_variants', true],
     ]);
   });
+
+  it('discards every null variant, however many and however spelled, before deciding a union collapses', async () => {
+    const circle = obj({ properties: { kind: { const: 'circle' }, r: { type: 'number' } } });
+    const square = obj({ deprecated: true, properties: { kind: { const: 'square' }, side: { type: 'number' } } });
+    const nulls = [{ type: 'null' }, { type: ['null'] }];
+    // One non-null variant beside two `null` spellings: a nullable wrapper,
+    // so the model is built from the object with the wrapper's flag — in
+    // both union keywords. (The `anyOf` spelling is exercised on the
+    // property: the request-body path materializes `oneOf` variants only,
+    // as it does on main, so an `anyOf` body has no inline model there.)
+    const oneOfTwoNulls = { deprecated: true, oneOf: [obj(), ...nulls] };
+    const anyOfTwoNulls = { deprecated: true, anyOf: [obj(), ...nulls] };
+    // Two non-null variants beside two `null`s: not a nullable wrapper, so
+    // nothing collapses and every variant keeps its fields and its own flag.
+    const twoOfTwoNulls = { deprecated: true, oneOf: [circle, square, ...nulls] };
+    const body = (schema: unknown, operationId: string) => ({
+      post: {
+        operationId,
+        requestBody: { content: { 'application/json': { schema } } },
+        responses: { '201': { description: 'created' } },
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const file = await writeSpec(
+        'multi-null.json',
+        specDoc(
+          {
+            Thing: { type: 'object', properties: { one_of: oneOfTwoNulls, any_of: anyOfTwoNulls, two: twoOfTwoNulls } },
+          },
+          {
+            '/one': body(oneOfTwoNulls, 'createOne'),
+            '/two': body(twoOfTwoNulls, 'createTwo'),
+          },
+        ),
+      );
+      const spec = await parseSpec(file);
+      for (const m of spec.models) expect(m.fields.length, m.name).toBeGreaterThan(0);
+      expect(shapes(spec.models)).toMatchInlineSnapshot(`
+        {
+          "CircleCreateTwoRequest": {
+            "deprecated": undefined,
+            "fields": [
+              "kind",
+              "r",
+            ],
+          },
+          "CreateOneRequest": {
+            "deprecated": true,
+            "fields": [
+              "k",
+            ],
+          },
+          "SquareCreateTwoRequest": {
+            "deprecated": true,
+            "fields": [
+              "kind",
+              "side",
+            ],
+          },
+          "SquareThingTwo": {
+            "deprecated": true,
+            "fields": [
+              "kind",
+              "side",
+            ],
+          },
+          "Thing": {
+            "deprecated": undefined,
+            "fields": [
+              "one_of",
+              "any_of",
+              "two",
+            ],
+          },
+          "ThingAnyOf": {
+            "deprecated": true,
+            "fields": [
+              "k",
+            ],
+          },
+          "ThingOneOf": {
+            "deprecated": true,
+            "fields": [
+              "k",
+            ],
+          },
+          "ThingTwo": {
+            "deprecated": undefined,
+            "fields": [
+              "kind",
+              "r",
+            ],
+          },
+        }
+      `);
+      // Every model the IR references exists under the name the type side chose.
+      expect(warn.mock.calls.filter(([message]) => String(message).includes('Unresolved model reference'))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
