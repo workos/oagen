@@ -16,6 +16,7 @@ interface ApiSpec {
   name: string; // From info.title
   version: string; // From info.version
   description?: string; // From info.description
+  externalDocs?: ExternalDocs; // The document's top-level externalDocs, when usable
   baseUrl: string; // From servers[0].url
   servers?: ServerEntry[]; // All servers from the spec
   services: Service[]; // Grouped operations
@@ -30,6 +31,19 @@ interface ApiSpec {
 The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
 
 `security` is the document-level `security` list, in the same shape as `Operation.security`; every operation that declares no `security` of its own inherits it. It is `undefined` when the document declares none.
+
+### ExternalDocs
+
+```typescript
+interface ExternalDocs {
+  url: string; // Exactly as written in the document
+  description?: string; // Only when it has non-whitespace content
+}
+```
+
+An OpenAPI External Documentation Object — the document's way of linking to fuller documentation — carried on `ApiSpec` (the top-level `externalDocs`), `Service` (from the document tag, see below), `Operation`, `Model` and `Enum`, so an emitter can add it to a doc comment (a JSDoc `@see`, say). The key is present only when the document declares an entry with a non-blank `url`: a non-object, a missing or blank `url`, is dropped — silently, the way a malformed document tag is, since the parser ignored `externalDocs` entirely before and a malformed value must keep parsing. `url` is kept verbatim. OpenAPI allows it to be relative to the document's own location, which the parser does not know, so it is neither resolved nor rewritten, and `expandDocUrls` leaves it alone too; `expandDocUrls` does expand relative links inside `description`, which is CommonMark like every other description it walks. `description` is present only when it has non-whitespace content and is kept verbatim otherwise.
+
+A `Model` built from an inline schema — a request body, a response, a `oneOf` variant, an object nested in a component field, array items, an `allOf` merge, a discriminated `allOf` + `oneOf` variant — carries the `externalDocs` of the schema it was built from. A wrapper the parser collapses or merges — a nullable `oneOf`/`anyOf` or `type: [..., "null"]`, a single-member `allOf`, an `allOf` response, field or nested-field merge — is the schema the document wrote, so the model built from what it unwraps or merges to carries the wrapper's link; a member's own stays on that member (a `$ref` member's on its component model), and a collapsed branch or member keeps its own link only when the wrapper has none. Every later pass that keeps, renames or merges models preserves the link; when `collapseJsonSuffixModels` folds `PetJson` into `Pet`, `Pet` keeps its own link as it keeps its own description, and takes `PetJson`'s only when it has none. An `Enum` carries the component schema's; an enum lifted from an inline field schema carries none.
 
 ### SdkBehavior
 
@@ -208,12 +222,17 @@ Service names are derived from OpenAPI tags when present — the first tag on an
 
 `Service.description` comes from the document's top-level `tags` list, matched by name: a tag entry applies to the service whose PascalCase name its `name` converts to, so `user-management`, `User Management`, and `user_management` all map to `UserManagement`. A service whose own name is a declared tag is described by that tag alone — its description when it has one, nothing otherwise — so another tag's wording is never borrowed for it (operations tagged `api_keys` that the path-prefix split merges into `UserManagement` do not label it "API keys"). A service whose own name is not declared, which is what the split produces when it carves `OrganizationDomains` out of operations tagged `organizations`, inherits the description of the first described tag its operations carry. The key is omitted when neither rule yields a description, including for path-named services whose operations have no tag. Malformed `tags` values (a non-array, `null` entries, non-string names) are skipped rather than failing the parse.
 
+`Service.externalDocs` is the tag's `externalDocs` (see [ExternalDocs](#externaldocs)), resolved by the same rule through the same code path: a service named after a declared tag takes that tag's link or nothing, and a split-off service inherits the link of the first linked tag its operations carry. Each field is chosen independently, from the first tag that gives it — among the tags a split-off service inherits from and among several document tags that normalize to one service name — so the description and the link need not come from the same tag, and adding a link to a tag never changes which description a service shows. A tag entry whose `externalDocs` is unusable keeps its description and gives no link.
+
+`Operation.externalDocs` is the operation's own `externalDocs`, present only when it declares a usable one.
+
 An operation carries its OpenAPI `summary` and `description` in two fields. `Operation.description` is the combined doc text: `summary + "\n\n" + description` when the document declares both with content, or whichever one has content (a summary identical to the description is not repeated). An empty or whitespace-only `summary` or `description` is treated as absent — `summary: "List pets"` with `description: ""` yields `description: "List pets"` — and text that has content is kept verbatim, surrounding whitespace included. An emitter that prints `description` as the doc comment therefore sees the same text whether or not the document used a summary. `Operation.summary` is the document's `summary` alone and is present only when the operation declares one with content, so an emitter that wants a one-line label (and the description without it) reads `summary` rather than guessing whether the first paragraph of `description` is one. When a doc URL base is configured, relative links are expanded in `summary` exactly as in `description`.
 
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"
   description?: string;
+  externalDocs?: ExternalDocs; // The document tag's link, by the same rule as description
   operations: Operation[];
 }
 
@@ -221,6 +240,7 @@ interface Operation {
   name: string; // e.g., "listUsers", "getUser", "createUser"
   summary?: string; // The document's summary alone; only when it has non-whitespace content
   description?: string; // summary + "\n\n" + description when both have content, else whichever does
+  externalDocs?: ExternalDocs; // The operation's own externalDocs, when usable
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   pathParams: Parameter[];
@@ -343,6 +363,7 @@ An object-shaped header (directly, inside an array, or as a oneOf variant) is ma
 interface Model {
   name: string; // PascalCase, e.g., "Organization"
   description?: string;
+  externalDocs?: ExternalDocs; // The schema's externalDocs, when usable
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
   constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
@@ -428,6 +449,7 @@ A 3.1 document's numeric form passes through unchanged, including the legal-but-
 interface Enum {
   name: string; // PascalCase
   values: EnumValue[];
+  externalDocs?: ExternalDocs; // The component enum schema's externalDocs, when usable; inline enums carry none
 }
 
 interface EnumValue {

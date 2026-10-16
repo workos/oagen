@@ -10,6 +10,7 @@ import {
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import { externalDocsEntry } from './external-docs.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -467,12 +468,15 @@ function extractDirectResource(
 
     if (Object.keys(mergedProperties).length > 0) {
       // Carry the wrapper's limits, conjoined with its inline members', so the
-      // rebuilt schema still declares what an instance must satisfy.
+      // rebuilt schema still declares what an instance must satisfy, and the
+      // wrapper's own link, as a component `allOf` model carries it; a
+      // member's stays on that member (a `$ref` member's on its component).
       const merged: SchemaObject = {
         type: 'object',
         properties: mergedProperties,
         required: mergedRequired,
         ...extractConstraints(schema),
+        ...externalDocsEntry(schema.externalDocs),
       };
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
@@ -590,5 +594,14 @@ function extractInlineModel(
   // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    {
+      name,
+      description: schema.description,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...constraintsEntry(schema),
+    },
+    ...nestedModels,
+  ];
 }
