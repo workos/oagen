@@ -47,7 +47,10 @@ export type Change =
   | ServiceRemoved
   | OperationAdded
   | OperationRemoved
-  | OperationModified;
+  | OperationModified
+  | WebhookAdded
+  | WebhookRemoved
+  | WebhookModified;
 
 export interface ModelAdded {
   kind: 'model-added';
@@ -145,6 +148,40 @@ export interface OperationModified {
   paginatedChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
+  classification: 'additive' | 'breaking';
+}
+
+/**
+ * A webhook is identified by its `name` and `httpMethod` together, since one
+ * `webhooks` key may declare several methods; a method change therefore
+ * reports as one webhook removed and another added.
+ */
+export interface WebhookAdded {
+  kind: 'webhook-added';
+  name: string;
+  httpMethod: string;
+  classification: 'additive';
+}
+
+export interface WebhookRemoved {
+  kind: 'webhook-removed';
+  name: string;
+  httpMethod: string;
+  classification: 'breaking';
+}
+
+/**
+ * Changes to a webhook the receiver already handles. Read from the receiver's
+ * side: a payload type change breaks the handler's signature, and parameter
+ * changes are classified the way a response's would be (see
+ * `diffWebhookParams`).
+ */
+export interface WebhookModified {
+  kind: 'webhook-modified';
+  name: string;
+  httpMethod: string;
+  paramChanges: ParamChange[];
+  requestBodyChanged: boolean;
   classification: 'additive' | 'breaking';
 }
 
