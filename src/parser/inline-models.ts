@@ -69,7 +69,7 @@ export function mintedInlineNames(
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return [enumName()];
-    return [...nameInlineVariants(nonNull, modelName()).values()];
+    return [...nameInlineVariants(s, modelName()).values()];
   }
   if (s.const !== undefined) return [];
   if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return [enumName()];
@@ -332,6 +332,10 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
  * callers without the component map at hand simply omit it.
  * `siblingProperties` is the parent object's full property set, for callers
  * that see more of it than this schema shows (see `elementContextName`).
+ * `reservedNames` is set only on the re-entry for a field's array items or
+ * map values: the inline names that field's siblings mint, which a union
+ * among the items or values must step around exactly as `schemaToTypeRef`
+ * does when it hands the same set down (`reservedNamesFor`).
  *
  * The recursion follows the document's own inline structure only: a `$ref`
  * is resolved solely to read a component's property list for typing (an
@@ -346,6 +350,7 @@ export function extractInlineModelsFromProperties(
   parentName?: string,
   componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
+  reservedNames?: ReadonlySet<string>,
 ): void {
   const properties = schema.properties ?? {};
   const allOfSchemas = schema.allOf ?? [];
@@ -354,10 +359,14 @@ export function extractInlineModelsFromProperties(
   // `elementContextName`). A caller that sees more siblings than this schema
   // shows — an `allOf` member, an envelope field — passes them in.
   const siblings = siblingProperties ?? collectProperties(schema);
+  // The names a union under `fieldName` must not take: the set handed down
+  // for array items / map values, else what the field's siblings mint.
+  const reservedFor = (fieldName: string): ReadonlySet<string> =>
+    reservedNames ?? reservedInlineNames(fieldName, siblings, parentName);
 
   for (const sub of allOfSchemas) {
     if (sub.properties) {
-      extractInlineModelsFromProperties(sub, results, parentName, componentSchemas, siblings);
+      extractInlineModelsFromProperties(sub, results, parentName, componentSchemas, siblings, reservedNames);
     }
   }
 
@@ -393,6 +402,8 @@ export function extractInlineModelsFromProperties(
         results,
         parentName,
         componentSchemas,
+        undefined,
+        reservedFor(fieldName),
       );
     }
 
@@ -411,6 +422,8 @@ export function extractInlineModelsFromProperties(
           results,
           parentName,
           componentSchemas,
+          undefined,
+          reservedFor(fieldName),
         );
       }
     }
@@ -456,6 +469,7 @@ export function extractInlineModelsFromProperties(
           parentName,
           componentSchemas,
           siblings,
+          reservedNames,
         );
       } else if (members.some((m) => m.properties)) {
         emitMerged();
@@ -479,11 +493,7 @@ export function extractInlineModelsFromProperties(
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
-        const variantNames = nameInlineVariants(
-          unionVariants,
-          modelName,
-          reservedInlineNames(fieldName, siblings, parentName),
-        );
+        const variantNames = nameInlineVariants(fieldSchema, modelName, reservedFor(fieldName));
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;

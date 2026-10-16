@@ -451,7 +451,7 @@ function unionBaseName(
 ): string {
   if (!fieldSchema.oneOf) return refName;
   const fromField = qualifyInlineModelName(toPascalCase(fieldName), parentModelName);
-  const names = [...nameInlineVariants(fieldSchema.oneOf, fromField, reserved).values()];
+  const names = [...nameInlineVariants(fieldSchema, fromField, reserved).values()];
   return names.includes(refName) ? fromField : refName;
 }
 
@@ -542,7 +542,7 @@ function extractNestedSchema(
   // letting the next variant claim its name.
   if (schema.oneOf) {
     const models: Model[] = [];
-    const variantNames = nameInlineVariants(schema.oneOf, name, reserved);
+    const variantNames = nameInlineVariants(schema, name, reserved);
 
     for (const variant of schema.oneOf) {
       const variantName = variantNames.get(variant);
@@ -749,29 +749,50 @@ export function nameInlineVariant(
 }
 
 /**
- * Name every inline object variant of a `oneOf`/`anyOf` from the union's base
- * name, keyed by variant schema identity; non-object and `$ref` variants get
- * no entry. Positions are local to this variant list, so the union's TypeRef
- * entries and the extracted models agree no matter what else has been
- * extracted. `reserved` holds the inline names the parent's other properties
- * mint (`reservedInlineNames`); every site that has a sibling set passes the
- * same one, so the reference and the model step around them identically.
+ * Name every inline object variant of a `oneOf`/`anyOf` schema from the
+ * union's base name, keyed by variant schema identity; null, non-object and
+ * `$ref` variants get no entry. Positions are local to this variant list, so
+ * the union's TypeRef entries and the extracted models agree no matter what
+ * else has been extracted. `reserved` holds the inline names the parent's
+ * other properties mint (`reservedInlineNames`); every site that has a
+ * sibling set passes the same one, so the reference and the model step
+ * around them identically.
+ *
+ * One union shape is named differently: a `oneOf` with no explicit
+ * `discriminator:` whose every variant carries a `$ref` or a `title` and pins
+ * the same const property (`titleMappedDiscriminatorProperty`). Its
+ * discriminator mapping has always named an inline variant by its title
+ * (`resolveSchemaName(title)`: `Circle`, `Square`, run through the project's
+ * schema-name transform like a component), and `schemaToTypeRef` references
+ * the variant by that mapped name, so the title is the model name here too —
+ * unless it is the base, already emitted, or reserved by a sibling, in which
+ * case the variant falls back to the regular chain and the mapping, which is
+ * read from this map, follows it.
+ *
  * This is the list-level entry point every site uses: `schemaToTypeRef` (via
  * `nameInlineObjectVariants`), `extractNestedSchema`,
  * `extractInlineModelDeep`, `extractInlineModelsFromProperties` and
  * `mintedInlineNames`.
  */
 export function nameInlineVariants(
-  variants: readonly SchemaObject[],
+  union: SchemaObject,
   base: string,
   reserved: ReadonlySet<string> = NO_RESERVED,
 ): Map<SchemaObject, string> {
-  const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
+  const nonNullVariants = (union.oneOf ?? union.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
+  const inlineObjectVariants = nonNullVariants.filter((v) => isInlineObjectSchema(v));
   const discriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
+  const titleMapped =
+    union.oneOf !== undefined && !union.discriminator && titleMappedDiscriminatorProperty(nonNullVariants) !== null;
   const emitted: string[] = [];
   const names = new Map<SchemaObject, string>();
   for (const variant of inlineObjectVariants) {
-    const name = nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator, reserved);
+    let name: string | null = null;
+    if (titleMapped) {
+      const titled = resolveVariantModelName(variant);
+      if (titled !== null && titled !== base && !emitted.includes(titled) && !reserved.has(titled)) name = titled;
+    }
+    name ??= nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator, reserved);
     emitted.push(name);
     names.set(variant, name);
   }
@@ -812,6 +833,13 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   if (!schema || schema.$ref || !schema.properties) return false;
   const { type } = schema;
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
+/** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable; never a variant to name. */
+function isNullVariantSchema(schema: SchemaObject): boolean {
+  return (
+    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
+  );
 }
 
 /**
@@ -938,46 +966,32 @@ function buildSyntheticEnumRef(
 }
 
 /**
- * Detect an implicit discriminator on an oneOf where every variant is an
- * object schema that pins the same property to a const value. Returns
- * { property, mapping } so the IR can represent the union as discriminated
- * without needing an explicit `discriminator:` key in the spec.
+ * Detect an implicit discriminator on a `oneOf` whose every variant pins the
+ * same property to a const value AND is nameable on its own — by a `$ref` to
+ * a component or by a `title` — so the IR can represent the union as
+ * discriminated, with a mapping to concrete names, without an explicit
+ * `discriminator:` keyword. Returns the property, or null when any variant
+ * doesn't fit the pattern or when the variants disagree on which property
+ * carries the discriminator. The mapping itself is built by `schemaToTypeRef`
+ * from the names `nameInlineVariants` gives the inline variants (their titles
+ * unless taken) and the component names of `$ref` variants, so it can only
+ * ever point at a model that exists.
  *
- * Both shapes are supported:
+ * Both const shapes are supported:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
- *
- * Returns null when any variant doesn't fit the pattern or when variants
- * disagree on which property carries the discriminator.
  */
-function detectConstPropertyDiscriminator(
-  variants: SchemaObject[],
-): { property: string; mapping: Record<string, string> } | null {
+function titleMappedDiscriminatorProperty(variants: SchemaObject[]): string | null {
   if (variants.length < 2) return null;
+  // Require a $ref or title on every variant so there is a concrete name to map to.
+  if (!variants.every((v) => resolveVariantModelName(v) !== null)) return null;
 
-  // Find properties whose const value is present on every variant.
-  let candidateProperty: string | null = null;
+  // The first property whose const value is present on every variant.
   const candidates = Object.keys(variants[0]?.properties ?? {});
   for (const propName of candidates) {
-    if (variants.every((v) => getConstPropertyValue(v, propName) !== null)) {
-      candidateProperty = propName;
-      break;
-    }
+    if (variants.every((v) => getConstPropertyValue(v, propName) !== null)) return propName;
   }
-
-  if (!candidateProperty) return null;
-
-  const mapping: Record<string, string> = {};
-  for (const v of variants) {
-    const value = getConstPropertyValue(v, candidateProperty);
-    if (value === null) return null;
-    // Require a $ref or title so we have a concrete model name to map to.
-    const variantName = resolveVariantModelName(v);
-    if (!variantName) return null;
-    mapping[value] = variantName;
-  }
-
-  return { property: candidateProperty, mapping };
+  return null;
 }
 
 function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
@@ -1014,53 +1028,50 @@ function mapVariantToDiscriminatorEntry(
 
 /**
  * Derive a discriminator value → variant model name mapping for an inline-
- * variant `oneOf` whose explicit `discriminator:` has no `mapping:` clause.
- *
- * Each variant model name is reproduced via `nameInlineVariant` so it matches
- * what `extractNestedSchema` registered when it walked the same `oneOf` to
- * pull variants out as named models. Variant 0 keeps the bare parent name
- * (e.g. `ApiKeyOwner`); subsequent variants get a const-derived prefix
- * (e.g. `UserApiKeyOwner` for the `type: const: user` variant).
- *
- * The "parent name" used here mirrors the one `collectNestedInlineModels`
- * passes to `extractNestedSchema`: it's the qualified inline model name
- * built from `contextName` (the field name) plus `parentModelName` (the
- * containing model), and the names the field's sibling properties mint are
- * reserved the same way (`siblingProperties`). Returns null when any
- * non-object variant is present or when a variant lacks a const value on the
- * discriminator property.
+ * variant `oneOf` from the names `nameInlineVariants` gave its variants
+ * (`inlineVariantNames`): the explicit `discriminator:` without a `mapping:`
+ * clause, and the implicit const discriminator of anonymous inline variants
+ * (`ApiKeyCreatedData.owner`: `ApiKeyCreatedDataOwner`,
+ * `UserApiKeyCreatedDataOwner`). Reading the names rather than deriving them
+ * again is what keeps the mapping pointing at models the extractors create.
+ * Returns null without a context name, when any variant is not an inline
+ * object, or when a variant lacks a const value on the property.
  */
 function deriveInlineVariantMapping(
   variants: SchemaObject[],
   discriminatorProperty: string,
   contextName: string | undefined,
-  parentModelName: string | undefined,
-  siblingProperties: ReadonlyMap<string, SchemaObject> | undefined,
+  inlineVariantNames: ReadonlyMap<SchemaObject, string>,
 ): Record<string, string> | null {
   if (variants.length === 0 || !contextName) return null;
-  const inlineObjectVariants = variants.filter((v) => isInlineObjectSchema(v));
-  if (inlineObjectVariants.length !== variants.length) return null;
-
-  const baseInlineName = qualifyInlineModelName(toPascalCase(contextName), parentModelName);
-  const reserved = reservedInlineNames(contextName, siblingProperties, parentModelName);
-  const namingDiscriminator = { property: discriminatorProperty };
   const mapping: Record<string, string> = {};
-  const emitted: string[] = [];
-  for (const variant of inlineObjectVariants) {
+  for (const variant of variants) {
+    const variantName = inlineVariantNames.get(variant);
+    if (variantName === undefined) return null;
     const constValue = getConstPropertyValue(variant, discriminatorProperty);
     if (constValue === null) return null;
-    const variantName = nameInlineVariant(
-      variant,
-      inlineObjectVariants,
-      baseInlineName,
-      emitted,
-      namingDiscriminator,
-      reserved,
-    );
     mapping[constValue] = variantName;
-    emitted.push(variantName);
   }
   return mapping;
+}
+
+/**
+ * The names reserved for a union typed under `contextName`: the set an
+ * enclosing field handed down (`reservedNames`, for a union among a field's
+ * array items or map values), else the inline names the field's own sibling
+ * properties mint (`reservedInlineNames`), else nothing. The extractor
+ * derives the same set at each of those levels, so the reference and the
+ * model step around a sibling's name identically.
+ */
+function reservedNamesFor(
+  contextName: string | undefined,
+  siblingProperties: ReadonlyMap<string, SchemaObject> | undefined,
+  parentModelName: string | undefined,
+  reservedNames: ReadonlySet<string> | undefined,
+): ReadonlySet<string> {
+  if (reservedNames) return reservedNames;
+  if (contextName === undefined) return NO_RESERVED;
+  return reservedInlineNames(contextName, siblingProperties, parentModelName);
 }
 
 /**
@@ -1068,20 +1079,24 @@ function deriveInlineVariantMapping(
  * inline-model extractors do (`extractInlineModelsFromProperties` in
  * inline-models.ts, and `extractNestedSchema` / `extractInlineModelDeep`
  * here): the union's base name is the field's qualified inline name, the
- * names the field's sibling properties mint are reserved
- * (`reservedInlineNames`), and `nameInlineVariants` hands out the variant
- * names from there. Returned keyed by variant schema identity.
+ * names the field's sibling properties mint — or the set handed down from an
+ * enclosing field — are reserved (`reservedNamesFor`), and
+ * `nameInlineVariants` hands out the variant names from there. Returned keyed
+ * by variant schema identity.
  */
 function nameInlineObjectVariants(
-  variants: SchemaObject[],
+  union: SchemaObject,
   contextName: string | undefined,
   parentModelName: string | undefined,
   siblingProperties: ReadonlyMap<string, SchemaObject> | undefined,
+  reservedNames: ReadonlySet<string> | undefined,
 ): Map<SchemaObject, string> {
   const baseInlineName = qualifyInlineModelName(toPascalCase(contextName ?? 'UnknownModel'), parentModelName);
-  const reserved =
-    contextName === undefined ? NO_RESERVED : reservedInlineNames(contextName, siblingProperties, parentModelName);
-  return nameInlineVariants(variants, baseInlineName, reserved);
+  return nameInlineVariants(
+    union,
+    baseInlineName,
+    reservedNamesFor(contextName, siblingProperties, parentModelName, reservedNames),
+  );
 }
 
 /**
@@ -1629,7 +1644,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
         const variantNames = nameInlineVariants(
-          fieldSchema.oneOf,
+          fieldSchema,
           qualifyNestedInlineName(name, fieldName),
           reservedInlineNames(fieldName, siblings, name),
         );
@@ -1686,6 +1701,10 @@ export function schemaToTypeRef(
   contextName?: string,
   parentModelName?: string,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
+  // The inline names an enclosing field's siblings mint, handed down to the
+  // field's array items and map values so a union among them steps around a
+  // sibling's model like a union at field level (`reservedNamesFor`).
+  reservedNames?: ReadonlySet<string>,
 ): TypeRef {
   // Handle $ref → ModelRef or EnumRef.
   // A `$ref` to a top-level component schema needs to preserve whether the
@@ -1724,13 +1743,14 @@ export function schemaToTypeRef(
           contextName,
           parentModelName,
           siblingProperties,
+          reservedNames,
         ),
       );
     }
     // Multiple non-null types → union
     if (nonNullTypes.length > 1) {
       const variants = nonNullTypes.map((t: string) =>
-        schemaToTypeRef({ ...schema, type: t }, contextName, parentModelName, siblingProperties),
+        schemaToTypeRef({ ...schema, type: t }, contextName, parentModelName, siblingProperties, reservedNames),
       );
       const ref: TypeRef = { kind: 'union', variants };
       if (schema.type.includes('null')) {
@@ -1742,7 +1762,9 @@ export function schemaToTypeRef(
 
   // Handle OAS 3.0 nullable flag
   if (schema.nullable && schema.type) {
-    return asNullable(schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName, siblingProperties));
+    return asNullable(
+      schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName, siblingProperties, reservedNames),
+    );
   }
 
   // Handle allOf — merge properties from all sub-schemas.
@@ -1763,7 +1785,7 @@ export function schemaToTypeRef(
     }
     // If allOf has a single item, unwrap it
     if (schema.allOf.length === 1) {
-      return schemaToTypeRef(schema.allOf[0], contextName, parentModelName, siblingProperties);
+      return schemaToTypeRef(schema.allOf[0], contextName, parentModelName, siblingProperties, reservedNames);
     }
     // If allOf items all have properties, treat as a merged model
     const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
@@ -1785,15 +1807,15 @@ export function schemaToTypeRef(
     const rawVariants: SchemaObject[] = schema.oneOf ?? schema.anyOf ?? [];
 
     // Check for nullable pattern: oneOf: [realType, { type: 'null' }]
-    const nullVariant = rawVariants.find(
-      (v: SchemaObject) => v.type === 'null' || (Array.isArray(v.type) && v.type.length === 1 && v.type[0] === 'null'),
-    );
+    const nullVariant = rawVariants.find(isNullVariantSchema);
     const nonNullVariants = rawVariants.filter((v) => v !== nullVariant);
 
     if (nullVariant && nonNullVariants.length === 1) {
       // Nullable single type — unwrap as nullable. `asNullable` keeps a
       // `$ref` to an already-nullable enum component from double-wrapping.
-      return asNullable(schemaToTypeRef(nonNullVariants[0], contextName, parentModelName, siblingProperties));
+      return asNullable(
+        schemaToTypeRef(nonNullVariants[0], contextName, parentModelName, siblingProperties, reservedNames),
+      );
     }
 
     // Collapse an oneOf/anyOf whose non-null variants are all string-const
@@ -1807,21 +1829,37 @@ export function schemaToTypeRef(
       return nullVariant ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
-    // Resolve the discriminator. Three sources, in order:
+    // The inline object variants' model names, decided once for this TypeRef
+    // and every extractor (`nameInlineVariants`): variant 0's bare qualified
+    // field name, a const prefix, a title, a distinguishing property or a
+    // counter — or, for a `oneOf` whose every variant is titled and pins a
+    // const (3. below), the title itself — never a name a sibling property
+    // mints. Computed first because the derived discriminator mappings below
+    // are read from it, so a mapping can only point at a model that exists.
+    const inlineVariantNames = nameInlineObjectVariants(
+      schema,
+      contextName,
+      parentModelName,
+      siblingProperties,
+      reservedNames,
+    );
+
+    // Resolve the discriminator. Four sources, in order:
     //   1. Explicit `discriminator:` with explicit `mapping:` — trust the spec.
-    //   2. Explicit `discriminator:` with no `mapping:` — derive mapping from
-    //      variants' const values on the discriminator property, pairing each
-    //      to its inline-extracted variant model name (built the same way
-    //      `extractNestedSchema` names them via `nameInlineVariant`). This
-    //      covers `ApiKey.owner`-shaped schemas where the spec uses
-    //      `discriminator: { propertyName: type }` but lists inline anonymous
-    //      `oneOf` variants instead of `$ref` links.
-    //   3. No explicit discriminator but every variant pins the same const-
-    //      valued property AND the variants are nameable via $ref/title —
-    //      `detectConstPropertyDiscriminator` covers this.
-    //   4. As a last resort, when (3) doesn't apply because variants are
-    //      inline anonymous objects, derive the same const → variant-model-
-    //      name mapping using `nameInlineVariant`. This covers
+    //   2. Explicit `discriminator:` with no `mapping:` — pair each variant's
+    //      const value on the property with its inline model name
+    //      (`deriveInlineVariantMapping`). This covers `ApiKey.owner`-shaped
+    //      schemas where the spec uses `discriminator: { propertyName: type }`
+    //      but lists inline anonymous `oneOf` variants instead of `$ref` links.
+    //   3. No explicit discriminator, but every variant carries a `$ref` or a
+    //      `title` and pins the same const property
+    //      (`titleMappedDiscriminatorProperty`): the mapping names a `$ref`
+    //      variant by its component and an inline variant by the name
+    //      `nameInlineVariants` gave it — its title (`Circle`, `Square`)
+    //      unless that is taken — so the extracted model and the mapping agree.
+    //   4. Otherwise, when every inline variant pins the same const property
+    //      with distinct values (`deriveConstNamingDiscriminator`), the same
+    //      value → inline model name pairing as 2. This covers
     //      `ApiKeyCreatedData.owner`-shaped schemas (oneOf with inline
     //      const-discriminating variants but no `discriminator:` keyword).
     let resolvedDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
@@ -1832,20 +1870,20 @@ export function schemaToTypeRef(
         Object.entries(explicitMapping).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
       );
       if (Object.keys(mapping).length === 0) {
-        const inlineMapping = deriveInlineVariantMapping(
-          nonNullVariants,
-          property,
-          contextName,
-          parentModelName,
-          siblingProperties,
-        );
+        const inlineMapping = deriveInlineVariantMapping(nonNullVariants, property, contextName, inlineVariantNames);
         if (inlineMapping) mapping = inlineMapping;
       }
       resolvedDiscriminator = { property, mapping };
     } else if (compositionKind === 'oneOf') {
-      const synthetic = detectConstPropertyDiscriminator(nonNullVariants);
-      if (synthetic) {
-        resolvedDiscriminator = synthetic;
+      const titleProperty = titleMappedDiscriminatorProperty(nonNullVariants);
+      if (titleProperty) {
+        const mapping: Record<string, string> = {};
+        for (const v of nonNullVariants) {
+          const value = getConstPropertyValue(v, titleProperty);
+          const mappedName = inlineVariantNames.get(v) ?? resolveVariantModelName(v);
+          if (value !== null && mappedName !== null) mapping[value] = mappedName;
+        }
+        resolvedDiscriminator = { property: titleProperty, mapping };
       } else {
         const namingDisc = deriveConstNamingDiscriminator(nonNullVariants);
         if (namingDisc) {
@@ -1853,8 +1891,7 @@ export function schemaToTypeRef(
             nonNullVariants,
             namingDisc.property,
             contextName,
-            parentModelName,
-            siblingProperties,
+            inlineVariantNames,
           );
           if (inlineMapping) {
             resolvedDiscriminator = { property: namingDisc.property, mapping: inlineMapping };
@@ -1864,24 +1901,19 @@ export function schemaToTypeRef(
     }
 
     // Build variants. An inline object variant is referenced by the name its
-    // extracted model carries: the discriminator mapping's entry when one
-    // resolves for it, otherwise the position-based name from
-    // `nameInlineObjectVariants`. Falling back to `schemaToTypeRef` instead
-    // would hand every inline variant the same parent-derived name (e.g.
-    // `ApiKeyOwner`), collapsing the union onto one repeated model ref while
-    // the extractor emits `ApiKeyOwner`, `ApiKeyOwner2`, ... for them.
+    // extracted model carries (`inlineVariantNames`); a discriminator mapping
+    // entry substitutes for it only when the spec's own `mapping:` (1.) names
+    // the variant, since the derived mappings (2.–4.) are read from the same
+    // names. Falling back to `schemaToTypeRef` instead would hand every
+    // inline variant the same parent-derived name (e.g. `ApiKeyOwner`),
+    // collapsing the union onto one repeated model ref while the extractor
+    // emits `ApiKeyOwner`, `UserApiKeyOwner`, ... for them.
     // The named ref replaces only the `object` member of what `schemaToTypeRef`
     // would build for the variant: a nullable variant (`['object', 'null']`,
     // OAS 3.0 `nullable: true`) keeps its wrapper, and a multi-type variant
     // (`['object', 'string']`) keeps its other alternatives in a union — see
     // `inlineVariantTypeRef`. The extractor emits the model under the same
     // name in every case.
-    const inlineVariantNames = nameInlineObjectVariants(
-      nonNullVariants,
-      contextName,
-      parentModelName,
-      siblingProperties,
-    );
     const variants: TypeRef[] = [];
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
@@ -1958,25 +1990,20 @@ export function schemaToTypeRef(
   // Handle array — pass parentModelName through to qualify inline items. The
   // items' context is the field itself, or `<field>_item` when a sibling
   // property would take the singular name (`elementContextName`), so an
-  // inline object item is `<Parent><Field>` or `<Parent><Field>Item`.
-  if (schema.type === 'array' && schema.items) {
+  // inline object item is `<Parent><Field>` or `<Parent><Field>Item`. The
+  // items get no sibling set of their own (they are not a property), but a
+  // union among them must still step around the models the field's siblings
+  // mint, so that set is handed down (`reservedNamesFor`), exactly as the
+  // extractor passes it into its items re-entry.
+  if ((schema.type === 'array' || !schema.type) && schema.items) {
     return {
       kind: 'array',
       items: schemaToTypeRef(
         schema.items,
         elementContext(contextName, 'item', siblingProperties, parentModelName, schema.items),
         parentModelName,
-      ),
-    };
-  }
-  // Handle array without explicit type but with items (valid OAS 3.1)
-  if (!schema.type && schema.items) {
-    return {
-      kind: 'array',
-      items: schemaToTypeRef(
-        schema.items,
-        elementContext(contextName, 'item', siblingProperties, parentModelName, schema.items),
-        parentModelName,
+        undefined,
+        reservedNamesFor(contextName, siblingProperties, parentModelName, reservedNames),
       ),
     };
   }
@@ -2010,7 +2037,14 @@ export function schemaToTypeRef(
     const valueSchema = mapValueSchema(schema);
     if (valueSchema) {
       const valueContext = elementContext(contextName, 'value', siblingProperties, parentModelName, valueSchema);
-      valueType = schemaToTypeRef(valueSchema, valueContext, parentModelName);
+      // Like array items: the field's sibling reservations reach the values.
+      valueType = schemaToTypeRef(
+        valueSchema,
+        valueContext,
+        parentModelName,
+        undefined,
+        reservedNamesFor(contextName, siblingProperties, parentModelName, reservedNames),
+      );
     }
     return {
       kind: 'map',
