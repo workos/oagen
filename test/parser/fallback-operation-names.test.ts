@@ -198,6 +198,44 @@ describe('fallback operation names (issue #210)', () => {
     ]);
   });
 
+  it('keeps an operationId unchanged when a singular fallback name collides with it', () => {
+    const { services } = extractOperations({
+      '/store/pets/{id}': { get: item('id') },
+      '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+    } as Parameters<typeof extractOperations>[0]);
+    const ops = services.flatMap((s) => s.operations);
+    const explicit = ops.find((op) => op.path === '/store/featured/{id}')!;
+    const fallback = ops.find((op) => op.path === '/store/pets/{id}')!;
+
+    expect(explicit.name).toBe('getPet');
+    expect(fallback.name).not.toBe('getPet');
+    expect(new Set(ops.map((op) => op.name)).size).toBe(ops.length);
+  });
+
+  it('still qualifies every operation when two operationIds collide with each other', () => {
+    const { services } = extractOperations({
+      '/store/pets/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+      '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+    } as Parameters<typeof extractOperations>[0]);
+    const opNames = services.flatMap((s) => s.operations).map((op) => op.name);
+    expect(new Set(opNames).size).toBe(2);
+  });
+
+  it('keeps an all-caps resource one word when singularised', () => {
+    const result = names({
+      '/store/DIRECTORIES/{id}': { get: item('id') },
+      '/store/ADDRESSES/{id}': { get: item('id') },
+      '/store/PETS/{id}': { get: item('id') },
+      '/store/Policies/{id}': { get: item('id') },
+    });
+    expect(result).toEqual([
+      'getAddress                   GET    /store/ADDRESSES/{id}',
+      'getDirectory                 GET    /store/DIRECTORIES/{id}',
+      'getPet                       GET    /store/PETS/{id}',
+      'getPolicy                    GET    /store/Policies/{id}',
+    ]);
+  });
+
   it('is not consulted for an operation with an operationId', () => {
     const paths = {
       '/store/pets/{petId}': { get: { ...item('petId'), operationId: 'fetchPets' } },

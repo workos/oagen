@@ -817,6 +817,33 @@ describe('header models across the spec', () => {
     return { ops: services.flatMap((s) => s.operations), inlineModels };
   }
 
+  it("qualifies a path-named operation's header model by its path stem, not by its derived name", () => {
+    const ok = (meta: Record<string, unknown>) => ({
+      '200': { description: 'ok', headers: { 'X-Meta': object(meta) } },
+    });
+    const { ops, inlineModels } = extractAll({
+      '/notes': { get: { responses: ok({ etag: { type: 'string' } }) } },
+      '/notes/{id}/pin': {
+        post: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: ok({ pinned_at: { type: 'integer' } }),
+        },
+      },
+    });
+    const [list, pin] = ops;
+    expect(list.name).toBe('list');
+    expect(pin.name).toBe('pinNote');
+
+    // The second shape needs a qualifier. It is the same path-derived stem the
+    // operation's body and response models use, so the model name depends only
+    // on the method and path: a verb or singular change in the operation name
+    // must never rename a generated type.
+    expect(modelNameOf(list.responseHeaders?.[0].type)).toBe('NotesXMeta');
+    expect(modelNameOf(pin.responseHeaders?.[0].type)).toBe('NotesByIdPinPostXMeta');
+    expect(fieldsOf(inlineModels, 'NotesXMeta')).toEqual(['etag']);
+    expect(fieldsOf(inlineModels, 'NotesByIdPinPostXMeta')).toEqual(['pinned_at']);
+  });
+
   // A singular service: `cleanSchemaName` singularizes a component's leading
   // word, so a component can only share a header model's name when the
   // service name is already singular (`Profile` + `X-Meta` → `ProfileXMeta`).

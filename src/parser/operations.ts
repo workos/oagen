@@ -318,6 +318,10 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
+  // Operations named from their method and path because they have no
+  // `operationId`. Only these may be renamed when names collide within a
+  // service (see disambiguateOperationNames); an `operationId` is kept as is.
+  const pathNamedOperations = new Set<Operation>();
   // One registry for the whole spec, seeded with the component models: a
   // header model's name must not collide with a differently shaped component
   // (a request body may already use `DocumentsXMeta`) or with another
@@ -361,6 +365,7 @@ export function extractOperations(
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
+      if (!op.operationId) pathNamedOperations.add(operation);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -402,7 +407,7 @@ export function extractOperations(
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
   for (const [, operations] of serviceMap) {
-    disambiguateOperationNames(operations);
+    disambiguateOperationNames(operations, pathNamedOperations);
   }
 
   const declaredTags = indexDocumentTags(documentTags);
@@ -652,8 +657,13 @@ function inferPostAction(path: string): { verb: string; resource: string } | nul
  * from the path. Only renames operations on DIFFERENT paths — same-name
  * operations on the same path (e.g., PUT + PATCH both "update") are left as-is
  * since they represent the same logical resource.
+ *
+ * A name taken from an `operationId` is the author's choice: when a
+ * path-derived name (inferOperationName) collides with it, only the
+ * path-named operations are qualified and the `operationId` keeps its name.
+ * Only when `operationId`s collide with each other are all of them qualified.
  */
-function disambiguateOperationNames(operations: Operation[]): void {
+function disambiguateOperationNames(operations: Operation[], pathNamed: ReadonlySet<Operation>): void {
   // Group by name
   const byName = new Map<string, Operation[]>();
   for (const op of operations) {
@@ -670,7 +680,9 @@ function disambiguateOperationNames(operations: Operation[]): void {
     const uniquePaths = new Set(group.map((op) => op.path));
     if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
 
-    for (const op of group) {
+    const renamable = group.some((op) => pathNamed.has(op)) ? group.filter((op) => pathNamed.has(op)) : group;
+
+    for (const op of renamable) {
       const resource = inferResourceFromPath(op.path);
       if (resource) {
         const newName = toCamelCase(`${name}_${resource}`);
@@ -691,6 +703,7 @@ function disambiguateOperationNames(operations: Operation[]): void {
       // Still colliding — different paths map to same resource name.
       // Use deeper path context to disambiguate.
       for (const op of rGroup) {
+        if (!renamable.includes(op)) continue;
         const deeper = inferDeeperContext(op.path);
         if (deeper) {
           (op as { name: string }).name = toCamelCase(`${op.name}_${deeper}`);
@@ -989,7 +1002,7 @@ function buildOperation(
     componentHeaders,
     componentSchemas,
     serviceName: opContext,
-    operationQualifier: toPascalCase(operationName),
+    operationQualifier: headerOperationQualifier(op, operationName, pathModelBaseName, opContext),
     registry: headerModelRegistry,
   });
   inlineModels.push(...reqBodyModels);
@@ -1068,6 +1081,29 @@ function buildOperation(
  * with `description: ""` yields `"List pets"` rather than `""`. Text that has
  * content is kept verbatim, surrounding whitespace included.
  */
+/**
+ * The qualifier that tells one operation's header models from another's
+ * (typeHeaderSchema's `byOperation` candidate). An `operationId` names the
+ * operation. A path-named operation uses the path-derived stem its request
+ * and response models are built from, so the model name depends only on the
+ * method and path and never on the derived operation name — a verb or
+ * singular change in inferOperationName must not rename a generated type.
+ * The stem's leading service word is dropped when it ends on a word boundary,
+ * since the model name already starts with the service:
+ * `Notes` + `ByIdPinPost` + `XMeta`, beside `NotesByIdPinPostResponse`.
+ */
+function headerOperationQualifier(
+  op: OperationObject,
+  operationName: string,
+  pathModelBaseName: string,
+  serviceName: string | undefined,
+): string {
+  if (op.operationId) return toPascalCase(operationName);
+  const parent = serviceName ? toPascalCase(serviceName) : '';
+  const rest = pathModelBaseName.slice(parent.length);
+  return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
+}
+
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
   const presentSummary = presentText(summary);
   const presentDescription = presentText(description);
