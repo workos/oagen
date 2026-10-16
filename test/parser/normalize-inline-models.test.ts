@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
+import { describe, it, expect, vi } from 'vitest';
+import { collapseJsonSuffixModels, mergeFieldInlineModels } from '../../src/parser/normalize-inline-models.js';
 import type { Model, Service } from '../../src/ir/types.js';
 
 describe('collapseJsonSuffixModels', () => {
@@ -311,5 +311,51 @@ describe('collapseJsonSuffixModels — response headers', () => {
       items: { kind: 'model', name: 'Meta' },
     });
     expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Meta' } });
+  });
+});
+
+describe('mergeFieldInlineModels', () => {
+  const field = (name: string): Model['fields'][number] => ({
+    name,
+    type: { kind: 'primitive', type: 'string' },
+    required: false,
+  });
+  const existing: Model[] = [{ name: 'DrawingLayer', fields: [field('name')] }];
+  const incoming: Model[] = [{ name: 'DrawingLayer', fields: [field('visible'), field('opacity')] }];
+
+  it('names both inline models when two inline models collide', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(mergeFieldInlineModels(existing, incoming, new Set(['Drawing']))).toEqual(existing);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[oagen] Warning: Two inline models are named "DrawingLayer" (fields: name | visible, opacity) — keeping the first, the second is dropped',
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('still reports a clash with a component schema as such', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(mergeFieldInlineModels(existing, incoming, new Set(['DrawingLayer']))).toEqual(existing);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[oagen] Warning: Inline model "DrawingLayer" has different fields than component schema — using component schema',
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps the component-schema wording when no component names are given', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(mergeFieldInlineModels(existing, incoming)).toEqual(existing);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[oagen] Warning: Inline model "DrawingLayer" has different fields than component schema — using component schema',
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

@@ -2,7 +2,12 @@ import type { ApiSpec, AuthScheme, ServerEntry } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
-import { extractSchemas, extractInlineModelsFromSchemas, clearSchemaNameTransform } from './schemas.js';
+import {
+  extractSchemas,
+  extractInlineModelsFromSchemas,
+  clearSchemaNameTransform,
+  resolveSchemaName,
+} from './schemas.js';
 import { extractOperations } from './operations.js';
 import {
   mergeInlineResponseModels,
@@ -73,6 +78,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
+      examples?: Record<string, unknown>;
       headers?: Record<string, unknown>;
       securitySchemes?: Record<string, SecuritySchemeObject>;
     };
@@ -100,6 +106,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
     models,
     spec.tags,
+    spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
   );
 
@@ -112,8 +119,14 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const fieldInlineModels = extractInlineModelsFromSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
+  // Resolved while the transform is still active so the names match the
+  // models'; lets the merge tell a clash with a component schema from one
+  // between two inline models.
+  const componentNames = new Set(
+    Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
+  );
   clearSchemaNameTransform();
-  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels);
+  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   applyFieldHints(finalModels, options?.fieldHints);
   collectInlineEnumsFromModels(finalModels, enums);

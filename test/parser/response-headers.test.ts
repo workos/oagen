@@ -26,6 +26,7 @@ function singleOperation(paths: Record<string, unknown>, componentHeaders?: Comp
     undefined,
     undefined,
     undefined,
+    undefined,
     componentHeaders,
   );
   const operations = services.flatMap((s) => s.operations);
