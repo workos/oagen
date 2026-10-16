@@ -2672,6 +2672,42 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     }
   });
 
+  it('allocates suffixes in name order when two groups reach the same suffixed name, whatever the document order', () => {
+    // Twelve spellings that all flatten to `listNotes`, whose suffixes run up to
+    // `listNotes12`, and two that flatten to `listNotes1`, whose first suffix is
+    // also `listNotes12`. The `listNotes` group is served first by name, so the
+    // second `listNotes1` path gets `listNotes13` however the document is ordered.
+    const twelve = [
+      '/v1/notes',
+      '/v1/Notes',
+      '/v1/NOTES',
+      '/v1/notes_',
+      '/v1/notes-',
+      '/v1/notes.',
+      '/v1/_notes',
+      '/v1/-notes',
+      '/v1/.notes',
+      '/v1/notes__',
+      '/v1/notes--',
+      '/v1/notes..',
+    ];
+    const two = ['/v1/notes1', '/v1/notes_1'];
+    const entries = (paths: string[]) => paths.map((path) => [path, { get: ok }] as const);
+    const orders = [
+      [...entries(twelve), ...entries(two)],
+      [...entries(two), ...entries(twelve)],
+      [...entries(twelve), ...entries(two)].reverse(),
+    ];
+
+    const results = orders.map((order) => names(Object.fromEntries(order)));
+    expect(results[1]).toEqual(results[0]);
+    expect(results[2]).toEqual(results[0]);
+    expect(new Set(Object.values(results[0])).size).toBe(14);
+    expect(results[0]['GET /v1/-notes']).toBe('listNotes');
+    expect(results[0]['GET /v1/notes1']).toBe('listNotes1');
+    expect(results[0]['GET /v1/notes_1']).toBe('listNotes13');
+  });
+
   it('keeps same-path PUT and PATCH on one name while a third path gets the suffix', () => {
     expect(
       names({

@@ -669,6 +669,8 @@ function disambiguateOperationNames(
     for (const group of collidingGroups(operations)) qualify(group);
   }
 
+  // Groups come in name order and members are sorted below, so suffixes are
+  // allocated from the shared pool in an order that depends only on the data.
   const taken = new Set(operations.map((op) => op.name));
   for (const group of collidingGroups(operations)) {
     const name = group[0].name;
@@ -704,9 +706,15 @@ function disambiguateOperationNames(
 }
 
 /**
- * The groups of operations that share a name but not a path, in document
- * order. A name shared only by operations on one path (PUT + PATCH) is not a
+ * The groups of operations that share a name but not a path, in name order.
+ * A name shared only by operations on one path (PUT + PATCH) is not a
  * collision and is excluded.
+ *
+ * Name order, not document order: the numeric pass draws suffixed names from
+ * one pool per service, and two groups can reach the same one (`listNotes` +
+ * `12` and `listNotes1` + `2`), so whichever is served first decides. Names
+ * are unique per group, so this is a total order, and with the members of a
+ * group also sorted the whole assignment depends only on the paths.
  */
 function collidingGroups(operations: Operation[]): Operation[][] {
   const byName = new Map<string, Operation[]>();
@@ -715,7 +723,10 @@ function collidingGroups(operations: Operation[]): Operation[][] {
     group.push(op);
     byName.set(op.name, group);
   }
-  return [...byName.values()].filter((group) => new Set(group.map((op) => op.path)).size > 1);
+  return [...byName.entries()]
+    .filter(([, group]) => new Set(group.map((op) => op.path)).size > 1)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, group]) => group);
 }
 
 /**
