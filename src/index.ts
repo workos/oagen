@@ -8,6 +8,7 @@ export type {
   SecurityRequirement,
   SecurityRequirementSet,
   SuccessResponse,
+  ResponseHeader,
   PaginationMeta,
   HttpMethod,
   Parameter,
@@ -41,6 +42,7 @@ export {
   assignModelsToServices,
   validateModelHints,
   collectRequestBodyModels,
+  collectResponseHeaders,
 } from './ir/types.js';
 
 // Operation resolution

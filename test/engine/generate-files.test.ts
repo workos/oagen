@@ -193,3 +193,54 @@ describe('collectReferencedNames — pagination envelope fields', () => {
     expect(referenced.models.has('Unrelated')).toBe(false);
   });
 });
+
+describe('collectReferencedNames — response headers', () => {
+  it('reaches models and enums referenced only by a response header', () => {
+    const services: Service[] = [
+      {
+        name: 'Documents',
+        operations: [
+          {
+            name: 'downloadDocument',
+            httpMethod: 'get',
+            path: '/documents/{id}/download',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'primitive', type: 'string', format: 'binary' },
+            responseHeaders: [
+              { name: 'X-Meta', type: { kind: 'model', name: 'DownloadMeta' }, required: false },
+              { name: 'X-Policy', type: { kind: 'enum', name: 'RateLimitPolicy' }, required: false },
+            ],
+            errors: [
+              {
+                statusCode: 429,
+                headers: [{ name: 'X-Throttle', type: { kind: 'model', name: 'ThrottleInfo' }, required: false }],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const models: Model[] = [
+      {
+        name: 'DownloadMeta',
+        fields: [{ name: 'origin', type: { kind: 'model', name: 'Origin' }, required: false }],
+      },
+      { name: 'Origin', fields: [] },
+      { name: 'ThrottleInfo', fields: [] },
+      { name: 'Unrelated', fields: [] },
+    ];
+
+    const referenced = collectReferencedNames(services, models);
+
+    // A model reached only through a header is emitted like a body model.
+    expect(referenced.models.has('DownloadMeta')).toBe(true);
+    // Chased transitively through the header model's own fields.
+    expect(referenced.models.has('Origin')).toBe(true);
+    expect(referenced.models.has('ThrottleInfo')).toBe(true);
+    expect(referenced.enums.has('RateLimitPolicy')).toBe(true);
+    expect(referenced.models.has('Unrelated')).toBe(false);
+  });
+});

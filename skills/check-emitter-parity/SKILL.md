@@ -80,6 +80,7 @@ A missing kind means an entire category of types won't generate correctly.
 #### ErrorResponse
 
 - `type` — Structured error type for typed exception/error classes
+- `headers` — Declared response headers (e.g. `Retry-After` on a 429) for typed error accessors
 
 ### Priority: MEDIUM (documentation — affects developer experience)
 
@@ -98,6 +99,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `deprecated` — Deprecation marker on methods
 - `async` — Async operation marker
 - `successResponses` — Multiple 2xx response types
+- `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits)
 - `errors` — Error responses for exception/error documentation
 - `cookieParams` — Cookie parameter handling
 
@@ -148,7 +150,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -233,6 +235,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
 | `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
 | `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
+| `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |

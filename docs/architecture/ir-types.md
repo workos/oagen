@@ -236,6 +236,7 @@ interface Operation {
   requestBodyEncoding?:
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
+  responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -270,6 +271,15 @@ To resolve what an operation accepts, take `op.security ?? spec.security`; a res
 interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
+  headers?: ResponseHeader[]; // Only when the spec declares at least one
+}
+
+interface ResponseHeader {
+  name: string; // As written in the spec, e.g. "Content-Disposition"
+  type: TypeRef;
+  required: boolean;
+  description?: string;
+  deprecated?: boolean;
 }
 
 interface Parameter {
@@ -317,6 +327,16 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 
 When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
 
+### Response Headers
+
+Headers a response declares (`Content-Disposition` on a download, `Location` after a create, `ETag`, rate-limit headers) are kept with the status code they belong to as `headers: ResponseHeader[]` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's headers are also exposed directly as `Operation.responseHeaders`.
+
+Each header is typed like a parameter via its `schema` (or the first media type of its `content` map); a header with neither is a `string`. `$ref`s into `components/headers` are resolved, and a `description` written next to the `$ref` overrides the component's (OpenAPI 3.1); a ref that cannot be resolved is warned about and dropped rather than failing the parse. A header named `Content-Type` is ignored, as OpenAPI requires. All three fields are present only when at least one header survives, so operations without headers keep their shape.
+
+An object-shaped header (directly, inside an array, or as a oneOf variant) is materialized as an inline model named from the service and header name (`Documents` + `X-Meta` → `DocumentsXMeta`), nested objects included (`DocumentsXMetaOrigin`). Because that name can already belong to a differently shaped component schema, to the same header on another status code, or to the same header on another operation of the service, the parser keeps a spec-wide registry of model shapes: the first owner of a name keeps it (component models first, then operations in path order, then a single operation's responses in ascending status-code order), and a later header with a different shape is re-derived under the first free candidate — bare name; then the status code (`DocumentsXMeta429`) when the clash is inside the same operation, or the operation (`DocumentsCreateDocumentXMeta`) when it is with a component or another operation; then the other of those two; then both (`DocumentsCreateDocumentXMeta429`); then a numeric suffix (`DocumentsXMeta2`). A header whose shape matches the name's owner shares it and materializes nothing new, so a header matching a component schema simply references that schema. Inline header enums follow the same idea with their own, status-code-based rule.
+
+`collectResponseHeaders(op)` (exported from `@workos/oagen`) yields every header list once — the primary list is the same array as its `successResponses` entry — and is what reachability, model assignment, ref rewriting/validation, the differ, and the compat filter use, so a model or enum reached only through a header is emitted like any other.
+
 ## Model & Field
 
 ```typescript
@@ -342,6 +362,17 @@ interface Field {
   constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
 }
 ```
+
+### Inline model naming
+
+Models come from `components/schemas` (named as written, after `cleanSchemaName` and any `schemaNameTransform`) and from inline object schemas in operations, which the parser materializes as models so emitters have something to reference. An inline request body or response is named from its operation:
+
+- **With an `operationId`:** `PascalCase(operationId)` + `Request` / `Response`, passed through `cleanSchemaName`. `createNote` → `CreateNoteRequest` / `CreateNoteResponse`.
+- **Without an `operationId`:** from the full path and method. Each non-parameter segment is PascalCased in order, each `{param}` segment becomes `By` + `PascalCase(param)`, then the method and `Request` / `Response` are appended, and the whole name is normalized with `toPascalCase` so an operation's body and response share a prefix (`POST /a/b` → `AbPostRequest` / `AbPostResponse`). `POST /notes` → `NotesPostRequest` / `NotesPostResponse`; `POST /notes/{id}/pin` → `NotesByIdPinPostResponse`; `GET /users/{user_id}/sessions` → `UsersByUserIdSessionsGetResponse`. This tells the common path shapes apart (list vs. item, sibling and nested sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`, `/notes/by-id` and `/notes/{id}`, or `/notes` and `/notes/` flatten to the same words. Names already taken are reserved first: every component schema name and, for every operation with an `operationId`, the stem all of its models start with (`PascalCase(operationId)` after `cleanSchemaName`). A path-based prefix is treated as colliding when any reserved name starts with it, because one prefix is the stem of several emitted names (`…Request`, `…Response`, a list's `…Item`, nested inline models such as `…ResponseOwner`, envelope companions such as `…ListMetadata`). Names derived from a path-based prefix use it verbatim — body `oneOf` variants included (`NotesPostRequest`, `NotesPostRequest2`, `EmailNotesPostRequest`) — and are never re-cleaned, so no later step can move them out from under the reservation; as a second line of defence the check also runs on the cleaned spellings of the prefix (`cleanSchemaName`, the project's `schemaNameTransform`, `ListItem`-marker stripping), so an unnamed `GET /notes` also yields to a component `NoteGetItem`. Names that embed the prefix behind a const value are covered as well: a body `oneOf` variant pinning `kind: email` is `EmailTagsPostRequest` and a nested `oneOf`/`anyOf` variant is `<Const><Parent><Field>`, so every string `const` (or single-value `enum`) found in the operation's inline body and 2xx response variants, top level and nested, is prepended to every spelling before the check, and a hashed prefix lands inside those names too (`EmailTags151Dd5PostRequest`). Names that do not embed the prefix at all — a response `oneOf` variant named from its bare const (`Email`) or a `title`-mapped variant — are outside what a disambiguator can separate and are left as they are. This is deliberately a superset: a component `AuditEventsGetter`, or an operationId `auditEventsGetSummary`, also pushes an unnamed `GET /audit/events` onto a hashed name although no emitted name would coincide; determinism and never sharing a name wrongly matter more than the rare extra hash. The reservation is unconditional, so an inline body is never merged into a same-named component even when their shapes agree. When two distinct paths with the same method would collide, the path spelled most plainly keeps the plain name (no trailing slash, `{id}` rather than a literal `by-id`; precisely, the lowest `[trailing slash, literal segments with a character outside a-z0-9]`), and every other path in the group gets a six-character disambiguator derived from its raw path (the start of its SHA-1, inserted before the method): `POST /foo/bar` next to `POST /foo-bar` → `FooBarPostResponse` and `FooBar546F12PostResponse`; `GET /notes/{id}` next to `GET /notes/by-id` → `NotesByIdGetResponse` and `NotesByIdBa41B5GetResponse`. When two paths tie for plainest (`/foo-bar` and `/foo_bar`), or the path-based name matches a reserved one (an unnamed `POST /audit/events` next to `operationId: auditEventsPost` or next to `components/schemas/AuditEventsPostRequest`), nobody keeps the plain name and every path in the group is disambiguated. The result depends only on the document's paths, `operationId`s and component names and never on their order; `operationId`-derived and component names never change, and paths that do not collide keep the plain name.
+
+A response object with a string `const` discriminant (`object: "note"`) is named from that value instead (`Note`); a list envelope's inline item model replaces the `Response` suffix with `Item`; nested inline objects are qualified with their parent model's name.
+
+If two inline models still resolve to the same name with different fields or field types (two `operationId`s that PascalCase to the same word, for example), the parser keeps the one with more fields — the first definition on a tie — and prints `[oagen] Warning: Inline model "…" has more than one definition with different fields or field types`.
 
 ### Field Examples
 
@@ -413,6 +444,7 @@ interface EnumValue {
 interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
+  headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
 }
 ```
 

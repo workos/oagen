@@ -1,15 +1,40 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
   for (const model of models) {
     const existing = byName.get(model.name);
+    if (existing && !haveSameFields(existing, model)) {
+      // Two inline models resolved to one name but describe different shapes
+      // (e.g. two operationIds that PascalCase to the same word). Only one can
+      // survive, so say which, instead of silently handing every other
+      // reference a model with someone else's fields.
+      const kept =
+        model.fields.length === existing.fields.length
+          ? 'keeping the first definition'
+          : 'keeping the one with more fields';
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" has more than one definition with different fields or field types (${model.fields.length} vs ${existing.fields.length}) — ${kept}`,
+      );
+    }
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
     }
   }
   return [...byName.values()];
+}
+
+/**
+ * Same field names with the same types, in any order. Types are compared by
+ * their JSON serialization: the parser builds a given shape's TypeRef with the
+ * same key order every time, so equal shapes serialize identically.
+ */
+function haveSameFields(a: Model, b: Model): boolean {
+  const signatures = (m: Model) => new Set(m.fields.map((f) => `${f.name}:${JSON.stringify(f.type)}`));
+  const aSignatures = signatures(a);
+  const bSignatures = signatures(b);
+  return aSignatures.size === bSignatures.size && [...aSignatures].every((s) => bSignatures.has(s));
 }
 
 function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
@@ -34,6 +59,9 @@ function rewriteModelRefs(models: Model[], services: Service[], oldName: string,
       }
       for (const field of op.pagination?.envelopeFields ?? []) {
         rewriteModelRef(field.type, oldName, newName);
+      }
+      for (const header of collectResponseHeaders(op)) {
+        rewriteModelRef(header.type, oldName, newName);
       }
     }
   }

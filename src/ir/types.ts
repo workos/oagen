@@ -104,6 +104,14 @@ export interface Operation {
   requestBody?: TypeRef;
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
   response: TypeRef;
+  /**
+   * Headers the primary success response declares (the one `response` is the
+   * body of). Present only when the spec declares at least one. Each entry of
+   * `successResponses` carries its own `headers`, but that list only exists
+   * when an operation has more than one 2xx, so the primary response's headers
+   * need a home of their own.
+   */
+  responseHeaders?: ResponseHeader[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -663,6 +671,11 @@ export function assignModelsToServices(
           }
         }
       }
+      for (const header of collectResponseHeaders(op)) {
+        for (const name of collectModelRefs(header.type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -746,13 +759,55 @@ export function collectRequestBodyModels(services: Service[]): Set<string> {
   return result;
 }
 
+/**
+ * Every response header an operation declares: the primary response's, each
+ * alternate success entry's, and each error entry's. The primary list is the
+ * same array as its `successResponses` entry when both exist, so it is yielded
+ * once. Every pass that walks an operation's type refs (reachability, model
+ * assignment, ref rewriting and validation, direction, compat filtering, enum
+ * collection) goes through this so a type reached only through a header is
+ * treated the way a body or parameter type is.
+ */
+export function collectResponseHeaders(op: Operation): ResponseHeader[] {
+  const result: ResponseHeader[] = [];
+  const seen = new Set<ResponseHeader[]>();
+  const lists = [
+    op.responseHeaders,
+    ...(op.successResponses ?? []).map((r) => r.headers),
+    ...op.errors.map((e) => e.headers),
+  ];
+  for (const list of lists) {
+    if (!list || seen.has(list)) continue;
+    seen.add(list);
+    result.push(...list);
+  }
+  return result;
+}
+
+/**
+ * A header a response declares, typed like a parameter. `name` is kept exactly
+ * as written in the spec (e.g. `Content-Disposition`); emitters apply their
+ * own casing.
+ */
+export interface ResponseHeader {
+  name: string;
+  type: TypeRef;
+  required: boolean;
+  description?: string;
+  deprecated?: boolean;
+}
+
 export interface ErrorResponse {
   statusCode: number;
   type?: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
 }
 
 /** A successful response entry from a 2xx status code */
 export interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
 }
