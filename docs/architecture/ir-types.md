@@ -236,6 +236,7 @@ interface Operation {
   requestBodyEncoding?:
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
+  responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -270,6 +271,15 @@ To resolve what an operation accepts, take `op.security ?? spec.security`; a res
 interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
+  headers?: ResponseHeader[]; // Only when the spec declares at least one
+}
+
+interface ResponseHeader {
+  name: string; // As written in the spec, e.g. "Content-Disposition"
+  type: TypeRef;
+  required: boolean;
+  description?: string;
+  deprecated?: boolean;
 }
 
 interface Parameter {
@@ -311,6 +321,16 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 ### Multiple 2xx Responses
 
 When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
+
+### Response Headers
+
+Headers a response declares (`Content-Disposition` on a download, `Location` after a create, `ETag`, rate-limit headers) are kept with the status code they belong to as `headers: ResponseHeader[]` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's headers are also exposed directly as `Operation.responseHeaders`.
+
+Each header is typed like a parameter via its `schema` (or the first media type of its `content` map); a header with neither is a `string`. `$ref`s into `components/headers` are resolved, and a `description` written next to the `$ref` overrides the component's (OpenAPI 3.1); a ref that cannot be resolved is warned about and dropped rather than failing the parse. A header named `Content-Type` is ignored, as OpenAPI requires. All three fields are present only when at least one header survives, so operations without headers keep their shape.
+
+An object-shaped header (directly, inside an array, or as a oneOf variant) is materialized as an inline model named from the service and header name (`Documents` + `X-Meta` → `DocumentsXMeta`), nested objects included (`DocumentsXMetaOrigin`). Because that name can already belong to a differently shaped component schema, to the same header on another status code, or to the same header on another operation of the service, the parser keeps a spec-wide registry of model shapes: the first owner of a name keeps it (component models first, then operations in path order, then a single operation's responses in ascending status-code order), and a later header with a different shape is re-derived under the first free candidate — bare name; then the status code (`DocumentsXMeta429`) when the clash is inside the same operation, or the operation (`DocumentsCreateDocumentXMeta`) when it is with a component or another operation; then the other of those two; then both (`DocumentsCreateDocumentXMeta429`); then a numeric suffix (`DocumentsXMeta2`). A header whose shape matches the name's owner shares it and materializes nothing new, so a header matching a component schema simply references that schema. Inline header enums follow the same idea with their own, status-code-based rule.
+
+`collectResponseHeaders(op)` (exported from `@workos/oagen`) yields every header list once — the primary list is the same array as its `successResponses` entry — and is what reachability, model assignment, ref rewriting/validation, the differ, and the compat filter use, so a model or enum reached only through a header is emitted like any other.
 
 ## Model & Field
 
@@ -362,6 +382,7 @@ interface EnumValue {
 interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
+  headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
 }
 ```
 

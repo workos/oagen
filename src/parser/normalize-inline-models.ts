@@ -1,5 +1,5 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
@@ -34,6 +34,9 @@ function rewriteModelRefs(models: Model[], services: Service[], oldName: string,
       }
       for (const field of op.pagination?.envelopeFields ?? []) {
         rewriteModelRef(field.type, oldName, newName);
+      }
+      for (const header of collectResponseHeaders(op)) {
+        rewriteModelRef(header.type, oldName, newName);
       }
     }
   }
