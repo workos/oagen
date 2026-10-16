@@ -61,6 +61,8 @@ interface MintedWebhook {
   requestBody?: TypeRef;
   requestBodyEncoding?: Webhook['requestBodyEncoding'];
   inlineModels: Model[];
+  /** Every model and inline-enum name the webhook minted (see `mintSchema`). */
+  names: Set<string>;
 }
 
 /**
@@ -295,7 +297,7 @@ function resolveComponentRef(
  * (`mintWebhook`) and the model and inline-enum names that produces —
  * payload, nested objects, union variants with their const or title
  * prefixes, parameter objects, parameter enums, field enums — are collected
- * (`mintedNames`). An entry collides when one of those names is reserved
+ * (`MintedWebhook.names`). An entry collides when one of those names is reserved
  * (`collectExistingNames`: every model and enum the components and the
  * operations have decided, the components' own inline field models included)
  * or is also minted by another entry. Two keys that flatten to one stem
@@ -324,7 +326,7 @@ function resolveWebhookModelStems(
 ): Map<WebhookEntry, string> {
   const minted = new Map<WebhookEntry, Set<string>>();
   for (const entry of entries) {
-    minted.set(entry, mintedNames(mintWebhook(entry, plainStem(entry, ''), components)));
+    minted.set(entry, mintWebhook(entry, plainStem(entry, ''), components).names);
   }
 
   const stems = new Map<WebhookEntry, string>();
@@ -357,84 +359,176 @@ function webhookDisambiguator(name: string): string {
 
 /**
  * Type a webhook's parameters and payload under `stem`, materializing every
- * model they reference inline. The parameters go through `extractParams`
- * with the stem as the qualifying context, as a service name qualifies an
- * operation's (`PetAdopted` + `X-Event-Type` → `PetAdoptedXEventType`); a
- * parameter with an inline object (or array of them) is then run through the
- * field extractor as a single synthetic property of the stem, which names
- * the model exactly as `extractParams` referenced it — the pairing response
- * headers already rely on. The payload is typed and materialized as the
- * synthetic `payload` property of the stem for the same reason: for every
- * shape the field extractor knows — an inline object, a `oneOf`/`anyOf` of
- * inline objects, an `allOf` merge or `$ref` augmentation, an array or map of
- * any of those, an inline enum, a nullable wrapper — the reference and the
- * model are named by one code path. A body with no schema is a binary or text
- * primitive, as on an operation.
+ * model they reference inline, in one namespace per webhook.
+ *
+ * The payload goes first, as the synthetic `payload` property of the stem
+ * (`<Stem>Payload`, nested objects under it), through the same
+ * `schemaToTypeRef` / `extractInlineModelsFromProperties` pair that names
+ * component fields and response unions, so for every shape the field
+ * extractor knows — an inline object, a `oneOf`/`anyOf` of inline objects, an
+ * `allOf` merge or `$ref` augmentation, an array or map of any of those, an
+ * inline enum, a nullable wrapper — the reference and the model are named by
+ * one code path. A body with no schema is a binary or text primitive, as on
+ * an operation.
+ *
+ * Each parameter then goes through `extractParams` with the stem as the
+ * qualifying context, as a service name qualifies an operation's
+ * (`PetAdopted` + `X-Event-Type` → `PetAdoptedXEventType`), and one whose
+ * schema mints anything inline — an object, an array of them, an enum — is
+ * run through the field extractor as a single synthetic property of the
+ * stem, which names the model exactly as `extractParams` referenced it, the
+ * pairing response headers already rely on. The property is the parameter's
+ * own name unless a name it would mint is already taken by the payload or an
+ * earlier parameter of this webhook: a query parameter named `payload` would
+ * mint the body's `<Stem>Payload`, one named `payload_pet` the body's nested
+ * `<Stem>PayloadPet`, and a header `X-Meta` beside a query `x_meta` would
+ * mint `<Stem>XMeta` twice. Such a parameter is typed and minted under its
+ * location-qualified name instead (`query_payload` → `<Stem>QueryPayload`),
+ * then a numbered one (`<Stem>QueryPayload2`, …), the first that takes
+ * nothing already minted, and its reference follows (see `mintParameter`).
+ * Parameters are visited in document order, so the outcome depends only on
+ * the document. `names` carries everything the webhook minted, for the stem
+ * decision in `resolveWebhookModelStems`.
  */
 function mintWebhook(entry: WebhookEntry, stem: string, components: WebhookComponents): MintedWebhook {
   const { params, body, label } = entry;
-  const inlineModels: Model[] = [];
   const parent = toPascalCase(stem);
+  const inlineModels: Model[] = [];
+  const names = new Set<string>();
   const extract = (location: 'query' | 'header' | 'cookie'): Parameter[] =>
     extractParams(params, location, stem, components.schemas, components.examples, label);
-  const headerParams = extract('header');
-  const queryParams = extract('query');
-  const cookieParams = extract('cookie');
-  for (const param of params) {
-    if (!param.schema) continue;
-    extractInlineModelsFromProperties(
-      { properties: { [param.name]: param.schema } },
-      inlineModels,
-      parent,
-      components.schemas,
-    );
+  const minted: MintedWebhook = {
+    headerParams: extract('header'),
+    queryParams: extract('query'),
+    cookieParams: extract('cookie'),
+    inlineModels,
+    names,
+  };
+
+  const payload = mintPayload(body, stem, components.schemas);
+  if (payload) {
+    minted.requestBody = payload.ref;
+    minted.requestBodyEncoding = payload.encoding;
+    inlineModels.push(...payload.models);
+    for (const name of payload.names) names.add(name);
   }
 
-  const minted: MintedWebhook = { headerParams, queryParams, cookieParams, inlineModels };
-  if (!body?.content) return minted;
-  const { encoding, schema } = selectRequestBodyContent(body);
-  if (!schema) {
-    if (encoding === 'binary') {
-      minted.requestBody = { kind: 'primitive', type: 'string', format: 'binary' };
-      minted.requestBodyEncoding = encoding;
-    } else if (encoding === 'text') {
-      minted.requestBody = { kind: 'primitive', type: 'string' };
-      minted.requestBodyEncoding = encoding;
-    }
-    return minted;
+  const typed = new Map<string, Parameter>();
+  for (const [location, list] of [
+    ['header', minted.headerParams],
+    ['query', minted.queryParams],
+    ['cookie', minted.cookieParams],
+  ] as const) {
+    for (const param of list) typed.set(`${location}:${param.name}`, param);
   }
-  minted.requestBody = schemaToTypeRef(schema, 'payload', stem);
-  minted.requestBodyEncoding = encoding;
-  extractInlineModelsFromProperties({ properties: { payload: schema } }, inlineModels, stem, components.schemas);
+  for (const param of params) {
+    const ir = typed.get(`${param.in}:${param.name}`);
+    if (!ir || !param.schema) continue;
+    const { property, ref, models, names: own } = mintParameter(param, param.schema, parent, names, components.schemas);
+    // `extractParams` typed the parameter under its own name; a parameter
+    // moved to a qualified property is re-typed so the reference matches.
+    if (property !== param.name) ir.type = ref;
+    inlineModels.push(...models);
+    for (const name of own) names.add(name);
+  }
   return minted;
 }
 
+/** What one schema minted under one synthetic property: its reference, its models, and every name among them. */
+interface MintedSchema {
+  ref: TypeRef;
+  models: Model[];
+  names: Set<string>;
+}
+
+/** The payload typed and materialized as the `payload` property of `stem`; `undefined` when there is no usable body. */
+function mintPayload(
+  body: RequestBodyObject | undefined,
+  stem: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): (MintedSchema & { encoding: Webhook['requestBodyEncoding'] }) | undefined {
+  if (!body?.content) return undefined;
+  const { encoding, schema } = selectRequestBodyContent(body);
+  if (!schema) {
+    if (encoding === 'binary') {
+      return { ref: { kind: 'primitive', type: 'string', format: 'binary' }, encoding, models: [], names: new Set() };
+    }
+    if (encoding === 'text') {
+      return { ref: { kind: 'primitive', type: 'string' }, encoding, models: [], names: new Set() };
+    }
+    return undefined;
+  }
+  return { ...mintSchema(schema, 'payload', stem, componentSchemas), encoding };
+}
+
 /**
- * Every name `mintWebhook` decided: the models it materialized and every
- * inline enum (an enum ref carrying `values`; a `$ref` to a component enum
- * carries none and is a reference, not a minting) in the parameters, the
- * payload, and the materialized models' fields. Component references are
- * deliberately not included: a payload that refers to `AdoptionEvent` names
- * nothing new.
+ * A parameter's schema typed and materialized under the first synthetic
+ * property whose minted names are all free: the parameter's own name, then
+ * `<in>_<name>`, then `<in>_<name>_2`, `<in>_<name>_3`, …. A schema that
+ * mints nothing (a primitive, a `$ref`) keeps the parameter's name at once.
+ * When a candidate changes none of the minted names — they do not embed the
+ * property, as a title-mapped union variant does not — no candidate can
+ * avoid the clash, so the last one is kept and the clash is left to the
+ * model merge, as for operations; `MAX_PARAMETER_PROPERTY_ATTEMPTS` is a
+ * backstop behind that rule.
  */
-function mintedNames(minted: MintedWebhook): Set<string> {
+function mintParameter(
+  param: ParameterObject,
+  schema: SchemaObject,
+  parent: string,
+  taken: ReadonlySet<string>,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): MintedSchema & { property: string } {
+  let previous: MintedSchema | undefined;
+  for (let attempt = 0; ; attempt++) {
+    const property =
+      attempt === 0 ? param.name : attempt === 1 ? `${param.in}_${param.name}` : `${param.in}_${param.name}_${attempt}`;
+    const minted = mintSchema(schema, property, parent, componentSchemas);
+    const free = [...minted.names].every((name) => !taken.has(name));
+    const stuck = previous !== undefined && sameNames(previous.names, minted.names);
+    if (free || stuck || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return { ...minted, property };
+    previous = minted;
+  }
+}
+
+/** Hard cap on the properties `mintParameter` tries; the no-progress rule stops it long before in practice. */
+const MAX_PARAMETER_PROPERTY_ATTEMPTS = 64;
+
+function sameNames(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  return a.size === b.size && [...a].every((name) => b.has(name));
+}
+
+/**
+ * Type `schema` as the synthetic property `property` of `parent` and
+ * materialize what it declares inline, collecting every name that minted:
+ * the models, and every inline enum (an enum ref carrying `values`; a `$ref`
+ * to a component enum carries none and is a reference, not a minting) in the
+ * reference and in the models' fields. Component references are deliberately
+ * not names: a payload that refers to `AdoptionEvent` names nothing new.
+ */
+function mintSchema(
+  schema: SchemaObject,
+  property: string,
+  parent: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): MintedSchema {
+  const models: Model[] = [];
+  extractInlineModelsFromProperties({ properties: { [property]: schema } }, models, parent, componentSchemas);
+  const ref = schemaToTypeRef(schema, property, parent);
   const names = new Set<string>();
-  const collectEnums = (ref: TypeRef): void => {
-    walkTypeRef(ref, {
+  const collectEnums = (typeRef: TypeRef): void => {
+    walkTypeRef(typeRef, {
       enum: (r) => {
         if (r.values) names.add(r.name);
       },
     });
   };
-  for (const model of minted.inlineModels) {
+  for (const model of models) {
     names.add(model.name);
     for (const field of model.fields) collectEnums(field.type);
   }
-  for (const param of [...minted.headerParams, ...minted.queryParams, ...minted.cookieParams]) {
-    collectEnums(param.type);
-  }
-  if (minted.requestBody) collectEnums(minted.requestBody);
-  return names;
+  collectEnums(ref);
+  return { ref, models, names };
 }
 
 function buildWebhook(entry: WebhookEntry, minted: MintedWebhook, components: WebhookComponents): Webhook {

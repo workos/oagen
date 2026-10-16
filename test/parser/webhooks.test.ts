@@ -48,6 +48,34 @@ function webhook(overrides: Partial<Webhook> = {}): Webhook {
   return { name: 'x', httpMethod: 'post', headerParams: [], queryParams: [], responses: [], ...overrides };
 }
 
+/**
+ * Every model a webhook references exists, `validateModelRefs` has nothing
+ * to say, and every model and enum of the spec is reachable (nothing is
+ * orphaned) once the webhooks seed reachability.
+ */
+function expectResolvedAndReferenced(spec: ApiSpec, warn: { mock: { calls: unknown[][] } }): void {
+  const modelNames = new Set(spec.models.map((m) => m.name));
+  for (const hook of spec.webhooks ?? []) {
+    for (const ref of collectWebhookTypeRefs(hook)) {
+      for (const name of collectModelRefs(ref)) expect(modelNames.has(name), name).toBe(true);
+    }
+  }
+  validateModelRefs(spec);
+  expect(warn.mock.calls).toEqual([]);
+
+  const referenced = collectReferencedNames(spec.services, spec.models, { webhooks: spec.webhooks });
+  for (const model of spec.models) expect(referenced.models.has(model.name), model.name).toBe(true);
+  for (const e of spec.enums) expect(referenced.enums.has(e.name), e.name).toBe(true);
+}
+
+/** The fields of the model a reference points at. */
+function fieldsOf(spec: ApiSpec, ref: unknown): string[] {
+  const name = (ref as { name: string }).name;
+  const model = spec.models.find((m) => m.name === name);
+  expect(model, name).toBeDefined();
+  return model!.fields.map((f) => f.name);
+}
+
 describe('webhooks', () => {
   let warn: ReturnType<typeof vi.spyOn>;
 
@@ -271,19 +299,8 @@ describe('webhooks', () => {
 
     it('resolves every model a webhook references and orphans none of their models', async () => {
       const spec = await parseSpec(`${FIXTURES}/webhooks.yml`);
-      const modelNames = new Set(spec.models.map((m) => m.name));
 
-      for (const hook of spec.webhooks!) {
-        for (const ref of collectWebhookTypeRefs(hook)) {
-          for (const name of collectModelRefs(ref)) expect(modelNames.has(name), name).toBe(true);
-        }
-      }
-      validateModelRefs(spec);
-      expect(warn).not.toHaveBeenCalled();
-
-      const referenced = collectReferencedNames(spec.services, spec.models, { webhooks: spec.webhooks });
-      for (const model of spec.models) expect(referenced.models.has(model.name), model.name).toBe(true);
-      for (const e of spec.enums) expect(referenced.enums.has(e.name), e.name).toBe(true);
+      expectResolvedAndReferenced(spec, warn);
       // Without the webhooks, every one of them would be pruned as an orphan.
       expect(collectReferencedNames(spec.services, spec.models).models.size).toBe(0);
     });
@@ -390,6 +407,39 @@ describe('webhooks', () => {
         [headerEnum.name, ['app', 'web']],
       ]);
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps a parameter named like the payload apart from the body, each typed with its own fields', async () => {
+      // Greptile's case: a query parameter `payload` would mint the body's
+      // `<Stem>Payload`; a header `X-Meta` beside a query `x_meta` would mint
+      // `<Stem>XMeta` twice.
+      const spec = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 't', version: '1' },
+        paths: {},
+        webhooks: {
+          petAdopted: postWith(petSchema, {
+            parameters: [
+              { name: 'payload', in: 'query', schema: { type: 'object', properties: { id: { type: 'string' } } } },
+              { name: 'X-Meta', in: 'header', schema: { type: 'object', properties: { etag: { type: 'string' } } } },
+              { name: 'x_meta', in: 'query', schema: { type: 'object', properties: { trace: { type: 'string' } } } },
+            ],
+          }),
+        },
+      });
+
+      const [hook] = spec.webhooks!;
+      expect(hook.requestBody).toEqual({ kind: 'model', name: 'PetAdoptedPayload' });
+      expect(fieldsOf(spec, hook.requestBody)).toEqual(['pet_id']);
+      expect(hook.queryParams.map((p) => p.type)).toEqual([
+        { kind: 'model', name: 'PetAdoptedQueryPayload' },
+        { kind: 'model', name: 'PetAdoptedQueryXMeta' },
+      ]);
+      expect(fieldsOf(spec, hook.queryParams[0].type)).toEqual(['id']);
+      expect(fieldsOf(spec, hook.queryParams[1].type)).toEqual(['trace']);
+      expect(hook.headerParams[0].type).toEqual({ kind: 'model', name: 'PetAdoptedXMeta' });
+      expect(fieldsOf(spec, hook.headerParams[0].type)).toEqual(['etag']);
+      expectResolvedAndReferenced(spec, warn);
     });
 
     it('reads a webhooks map on any 3.x document, since the key is unambiguous', async () => {
@@ -712,6 +762,55 @@ describe('webhooks', () => {
           ['PetAdoptedXMeta', ['etag']],
           ['PetAdoptedFilter', ['pet_id']],
           ['PetAdoptedSession', ['id']],
+        ]);
+      });
+
+      it('moves a parameter off a name the payload or an earlier parameter minted, nested names and enums included', () => {
+        const { webhooks, inlineModels } = extractWebhooks({
+          petAdopted: postWith(
+            {
+              type: 'object',
+              properties: { pet: petSchema, reason: { type: 'string', enum: ['allergy', 'moved'] } },
+            },
+            {
+              parameters: [
+                // Would mint the body's nested `PetAdoptedPayloadPet`.
+                {
+                  name: 'payload_pet',
+                  in: 'header',
+                  schema: { type: 'object', properties: { id: { type: 'string' } } },
+                },
+                // Would mint the body's field enum `PetAdoptedPayloadReason`.
+                { name: 'payload_reason', in: 'query', schema: { type: 'string', enum: ['moved', 'other'] } },
+                // Takes `PetAdoptedQueryPayload` first, in document order ...
+                {
+                  name: 'query_payload',
+                  in: 'query',
+                  schema: { type: 'object', properties: { a: { type: 'string' } } },
+                },
+                // ... so `payload` steps past both `Payload` and `QueryPayload`.
+                { name: 'payload', in: 'query', schema: { type: 'object', properties: { b: { type: 'string' } } } },
+                // Mints nothing: keeps its own name, whatever is taken.
+                { name: 'Payload', in: 'cookie', schema: { type: 'string' } },
+              ],
+            },
+          ),
+        });
+
+        const [hook] = webhooks;
+        expect(hook.headerParams[0].type).toEqual({ kind: 'model', name: 'PetAdoptedHeaderPayloadPet' });
+        expect(hook.queryParams.map((p) => p.type)).toEqual([
+          { kind: 'enum', name: 'PetAdoptedQueryPayloadReason', values: ['moved', 'other'] },
+          { kind: 'model', name: 'PetAdoptedQueryPayload' },
+          { kind: 'model', name: 'PetAdoptedQueryPayload2' },
+        ]);
+        expect(hook.cookieParams![0].type).toEqual({ kind: 'primitive', type: 'string' });
+        expect(inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+          ['PetAdoptedPayload', ['pet', 'reason']],
+          ['PetAdoptedPayloadPet', ['pet_id']],
+          ['PetAdoptedHeaderPayloadPet', ['id']],
+          ['PetAdoptedQueryPayload', ['a']],
+          ['PetAdoptedQueryPayload2', ['b']],
         ]);
       });
 
