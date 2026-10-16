@@ -1559,7 +1559,11 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
  * variant's, the position counter (`CreateThingRequest2`). `siblings` are the
  * union's inline object variants and `contentNamed` the names its const-less
  * variants have taken so far; `fromContent` tells the caller to record this
- * one there. A clash with a model minted elsewhere still bumps the counter.
+ * one there. A clash with a model minted elsewhere still bumps the counter:
+ * on the base for a content-named variant (`CreateThingRequest2`), on the
+ * const-derived name for a const-named one (`FooCreateThingRequest2`) — so a
+ * variant titled `Foo` and a later one pinning `kind: foo` in the same body
+ * never share a model.
  *
  * `fromOperationId` says where `baseName` came from. An operationId-derived
  * base is already in cleanSchemaName form and its variants go through
@@ -1579,25 +1583,26 @@ function deriveOneOfVariantName(
   fromOperationId: boolean,
 ): { name: string; fromContent: boolean } {
   const finalize = (name: string): string => (fromOperationId ? resolveSchemaName(name) : name);
+  const existingNames = new Set(existingModels.map((m) => m.name));
+  // `name`, or `<stem><n>` counting from 2 while a model of that name exists.
+  const unique = (name: string, stem: string): string => {
+    let candidate = name;
+    for (let suffix = 2; existingNames.has(candidate); suffix++) candidate = `${stem}${suffix}`;
+    return candidate;
+  };
   // Try to use a distinguishing property (e.g., "grant_type" field's const/enum value)
   if (variant.properties) {
     for (const [, propSchema] of Object.entries(variant.properties)) {
       if (propSchema?.const && typeof propSchema.const === 'string') {
-        const derivedName = toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
-        return { name: finalize(derivedName), fromContent: false };
+        const derivedName = finalize(toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request');
+        return { name: unique(derivedName, derivedName), fromContent: false };
       }
     }
   }
-  const existingNames = new Set(existingModels.map((m) => m.name));
   // Finalize before naming so every candidate stays in the same namespace as
   // the rest of the IR.
   const finalBaseName = finalize(baseName);
-  let name = nameInlineVariant(variant, siblings, finalBaseName, contentNamed, null);
-  let suffix = 2;
-  while (existingNames.has(name)) {
-    name = `${finalBaseName}${suffix}`;
-    suffix++;
-  }
+  const name = unique(nameInlineVariant(variant, siblings, finalBaseName, contentNamed, null), finalBaseName);
   return { name, fromContent: true };
 }
 
