@@ -279,11 +279,18 @@ interface Parameter {
   description?: string;
   deprecated?: boolean;
   default?: unknown;
-  example?: unknown;
+  example?: unknown; // The document's `example`, else `examples[0]`
+  examples?: unknown[]; // Every example value, in document order; only when non-empty
 }
 ```
 
 `Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
+
+### Parameter Examples
+
+`example` and `examples` are read from three levels in order: the parameter itself, then its inline `schema`, then the component schema its `$ref` points at. A parameter-level `examples` is an OpenAPI map of Example Objects, so each entry's `value` is taken in document order; a `$ref` entry is resolved against `components.examples` (a dangling ref is skipped with a warning), and an `externalValue` entry is skipped. A schema-level `examples` is the JSON Schema list and is taken as-is.
+
+Each value walks the levels on its own. `examples` is the first level's non-empty list. `example` comes from the first level that has either an `example` or a list, preferring that level's own `example` over its first list entry, so a schema-level `example` can never mask the parameter's own `examples` map. A level with neither falls through; an explicit `null` is a value and is kept. Emitters that read only `example` therefore still see a value for an OAS 3.1 document that uses `examples` alone.
 
 ### Idempotency Key
 
@@ -324,8 +331,14 @@ interface Field {
   writeOnly?: boolean;
   deprecated?: boolean;
   default?: unknown;
+  example?: unknown; // The schema's `example`, else `examples[0]`
+  examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
 }
 ```
+
+### Field Examples
+
+OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does. A field whose schema (and `$ref` target, if any) gives neither has no `example` and no `examples` key.
 
 ## Enum
 

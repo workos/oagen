@@ -284,16 +284,25 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
     const parentName = resolveSchemaName(schemaName);
     // The same sibling set `extractModel` / `extractAllOfModel` type the
     // component's fields from, `$ref`'d allOf members included.
-    extractInlineModelsFromProperties(schema, inlineModels, parentName, collectProperties(schema, schemas));
+    extractInlineModelsFromProperties(schema, inlineModels, parentName, schemas, collectProperties(schema, schemas));
   }
 
   return inlineModels;
 }
 
+/**
+ * Walk a schema's properties and materialise every inline object as a model.
+ * `componentSchemas` is optional and only feeds `buildFieldFromSchema`, so a
+ * field that `$ref`s a component can take its `example`/`examples` from it;
+ * callers without the component map at hand simply omit it.
+ * `siblingProperties` is the parent object's full property set, for callers
+ * that see more of it than this schema shows (see `elementContextName`).
+ */
 export function extractInlineModelsFromProperties(
   schema: SchemaObject,
   results: Model[],
   parentName?: string,
+  componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
 ): void {
   const properties = schema.properties ?? {};
@@ -306,7 +315,7 @@ export function extractInlineModelsFromProperties(
 
   for (const sub of allOfSchemas) {
     if (sub.properties) {
-      extractInlineModelsFromProperties(sub, results, parentName, siblings);
+      extractInlineModelsFromProperties(sub, results, parentName, componentSchemas, siblings);
     }
   }
 
@@ -322,8 +331,8 @@ export function extractInlineModelsFromProperties(
     if (isInlineObjectSchema(fieldSchema)) {
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
-      results.push(buildInlineModel(modelName, fieldSchema));
-      extractInlineModelsFromProperties(fieldSchema, results, modelName);
+      results.push(buildInlineModel(modelName, fieldSchema, componentSchemas));
+      extractInlineModelsFromProperties(fieldSchema, results, modelName, componentSchemas);
     }
 
     // Array: schemaToTypeRef types the items with the field's own context
@@ -337,7 +346,12 @@ export function extractInlineModelsFromProperties(
     // byte-for-byte identical naming.
     if (fieldSchema.type === 'array' && fieldSchema.items) {
       const itemContext = elementContextName(fieldName, 'item', siblings, parentName, fieldSchema.items);
-      extractInlineModelsFromProperties({ properties: { [itemContext]: fieldSchema.items } }, results, parentName);
+      extractInlineModelsFromProperties(
+        { properties: { [itemContext]: fieldSchema.items } },
+        results,
+        parentName,
+        componentSchemas,
+      );
     }
 
     // Map (`additionalProperties` / `patternProperties` on a property-less
@@ -350,7 +364,12 @@ export function extractInlineModelsFromProperties(
       const valueSchema = mapValueSchema(fieldSchema);
       if (valueSchema) {
         const valueContext = elementContextName(fieldName, 'value', siblings, parentName, valueSchema);
-        extractInlineModelsFromProperties({ properties: { [valueContext]: valueSchema } }, results, parentName);
+        extractInlineModelsFromProperties(
+          { properties: { [valueContext]: valueSchema } },
+          results,
+          parentName,
+          componentSchemas,
+        );
       }
     }
 
@@ -364,8 +383,8 @@ export function extractInlineModelsFromProperties(
       if (Object.keys(merged.properties ?? {}).length > 0) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
-        results.push(buildInlineModel(modelName, merged));
-        extractInlineModelsFromProperties(merged, results, modelName);
+        results.push(buildInlineModel(modelName, merged, componentSchemas));
+        extractInlineModelsFromProperties(merged, results, modelName, componentSchemas);
       }
     }
 
@@ -391,8 +410,8 @@ export function extractInlineModelsFromProperties(
           emittedNames.push(variantName);
           if (!existingNames.has(variantName)) {
             existingNames.add(variantName);
-            results.push(buildInlineModel(variantName, variant));
-            extractInlineModelsFromProperties(variant, results, variantName);
+            results.push(buildInlineModel(variantName, variant, componentSchemas));
+            extractInlineModelsFromProperties(variant, results, variantName, componentSchemas);
             // A multi-type variant (`type: ['object', 'array']`) types the
             // items of its array member under the variant's name
             // (`<Variant>Item`, see `variantMemberSchemas`); re-enter with
@@ -401,6 +420,7 @@ export function extractInlineModelsFromProperties(
               { properties: variantMemberSchemas(variant, variantName) },
               results,
               variantName,
+              componentSchemas,
             );
           }
         }
@@ -537,14 +557,14 @@ export function mapValueSchema(schema: SchemaObject): SchemaObject | null {
   return patterns[0] ?? null;
 }
 
-function buildInlineModel(name: string, schema: SchemaObject): Model {
+function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): Model {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
   const siblings = collectProperties(schema);
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
   return { name, description: schema.description, fields };

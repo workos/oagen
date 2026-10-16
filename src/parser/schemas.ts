@@ -126,7 +126,79 @@ export interface SchemaObject {
   deprecated?: boolean;
   default?: unknown;
   example?: unknown;
+  /** JSON Schema `examples` list; OAS 3.1 deprecates `example` in its favour. */
+  examples?: unknown[];
   [key: string]: unknown;
+}
+
+/**
+ * Narrow a raw `examples` value to a non-empty list, or undefined. Guards
+ * against documents that put an OAS Example Object map (or anything else)
+ * where JSON Schema expects an array, and against an empty list, so the IR
+ * carries `examples` only when there is at least one value.
+ */
+export function nonEmptyExamples(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Pick the single `example` the IR carries: the document's own `example`
+ * when it is set (including an explicit `null`), otherwise the first entry
+ * of the resolved `examples` list.
+ */
+export function pickExample(example: unknown, examples: unknown[] | undefined): unknown {
+  return example !== undefined ? example : examples?.[0];
+}
+
+/** One source of example values, e.g. a parameter's own declaration or its schema. */
+export interface ExampleSource {
+  example: unknown;
+  examples: unknown[] | undefined;
+}
+
+/**
+ * Resolve `example` and `examples` across ordered precedence levels: for a
+ * parameter its own declaration, its inline schema, then the component its
+ * `$ref` points at; for a field its own schema, then its `$ref` target.
+ *
+ * Each value walks the levels independently. `examples` is the first
+ * non-empty list. `example` comes from the first level that has either an
+ * `example` or a list, preferring that level's own `example` over its first
+ * list entry — so a schema-level `example` can never mask the parameter's
+ * own `examples` map. A level with neither falls through; an explicit
+ * `null` is a value and stops the walk.
+ */
+export function resolveExamples(levels: ExampleSource[]): ExampleSource {
+  let example: unknown;
+  let examples: unknown[] | undefined;
+  for (const level of levels) {
+    if (examples === undefined) examples = level.examples;
+    if (example === undefined) example = pickExample(level.example, level.examples);
+  }
+  return { example, examples };
+}
+
+/**
+ * If a schema is a `$ref` to `#/components/schemas/X`, return the referenced
+ * component schema. Used to surface schema-level metadata (default, example,
+ * examples, deprecated, description) that would otherwise be invisible at the
+ * field or parameter level.
+ *
+ * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
+ * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
+ * silently loses the target's `default: desc` and the SDK stops emitting the
+ * spec-mandated default value in generated method signatures.
+ */
+export function resolveComponentSchemaRef(
+  schema: SchemaObject | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  if (!schema || !componentSchemas) return undefined;
+  const ref = (schema as { $ref?: string }).$ref;
+  if (!ref) return undefined;
+  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
+  if (!match) return undefined;
+  return componentSchemas[match[1]];
 }
 
 export interface ExtractedSchemas {
@@ -216,7 +288,7 @@ export function extractSchemas(
         modelsByCleanName.set(pascalName, model);
       }
 
-      for (const inlineModel of extractDiscriminatedAllOfVariantModels(schema, pascalName)) {
+      for (const inlineModel of extractDiscriminatedAllOfVariantModels(schema, pascalName, schemas)) {
         const existingInline = modelsByCleanName.get(inlineModel.name);
         if (existingInline) {
           if (inlineModel.fields.length > existingInline.fields.length) {
@@ -336,7 +408,7 @@ function collectNestedInlineModels(
       if (!fieldSchema) return;
 
       // Extract inline models from the field schema
-      const extracted = extractNestedSchema(modelRef.name, fieldSchema);
+      const extracted = extractNestedSchema(modelRef.name, fieldSchema, schemas);
       for (const m of extracted) {
         if (!modelNames.has(m.name)) {
           models.push(m);
@@ -415,7 +487,7 @@ function findNestedFieldSchema(
 }
 
 /** Extract a model (and nested models) from an inline field schema. */
-function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
+function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
   // Handle oneOf: extract each object variant as its own model
   if (schema.oneOf) {
     const models: Model[] = [];
@@ -442,7 +514,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
         const fields: Field[] = [];
         for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
           if (!fs) continue;
-          fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, siblings));
+          fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
         }
         models.push({ name: variantName, description: variant.description, fields });
       }
@@ -457,7 +529,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
     const fields: Field[] = [];
     for (const [fn, fs] of Object.entries(schema.properties)) {
       if (!fs) continue;
-      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, siblings));
+      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
     return [{ name, description: schema.description, fields }];
   }
@@ -469,7 +541,7 @@ function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
     const fields: Field[] = [];
     for (const [fn, fs] of Object.entries(schema.items.properties)) {
       if (!fs) continue;
-      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, siblings));
+      fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
     return [{ name, description: schema.items.description, fields }];
   }
@@ -611,18 +683,26 @@ export function variantMemberSchemas(variant: SchemaObject, variantName: string)
 
 /**
  * Build a single Field from a schema property entry. Shared across all
- * extraction sites. `siblingProperties` are the other properties of the object the
- * field belongs to (`collectPropertyNames`); array items and map values use
- * them to step aside from a sibling that would take their singular name
- * (`elementContextName`).
+ * extraction sites. Pass `componentSchemas` where they are at hand so a
+ * field whose schema is a bare `$ref` can take `example`/`examples` from the
+ * component it points at, as a parameter does. `siblingProperties` are the
+ * other properties of the object the field belongs to (`collectProperties`);
+ * array items and map values use them to step aside from a sibling that
+ * would take their singular name (`elementContextName`).
  */
 export function buildFieldFromSchema(
   fieldName: string,
   fieldSchema: SchemaObject,
   contextName: string,
   requiredSet: Set<string>,
+  componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
 ): Field {
+  const refTarget = resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const { example, examples } = resolveExamples([
+    { example: fieldSchema.example, examples: nonEmptyExamples(fieldSchema.examples) },
+    { example: refTarget?.example, examples: nonEmptyExamples(refTarget?.examples) },
+  ]);
   return {
     name: fieldName,
     type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
@@ -632,7 +712,10 @@ export function buildFieldFromSchema(
     writeOnly: fieldSchema.writeOnly || undefined,
     deprecated: fieldSchema.deprecated || undefined,
     default: fieldSchema.default,
-    example: fieldSchema.example,
+    example,
+    // Only materialise the key when there is something to carry so existing
+    // inline snapshots of fields without examples stay byte-identical.
+    ...(examples ? { examples } : {}),
   };
 }
 
@@ -889,7 +972,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
 
   for (const [fieldName, fieldSchema] of Object.entries(schema.properties ?? {})) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, schemas, siblings));
   }
 
   // Pure oneOf/anyOf schemas (no allOf, no properties): merge variant fields
@@ -904,7 +987,9 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
       for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
         if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
         seenFieldNames.add(fieldName);
-        fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, siblings));
+        fields.push(
+          buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, schemas, siblings),
+        );
       }
     }
   }
@@ -978,7 +1063,9 @@ function extractAllOfModel(
           for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
             if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
             seenFieldNames.add(fieldName);
-            fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, siblings));
+            fields.push(
+              buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, schemas, siblings),
+            );
           }
         }
         // Do NOT add variant-level required to the requiredSet — these fields
@@ -994,7 +1081,7 @@ function extractAllOfModel(
         const emptyRequired = new Set<string>();
         for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
           if (!fieldSchema) continue;
-          fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired, siblings));
+          fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired, schemas, siblings));
         }
       }
     }
@@ -1105,7 +1192,11 @@ function detectAllOfVariantDiscriminator(
   return { property: candidateProperty, mapping };
 }
 
-function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackName: string): Model[] {
+function extractDiscriminatedAllOfVariantModels(
+  schema: SchemaObject,
+  fallbackName: string,
+  schemas?: Record<string, SchemaObject>,
+): Model[] {
   const models: Model[] = [];
   const seenNames = new Set<string>();
 
@@ -1153,7 +1244,7 @@ function extractDiscriminatedAllOfVariantModels(schema: SchemaObject, fallbackNa
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
-      for (const model of extractInlineModelDeep(variantName, merged)) {
+      for (const model of extractInlineModelDeep(variantName, merged, schemas)) {
         if (seenNames.has(model.name)) continue;
         seenNames.add(model.name);
         models.push(model);
@@ -1297,7 +1388,7 @@ function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: stri
   return `${fallbackName}${pascal}`;
 }
 
-function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
+function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
   const properties = schema.properties ?? {};
@@ -1306,10 +1397,10 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
   const siblings = collectProperties(schema);
   for (const [fieldName, fieldSchema] of Object.entries(properties)) {
     if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, siblings));
+    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, schemas, siblings));
 
     if (fieldSchema.type === 'object' && fieldSchema.properties) {
-      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema));
+      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema, schemas));
     }
 
     // Array items and map values are named like the field — or `<Field>Item` /
@@ -1317,14 +1408,16 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
     // `schemaToTypeRef` references them (`elementContextName`).
     if (fieldSchema.type === 'array' && fieldSchema.items?.properties) {
       const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
-      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items));
+      nestedModels.push(
+        ...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items, schemas),
+      );
     }
 
     if (fieldSchema.type === 'object' && !fieldSchema.properties) {
       const valueSchema = mapValueSchema(fieldSchema);
       if (valueSchema && !valueSchema.$ref && valueSchema.properties) {
         const valueContext = elementContextName(fieldName, 'value', siblings, name, valueSchema);
-        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, valueContext), valueSchema));
+        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, valueContext), valueSchema, schemas));
       }
     }
 
@@ -1337,11 +1430,15 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
       }
       if (Object.keys(mergedProperties).length > 0) {
         nestedModels.push(
-          ...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), {
-            type: 'object',
-            properties: mergedProperties,
-            required: mergedRequired,
-          }),
+          ...extractInlineModelDeep(
+            qualifyNestedInlineName(name, fieldName),
+            {
+              type: 'object',
+              properties: mergedProperties,
+              required: mergedRequired,
+            },
+            schemas,
+          ),
         );
       }
     }
@@ -1355,13 +1452,13 @@ function extractInlineModelDeep(name: string, schema: SchemaObject): Model[] {
         for (const variant of inlineObjectVariants) {
           const variantName = nameVariantModel(variant, baseQualified, emitted, namingDisc);
           emitted.push({ name: variantName, fields: [] });
-          nestedModels.push(...extractInlineModelDeep(variantName, variant));
+          nestedModels.push(...extractInlineModelDeep(variantName, variant, schemas));
           // A multi-type variant's array member types its items under the
           // variant's name (`<Variant>Item`); extract them there too. The
           // synthetic wrapper model is dropped, only its nested models kept.
           const memberSchemas = variantMemberSchemas(variant, variantName);
           if (Object.keys(memberSchemas).length > 0) {
-            nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }).slice(1));
+            nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }, schemas).slice(1));
           }
         }
       }
