@@ -9,7 +9,7 @@ import {
   resolveSchemaName,
 } from './schemas.js';
 import { extractOperations } from './operations.js';
-import { extractWebhooks } from './webhooks.js';
+import { collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
@@ -85,6 +85,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
+      responses?: Record<string, unknown>;
       examples?: Record<string, unknown>;
       headers?: Record<string, unknown>;
       pathItems?: Record<string, unknown>;
@@ -118,32 +119,35 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
   );
 
+  // Extract inline models from model field definitions (objects/arrays with properties).
+  // schemaNameTransform is kept active so inline child names use the
+  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
+  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget). Read before the
+  // webhooks so their names are reserved against these too.
+  const fieldInlineModels = extractInlineModelsFromSchemas(
+    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+  );
+
   // Webhooks are read while the schema-name transform is still active, like
   // operations, so a payload's `$ref`s resolve to the same names as a field's.
-  // Their inline models are named against every model decided so far, so a
-  // payload never takes a component's or an operation's model name.
+  // Their models are named last, against every model and enum decided so far —
+  // components, operations, and the components' own inline field models — so
+  // a webhook never takes a name another pass has already minted.
   const { webhooks, inlineModels: webhookInlineModels } = extractWebhooks(
     spec.webhooks,
     {
       schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
       parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
       requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+      responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
       examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
       pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
     },
-    [...models, ...inlineModels].map((model) => model.name),
+    collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels]);
-
-  // Extract inline models from model field definitions (objects/arrays with properties).
-  // schemaNameTransform is kept active so inline child names use the
-  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
-  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget).
-  const fieldInlineModels = extractInlineModelsFromSchemas(
-    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-  );
   // Resolved while the transform is still active so the names match the
   // models'; lets the merge tell a clash with a component schema from one
   // between two inline models.

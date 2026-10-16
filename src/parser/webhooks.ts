@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
-import type { HttpMethod, Model, Parameter, TypeRef, Webhook, WebhookResponse } from '../ir/types.js';
-import { cleanSchemaName, stripListItemMarkers, toPascalCase } from '../utils/naming.js';
+import type { Enum, HttpMethod, Model, Parameter, Service, TypeRef, Webhook, WebhookResponse } from '../ir/types.js';
+import { collectResponseHeaders, walkTypeRef } from '../ir/types.js';
+import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { resolveSchemaName, schemaToTypeRef } from './schemas.js';
+import { schemaToTypeRef } from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import {
   HTTP_METHODS,
   buildDescription,
-  collectConstPrefixes,
   extractParams,
   operationIdModelBase,
   presentText,
@@ -26,6 +26,7 @@ export interface WebhookComponents {
   schemas?: Record<string, SchemaObject>;
   parameters?: Record<string, Record<string, unknown>>;
   requestBodies?: Record<string, Record<string, unknown>>;
+  responses?: Record<string, Record<string, unknown>>;
   examples?: Record<string, Record<string, unknown>>;
   /** `components.pathItems` (OpenAPI 3.1), the only target a webhook entry's `$ref` may point at. */
   pathItems?: Record<string, Record<string, unknown>>;
@@ -34,12 +35,9 @@ export interface WebhookComponents {
 export interface WebhookExtractionResult {
   /** One entry per (webhook key, HTTP method), in document order. */
   webhooks: Webhook[];
-  /** Models materialized from inline payload schemas, to merge into `ApiSpec.models`. */
+  /** Models materialized from inline payload and parameter schemas, to merge into `ApiSpec.models`. */
   inlineModels: Model[];
 }
-
-/** The suffix every model minted from a webhook's stem starts with (`<Stem>Payload`, `<Stem>PayloadPet`, ...). */
-const PAYLOAD_SUFFIX = 'Payload';
 
 /** One (key, method) pair of the `webhooks` map, with its references resolved. */
 interface WebhookEntry {
@@ -51,8 +49,18 @@ interface WebhookEntry {
   body: RequestBodyObject | undefined;
   /** `webhooks.<name>.<method>`, for diagnostics. */
   label: string;
-  /** How many methods the entry's path item declares; a second one qualifies the stem. */
+  /** How many methods the entry's path item declares; a second one qualifies a key-derived stem. */
   methodCount: number;
+}
+
+/** What one stem mints for a webhook: its typed parameters and payload, and the models behind them. */
+interface MintedWebhook {
+  headerParams: Parameter[];
+  queryParams: Parameter[];
+  cookieParams: Parameter[];
+  requestBody?: TypeRef;
+  requestBodyEncoding?: Webhook['requestBodyEncoding'];
+  inlineModels: Model[];
 }
 
 /**
@@ -72,7 +80,8 @@ interface WebhookEntry {
  * resolved, path-item-level parameters overridden by operation-level ones of
  * the same identity), so a malformed reference fails the parse the way it
  * does on an operation. A `path` parameter has nowhere to go — a webhook has
- * no path — and is dropped with a warning.
+ * no path — and is dropped with a warning. A response that is a `$ref` into
+ * `components/responses` is followed for its description.
  *
  * The payload schema is typed and materialized as the `payload` property of a
  * synthetic object named by the webhook's stem (see
@@ -83,16 +92,17 @@ interface WebhookEntry {
  * objects stays a union whose variants are named as any field-level union's
  * are, discriminator intact, because an event handler switches on it; a
  * `$ref` stays a reference; an inline enum takes the same name and is
- * promoted by `collectInlineEnumsFromWebhooks`. Nothing is flattened.
+ * promoted by `collectInlineEnumsFromWebhooks`. Nothing is flattened. An
+ * inline object on a parameter is materialized the same way, under the name
+ * `extractParams` references it by (`<Stem>XMeta`).
  *
- * `reservedModelNames` is every model name already decided — the component
- * models and the operations' inline models — so a stem is never allowed to
- * mint a name one of them owns.
+ * `reservedNames` is every model and enum name already decided — see
+ * `collectExistingNames` — so a webhook never mints a name one of them owns.
  */
 export function extractWebhooks(
   webhooks: unknown,
   components: WebhookComponents = {},
-  reservedModelNames: Iterable<string> = [],
+  reservedNames: Iterable<string> = [],
 ): WebhookExtractionResult {
   if (webhooks === undefined) return { webhooks: [], inlineModels: [] };
   if (!isRecord(webhooks)) {
@@ -101,15 +111,62 @@ export function extractWebhooks(
   }
 
   const entries = collectWebhookEntries(webhooks, components);
-  const stems = resolveWebhookModelStems(entries, reservedModelNames);
+  const stems = resolveWebhookModelStems(entries, new Set(reservedNames), components);
   const inlineModels: Model[] = [];
   const result: Webhook[] = [];
 
   for (const entry of entries) {
-    result.push(buildWebhook(entry, stems.get(entry)!, components, inlineModels));
+    const minted = mintWebhook(entry, stems.get(entry)!, components);
+    inlineModels.push(...minted.inlineModels);
+    result.push(buildWebhook(entry, minted, components));
   }
 
   return { webhooks: result, inlineModels };
+}
+
+/**
+ * Every model and enum name the rest of the parse has decided before webhooks
+ * are extracted, for `extractWebhooks` to reserve: each model's name, each
+ * enum's name, and every model or enum a model field or an operation refers
+ * to (parameters, bodies, responses, errors, pagination envelopes, response
+ * headers), inline enums included since their names are already fixed in the
+ * references that carry them. A superset is harmless — a referenced name is
+ * one that exists — and keeps the check from depending on which pass minted
+ * what.
+ */
+export function collectExistingNames(models: Model[], services: Service[], enums: Enum[]): Set<string> {
+  const names = new Set<string>();
+  const collect = (ref: TypeRef): void => {
+    walkTypeRef(ref, { model: (r) => names.add(r.name), enum: (r) => names.add(r.name) });
+  };
+  for (const model of models) {
+    names.add(model.name);
+    for (const field of model.fields) collect(field.type);
+  }
+  for (const e of enums) names.add(e.name);
+  for (const service of services) {
+    for (const op of service.operations) {
+      for (const param of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
+        collect(param.type);
+      }
+      if (op.requestBody) collect(op.requestBody);
+      collect(op.response);
+      for (const success of op.successResponses ?? []) collect(success.type);
+      for (const error of op.errors) if (error.type) collect(error.type);
+      if (op.pagination) {
+        collect(op.pagination.itemType);
+        for (const field of op.pagination.envelopeFields ?? []) collect(field.type);
+      }
+      for (const header of collectResponseHeaders(op)) collect(header.type);
+    }
+  }
+  return names;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -119,7 +176,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Flatten the map into one entry per (key, method), resolving path-item refs
  * and parameter / request-body refs up front so the stem resolution below can
- * read every entry's payload schema before any name is decided.
+ * mint every entry's names before any stem is decided.
  */
 function collectWebhookEntries(webhooks: Record<string, unknown>, components: WebhookComponents): WebhookEntry[] {
   const entries: WebhookEntry[] = [];
@@ -188,12 +245,7 @@ function resolveWebhookPathItem(
       return undefined;
     }
     seenRefs.add(ref);
-    // Match the whole pointer: a ref into any other section must not resolve
-    // off a same-named path item component.
-    const match = /^#\/components\/pathItems\/(.+)$/.exec(ref);
-    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
-    const resolved = refName ? componentPathItems?.[refName] : undefined;
+    const resolved = resolveComponentRef(ref, 'pathItems', componentPathItems);
     if (!resolved) {
       console.warn(
         `[oagen] Warning: Unresolved path item $ref "${ref}" for webhook "${name}": ` +
@@ -206,10 +258,28 @@ function resolveWebhookPathItem(
 }
 
 /**
+ * The component a `#/components/<section>/<name>` pointer names, or
+ * `undefined` when it points anywhere else or at nothing. The whole pointer
+ * is matched, so a ref into another section never resolves off a same-named
+ * entry of this one.
+ */
+function resolveComponentRef(
+  ref: string,
+  section: 'pathItems' | 'responses',
+  components: Record<string, Record<string, unknown>> | undefined,
+): Record<string, unknown> | undefined {
+  const prefix = `#/components/${section}/`;
+  if (!ref.startsWith(prefix)) return undefined;
+  // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
+  const refName = ref.slice(prefix.length).replace(/~1/g, '/').replace(/~0/g, '~');
+  return refName === '' ? undefined : components?.[refName];
+}
+
+/**
  * Decide the stem every model of each webhook is named from: `<Stem>Payload`
  * for the payload, `<Stem>Payload<Field>` for objects nested in it,
  * `<Const><Stem>Payload` for a const-discriminated variant, `<Stem><Param>`
- * for an inline parameter enum.
+ * for an inline parameter object or enum.
  *
  * The plain stem is the `operationId` when the operation declares one — run
  * through the same cleaning an operation's own `…Request` model gets, so a
@@ -220,42 +290,50 @@ function resolveWebhookPathItem(
  * unique per document and needs no qualifier. A key that PascalCases to
  * nothing, or to something starting with a digit, gets `Webhook` in front.
  *
- * A stem collides when a reserved name — a component model, or an inline
- * model an operation already minted — starts with `<Stem>Payload` in any of
- * its cleaned spellings, or with that behind a const value the payload can
- * prepend (`collectConstPrefixes`); or when another webhook's
- * `<Stem>Payload` starts with it, which covers two keys that flatten to one
- * stem (`pet_adopted` and `petAdopted`) as well as one stem nesting under
- * another. A colliding stem takes the first six hex characters of the SHA-1
- * of the webhook's key before the method qualifier (`PetAdopted546F12`),
- * exactly as an operationId-less operation's path prefix does. The check is
- * deliberately a superset — a reserved `PetAdoptedPayloads` also pushes the
- * stem onto the hash — because never sharing a name wrongly matters more
- * than the rare extra hash. The outcome depends only on the document's keys,
- * operationIds, component names and operations, never on their order, and a
- * key that stops colliding returns to its plain stem.
+ * Whether a stem collides is decided from the names it actually mints, not
+ * from a prefix: every entry is first minted with its plain stem
+ * (`mintWebhook`) and the model and inline-enum names that produces —
+ * payload, nested objects, union variants with their const or title
+ * prefixes, parameter objects, parameter enums, field enums — are collected
+ * (`mintedNames`). An entry collides when one of those names is reserved
+ * (`collectExistingNames`: every model and enum the components and the
+ * operations have decided, the components' own inline field models included)
+ * or is also minted by another entry. Two keys that flatten to one stem
+ * (`pet_adopted` and `petAdopted`) collide on every name; a `petEvent` union
+ * variant pinning `kind: returned` and a webhook keyed `returnedPetEvent`
+ * collide on the one name `ReturnedPetEventPayload`; a stem that merely
+ * starts with another's (`petAdopted` beside `petAdoptedPayloadPet`) does
+ * not collide unless a name coincides. A colliding stem takes the first six
+ * hex characters of the SHA-1 of the webhook's key before the method
+ * qualifier (`PetAdoptedB4A950`), exactly as an operationId-less operation's
+ * path prefix does, and is minted again under it. Both sides of a
+ * webhook-to-webhook collision are hashed, since neither key is more
+ * canonical than the other. The outcome depends only on the document's keys,
+ * operationIds, components and operations, never on their order, and a key
+ * that stops colliding returns to its plain stem.
+ *
+ * A name that does not embed the stem — a title-mapped union variant, which
+ * is context-free by design — cannot be moved by the hash; such a clash is
+ * left to the model merge, which shares an identical shape and warns about
+ * a different one, as it does for operations.
  */
 function resolveWebhookModelStems(
   entries: WebhookEntry[],
-  reservedModelNames: Iterable<string>,
+  reserved: ReadonlySet<string>,
+  components: WebhookComponents,
 ): Map<WebhookEntry, string> {
-  const reserved = [...reservedModelNames];
-  const plainStems = new Map<WebhookEntry, string>();
-  for (const entry of entries) plainStems.set(entry, plainStem(entry, ''));
+  const minted = new Map<WebhookEntry, Set<string>>();
+  for (const entry of entries) {
+    minted.set(entry, mintedNames(mintWebhook(entry, plainStem(entry, ''), components)));
+  }
 
   const stems = new Map<WebhookEntry, string>();
   for (const entry of entries) {
-    const stem = plainStems.get(entry)!;
-    const spellings = prefixSpellings(stem + PAYLOAD_SUFFIX);
-    const constPrefixes = new Set<string>();
-    collectConstPrefixes(selectRequestBodyContent(entry.body).schema, constPrefixes, 0);
-    const prefixes = [...spellings, ...[...constPrefixes].flatMap((c) => spellings.map((s) => c + s))];
-    const reservedTaken = reserved.some((name) => prefixes.some((prefix) => name.startsWith(prefix)));
-    const webhookTaken = entries.some(
-      (other) =>
-        other !== entry && spellings.some((spelling) => (plainStems.get(other)! + PAYLOAD_SUFFIX).startsWith(spelling)),
+    const names = minted.get(entry)!;
+    const taken = [...names].some(
+      (name) => reserved.has(name) || entries.some((other) => other !== entry && minted.get(other)!.has(name)),
     );
-    stems.set(entry, reservedTaken || webhookTaken ? plainStem(entry, webhookDisambiguator(entry.name)) : stem);
+    stems.set(entry, taken ? plainStem(entry, webhookDisambiguator(entry.name)) : plainStem(entry, ''));
   }
   return stems;
 }
@@ -278,34 +356,90 @@ function webhookDisambiguator(name: string): string {
 }
 
 /**
- * The spellings a stem-derived prefix could take after one of the parser's
- * cleaning steps — the same second line of defence an operation's path
- * prefix gets: the prefix itself, cleanSchemaName's form, resolveSchemaName's
- * form, and stripListItemMarkers alone, which nested-model qualification
- * applies to a parent name. Empty spellings are dropped so a degenerate
- * prefix cannot match every reserved name.
+ * Type a webhook's parameters and payload under `stem`, materializing every
+ * model they reference inline. The parameters go through `extractParams`
+ * with the stem as the qualifying context, as a service name qualifies an
+ * operation's (`PetAdopted` + `X-Event-Type` → `PetAdoptedXEventType`); a
+ * parameter with an inline object (or array of them) is then run through the
+ * field extractor as a single synthetic property of the stem, which names
+ * the model exactly as `extractParams` referenced it — the pairing response
+ * headers already rely on. The payload is typed and materialized as the
+ * synthetic `payload` property of the stem for the same reason: for every
+ * shape the field extractor knows — an inline object, a `oneOf`/`anyOf` of
+ * inline objects, an `allOf` merge or `$ref` augmentation, an array or map of
+ * any of those, an inline enum, a nullable wrapper — the reference and the
+ * model are named by one code path. A body with no schema is a binary or text
+ * primitive, as on an operation.
  */
-function prefixSpellings(prefix: string): string[] {
-  const spellings = [prefix, cleanSchemaName(prefix), resolveSchemaName(prefix), stripListItemMarkers(prefix)];
-  return [...new Set(spellings)].filter((spelling) => spelling.length > 0);
-}
-
-function buildWebhook(
-  entry: WebhookEntry,
-  stem: string,
-  components: WebhookComponents,
-  inlineModels: Model[],
-): Webhook {
-  const { name, method, op, params, body, label } = entry;
-  // The stem qualifies inline parameter enums the way a service name does
-  // for an operation: `PetAdopted` + `X-Event-Type` → `PetAdoptedXEventType`.
+function mintWebhook(entry: WebhookEntry, stem: string, components: WebhookComponents): MintedWebhook {
+  const { params, body, label } = entry;
+  const inlineModels: Model[] = [];
+  const parent = toPascalCase(stem);
   const extract = (location: 'query' | 'header' | 'cookie'): Parameter[] =>
     extractParams(params, location, stem, components.schemas, components.examples, label);
   const headerParams = extract('header');
   const queryParams = extract('query');
   const cookieParams = extract('cookie');
+  for (const param of params) {
+    if (!param.schema) continue;
+    extractInlineModelsFromProperties(
+      { properties: { [param.name]: param.schema } },
+      inlineModels,
+      parent,
+      components.schemas,
+    );
+  }
 
-  const { requestBody, requestBodyEncoding } = extractWebhookPayload(body, stem, components.schemas, inlineModels);
+  const minted: MintedWebhook = { headerParams, queryParams, cookieParams, inlineModels };
+  if (!body?.content) return minted;
+  const { encoding, schema } = selectRequestBodyContent(body);
+  if (!schema) {
+    if (encoding === 'binary') {
+      minted.requestBody = { kind: 'primitive', type: 'string', format: 'binary' };
+      minted.requestBodyEncoding = encoding;
+    } else if (encoding === 'text') {
+      minted.requestBody = { kind: 'primitive', type: 'string' };
+      minted.requestBodyEncoding = encoding;
+    }
+    return minted;
+  }
+  minted.requestBody = schemaToTypeRef(schema, 'payload', stem);
+  minted.requestBodyEncoding = encoding;
+  extractInlineModelsFromProperties({ properties: { payload: schema } }, inlineModels, stem, components.schemas);
+  return minted;
+}
+
+/**
+ * Every name `mintWebhook` decided: the models it materialized and every
+ * inline enum (an enum ref carrying `values`; a `$ref` to a component enum
+ * carries none and is a reference, not a minting) in the parameters, the
+ * payload, and the materialized models' fields. Component references are
+ * deliberately not included: a payload that refers to `AdoptionEvent` names
+ * nothing new.
+ */
+function mintedNames(minted: MintedWebhook): Set<string> {
+  const names = new Set<string>();
+  const collectEnums = (ref: TypeRef): void => {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (r.values) names.add(r.name);
+      },
+    });
+  };
+  for (const model of minted.inlineModels) {
+    names.add(model.name);
+    for (const field of model.fields) collectEnums(field.type);
+  }
+  for (const param of [...minted.headerParams, ...minted.queryParams, ...minted.cookieParams]) {
+    collectEnums(param.type);
+  }
+  if (minted.requestBody) collectEnums(minted.requestBody);
+  return names;
+}
+
+function buildWebhook(entry: WebhookEntry, minted: MintedWebhook, components: WebhookComponents): Webhook {
+  const { name, method, op, body, label } = entry;
+  const { headerParams, queryParams, cookieParams, requestBody, requestBodyEncoding } = minted;
   const summary = presentText(op.summary);
   const description = buildDescription(summary, op.description);
   const tags = Array.isArray(op.tags)
@@ -327,55 +461,66 @@ function buildWebhook(
     ...(requestBody ? { requestBody } : {}),
     ...(requestBodyEncoding ? { requestBodyEncoding } : {}),
     ...(body?.required === true ? { requestBodyRequired: true } : {}),
-    responses: extractWebhookResponses(op.responses),
+    responses: extractWebhookResponses(op.responses, components.responses, label),
     ...(security !== undefined ? { security } : {}),
   };
 }
 
 /**
- * Type the payload and materialize whatever it declares inline, as the
- * `payload` property of a synthetic object named `stem`. `schemaToTypeRef`
- * names the reference and `extractInlineModelsFromProperties` names the
- * models from the same inputs, so they agree by construction for every shape
- * the field extractor knows: an inline object (`<Stem>Payload`, nested
- * objects under it), a `oneOf`/`anyOf` of inline objects (one model per
- * variant, union kept), an `allOf` merge or `$ref` augmentation, an array or
- * map of any of those, an inline enum, a nullable wrapper around any of them.
- * A body with no schema is a binary or text primitive, as on an operation.
- */
-function extractWebhookPayload(
-  body: RequestBodyObject | undefined,
-  stem: string,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-  inlineModels: Model[],
-): { requestBody?: TypeRef; requestBodyEncoding?: Webhook['requestBodyEncoding'] } {
-  if (!body?.content) return {};
-  const { encoding, schema } = selectRequestBodyContent(body);
-  if (!schema) {
-    if (encoding === 'binary') {
-      return { requestBody: { kind: 'primitive', type: 'string', format: 'binary' }, requestBodyEncoding: encoding };
-    }
-    if (encoding === 'text') {
-      return { requestBody: { kind: 'primitive', type: 'string' }, requestBodyEncoding: encoding };
-    }
-    return {};
-  }
-  const requestBody = schemaToTypeRef(schema, 'payload', stem);
-  extractInlineModelsFromProperties({ properties: { payload: schema } }, inlineModels, stem, componentSchemas);
-  return { requestBody, requestBodyEncoding: encoding };
-}
-
-/**
  * The status codes the sender expects back, in document order. Only
  * three-digit keys are carried: `default` and ranges such as `2XX` name no
- * single code a handler could return. A blank description is omitted.
+ * single code a handler could return. A response written as a `$ref` into
+ * `components/responses` is followed for its description, chains included; a
+ * description written beside the `$ref` (OpenAPI 3.1) wins over the
+ * component's. A ref that leads nowhere, or anywhere else, keeps the status
+ * code without a description, with a warning. A blank description is omitted.
  */
-function extractWebhookResponses(responses: OperationObject['responses']): WebhookResponse[] {
+function extractWebhookResponses(
+  responses: OperationObject['responses'],
+  componentResponses: Record<string, Record<string, unknown>> | undefined,
+  label: string,
+): WebhookResponse[] {
   const result: WebhookResponse[] = [];
-  for (const [code, response] of Object.entries(responses ?? {})) {
+  for (const [code, raw] of Object.entries(responses ?? {})) {
     if (!/^\d{3}$/.test(code)) continue;
-    const description = presentText(isRecord(response) ? (response.description as string | undefined) : undefined);
+    const description = presentText(resolveResponseDescription(raw, componentResponses, code, label));
     result.push({ statusCode: Number(code), ...(description !== undefined ? { description } : {}) });
   }
   return result;
+}
+
+/**
+ * The description of a response, following a `components/responses` `$ref`
+ * chain with a cycle guard. The outermost description along the chain wins,
+ * so a sibling beside a ref overrides what it points at.
+ */
+function resolveResponseDescription(
+  raw: unknown,
+  componentResponses: Record<string, Record<string, unknown>> | undefined,
+  code: string,
+  label: string,
+): string | undefined {
+  const seenRefs = new Set<string>();
+  let description: string | undefined;
+  let current: unknown = raw;
+  while (isRecord(current)) {
+    if (description === undefined && typeof current.description === 'string') description = current.description;
+    const ref = current.$ref;
+    if (ref === undefined) break;
+    if (typeof ref !== 'string' || seenRefs.has(ref)) {
+      console.warn(
+        `[oagen] Warning: Circular or malformed response $ref for status ${code} in ${label}; keeping the status code only.`,
+      );
+      break;
+    }
+    seenRefs.add(ref);
+    current = resolveComponentRef(ref, 'responses', componentResponses);
+    if (!current) {
+      console.warn(
+        `[oagen] Warning: Unresolved response $ref "${ref}" for status ${code} in ${label}: ` +
+          'no matching entry under components/responses. Keeping the status code only.',
+      );
+    }
+  }
+  return description;
 }

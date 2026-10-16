@@ -77,14 +77,15 @@ webhooks:
   # A path item reference (OpenAPI 3.1) with path-item-level parameters and no body.
   shelterClosed:
     $ref: '#/components/pathItems/ShelterClosed'
-  # A referenced request body whose payload is a discriminated oneOf.
+  # A referenced request body whose payload is a discriminated oneOf, and a
+  # referenced response.
   petEvent:
     post:
       requestBody:
         $ref: '#/components/requestBodies/PetEvent'
       responses:
         '202':
-          description: Queued
+          $ref: '#/components/responses/Queued'
   # Two methods on one key: each payload gets its own model.
   petUpdated:
     post:
@@ -120,9 +121,21 @@ components:
         - $ref: '#/components/parameters/DeliveryId'
       post:
         operationId: shelterClosed
+        # An object-shaped header: its model must be materialized.
+        parameters:
+          - name: X-Meta
+            in: header
+            schema:
+              type: object
+              properties:
+                etag:
+                  type: string
         responses:
           '204':
             description: ok
+  responses:
+    Queued:
+      description: Queued for delivery
   parameters:
     DeliveryId:
       name: X-Delivery-Id

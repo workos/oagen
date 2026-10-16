@@ -235,10 +235,28 @@ describe('webhooks', () => {
       const closed = spec.webhooks!.find((w) => w.name === 'shelterClosed')!;
 
       expect(closed.operationId).toBe('shelterClosed');
-      expect(closed.headerParams.map((p) => [p.name, p.required])).toEqual([['X-Delivery-Id', true]]);
+      expect(closed.headerParams.map((p) => [p.name, p.required])).toEqual([
+        ['X-Delivery-Id', true],
+        ['X-Meta', false],
+      ]);
       expect(closed.requestBody).toBeUndefined();
       expect(Object.keys(closed)).not.toContain('requestBody');
       expect(closed.responses).toEqual([{ statusCode: 204, description: 'ok' }]);
+    });
+
+    it('materializes an object-shaped parameter under the name the parameter references', async () => {
+      const spec = await parseSpec(`${FIXTURES}/webhooks.yml`);
+      const closed = spec.webhooks!.find((w) => w.name === 'shelterClosed')!;
+
+      expect(closed.headerParams[1].type).toEqual({ kind: 'model', name: 'ShelterClosedXMeta' });
+      expect(spec.models.find((m) => m.name === 'ShelterClosedXMeta')!.fields.map((f) => f.name)).toEqual(['etag']);
+    });
+
+    it('follows a components/responses reference for the description', async () => {
+      const spec = await parseSpec(`${FIXTURES}/webhooks.yml`);
+      const event = spec.webhooks!.find((w) => w.name === 'petEvent')!;
+
+      expect(event.responses).toEqual([{ statusCode: 202, description: 'Queued for delivery' }]);
     });
 
     it('does not turn a webhook into a service or an operation', async () => {
@@ -307,6 +325,73 @@ describe('webhooks', () => {
       expect(warn.mock.calls[0][0]).toContain('`x-webhooks` is not read');
     });
 
+    it("never takes a name a component's inline field model needs, map values included", async () => {
+      // Greptile's case: `Event.payload` is a map of inline objects, whose
+      // value model is `EventPayload` — the name a webhook keyed `event` would
+      // also mint. The component's model must keep its own fields.
+      const mapOfObjects = {
+        type: 'object',
+        additionalProperties: { type: 'object', properties: { id: { type: 'string' } } },
+      };
+      const spec = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 't', version: '1' },
+        paths: {},
+        webhooks: { event: postWith(petSchema) },
+        components: { schemas: { Event: { type: 'object', properties: { payload: mapOfObjects } } } },
+      });
+
+      expect(spec.models.find((m) => m.name === 'EventPayload')!.fields.map((f) => f.name)).toEqual(['id']);
+      const payloadName = (spec.webhooks![0].requestBody as { name: string }).name;
+      expect(payloadName).toMatchInlineSnapshot(`"Event5006EdPayload"`);
+      expect(spec.models.find((m) => m.name === payloadName)!.fields.map((f) => f.name)).toEqual(['pet_id']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('never takes a name a component needs for a nested inline model either', async () => {
+      // Only the nested name coincides: `Order.payload_item` is `OrderPayloadItem`,
+      // which the webhook's `item` property under `OrderPayload` would also mint.
+      const item = { type: 'object', properties: { qty: { type: 'integer' } } };
+      const payloadItem = { type: 'object', properties: { sku: { type: 'string' } } };
+      const spec = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 't', version: '1' },
+        paths: {},
+        webhooks: { order: postWith({ type: 'object', properties: { item } }) },
+        components: { schemas: { Order: { type: 'object', properties: { payload_item: payloadItem } } } },
+      });
+
+      expect(spec.models.find((m) => m.name === 'OrderPayloadItem')!.fields.map((f) => f.name)).toEqual(['sku']);
+      expect(spec.models.map((m) => m.name)).toMatchInlineSnapshot(`
+        [
+          "Order",
+          "OrderPayloadItem",
+          "OrderCce55EPayload",
+          "OrderCce55EPayloadItem",
+        ]
+      `);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('never takes the name of a component enum for an inline parameter enum', async () => {
+      const header = { name: 'X-Source', in: 'header', schema: { type: 'string', enum: ['app', 'web'] } };
+      const spec = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 't', version: '1' },
+        paths: {},
+        webhooks: { petAdopted: { post: { parameters: [header], responses: {} } } },
+        components: { schemas: { PetAdoptedXSource: { type: 'string', enum: ['legacy'] } } },
+      });
+
+      const headerEnum = spec.webhooks![0].headerParams[0].type as { name: string };
+      expect(headerEnum.name).toMatchInlineSnapshot(`"PetAdoptedB4A950XSource"`);
+      expect(spec.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+        ['PetAdoptedXSource', ['legacy']],
+        [headerEnum.name, ['app', 'web']],
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it('reads a webhooks map on any 3.x document, since the key is unambiguous', async () => {
       const spec = await parseJson({
         openapi: '3.0.3',
@@ -348,12 +433,36 @@ describe('webhooks', () => {
         );
       });
 
-      it('hashes a stem a reserved model name starts with, and returns to the plain stem once it is free', () => {
-        const reserved = extractWebhooks({ orderShipped: postWith(petSchema) }, {}, ['OrderShippedPayloadItem']);
+      it('hashes a stem when a reserved name is one it would mint, and returns to the plain stem once free', () => {
+        const reserved = extractWebhooks({ orderShipped: postWith(petSchema) }, {}, ['OrderShippedPayload']);
         expect(reserved.inlineModels.map((m) => m.name)).toEqual(['OrderShippedA13Ec8Payload']);
 
-        const free = extractWebhooks({ orderShipped: postWith(petSchema) }, {}, ['OrderShipment']);
+        // A reserved name the webhook does not mint is no collision, however it is spelled.
+        const free = extractWebhooks({ orderShipped: postWith(petSchema) }, {}, ['OrderShippedPayloadItem']);
         expect(free.inlineModels.map((m) => m.name)).toEqual(['OrderShippedPayload']);
+      });
+
+      it('hashes a stem when a reserved name is one of its nested or parameter models', () => {
+        const nested = extractWebhooks({ order: postWith({ type: 'object', properties: { item: petSchema } }) }, {}, [
+          'OrderPayloadItem',
+        ]);
+        expect(nested.inlineModels.map((m) => m.name)).toMatchInlineSnapshot(`
+          [
+            "OrderCce55EPayload",
+            "OrderCce55EPayloadItem",
+          ]
+        `);
+
+        const param = extractWebhooks(
+          { order: { post: { parameters: [{ name: 'X-Meta', in: 'header', schema: petSchema }], responses: {} } } },
+          {},
+          ['OrderXMeta'],
+        );
+        expect(param.inlineModels.map((m) => m.name)).toMatchInlineSnapshot(`
+          [
+            "OrderCce55EXMeta",
+          ]
+        `);
       });
 
       it('hashes a stem one of its const-prefixed variant names would collide on', () => {
@@ -375,15 +484,86 @@ describe('webhooks', () => {
         });
       });
 
-      it('hashes a stem another webhook stem nests under, keeping the longer one plain', () => {
+      it('hashes both webhooks when one mints a name the other also mints, const prefixes included', () => {
+        // Greptile's case: the `returned` variant of `petEvent` is named
+        // `ReturnedPetEventPayload`, which is also the payload name of a
+        // webhook keyed `returnedPetEvent`.
+        const union = {
+          oneOf: [
+            { type: 'object', properties: { kind: { const: 'adopted' }, pet_id: { type: 'string' } } },
+            { type: 'object', properties: { kind: { const: 'returned' }, pet_id: { type: 'string' } } },
+          ],
+          discriminator: { propertyName: 'kind' },
+        };
+        const { webhooks, inlineModels } = extractWebhooks({
+          petEvent: postWith(union),
+          returnedPetEvent: postWith({ type: 'object', properties: { reason: { type: 'string' } } }),
+        });
+
+        expect(inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toMatchInlineSnapshot(`
+          [
+            [
+              "PetEvent59656FPayload",
+              [
+                "kind",
+                "pet_id",
+              ],
+            ],
+            [
+              "ReturnedPetEvent59656FPayload",
+              [
+                "kind",
+                "pet_id",
+              ],
+            ],
+            [
+              "ReturnedPetEvent978BcdPayload",
+              [
+                "reason",
+              ],
+            ],
+          ]
+        `);
+        expect(webhooks.map((w) => w.requestBody)).toMatchInlineSnapshot(`
+          [
+            {
+              "compositionKind": "oneOf",
+              "discriminator": {
+                "mapping": {
+                  "adopted": "PetEvent59656FPayload",
+                  "returned": "ReturnedPetEvent59656FPayload",
+                },
+                "property": "kind",
+              },
+              "kind": "union",
+              "variants": [
+                {
+                  "kind": "model",
+                  "name": "PetEvent59656FPayload",
+                },
+                {
+                  "kind": "model",
+                  "name": "ReturnedPetEvent59656FPayload",
+                },
+              ],
+            },
+            {
+              "kind": "model",
+              "name": "ReturnedPetEvent978BcdPayload",
+            },
+          ]
+        `);
+      });
+
+      it('does not hash a stem merely because another stem starts with it', () => {
         const { inlineModels } = extractWebhooks({
           petAdopted: postWith({ type: 'object', properties: { pet: petSchema } }),
           petAdoptedPayloadPet: postWith(petSchema),
         });
 
         expect(inlineModels.map((m) => m.name)).toEqual([
-          'PetAdoptedB4A950Payload',
-          'PetAdoptedB4A950PayloadPet',
+          'PetAdoptedPayload',
+          'PetAdoptedPayloadPet',
           'PetAdoptedPayloadPetPayload',
         ]);
       });
@@ -510,6 +690,31 @@ describe('webhooks', () => {
         );
       });
 
+      it('materializes inline object and array-of-object parameters under the names they reference', () => {
+        const { webhooks, inlineModels } = extractWebhooks({
+          petAdopted: {
+            post: {
+              parameters: [
+                { name: 'X-Meta', in: 'header', schema: { type: 'object', properties: { etag: { type: 'string' } } } },
+                { name: 'filters', in: 'query', schema: { type: 'array', items: petSchema } },
+                { name: 'session', in: 'cookie', schema: { type: 'object', properties: { id: { type: 'string' } } } },
+              ],
+              responses: {},
+            },
+          },
+        });
+
+        const [hook] = webhooks;
+        expect(hook.headerParams[0].type).toEqual({ kind: 'model', name: 'PetAdoptedXMeta' });
+        expect(hook.queryParams[0].type).toEqual({ kind: 'array', items: { kind: 'model', name: 'PetAdoptedFilter' } });
+        expect(hook.cookieParams![0].type).toEqual({ kind: 'model', name: 'PetAdoptedSession' });
+        expect(inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+          ['PetAdoptedXMeta', ['etag']],
+          ['PetAdoptedFilter', ['pet_id']],
+          ['PetAdoptedSession', ['id']],
+        ]);
+      });
+
       it('fails the parse on a parameter or request body ref it cannot resolve, as an operation does', () => {
         expect(() =>
           extractWebhooks({ petAdopted: { post: { parameters: [{ $ref: '#/components/parameters/Nope' }] } } }),
@@ -574,6 +779,48 @@ describe('webhooks', () => {
             ],
           },
         ]);
+      });
+
+      it('follows components/responses references for descriptions, the outermost description winning', () => {
+        const { webhooks } = extractWebhooks(
+          {
+            petAdopted: {
+              post: {
+                responses: {
+                  '200': { $ref: '#/components/responses/Ack' },
+                  '202': { $ref: '#/components/responses/Alias' },
+                  '204': { $ref: '#/components/responses/Ack', description: 'Sibling wins' },
+                  '400': { $ref: '#/components/responses/Loop' },
+                  '404': { $ref: '#/components/responses/Missing' },
+                  '410': { $ref: '#/components/schemas/Ack' },
+                },
+              },
+            },
+          },
+          {
+            responses: {
+              Ack: { description: 'Acknowledged' },
+              Alias: { $ref: '#/components/responses/Ack' },
+              Loop: { $ref: '#/components/responses/Loop' },
+            },
+          },
+        );
+
+        expect(webhooks[0].responses).toEqual([
+          { statusCode: 200, description: 'Acknowledged' },
+          { statusCode: 202, description: 'Acknowledged' },
+          { statusCode: 204, description: 'Sibling wins' },
+          { statusCode: 400 },
+          { statusCode: 404 },
+          { statusCode: 410 },
+        ]);
+        expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).toMatchInlineSnapshot(`
+          [
+            "[oagen] Warning: Circular or malformed response $ref for status 400 in webhooks.petAdopted.post; keeping the status code only.",
+            "[oagen] Warning: Unresolved response $ref "#/components/responses/Missing" for status 404 in webhooks.petAdopted.post: no matching entry under components/responses. Keeping the status code only.",
+            "[oagen] Warning: Unresolved response $ref "#/components/schemas/Ack" for status 410 in webhooks.petAdopted.post: no matching entry under components/responses. Keeping the status code only.",
+          ]
+        `);
       });
 
       it('carries only three-digit response codes, each with its description when it has one', () => {
@@ -645,6 +892,39 @@ describe('webhooks', () => {
       collectInlineEnumsFromWebhooks([hook], enums);
 
       expect(enums.map((e) => e.name)).toEqual(['Existing', 'Source']);
+    });
+
+    it('collectInlineEnumsFromWebhooks renames an enum whose name is taken by different values, shares one with the same', () => {
+      const hook = webhook({
+        headerParams: [
+          { name: 'X-Source', type: { kind: 'enum', name: 'Source', values: ['x', 'y'] }, required: false },
+        ],
+        queryParams: [{ name: 'kind', type: { kind: 'enum', name: 'Kind', values: ['b', 'a'] }, required: false }],
+        requestBody: { kind: 'enum', name: 'Source', values: ['x', 'y'] },
+      });
+      const enums: Enum[] = [
+        { name: 'Source', values: [{ name: 'APP', value: 'app' }] },
+        {
+          name: 'Kind',
+          values: [
+            { name: 'A', value: 'a' },
+            { name: 'B', value: 'b' },
+          ],
+        },
+      ];
+
+      collectInlineEnumsFromWebhooks([hook], enums);
+
+      // Both refs to the clashing set are renamed to the one distinct name; the
+      // identical-valued set (order aside) is shared under the existing name.
+      expect(hook.headerParams[0].type).toMatchObject({ kind: 'enum', name: 'Source2' });
+      expect(hook.requestBody).toMatchObject({ kind: 'enum', name: 'Source2' });
+      expect(hook.queryParams[0].type).toMatchObject({ kind: 'enum', name: 'Kind' });
+      expect(enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+        ['Source', ['app']],
+        ['Kind', ['a', 'b']],
+        ['Source2', ['x', 'y']],
+      ]);
     });
   });
 });

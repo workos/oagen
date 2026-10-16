@@ -2049,7 +2049,7 @@ function collectOperationConstPrefixes(
   return prefixes;
 }
 
-export function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>, depth: number): void {
+function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>, depth: number): void {
   if (!schema || schema.$ref || depth > 16) return;
   for (const variants of [schema.oneOf, schema.anyOf]) {
     for (const variant of variants ?? []) {
