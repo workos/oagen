@@ -50,26 +50,6 @@ export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
   '5XX': 'ServerError',
 };
 
-/**
- * Type the body of a fallback (`default` or `nXX`) response. A `$ref` is
- * kept as the referenced model; an inline schema is materialized under
- * `contextName` by the same extractor the primary body uses, nested inline
- * objects and `oneOf` variants included, so the ref never dangles. List
- * envelope and resource-wrapper detection are skipped on purpose: a fallback
- * body is not what the SDK method returns, so it must not drive pagination.
- */
-export function extractFallbackResponseBody(
-  schema: SchemaObject,
-  contextName: string,
-  componentSchemas?: Record<string, SchemaObject>,
-): { type: TypeRef; inlineModels: Model[] } {
-  if (schema.$ref) {
-    return { type: schemaToTypeRef(schema, contextName), inlineModels: [] };
-  }
-  const { response, inlineModels } = extractDirectResource(schema, contextName, componentSchemas);
-  return { type: response, inlineModels };
-}
-
 export function classifyAndExtractResponse(
   schema: SchemaObject,
   contextName: string,

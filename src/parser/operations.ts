@@ -31,7 +31,8 @@ import {
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
-import { classifyAndExtractResponse, extractFallbackResponseBody, STATUS_RANGE_LABELS } from './responses.js';
+import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
+import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 
@@ -299,6 +300,7 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -352,6 +354,7 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        componentResponses,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -849,6 +852,7 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -942,13 +946,22 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
-    componentHeaders,
+  } = extractResponses(
+    op.responses,
+    op,
+    pathModelBaseName,
+    path,
+    method,
     componentSchemas,
-    serviceName: opContext,
-    operationQualifier: toPascalCase(operationName),
-    registry: headerModelRegistry,
-  });
+    {
+      componentHeaders,
+      componentSchemas,
+      serviceName: opContext,
+      operationQualifier: toPascalCase(operationName),
+      registry: headerModelRegistry,
+    },
+    componentResponses,
+  );
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -2127,6 +2140,8 @@ interface FallbackResponseSink {
   headerContext: HeaderExtractionContext;
   /** Shared with the explicit status codes' headers: one registry, one list. */
   headerModels: Model[];
+  /** `components/responses`, for a fallback written as a Reference Object. */
+  componentResponses?: Record<string, Record<string, unknown>>;
   /** The body models the fallback responses materialize. */
   models: Model[];
   defaultResponse?: DefaultResponse;
@@ -2148,7 +2163,11 @@ function statusRangeOf(key: string): StatusRange | undefined {
  * dropped silently. A numeric key returns false so the caller reads it as
  * before — `parseInt` keeps `200`, `201 ` and the like exactly as they were.
  */
-function readFallbackResponse(key: string, resp: ResponseObject, sink: FallbackResponseSink): boolean {
+function readFallbackResponse(
+  key: string,
+  resp: ResponseObject | ReferenceObject,
+  sink: FallbackResponseSink,
+): boolean {
   if (key.startsWith('x-')) return true;
   const range = statusRangeOf(key);
   if (key === 'default' || range) {
@@ -2157,7 +2176,14 @@ function readFallbackResponse(key: string, resp: ResponseObject, sink: FallbackR
       console.warn(`[oagen] Warning: Duplicate "${range}" response on ${sink.opLabel}; keeping the first`);
       return true;
     }
-    const entry = extractFallbackResponse(resp, range ? STATUS_RANGE_LABELS[range] : 'Default', sink);
+    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+    // Reference Object has no `headers` or `content` of its own to read.
+    const resolved = resolveResponseRef<ResponseObject>(
+      resp,
+      sink.componentResponses,
+      `${key} response of ${sink.opLabel}`,
+    );
+    const entry = extractFallbackResponse(resolved, range ? STATUS_RANGE_LABELS[range] : 'Default', sink);
     if (range) sink.rangeResponses.push({ range, ...entry });
     else sink.defaultResponse = entry;
     return true;
@@ -2175,14 +2201,54 @@ function readFallbackResponse(key: string, resp: ResponseObject, sink: FallbackR
 function extractFallbackResponse(resp: ResponseObject, label: string, sink: FallbackResponseSink): DefaultResponse {
   const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.headerContext, sink.headerModels);
   const schema = jsonResponseSchema(resp);
-  let type: TypeRef | undefined;
-  if (schema) {
-    const contextName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
-    const body = extractFallbackResponseBody(schema, contextName, sink.componentSchemas);
-    type = body.type;
-    sink.models.push(...body.inlineModels);
-  }
+  const type = schema
+    ? typeFallbackBody(schema, deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label), sink)
+    : undefined;
   return { ...(type && { type }), ...(headers && { headers }) };
+}
+
+/**
+ * Type a fallback body and materialize every model it names, under a name no
+ * other model owns.
+ *
+ * The body is extracted as if it were a field named `contextName` of a parent
+ * with no name, through the extractor every field goes through — so every
+ * shape a field can take (a nullable object, an array or map of objects,
+ * `oneOf`/`anyOf` variants, an `allOf` merge, nested objects) is materialized
+ * under the name `schemaToTypeRef` references it by, by construction. List
+ * envelope and resource-wrapper detection are skipped on purpose: a fallback
+ * body is not what the SDK method returns, so it must not drive pagination.
+ *
+ * The models are checked against the spec-wide registry (the component
+ * models, and every header and fallback model so far) the way header models
+ * are: a model whose shape matches the name's owner shares it, and a clash
+ * moves the whole body to the next free name (`<Op>DefaultResponse2`, `…3`),
+ * nested models and ref together — so a component that happens to be named
+ * like the fallback is never overwritten by `mergeInlineResponseModels`.
+ */
+function typeFallbackBody(schema: SchemaObject, contextName: string, sink: FallbackResponseSink): TypeRef {
+  if (schema.$ref) return schemaToTypeRef(schema, contextName);
+  const { registry, operationQualifier } = sink.headerContext;
+
+  for (let attempt = 0; ; attempt++) {
+    const name = attempt === 0 ? contextName : `${contextName}${attempt + 1}`;
+    const trial: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { [name]: schema } }, trial, undefined, sink.componentSchemas);
+
+    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
+    const clashes = fingerprints.some(([model, fingerprint]) => {
+      const owner = registry.get(model.name);
+      return owner !== undefined && owner.fingerprint !== fingerprint;
+    });
+    if (clashes) continue;
+
+    for (const [model, fingerprint] of fingerprints) {
+      if (registry.has(model.name)) continue;
+      registry.set(model.name, { fingerprint, operation: operationQualifier });
+      sink.models.push(model);
+    }
+    return schemaToTypeRef(schema, name);
+  }
 }
 
 /**
@@ -2208,6 +2274,7 @@ function extractResponses(
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
   headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
@@ -2246,6 +2313,7 @@ function extractResponses(
     componentSchemas,
     headerContext,
     headerModels,
+    componentResponses,
     models: [],
     rangeResponses: [],
   };

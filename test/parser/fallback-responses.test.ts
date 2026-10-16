@@ -190,7 +190,7 @@ describe('the default response (issue #214)', () => {
     expectConsistent(ir);
   });
 
-  it('materializes inline array items as <Op>DefaultItem', async () => {
+  it("materializes inline array items under the body's name, as a field's array items take its name", async () => {
     const ir = await parseWithoutWarnings(
       petsSpec({
         '200': ok,
@@ -201,8 +201,8 @@ describe('the default response (issue #214)', () => {
       }),
     );
 
-    expect(only(ir).defaultResponse).toEqual({ type: { kind: 'array', items: model('ListPetsDefaultItem') } });
-    expect(fieldTypesByModel(ir.models)['ListPetsDefaultItem']).toEqual({ code: str });
+    expect(only(ir).defaultResponse).toEqual({ type: { kind: 'array', items: model('ListPetsDefaultResponse') } });
+    expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({ code: str });
     expectConsistent(ir);
   });
 
@@ -501,5 +501,350 @@ describe('fallback response bodies reach every pass', () => {
     expect(assigned.get('Error')).toBe('Pets');
     expect(assigned.get('ListPetsServerErrorResponse')).toBe('Pets');
     expect(assigned.get('Pet')).toBeUndefined();
+  });
+});
+
+describe('every body shape a field can take is materialized, for default and for a range', () => {
+  const obj = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+  const code = obj({ code: { type: 'string' } });
+  const reason = obj({ reason: { type: 'string' } });
+
+  type Shape = {
+    label: string;
+    schema: unknown;
+    /** The body's type, given the name the body is materialized under. */
+    type: (name: string) => TypeRef;
+    /** Every model the body materializes, given that name. */
+    models: (name: string) => string[];
+  };
+  const shapes: Shape[] = [
+    { label: 'an object', schema: code, type: model, models: (n) => [n] },
+    {
+      label: 'a nullable object (type array)',
+      schema: { type: ['object', 'null'], properties: { code: { type: 'string' } } },
+      type: (n) => ({ kind: 'nullable', inner: model(n) }),
+      models: (n) => [n],
+    },
+    {
+      label: 'a oneOf with a null variant',
+      schema: { oneOf: [code, { type: 'null' }] },
+      type: (n) => ({ kind: 'nullable', inner: model(n) }),
+      models: (n) => [n],
+    },
+    {
+      label: 'a oneOf of inline objects',
+      schema: { oneOf: [code, reason] },
+      type: (n) => ({ kind: 'union', variants: [model(n), model(`${n}WithReason`)], compositionKind: 'oneOf' }),
+      models: (n) => [n, `${n}WithReason`],
+    },
+    {
+      label: 'an anyOf of inline objects',
+      schema: { anyOf: [code, reason] },
+      type: (n) => ({ kind: 'union', variants: [model(n), model(`${n}WithReason`)], compositionKind: 'anyOf' }),
+      models: (n) => [n, `${n}WithReason`],
+    },
+    {
+      label: 'a map of objects',
+      schema: { type: 'object', additionalProperties: code },
+      type: (n) => ({ kind: 'map', valueType: model(n) }),
+      models: (n) => [n],
+    },
+    {
+      label: 'an array of objects',
+      schema: { type: 'array', items: code },
+      type: (n) => ({ kind: 'array', items: model(n) }),
+      models: (n) => [n],
+    },
+    {
+      label: 'a nullable array of objects',
+      schema: { type: ['array', 'null'], items: code },
+      type: (n) => ({ kind: 'nullable', inner: { kind: 'array', items: model(n) } }),
+      models: (n) => [n],
+    },
+    {
+      label: 'nested objects',
+      schema: obj({ detail: obj({ field: { type: 'string' } }) }),
+      type: model,
+      models: (n) => [n, `${n}Detail`],
+    },
+    {
+      label: 'an allOf merge of a $ref and an inline object',
+      schema: { allOf: [{ $ref: '#/components/schemas/Error' }, code] },
+      type: model,
+      models: (n) => [n],
+    },
+  ];
+  const keys: Array<[key: string, name: string, pick: (op: Operation) => TypeRef | undefined]> = [
+    ['default', 'ListPetsDefaultResponse', (op) => op.defaultResponse?.type],
+    ['4XX', 'ListPetsClientErrorResponse', (op) => op.rangeResponses?.[0].type],
+  ];
+
+  for (const [key, name, pick] of keys) {
+    it.each(shapes)(`${key}: $label`, async ({ schema, type, models }) => {
+      const ir = await parseWithoutWarnings(
+        petsSpec({ '200': ok, [key]: { description: 'r', content: json(schema) } }),
+      );
+
+      expect(pick(only(ir))).toEqual(type(name));
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'Pet', ...models(name)].sort());
+      expectConsistent(ir);
+    });
+  }
+});
+
+describe('fallback body enums reach spec.enums', () => {
+  const enumOf = (ir: ApiSpec, name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+
+  it('promotes a body that is itself an inline enum, for default and for a range', async () => {
+    const ir = await parseWithoutWarnings(
+      petsSpec({
+        '200': ok,
+        default: { description: 'd', content: json({ type: 'string', enum: ['retry', 'stop'] }) },
+        '5XX': { description: 's', content: json({ type: 'string', enum: ['wait', 'later'] }) },
+      }),
+    );
+    const op = only(ir);
+
+    expect(op.defaultResponse?.type).toEqual({
+      kind: 'enum',
+      name: 'ListPetsDefaultResponse',
+      values: ['retry', 'stop'],
+    });
+    expect(op.rangeResponses?.[0].type).toEqual({
+      kind: 'enum',
+      name: 'ListPetsServerErrorResponse',
+      values: ['wait', 'later'],
+    });
+    expect(enumOf(ir, 'ListPetsDefaultResponse')).toEqual(['retry', 'stop']);
+    expect(enumOf(ir, 'ListPetsServerErrorResponse')).toEqual(['wait', 'later']);
+  });
+
+  it('promotes the items enum of an array body', async () => {
+    const ir = await parseWithoutWarnings(
+      petsSpec({
+        '200': ok,
+        default: {
+          description: 'd',
+          content: json({ type: 'array', items: { type: 'string', enum: ['retry', 'stop'] } }),
+        },
+      }),
+    );
+
+    expect(only(ir).defaultResponse?.type).toEqual({
+      kind: 'array',
+      items: { kind: 'enum', name: 'ListPetsDefaultResponse', values: ['retry', 'stop'] },
+    });
+    expect(enumOf(ir, 'ListPetsDefaultResponse')).toEqual(['retry', 'stop']);
+  });
+
+  it('promotes an enum field nested in an inline body model', async () => {
+    const ir = await parseWithoutWarnings(
+      petsSpec({
+        '200': ok,
+        default: {
+          description: 'd',
+          content: json({ type: 'object', properties: { status: { type: 'string', enum: ['open', 'closed'] } } }),
+        },
+      }),
+    );
+
+    expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({
+      status: { kind: 'enum', name: 'ListPetsDefaultResponseStatus', values: ['open', 'closed'] },
+    });
+    expect(enumOf(ir, 'ListPetsDefaultResponseStatus')).toEqual(['open', 'closed']);
+  });
+
+  it('numbers a body enum whose name a component enum with other values owns, and shares one with the same values', async () => {
+    const components = { ListPetsDefaultResponse: { type: 'string', enum: ['a', 'b'] } };
+    const withSchemas = (responses: Record<string, unknown>) => {
+      const spec = petsSpec(responses) as { components: { schemas: Record<string, unknown> } };
+      Object.assign(spec.components.schemas, components);
+      return spec;
+    };
+
+    const clash = await parseWithoutWarnings(
+      withSchemas({
+        '200': ok,
+        default: { description: 'd', content: json({ type: 'string', enum: ['retry', 'stop'] }) },
+      }),
+    );
+    expect(only(clash).defaultResponse?.type).toEqual({
+      kind: 'enum',
+      name: 'ListPetsDefaultResponse2',
+      values: ['retry', 'stop'],
+    });
+    expect(enumOf(clash, 'ListPetsDefaultResponse')).toEqual(['a', 'b']);
+    expect(enumOf(clash, 'ListPetsDefaultResponse2')).toEqual(['retry', 'stop']);
+
+    const shared = await parseWithoutWarnings(
+      withSchemas({ '200': ok, default: { description: 'd', content: json({ type: 'string', enum: ['a', 'b'] }) } }),
+    );
+    expect(only(shared).defaultResponse?.type).toEqual({
+      kind: 'enum',
+      name: 'ListPetsDefaultResponse',
+      values: ['a', 'b'],
+    });
+    expect(shared.enums.map((e) => e.name)).toEqual(['ListPetsDefaultResponse']);
+  });
+});
+
+describe('a fallback body never overwrites a model that owns its name', () => {
+  const obj = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+  const withComponent = (name: string, schema: unknown, responses: Record<string, unknown>) => {
+    const spec = petsSpec(responses) as { components: { schemas: Record<string, unknown> } };
+    spec.components.schemas[name] = schema;
+    return spec;
+  };
+
+  it('moves the body, its nested models and its ref to the next free name when a component of another shape owns it', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponent('ListPetsDefaultResponse', obj({ message: str }), {
+        '200': ok,
+        default: {
+          description: 'd',
+          content: json(obj({ message: str, code: str, detail: obj({ field: { type: 'string' } }) })),
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+
+    // The component is exactly what it was.
+    expect(types['ListPetsDefaultResponse']).toEqual({ message: str });
+    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2') });
+    expect(types['ListPetsDefaultResponse2']).toEqual({
+      message: str,
+      code: str,
+      detail: model('ListPetsDefaultResponse2Detail'),
+    });
+    expect(types['ListPetsDefaultResponse2Detail']).toEqual({ field: str });
+    expectConsistent(ir, ['Pet', 'Error', 'ListPetsDefaultResponse']);
+  });
+
+  it('shares the name with a component of the same shape and materializes nothing new', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponent('ListPetsDefaultResponse', obj({ message: str }), {
+        '200': ok,
+        default: { description: 'd', content: json(obj({ message: str })) },
+      }),
+    );
+
+    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse') });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'ListPetsDefaultResponse', 'Pet']);
+    expectConsistent(ir);
+  });
+
+  it('does the same for a range body', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponent('ListPetsClientErrorResponse', obj({ message: str }), {
+        '200': ok,
+        '4XX': { description: 'r', content: json(obj({ code: str })) },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+
+    expect(types['ListPetsClientErrorResponse']).toEqual({ message: str });
+    expect(only(ir).rangeResponses).toEqual([{ range: '4XX', type: model('ListPetsClientErrorResponse2') }]);
+    expect(types['ListPetsClientErrorResponse2']).toEqual({ code: str });
+    expectConsistent(ir, ['Pet', 'Error', 'ListPetsClientErrorResponse']);
+  });
+
+  it('moves the whole body when only a nested model name is owned by a component', async () => {
+    const ir = await parseWithoutWarnings(
+      withComponent('ListPetsDefaultResponseDetail', obj({ other: str }), {
+        '200': ok,
+        default: { description: 'd', content: json(obj({ detail: obj({ field: { type: 'string' } }) })) },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+
+    expect(types['ListPetsDefaultResponseDetail']).toEqual({ other: str });
+    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2') });
+    expect(types['ListPetsDefaultResponse2']).toEqual({ detail: model('ListPetsDefaultResponse2Detail') });
+    expectConsistent(ir, ['Pet', 'Error', 'ListPetsDefaultResponseDetail']);
+  });
+});
+
+describe('a fallback written as a $ref into components/responses', () => {
+  const problem = {
+    description: 'A problem',
+    headers: { 'Retry-After': { schema: { type: 'integer' } } },
+    content: { 'application/problem+json': { schema: { $ref: '#/components/schemas/Error' } } },
+  };
+  const withResponses = (responses: Record<string, unknown>, components: Record<string, unknown>) => {
+    const spec = petsSpec(responses) as { components: Record<string, unknown> };
+    spec.components['responses'] = components;
+    return spec;
+  };
+
+  it('is resolved, body and headers alike, for default and for a range', async () => {
+    const ir = await parseWithoutWarnings(
+      withResponses(
+        {
+          '200': ok,
+          default: { $ref: '#/components/responses/Problem' },
+          '5XX': { $ref: '#/components/responses/Problem' },
+        },
+        { Problem: problem },
+      ),
+    );
+    const op = only(ir);
+    const retryAfter = [{ name: 'Retry-After', type: int, required: false }];
+
+    expect(op.defaultResponse).toEqual({ type: model('Error'), headers: retryAfter });
+    expect(op.rangeResponses).toEqual([{ range: '5XX', type: model('Error'), headers: retryAfter }]);
+  });
+
+  it('materializes an inline body declared in the component response under the operation name', async () => {
+    const ir = await parseWithoutWarnings(
+      withResponses(
+        { '200': ok, default: { $ref: '#/components/responses/Problem' } },
+        { Problem: { description: 'p', content: json({ type: 'object', properties: { code: { type: 'string' } } }) } },
+      ),
+    );
+
+    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse') });
+    expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({ code: str });
+    expectConsistent(ir);
+  });
+
+  it('follows a chain of refs and an escaped JSON pointer', async () => {
+    const ir = await parseWithoutWarnings(
+      withResponses(
+        {
+          '200': ok,
+          default: { $ref: '#/components/responses/Alias' },
+          '4XX': { $ref: '#/components/responses/a~1b~0c' },
+        },
+        { Alias: { $ref: '#/components/responses/Problem' }, Problem: problem, 'a/b~c': problem },
+      ),
+    );
+    const op = only(ir);
+
+    expect(op.defaultResponse?.type).toEqual(model('Error'));
+    expect(op.rangeResponses?.[0].type).toEqual(model('Error'));
+  });
+
+  it('fails loudly on a ref no component response answers, naming the response', () => {
+    expect(() =>
+      extractOperations(
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              responses: { '200': ok, default: { $ref: '#/components/responses/Missing' } },
+            },
+          },
+        } as never,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {},
+      ),
+    ).toThrow('Unresolved response $ref "#/components/responses/Missing" in default response of listPets');
   });
 });
