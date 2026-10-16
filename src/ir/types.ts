@@ -65,10 +65,11 @@ export interface Service {
   name: string;
   description?: string;
   /**
-   * The `externalDocs` of the document tag the service is documented by,
-   * resolved by the same rule as `description` (a service named after a
-   * declared tag takes that tag's; a split-off service inherits from the tags
-   * its operations carry). Absent when no tag gives one.
+   * A document tag's `externalDocs`, resolved by the same rule as
+   * `description`: a service named after a declared tag takes that tag's; a
+   * split-off service inherits it from the first linked tag its operations
+   * carry, chosen independently of the tag its description comes from.
+   * Absent when no tag gives one.
    */
   externalDocs?: ExternalDocs;
   operations: Operation[];

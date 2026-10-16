@@ -8,7 +8,7 @@ import {
   stripListItemMarkers,
   splitWords,
 } from '../utils/naming.js';
-import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
+import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -748,10 +748,17 @@ function extractNestedSchema(
   if (schema.oneOf) {
     const models: Model[] = [];
     const variantNames = nameInlineVariants(schema, name, reserved);
+    // A nullable wrapper — one real variant beside `{ type: 'null' }` — is the
+    // field's schema, which `schemaToTypeRef` collapses to `nullable<T>`, so
+    // its own link documents the model built from that variant, exactly as
+    // the field extractor's unwrap carries it (`withWrapperExternalDocs`).
+    const wrapsOneVariant =
+      schema.oneOf.some(isNullSchema) && schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
-    for (const variant of schema.oneOf) {
-      const variantName = variantNames.get(variant);
+    for (const rawVariant of schema.oneOf) {
+      const variantName = variantNames.get(rawVariant);
       if (variantName === undefined) continue;
+      const variant = wrapsOneVariant ? withWrapperExternalDocs(rawVariant, schema) : rawVariant;
       // Build the variant's fields under its own name: an inline object
       // nested under variant N is then referenced as `<VariantN>Child`
       // (`ThingShapeWithSideCenter`), which is the name the field extractor
@@ -1941,6 +1948,9 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
               properties: mergedProperties,
               required: mergedRequired,
               ...extractConstraints(fieldSchema),
+              // The wrapper's own link, as for every `allOf` merge; a member's
+              // stays on that member.
+              ...externalDocsEntry(fieldSchema.externalDocs),
             },
             schemas,
           ),

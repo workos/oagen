@@ -589,3 +589,255 @@ describe('parseSpec – externalDocs reaches the IR (issue #217)', () => {
     });
   });
 });
+
+describe('externalDocs survives schema rebuilds and unwraps (PR #228 review)', () => {
+  afterEach(() => clearSchemaNameTransform());
+  const wrapperLink = { url: '/wrapper' };
+  const memberLink = { url: '/member' };
+  const branch = { type: 'object', properties: { name: { type: 'string' } } };
+
+  it('an allOf response carries the wrapper link; a member or $ref component link is not lifted', () => {
+    const paths = {
+      '/pets/{id}': {
+        get: {
+          operationId: 'getPet',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: {
+                    externalDocs: wrapperLink,
+                    allOf: [{ type: 'object', externalDocs: memberLink, properties: { id: { type: 'string' } } }],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/toys/{id}': {
+        get: {
+          operationId: 'getToy',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/Base' },
+                      { type: 'object', externalDocs: memberLink, properties: { id: { type: 'string' } } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const componentSchemas = {
+      Base: { type: 'object', externalDocs: { url: '/base' }, properties: { base: { type: 'string' } } },
+    };
+
+    const { inlineModels } = extractOperations(paths, undefined, componentSchemas);
+    expect(byName(inlineModels, 'GetPetResponse').externalDocs).toEqual(wrapperLink);
+    expect('externalDocs' in byName(inlineModels, 'GetToyResponse')).toBe(false);
+  });
+
+  it('a single-member allOf field carries the wrapper link, else the member own', () => {
+    const schemas = {
+      Pet: {
+        type: 'object',
+        properties: {
+          owner: { externalDocs: wrapperLink, allOf: [{ ...branch, externalDocs: memberLink }] },
+          sitter: { allOf: [{ ...branch, externalDocs: memberLink }] },
+          vet: { externalDocs: wrapperLink, allOf: [branch] },
+          groomer: { allOf: [branch] },
+        },
+      },
+    };
+
+    const models = extractInlineModelsFromSchemas(schemas);
+    expect(byName(models, 'PetOwner').externalDocs).toEqual(wrapperLink);
+    expect(byName(models, 'PetSitter').externalDocs).toEqual(memberLink);
+    expect(byName(models, 'PetVet').externalDocs).toEqual(wrapperLink);
+    expect('externalDocs' in byName(models, 'PetGroomer')).toBe(false);
+  });
+
+  it('a multi-member allOf field carries the wrapper link only', () => {
+    const schemas = {
+      Pet: {
+        type: 'object',
+        properties: {
+          owner: {
+            externalDocs: wrapperLink,
+            allOf: [
+              { ...branch, externalDocs: memberLink },
+              { type: 'object', properties: { age: { type: 'integer' } } },
+            ],
+          },
+          sitter: {
+            allOf: [
+              { ...branch, externalDocs: memberLink },
+              { type: 'object', properties: { age: { type: 'integer' } } },
+            ],
+          },
+        },
+      },
+    };
+
+    const models = extractInlineModelsFromSchemas(schemas);
+    expect(byName(models, 'PetOwner').externalDocs).toEqual(wrapperLink);
+    expect('externalDocs' in byName(models, 'PetSitter')).toBe(false);
+  });
+
+  it('a nullable wrapper carries its link onto the model built from its branch, in every nullable form', async () => {
+    const schemas = {
+      Pet: {
+        type: 'object',
+        properties: {
+          a: { externalDocs: wrapperLink, oneOf: [branch, { type: 'null' }] },
+          b: { externalDocs: wrapperLink, anyOf: [{ type: 'null' }, branch] },
+          c: { externalDocs: wrapperLink, type: ['object', 'null'], properties: { name: { type: 'string' } } },
+          d: { externalDocs: wrapperLink, nullable: true, type: 'object', properties: { name: { type: 'string' } } },
+          // The branch documents itself and the wrapper says nothing.
+          e: { oneOf: [{ ...branch, externalDocs: memberLink }, { type: 'null' }] },
+          // Both: the wrapper is the field's schema, so its link wins.
+          f: { externalDocs: wrapperLink, oneOf: [{ ...branch, externalDocs: memberLink }, { type: 'null' }] },
+          // Not a nullable wrapper: two real variants keep their own links.
+          g: {
+            externalDocs: wrapperLink,
+            oneOf: [
+              { ...branch, externalDocs: memberLink },
+              { type: 'object', properties: { age: { type: 'integer' } } },
+            ],
+          },
+        },
+      },
+    };
+    const expected: Record<string, { url: string } | undefined> = {
+      PetA: wrapperLink,
+      PetB: wrapperLink,
+      PetC: wrapperLink,
+      PetD: wrapperLink,
+      PetE: memberLink,
+      PetF: wrapperLink,
+      PetG: memberLink,
+      PetGWithAge: undefined,
+    };
+
+    const fromFields = extractInlineModelsFromSchemas(schemas);
+    for (const [name, link] of Object.entries(expected)) {
+      expect(byName(fromFields, name).externalDocs, name).toEqual(link);
+    }
+
+    // End to end: parseSpec keeps the component pass's definition of a nested
+    // model over the field extractor's, so the `oneOf` form must carry the
+    // wrapper's link there too (extractNestedSchema).
+    const spec = await parseDocument(
+      {
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: { '/pets': { get: { operationId: 'listPets', responses } } },
+        components: { schemas },
+      },
+      'nullable',
+    );
+    for (const [name, link] of Object.entries(expected)) {
+      expect(byName(spec.models, name).externalDocs, name).toEqual(link);
+    }
+  });
+
+  it('a nested allOf field of a discriminated allOf + oneOf variant carries the wrapper link', () => {
+    const { models } = extractSchemas({
+      Event: {
+        allOf: [
+          { type: 'object', properties: { id: { type: 'string' } } },
+          {
+            oneOf: [
+              {
+                type: 'object',
+                properties: {
+                  event: { const: 'pet.created' },
+                  payload: {
+                    externalDocs: wrapperLink,
+                    allOf: [
+                      { type: 'object', externalDocs: memberLink, properties: { x: { type: 'string' } } },
+                      { type: 'object', properties: { y: { type: 'string' } } },
+                    ],
+                  },
+                },
+              },
+              { type: 'object', properties: { event: { const: 'pet.deleted' } } },
+            ],
+          },
+        ],
+      },
+    });
+
+    const payload = models.find((m) => m.fields.some((f) => f.name === 'x'))!;
+    expect(payload.fields.map((f) => f.name)).toEqual(['x', 'y']);
+    expect(payload.externalDocs).toEqual(wrapperLink);
+  });
+
+  it('a nullable list-envelope companion carries the wrapper link', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+                      list_metadata: {
+                        externalDocs: wrapperLink,
+                        anyOf: [{ type: 'object', properties: { before: { type: 'string' } } }, { type: 'null' }],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const componentSchemas = { Pet: { type: 'object', properties: { id: { type: 'string' } } } };
+
+    const { services, inlineModels } = extractOperations(paths, undefined, componentSchemas);
+    expect(services[0].operations[0].pagination?.envelopeFields?.map((f) => f.name)).toEqual(['list_metadata']);
+    const companion = inlineModels.find((m) => m.fields.some((f) => f.name === 'before'))!;
+    expect(companion.externalDocs).toEqual(wrapperLink);
+  });
+
+  it('collapseJsonSuffixModels fills a missing base link from the Json model', async () => {
+    const spec = await parseDocument(
+      {
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: { '/pets': { get: { operationId: 'listPets', responses } } },
+        components: {
+          schemas: {
+            Pet: { type: 'object', properties: { id: { type: 'string' } } },
+            PetJson: {
+              type: 'object',
+              externalDocs: wrapperLink,
+              properties: { id: { type: 'string' }, name: { type: 'string' } },
+            },
+          },
+        },
+      },
+      'collapse',
+    );
+
+    expect(spec.models.map((m) => m.name)).toEqual(['Pet']);
+    expect(byName(spec.models, 'Pet').externalDocs).toEqual(wrapperLink);
+  });
+});

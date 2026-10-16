@@ -1,4 +1,5 @@
 import type { ExternalDocs } from '../ir/types.js';
+import type { SchemaObject } from './schemas.js';
 
 /**
  * An External Documentation Object as written in the OpenAPI document, before
@@ -42,4 +43,17 @@ export function readExternalDocs(raw: unknown): ExternalDocs | undefined {
 export function externalDocsEntry(raw: unknown): { externalDocs?: ExternalDocs } {
   const externalDocs = readExternalDocs(raw);
   return externalDocs ? { externalDocs } : {};
+}
+
+/**
+ * `inner` carrying the wrapper's `externalDocs` when the wrapper declares a
+ * usable one, its own otherwise. A wrapper the parser collapses — a nullable
+ * `oneOf`/`anyOf`, a single-member `allOf` — is the schema the document
+ * wrote for the field, so its link is that schema's own documentation and
+ * the model built from what it unwraps to must carry it, or the link would
+ * vanish with the wrapper. A branch or member that documents itself keeps
+ * its link only when the wrapper says nothing.
+ */
+export function withWrapperExternalDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
+  return { ...inner, ...externalDocsEntry(wrapper.externalDocs) };
 }

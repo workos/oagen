@@ -11,7 +11,7 @@ import {
   resolveSchemaName,
   variantMemberSchemas,
 } from './schemas.js';
-import { externalDocsEntry, readExternalDocs } from './external-docs.js';
+import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -609,9 +609,14 @@ export function extractInlineModelsFromProperties(
       } else if (only) {
         // The wrapper's own keywords, conjoined with the member's, are the
         // field's limits (see extractConstraints), so they ride along with the
-        // unwrapped member and its model carries the same constraints.
+        // unwrapped member and its model carries the same constraints. Its
+        // link is the wrapper's too, when the wrapper has one.
         extractInlineModelsFromProperties(
-          { properties: { [fieldName]: { ...only, ...extractConstraints(fieldSchema) } } },
+          {
+            properties: {
+              [fieldName]: withWrapperExternalDocs({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
+            },
+          },
           results,
           parentName,
           componentSchemas,
@@ -807,12 +812,13 @@ function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
  * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
  * conjoins that wrapper's own keywords with its branch's as the field's
  * limits, so the model built from the branch must carry the same ones or
- * `Model.constraints` would omit what the field declares.
+ * `Model.constraints` would omit what the field declares. The wrapper's
+ * `externalDocs` rides along the same way (see `withWrapperExternalDocs`).
  */
 function unwrapNullableField(schema: SchemaObject): SchemaObject {
   const inner = unwrapNullableSchema(schema);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return { ...inner, ...extractConstraints(schema) };
+  return withWrapperExternalDocs({ ...inner, ...extractConstraints(schema) }, schema);
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */

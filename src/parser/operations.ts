@@ -486,10 +486,10 @@ function indexDocumentTags(documentTags: unknown): Map<string, TagDocs> {
  *
  * A service whose own name is not declared is one the split carved out of a
  * tag (e.g. `OrganizationDomains` from operations tagged `organizations`); it
- * inherits each field from the first tag its operations carry that gives it:
- * the description of the first described tag, the link of the first linked
- * one — the same tag whenever that tag declares both. Path-named services
- * whose operations have no tag carry nothing and stay undocumented.
+ * inherits each field on its own from the first tag its operations carry that
+ * gives it: the description of the first described tag, the link of the first
+ * linked one, which need not be the same tag. Path-named services whose
+ * operations have no tag carry nothing and stay undocumented.
  */
 function resolveServiceDocs(
   serviceName: string,
