@@ -26,6 +26,7 @@ import {
   extractConstraints,
   constraintsEntry,
   deprecatedEntry,
+  unwrapNullableField,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
@@ -1408,6 +1409,11 @@ function extractRequestBody(
       (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
     );
     const contentNamed: string[] = [];
+    // A nullable body (`oneOf: [object, null]`) is one schema: the model built
+    // from its object branch takes the wrapper's `deprecated` and limits, as
+    // every other nullable unwrap gives it (`unwrapNullableField`). The null
+    // branch still makes the body nullable below.
+    const collapsed = unwrapNullableField(schema);
 
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
@@ -1426,10 +1432,11 @@ function extractRequestBody(
         );
         const variantName = named.name;
         if (named.fromContent) contentNamed.push(variantName);
-        const requiredSet = new Set(variant.required ?? []);
-        const siblings = collectProperties(variant);
+        const source = collapsed === schema ? variant : collapsed;
+        const requiredSet = new Set(source.required ?? []);
+        const siblings = collectProperties(source);
         const fields: Field[] = [];
-        for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+        for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
           if (!fieldSchema) continue;
           fields.push(
             buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
@@ -1437,12 +1444,12 @@ function extractRequestBody(
         }
         inlineModels.push({
           name: variantName,
-          description: variant.description,
+          description: source.description,
           fields,
-          ...deprecatedEntry(variant),
-          ...constraintsEntry(variant),
+          ...deprecatedEntry(source),
+          ...constraintsEntry(source),
         });
-        extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);
+        extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
         variants.push({ kind: 'model', name: variantName });
       } else {
         variants.push(schemaToTypeRef(variant, contextName));

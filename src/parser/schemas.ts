@@ -234,7 +234,7 @@ function singleNonNullBranch(schema: SchemaObject): SchemaObject | undefined {
 }
 
 /** True for the `{ type: 'null' }` / `{ type: ['null'] }` branch of a nullable wrapper. */
-function isNullSchema(schema: SchemaObject): boolean {
+export function isNullSchema(schema: SchemaObject): boolean {
   return (
     schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
   );
@@ -257,6 +257,73 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
  */
 export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } {
   return schema.deprecated ? { deprecated: true } : {};
+}
+
+/**
+ * Strip the nullable wrappers `schemaToTypeRef` unwraps before it names
+ * anything — the OAS 3.1 `type: [X, 'null']` array, the OAS 3.0
+ * `nullable: true` flag, and a `oneOf`/`anyOf` with a single non-null
+ * variant — so extraction dispatches on the same shape the TypeRef was built
+ * from. The unwrap keeps `contextName`/`parentModelName` semantics intact:
+ * `schemaToTypeRef` passes both through each of these wrappers unchanged.
+ */
+export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
+  if (schema.$ref) return schema;
+  if (Array.isArray(schema.type)) {
+    const nonNullTypes = schema.type.filter((t) => t !== 'null');
+    if (nonNullTypes.length !== 1) return schema;
+    return unwrapNullableSchema({ ...schema, type: nonNullTypes[0], nullable: false });
+  }
+  if (schema.nullable && schema.type) {
+    return unwrapNullableSchema({ ...schema, nullable: false });
+  }
+  // `allOf` takes precedence over `oneOf`/`anyOf` in schemaToTypeRef, so only
+  // a bare union is a nullable wrapper candidate.
+  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
+  if (variants) {
+    const nullVariant = variants.find(isNullSchema);
+    const nonNullVariants = variants.filter((v) => v !== nullVariant);
+    const only = nonNullVariants[0];
+    if (nullVariant && nonNullVariants.length === 1 && only) {
+      return unwrapNullableSchema(only);
+    }
+  }
+  return schema;
+}
+
+/**
+ * `unwrapNullableSchema` for a schema a model is built from, carrying the
+ * wrapper's limits and `deprecated` onto the branch it unwraps to. The
+ * type-array and `nullable: true` forms unwrap by spreading, so every keyword
+ * survives; the union form swaps in the bare branch, which would drop a
+ * `minProperties` or `deprecated: true` written beside
+ * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
+ * conjoins that wrapper's own keywords with its branch's as the field's
+ * limits, and `Field.deprecated` is the wrapper's, so the model built from the
+ * branch must carry the same ones or it would disagree with its field. Every
+ * extractor that builds a model from a nullable wrapper's branch — the field
+ * extractor, `extractNestedSchema`, `extractInlineModelDeep`, the request-body
+ * and wrapped-response paths — goes through this one function, so the
+ * copies they produce agree and the inline-model merges cannot keep a wrongly
+ * flagged one. Returns `schema` itself when there is nothing to unwrap.
+ */
+export function unwrapNullableField(schema: SchemaObject): SchemaObject {
+  const inner = unwrapNullableSchema(schema);
+  if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
+  return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
+}
+
+/**
+ * `inner` carrying the wrapper's `deprecated` in place of its own. A wrapper
+ * the parser collapses — a nullable `oneOf`/`anyOf`, a single-member `allOf`
+ * — is the field's schema, and `Field.deprecated` reads only that top-level
+ * keyword, so the model built from what it unwraps to carries the same flag
+ * the field does: the wrapper's, never the branch's or the member's own.
+ */
+export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
+  const result: SchemaObject = { ...inner, ...deprecatedEntry(wrapper) };
+  if (!wrapper.deprecated) delete result.deprecated;
+  return result;
 }
 
 /** Keywords where the stricter of two declarations is the larger value. */
@@ -754,27 +821,34 @@ function extractNestedSchema(
   if (schema.oneOf) {
     const models: Model[] = [];
     const variantNames = nameInlineVariants(schema, name, reserved);
+    // A nullable wrapper (one non-null branch beside `null`) is the field's
+    // schema: the model built from its branch takes the wrapper's `deprecated`
+    // and limits (`unwrapNullableField`), exactly as the field extractor
+    // builds the same model, so the two copies agree. A genuine multi-variant
+    // union is not collapsed; each variant is its own schema.
+    const collapsed = unwrapNullableField(schema);
 
     for (const variant of schema.oneOf) {
       const variantName = variantNames.get(variant);
       if (variantName === undefined) continue;
+      const source = collapsed === schema ? variant : collapsed;
       // Build the variant's fields under its own name: an inline object
       // nested under variant N is then referenced as `<VariantN>Child`
       // (`ThingShapeWithSideCenter`), which is the name the field extractor
       // materializes it under — not `<Variant0>Child`.
-      const requiredSet = new Set(variant.required ?? []);
-      const siblings = collectProperties(variant);
+      const requiredSet = new Set(source.required ?? []);
+      const siblings = collectProperties(source);
       const fields: Field[] = [];
-      for (const [fn, fs] of Object.entries(variant.properties ?? {})) {
+      for (const [fn, fs] of Object.entries(source.properties ?? {})) {
         if (!fs) continue;
         fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
       }
       models.push({
         name: variantName,
-        description: variant.description,
+        description: source.description,
         fields,
-        ...deprecatedEntry(variant),
-        ...constraintsEntry(variant),
+        ...deprecatedEntry(source),
+        ...constraintsEntry(source),
       });
     }
     return models;
@@ -1952,10 +2026,15 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
           qualifyNestedInlineName(name, fieldName),
           reservedInlineNames(fieldName, siblings, name),
         );
+        // A nullable wrapper's one branch is built with the wrapper's
+        // `deprecated` and limits, as everywhere else (`unwrapNullableField`).
+        const collapsed = unwrapNullableField(fieldSchema);
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;
-          nestedModels.push(...extractInlineModelDeep(variantName, variant, schemas));
+          nestedModels.push(
+            ...extractInlineModelDeep(variantName, collapsed === fieldSchema ? variant : collapsed, schemas),
+          );
           // A multi-type variant's array member types its items under the
           // variant's name (`<Variant>Item`); extract them there too. The
           // synthetic wrapper model is dropped, only its nested models kept.

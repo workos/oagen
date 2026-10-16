@@ -7,6 +7,10 @@ import {
   deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
+  isNullSchema,
+  unwrapNullableField,
+  unwrapNullableSchema,
+  withWrapperDeprecation,
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
@@ -770,74 +774,6 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
   };
-}
-
-/**
- * Strip the nullable wrappers `schemaToTypeRef` unwraps before it names
- * anything — the OAS 3.1 `type: [X, 'null']` array, the OAS 3.0
- * `nullable: true` flag, and a `oneOf`/`anyOf` with a single non-null
- * variant — so extraction dispatches on the same shape the TypeRef was built
- * from. The unwrap keeps `contextName`/`parentModelName` semantics intact:
- * `schemaToTypeRef` passes both through each of these wrappers unchanged.
- */
-function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
-  if (schema.$ref) return schema;
-  if (Array.isArray(schema.type)) {
-    const nonNullTypes = schema.type.filter((t) => t !== 'null');
-    if (nonNullTypes.length !== 1) return schema;
-    return unwrapNullableSchema({ ...schema, type: nonNullTypes[0], nullable: false });
-  }
-  if (schema.nullable && schema.type) {
-    return unwrapNullableSchema({ ...schema, nullable: false });
-  }
-  // `allOf` takes precedence over `oneOf`/`anyOf` in schemaToTypeRef, so only
-  // a bare union is a nullable wrapper candidate.
-  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
-  if (variants) {
-    const nullVariant = variants.find(isNullSchema);
-    const nonNullVariants = variants.filter((v) => v !== nullVariant);
-    const only = nonNullVariants[0];
-    if (nullVariant && nonNullVariants.length === 1 && only) {
-      return unwrapNullableSchema(only);
-    }
-  }
-  return schema;
-}
-
-/**
- * `unwrapNullableSchema` for a field, carrying the wrapper's limits onto the
- * branch it unwraps to. The type-array and `nullable: true` forms unwrap by
- * spreading, so every keyword survives; the union form swaps in the bare
- * branch, which would drop a `minProperties` written beside
- * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
- * conjoins that wrapper's own keywords with its branch's as the field's
- * limits, so the model built from the branch must carry the same ones or
- * `Model.constraints` would omit what the field declares.
- */
-function unwrapNullableField(schema: SchemaObject): SchemaObject {
-  const inner = unwrapNullableSchema(schema);
-  if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
-}
-
-/**
- * `inner` carrying the wrapper's `deprecated` in place of its own. A wrapper
- * the parser collapses — a nullable `oneOf`/`anyOf`, a single-member `allOf`
- * — is the field's schema, and `Field.deprecated` reads only that top-level
- * keyword, so the model built from what it unwraps to carries the same flag
- * the field does: the wrapper's, never the branch's or the member's own.
- */
-function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
-  const result: SchemaObject = { ...inner, ...deprecatedEntry(wrapper) };
-  if (!wrapper.deprecated) delete result.deprecated;
-  return result;
-}
-
-/** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */
-function isNullSchema(schema: SchemaObject): boolean {
-  return (
-    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
-  );
 }
 
 /**

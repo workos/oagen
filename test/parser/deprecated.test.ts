@@ -17,6 +17,21 @@ import type { Model } from '../../src/ir/types.js';
 const flags = (models: Model[]): Record<string, boolean | undefined> =>
   Object.fromEntries(models.map((m) => [m.name, m.deprecated]));
 
+/** An inline object schema with one string property, plus whatever `extra` says. */
+const obj = (extra: Record<string, unknown> = {}) => ({
+  type: 'object',
+  properties: { k: { type: 'string' } },
+  ...extra,
+});
+
+/** A minimal OpenAPI 3.1 document around `schemas` (and optional `paths`). */
+const specDoc = (schemas: Record<string, unknown>, paths: Record<string, unknown> = {}) => ({
+  openapi: '3.1.0',
+  info: { title: 'nullable', version: '1' },
+  paths,
+  components: { schemas },
+});
+
 describe('deprecatedEntry', () => {
   it('yields { deprecated: true } only when the schema says so', () => {
     expect(deprecatedEntry({ deprecated: true })).toEqual({ deprecated: true });
@@ -185,6 +200,27 @@ describe('extractSchemas – deprecated', () => {
       }
     `);
   });
+
+  it('builds a nullable oneOf property’s model with the same flag from both extractors', () => {
+    // `mergeFieldInlineModels` keeps the component extractor's copy, so that
+    // copy must already carry the wrapper's flag — it cannot rely on the
+    // field extractor getting it right later.
+    const schemas = {
+      Thing: {
+        type: 'object',
+        properties: {
+          wrapper: { deprecated: true, oneOf: [obj(), { type: 'null' }] },
+          branch: { oneOf: [obj({ deprecated: true }), { type: 'null' }] },
+        },
+      },
+    };
+    expect(flags(extractSchemas(schemas).models)).toEqual({
+      Thing: undefined,
+      ThingWrapper: true,
+      ThingBranch: undefined,
+    });
+    expect(flags(extractInlineModelsFromSchemas(schemas))).toEqual({ ThingWrapper: true, ThingBranch: undefined });
+  });
 });
 
 describe('extractOperations – deprecated', () => {
@@ -266,6 +302,47 @@ describe('extractOperations – deprecated', () => {
         "GetAResponse": true,
         "GetBResponse": true,
         "GetCResponse": undefined,
+      }
+    `);
+  });
+
+  it('applies the wrapper rule to a nullable request body and a nullable wrapped resource', () => {
+    const wrapped = (data: Record<string, unknown>, operationId: string) => ({
+      get: {
+        operationId,
+        responses: {
+          '200': {
+            description: 'ok',
+            content: {
+              'application/json': { schema: { type: 'object', required: ['data'], properties: { data } } },
+            },
+          },
+        },
+      },
+    });
+    const resource = (name: string, extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { object: { const: name }, k: { type: 'string' } },
+      ...extra,
+    });
+    const { inlineModels } = extractOperations({
+      '/a': body(
+        { deprecated: true, oneOf: [obj({ properties: { kind: { const: 'a' } } }), { type: 'null' }] },
+        'createA',
+      ),
+      '/b': body(
+        { oneOf: [obj({ deprecated: true, properties: { kind: { const: 'b' } } }), { type: 'null' }] },
+        'createB',
+      ),
+      '/c': wrapped({ deprecated: true, oneOf: [resource('thing_c'), { type: 'null' }] }, 'getC'),
+      '/d': wrapped({ oneOf: [resource('thing_d', { deprecated: true }), { type: 'null' }] }, 'getD'),
+    });
+    expect(flags(inlineModels)).toMatchInlineSnapshot(`
+      {
+        "ACreateARequest": true,
+        "BCreateBRequest": undefined,
+        "ThingC": true,
+        "ThingD": undefined,
       }
     `);
   });
@@ -354,5 +431,137 @@ describe('parseSpec – deprecated', () => {
     // The field-level flag is unchanged by the model-level one.
     const owner = spec.models.find(({ name }) => name === 'LegacyPet')?.fields.find((f) => f.name === 'owner');
     expect(owner?.deprecated).toBe(true);
+  });
+
+  it('gives a nullable property’s model the wrapper’s flag, not the branch’s, however it is spelled', async () => {
+    const file = await writeSpec(
+      'nullable.json',
+      specDoc({
+        Thing: {
+          type: 'object',
+          properties: {
+            one_of_wrapper: { deprecated: true, oneOf: [obj(), { type: 'null' }] },
+            one_of_branch: { oneOf: [obj({ deprecated: true }), { type: 'null' }] },
+            any_of_wrapper: { deprecated: true, anyOf: [obj(), { type: 'null' }] },
+            any_of_branch: { anyOf: [obj({ deprecated: true }), { type: 'null' }] },
+            type_array: obj({ deprecated: true, type: ['object', 'null'] }),
+            nullable_flag: obj({ deprecated: true, nullable: true }),
+          },
+        },
+      }),
+    );
+    const spec = await parseSpec(file);
+    expect(flags(spec.models)).toMatchInlineSnapshot(`
+      {
+        "Thing": undefined,
+        "ThingAnyOfBranch": undefined,
+        "ThingAnyOfWrapper": true,
+        "ThingNullableFlag": true,
+        "ThingOneOfBranch": undefined,
+        "ThingOneOfWrapper": true,
+        "ThingTypeArray": true,
+      }
+    `);
+    // The field reads the same keyword, so each field agrees with its model.
+    const thing = spec.models.find((m) => m.name === 'Thing')!;
+    expect(Object.fromEntries(thing.fields.map((f) => [f.name, f.deprecated]))).toMatchInlineSnapshot(`
+      {
+        "any_of_branch": undefined,
+        "any_of_wrapper": true,
+        "nullable_flag": true,
+        "one_of_branch": undefined,
+        "one_of_wrapper": true,
+        "type_array": true,
+      }
+    `);
+  });
+
+  it('applies the wrapper rule two levels down', async () => {
+    const file = await writeSpec(
+      'nested.json',
+      specDoc({
+        Thing: {
+          type: 'object',
+          properties: {
+            outer: {
+              type: 'object',
+              properties: {
+                inner: { deprecated: true, oneOf: [obj(), { type: 'null' }] },
+                inner_branch: { oneOf: [obj({ deprecated: true }), { type: 'null' }] },
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(flags((await parseSpec(file)).models)).toMatchInlineSnapshot(`
+      {
+        "Thing": undefined,
+        "ThingOuter": undefined,
+        "ThingOuterInner": true,
+        "ThingOuterInnerBranch": undefined,
+      }
+    `);
+  });
+
+  it('applies the wrapper rule inside a discriminated allOf+oneOf variant', async () => {
+    const file = await writeSpec(
+      'variant.json',
+      specDoc({
+        Event: {
+          allOf: [
+            { type: 'object', properties: { id: { type: 'string' } } },
+            {
+              oneOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    event: { const: 'user.created' },
+                    meta: { deprecated: true, oneOf: [obj(), { type: 'null' }] },
+                    meta_branch: { oneOf: [obj({ deprecated: true }), { type: 'null' }] },
+                  },
+                },
+                { type: 'object', properties: { event: { const: 'user.deleted' } } },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(flags((await parseSpec(file)).models)).toMatchInlineSnapshot(`
+      {
+        "Event": undefined,
+        "UserCreated": undefined,
+        "UserCreatedMeta": true,
+        "UserCreatedMetaBranch": undefined,
+        "UserDeleted": undefined,
+      }
+    `);
+  });
+
+  it('applies the wrapper rule to nullable array items, and keeps an item model live under a deprecated array field', async () => {
+    const file = await writeSpec(
+      'items.json',
+      specDoc({
+        Thing: {
+          type: 'object',
+          properties: {
+            tags: { type: 'array', items: { deprecated: true, oneOf: [obj(), { type: 'null' }] } },
+            tags_branch: { type: 'array', items: { oneOf: [obj({ deprecated: true }), { type: 'null' }] } },
+            // The array field is deprecated; its items schema is not, and the
+            // item model is that schema's own.
+            plain: { deprecated: true, type: 'array', items: obj() },
+          },
+        },
+      }),
+    );
+    expect(flags((await parseSpec(file)).models)).toMatchInlineSnapshot(`
+      {
+        "Thing": undefined,
+        "ThingPlain": undefined,
+        "ThingTags": true,
+        "ThingTagsBranch": undefined,
+      }
+    `);
   });
 });
