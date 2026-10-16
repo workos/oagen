@@ -177,9 +177,8 @@ function findModel(ctx: EmitterContext, name: string): Model | undefined {
 }
 
 function exampleForParam(p: Parameter, examples: ExampleBuilder): unknown {
-  if (p.example !== undefined) return p.example;
-  if (p.default !== undefined) return p.default;
-  return examples.forType(p.type);
+  // example → default → a value generated inside the param's constraints.
+  return examples.forParameter(p);
 }
 
 function exampleForField(f: Field, examples: ExampleBuilder): unknown {

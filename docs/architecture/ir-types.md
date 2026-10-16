@@ -236,6 +236,7 @@ interface Operation {
   requestBodyEncoding?:
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
+  responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -270,6 +271,15 @@ To resolve what an operation accepts, take `op.security ?? spec.security`; a res
 interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
+  headers?: ResponseHeader[]; // Only when the spec declares at least one
+}
+
+interface ResponseHeader {
+  name: string; // As written in the spec, e.g. "Content-Disposition"
+  type: TypeRef;
+  required: boolean;
+  description?: string;
+  deprecated?: boolean;
 }
 
 interface Parameter {
@@ -281,10 +291,15 @@ interface Parameter {
   default?: unknown;
   example?: unknown; // The document's `example`, else `examples[0]`
   examples?: unknown[]; // Every example value, in document order; only when non-empty
+  style?: "form" | "simple" | "label" | "matrix";
+  explode?: boolean;
+  constraints?: Constraints; // Validation keywords; see Constraints below
 }
 ```
 
 `Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
+
+A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
 
 ### Parameter Examples
 
@@ -312,6 +327,16 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 
 When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
 
+### Response Headers
+
+Headers a response declares (`Content-Disposition` on a download, `Location` after a create, `ETag`, rate-limit headers) are kept with the status code they belong to as `headers: ResponseHeader[]` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's headers are also exposed directly as `Operation.responseHeaders`.
+
+Each header is typed like a parameter via its `schema` (or the first media type of its `content` map); a header with neither is a `string`. `$ref`s into `components/headers` are resolved, and a `description` written next to the `$ref` overrides the component's (OpenAPI 3.1); a ref that cannot be resolved is warned about and dropped rather than failing the parse. A header named `Content-Type` is ignored, as OpenAPI requires. All three fields are present only when at least one header survives, so operations without headers keep their shape.
+
+An object-shaped header (directly, inside an array, or as a oneOf variant) is materialized as an inline model named from the service and header name (`Documents` + `X-Meta` → `DocumentsXMeta`), nested objects included (`DocumentsXMetaOrigin`). Because that name can already belong to a differently shaped component schema, to the same header on another status code, or to the same header on another operation of the service, the parser keeps a spec-wide registry of model shapes: the first owner of a name keeps it (component models first, then operations in path order, then a single operation's responses in ascending status-code order), and a later header with a different shape is re-derived under the first free candidate — bare name; then the status code (`DocumentsXMeta429`) when the clash is inside the same operation, or the operation (`DocumentsCreateDocumentXMeta`) when it is with a component or another operation; then the other of those two; then both (`DocumentsCreateDocumentXMeta429`); then a numeric suffix (`DocumentsXMeta2`). A header whose shape matches the name's owner shares it and materializes nothing new, so a header matching a component schema simply references that schema. Inline header enums follow the same idea with their own, status-code-based rule.
+
+`collectResponseHeaders(op)` (exported from `@workos/oagen`) yields every header list once — the primary list is the same array as its `successResponses` entry — and is what reachability, model assignment, ref rewriting/validation, the differ, and the compat filter use, so a model or enum reached only through a header is emitted like any other.
+
 ## Model & Field
 
 ```typescript
@@ -320,6 +345,7 @@ interface Model {
   description?: string;
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
+  constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
 }
 
 interface Field {
@@ -333,12 +359,68 @@ interface Field {
   default?: unknown;
   example?: unknown; // The schema's `example`, else `examples[0]`
   examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
+  constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
 }
 ```
+
+### Inline model naming
+
+Models come from `components/schemas` (named as written, after `cleanSchemaName` and any `schemaNameTransform`) and from inline object schemas in operations, which the parser materializes as models so emitters have something to reference. An inline request body or response is named from its operation:
+
+- **With an `operationId`:** `PascalCase(operationId)` + `Request` / `Response`, passed through `cleanSchemaName`. `createNote` → `CreateNoteRequest` / `CreateNoteResponse`.
+- **Without an `operationId`:** from the full path and method. Each non-parameter segment is PascalCased in order, each `{param}` segment becomes `By` + `PascalCase(param)`, then the method and `Request` / `Response` are appended, and the whole name is normalized with `toPascalCase` so an operation's body and response share a prefix (`POST /a/b` → `AbPostRequest` / `AbPostResponse`). `POST /notes` → `NotesPostRequest` / `NotesPostResponse`; `POST /notes/{id}/pin` → `NotesByIdPinPostResponse`; `GET /users/{user_id}/sessions` → `UsersByUserIdSessionsGetResponse`. This tells the common path shapes apart (list vs. item, sibling and nested sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`, `/notes/by-id` and `/notes/{id}`, or `/notes` and `/notes/` flatten to the same words. Names already taken are reserved first: every component schema name and, for every operation with an `operationId`, the stem all of its models start with (`PascalCase(operationId)` after `cleanSchemaName`). A path-based prefix is treated as colliding when any reserved name starts with it, because one prefix is the stem of several emitted names (`…Request`, `…Response`, a list's `…Item`, nested inline models such as `…ResponseOwner`, envelope companions such as `…ListMetadata`). Names derived from a path-based prefix use it verbatim — body `oneOf` variants included (`NotesPostRequest`, `NotesPostRequest2`, `EmailNotesPostRequest`) — and are never re-cleaned, so no later step can move them out from under the reservation; as a second line of defence the check also runs on the cleaned spellings of the prefix (`cleanSchemaName`, the project's `schemaNameTransform`, `ListItem`-marker stripping), so an unnamed `GET /notes` also yields to a component `NoteGetItem`. Names that embed the prefix behind a const value are covered as well: a body `oneOf` variant pinning `kind: email` is `EmailTagsPostRequest` and a nested `oneOf`/`anyOf` variant is `<Const><Parent><Field>`, so every string `const` (or single-value `enum`) found in the operation's inline body and 2xx response variants, top level and nested, is prepended to every spelling before the check, and a hashed prefix lands inside those names too (`EmailTags151Dd5PostRequest`). Names that do not embed the prefix at all — a response `oneOf` variant named from its bare const (`Email`) or a `title`-mapped variant — are outside what a disambiguator can separate and are left as they are. This is deliberately a superset: a component `AuditEventsGetter`, or an operationId `auditEventsGetSummary`, also pushes an unnamed `GET /audit/events` onto a hashed name although no emitted name would coincide; determinism and never sharing a name wrongly matter more than the rare extra hash. The reservation is unconditional, so an inline body is never merged into a same-named component even when their shapes agree. When two distinct paths with the same method would collide, the path spelled most plainly keeps the plain name (no trailing slash, `{id}` rather than a literal `by-id`; precisely, the lowest `[trailing slash, literal segments with a character outside a-z0-9]`), and every other path in the group gets a six-character disambiguator derived from its raw path (the start of its SHA-1, inserted before the method): `POST /foo/bar` next to `POST /foo-bar` → `FooBarPostResponse` and `FooBar546F12PostResponse`; `GET /notes/{id}` next to `GET /notes/by-id` → `NotesByIdGetResponse` and `NotesByIdBa41B5GetResponse`. When two paths tie for plainest (`/foo-bar` and `/foo_bar`), or the path-based name matches a reserved one (an unnamed `POST /audit/events` next to `operationId: auditEventsPost` or next to `components/schemas/AuditEventsPostRequest`), nobody keeps the plain name and every path in the group is disambiguated. The result depends only on the document's paths, `operationId`s and component names and never on their order; `operationId`-derived and component names never change, and paths that do not collide keep the plain name.
+
+A response object with a string `const` discriminant (`object: "note"`) is named from that value instead (`Note`); a list envelope's inline item model replaces the `Response` suffix with `Item`; nested inline objects are qualified with their parent model's name.
+
+If two inline models still resolve to the same name with different fields or field types (two `operationId`s that PascalCase to the same word, for example), the parser keeps the one with more fields — the first definition on a tie — and prints `[oagen] Warning: Inline model "…" has more than one definition with different fields or field types`.
 
 ### Field Examples
 
 OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does. A field whose schema (and `$ref` target, if any) gives neither has no `example` and no `examples` key.
+
+### Constraints
+
+JSON Schema's validation keywords are carried on `Field`, `Parameter` and `Model` so an emitter can document a value's limits ("at most 100"), check a value before sending it, or keep a generated example within range. `type`, `enum`, `const` and `required` already have their own place in the IR and are not repeated here.
+
+```typescript
+interface Constraints {
+  // numbers
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  multipleOf?: number;
+  // strings
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string; // ECMA-262 regex, verbatim from the document
+  // arrays
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean; // present only when true
+  minContains?: number;
+  maxContains?: number;
+  // objects
+  minProperties?: number;
+  maxProperties?: number;
+  dependentRequired?: Record<string, string[]>;
+}
+```
+
+Every member is optional and present only when the document declares it. A schema with no validation keyword yields no `constraints` key at all, so `field.constraints?.maxLength` is the idiomatic read. The parser ignores a keyword whose value has the wrong type (a string `maxLength`, say) rather than carrying it.
+
+**OAS 3.0 → 3.1 normalization.** OpenAPI 3.1 (JSON Schema 2020-12) gives `exclusiveMinimum` / `exclusiveMaximum` as the bound itself; OpenAPI 3.0 spells them as booleans that make `minimum` / `maximum` exclusive. Both versions are parsed, and the IR always uses the 3.1 shape:
+
+| Document (3.0)                             | IR                                         |
+| ------------------------------------------ | ------------------------------------------ |
+| `minimum: 0, exclusiveMinimum: true`       | `{ exclusiveMinimum: 0 }` (no `minimum`)   |
+| `maximum: 100, exclusiveMaximum: true`     | `{ exclusiveMaximum: 100 }` (no `maximum`) |
+| `minimum: 0, exclusiveMinimum: false`      | `{ minimum: 0 }`                           |
+| `exclusiveMinimum: true` with no `minimum` | nothing                                    |
+
+A 3.1 document's numeric form passes through unchanged, including the legal-but-unusual case of an inclusive and an exclusive bound on the same side.
+
+**Scope.** The keywords declared on the field, parameter or model schema are collected, conjoined with those of its inline `allOf` members: the parser unwraps a single-member `allOf`, so `{ allOf: [{ type: string, maxLength: 3 }] }` is a string field carrying `{ maxLength: 3 }`, and a `$ref` member contributes the keywords written beside the reference while the referenced model keeps its own. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried. The one exception is a nullable wrapper — a `oneOf`/`anyOf` with exactly one non-null, non-`$ref` branch, which the IR collapses to `nullable<T>` — whose branch keywords are conjoined with the wrapper's own (and its `allOf` members'), so `anyOf: [{ type: string, maxLength: 8 }, { type: "null" }]` gives `{ maxLength: 8 }` and `{ allOf: [{ maxLength: 30 }], anyOf: [{ type: string, minLength: 20 }, { type: "null" }] }` gives `{ maxLength: 30, minLength: 20 }`, and an inline model built from that branch carries the same conjoined keywords, so `minProperties` written beside `anyOf: [{ type: object, … }, { type: "null" }]` reaches both the field and its model. Limits on a general multi-variant union are not carried. Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` field gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model — a component, or an inline response, request body or field the parser rebuilds from `allOf` members — it is the wrapper's keywords conjoined with its members' (the stricter bound wins; a `$ref` member contributes the keywords written beside the reference, while the referenced model keeps its own). A variant model of a discriminated `allOf` + `oneOf` union conjoins the shared keywords — the outer wrapper's, the base members' and any written beside the `oneOf` — with the variant's own the way `allOf` does — an instance must satisfy both, so the larger `min*` and the smaller `max*` win and `dependentRequired` maps are unioned per property.
 
 ## Enum
 
@@ -362,6 +444,7 @@ interface EnumValue {
 interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
+  headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
 }
 ```
 

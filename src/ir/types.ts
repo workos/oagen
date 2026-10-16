@@ -104,6 +104,14 @@ export interface Operation {
   requestBody?: TypeRef;
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
   response: TypeRef;
+  /**
+   * Headers the primary success response declares (the one `response` is the
+   * body of). Present only when the spec declares at least one. Each entry of
+   * `successResponses` carries its own `headers`, but that list only exists
+   * when an operation has more than one 2xx, so the primary response's headers
+   * need a home of their own.
+   */
+  responseHeaders?: ResponseHeader[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -213,6 +221,64 @@ export interface PaginationMeta {
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
 
+/**
+ * JSON Schema validation keywords declared directly on a schema, carried so an
+ * emitter can document a value's limits ("at most 100"), check a value before
+ * sending it, or keep a generated example within range. Every member is
+ * optional and present only when the document declares it; a schema with no
+ * validation keyword has no `constraints` at all.
+ *
+ * Numeric bounds use the OpenAPI 3.1 / JSON Schema 2020-12 shape, where
+ * `exclusiveMinimum` / `exclusiveMaximum` are the bound itself. OpenAPI 3.0
+ * spells them as booleans that make `minimum` / `maximum` exclusive; the
+ * parser normalizes that form, so `{ minimum: 0, exclusiveMinimum: true }`
+ * arrives as `{ exclusiveMinimum: 0 }` with no `minimum`, and a `false` is
+ * dropped. Emitters read one shape whichever version produced it.
+ *
+ * The keywords on the field, parameter or model schema itself are carried,
+ * conjoined with those of its inline `allOf` members (a single-member
+ * `allOf` is unwrapped by the parser, so its limit is the value's own; a
+ * `$ref` member contributes the keywords written beside the reference while
+ * the referenced model keeps its own). Limits nested inside array `items` or
+ * map values are not carried. A nullable wrapper — `oneOf`/`anyOf` with a
+ * single non-null, non-`$ref` branch — conjoins that branch's keywords with
+ * its own; limits on a general multi-variant union are not carried.
+ */
+export interface Constraints {
+  /** Inclusive lower bound (`minimum`). */
+  minimum?: number;
+  /** Inclusive upper bound (`maximum`). */
+  maximum?: number;
+  /** Exclusive lower bound as a number; the OAS 3.0 boolean form is normalized to this. */
+  exclusiveMinimum?: number;
+  /** Exclusive upper bound as a number; the OAS 3.0 boolean form is normalized to this. */
+  exclusiveMaximum?: number;
+  /** The value must be an integer multiple of this (`multipleOf`). */
+  multipleOf?: number;
+  /** Minimum string length in characters (`minLength`). */
+  minLength?: number;
+  /** Maximum string length in characters (`maxLength`). */
+  maxLength?: number;
+  /** ECMA-262 regular expression the string must match (`pattern`), verbatim from the document. */
+  pattern?: string;
+  /** Minimum number of array items (`minItems`). */
+  minItems?: number;
+  /** Maximum number of array items (`maxItems`). */
+  maxItems?: number;
+  /** Present, and `true`, when array items must be unique; `uniqueItems: false` restates the default and is dropped. */
+  uniqueItems?: boolean;
+  /** Minimum number of items matching the schema's `contains` (`minContains`). */
+  minContains?: number;
+  /** Maximum number of items matching the schema's `contains` (`maxContains`). */
+  maxContains?: number;
+  /** Minimum number of object properties (`minProperties`). */
+  minProperties?: number;
+  /** Maximum number of object properties (`maxProperties`). */
+  maxProperties?: number;
+  /** Property name → properties that must also be present when it is (`dependentRequired`). */
+  dependentRequired?: Record<string, string[]>;
+}
+
 export interface Parameter {
   name: string;
   type: TypeRef;
@@ -238,6 +304,14 @@ export interface Parameter {
   examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
+  /**
+   * Validation keywords from the parameter's schema. When that schema is a
+   * `$ref`, the target's keywords are merged underneath the parameter's own
+   * — the per-value fallback `default` and `example` use — so a parameter
+   * can be read on its own without chasing the fieldless alias model the
+   * target also becomes. Absent when neither declares any.
+   */
+  constraints?: Constraints;
 }
 
 /** Type reference — the core type system of the IR */
@@ -318,6 +392,12 @@ export interface Model {
     property: string;
     mapping: Record<string, string>;
   };
+  /**
+   * Validation keywords declared on the model's own schema — for an object
+   * schema, `minProperties`, `maxProperties` and `dependentRequired`. Absent
+   * when the schema declares none.
+   */
+  constraints?: Constraints;
 }
 
 export interface Field {
@@ -352,6 +432,13 @@ export interface Field {
    * Present only when the list has at least one entry.
    */
   examples?: unknown[];
+  /**
+   * Validation keywords declared on the field's schema, including any
+   * written beside a `$ref` (OpenAPI 3.1 allows siblings). Absent when the
+   * schema declares none; a bare `$ref` yields none, since the referenced
+   * model carries its own limits.
+   */
+  constraints?: Constraints;
 }
 
 /** Enum definition */
@@ -584,6 +671,11 @@ export function assignModelsToServices(
           }
         }
       }
+      for (const header of collectResponseHeaders(op)) {
+        for (const name of collectModelRefs(header.type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -667,13 +759,55 @@ export function collectRequestBodyModels(services: Service[]): Set<string> {
   return result;
 }
 
+/**
+ * Every response header an operation declares: the primary response's, each
+ * alternate success entry's, and each error entry's. The primary list is the
+ * same array as its `successResponses` entry when both exist, so it is yielded
+ * once. Every pass that walks an operation's type refs (reachability, model
+ * assignment, ref rewriting and validation, direction, compat filtering, enum
+ * collection) goes through this so a type reached only through a header is
+ * treated the way a body or parameter type is.
+ */
+export function collectResponseHeaders(op: Operation): ResponseHeader[] {
+  const result: ResponseHeader[] = [];
+  const seen = new Set<ResponseHeader[]>();
+  const lists = [
+    op.responseHeaders,
+    ...(op.successResponses ?? []).map((r) => r.headers),
+    ...op.errors.map((e) => e.headers),
+  ];
+  for (const list of lists) {
+    if (!list || seen.has(list)) continue;
+    seen.add(list);
+    result.push(...list);
+  }
+  return result;
+}
+
+/**
+ * A header a response declares, typed like a parameter. `name` is kept exactly
+ * as written in the spec (e.g. `Content-Disposition`); emitters apply their
+ * own casing.
+ */
+export interface ResponseHeader {
+  name: string;
+  type: TypeRef;
+  required: boolean;
+  description?: string;
+  deprecated?: boolean;
+}
+
 export interface ErrorResponse {
   statusCode: number;
   type?: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
 }
 
 /** A successful response entry from a 2xx status code */
 export interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
 }

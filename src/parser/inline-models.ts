@@ -1,8 +1,10 @@
-import type { Model, Field } from '../ir/types.js';
+import type { Constraints, Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
+  constraintsEntry,
+  extractConstraints,
   isInlineObjectSchema,
   nameInlineVariantEntries,
   nameInlineVariants,
@@ -517,7 +519,7 @@ export function extractInlineModelsFromProperties(
     // wrappers before deciding whether a field is an object, array, or map,
     // so a nullable field must be unwrapped here the same way or its inline
     // object / array items / map values are referenced but never extracted.
-    const fieldSchema = unwrapNullableSchema(rawFieldSchema);
+    const fieldSchema = unwrapNullableField(rawFieldSchema);
     // Direct inline object with properties (with or without explicit type: 'object',
     // including the nullable `type: ['object', 'null']` form)
     if (isInlineObjectSchema(fieldSchema)) {
@@ -604,8 +606,11 @@ export function extractInlineModelsFromProperties(
       if (members.some((m) => m.$ref)) {
         if (members.some((m) => !m.$ref && (m.properties || m.type === 'object'))) emitMerged();
       } else if (only) {
+        // The wrapper's own keywords, conjoined with the member's, are the
+        // field's limits (see extractConstraints), so they ride along with the
+        // unwrapped member and its model carries the same constraints.
         extractInlineModelsFromProperties(
-          { properties: { [fieldName]: only } },
+          { properties: { [fieldName]: { ...only, ...extractConstraints(fieldSchema) } } },
           results,
           parentName,
           componentSchemas,
@@ -670,6 +675,8 @@ interface MergedAllOf {
   properties: MergedProperty[];
   required: string[];
   description: string | undefined;
+  /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
+  constraints: Constraints | undefined;
 }
 
 /**
@@ -715,7 +722,9 @@ function mergeAugmentation(
     for (const sub of s.allOf ?? []) visit(sub, origin);
   };
   visit(schema, null);
-  return { properties, required, description: schema.description };
+  // Limits conjoin the way properties merge, so the merged model declares what
+  // an instance must satisfy; a `$ref` member's target keeps its own limits.
+  return { properties, required, description: schema.description, constraints: extractConstraints(schema) };
 }
 
 /**
@@ -740,7 +749,12 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     }
     return buildFieldFromSchema(p.name, p.schema, p.origin.name, requiredSet, componentSchemas, siblings);
   });
-  return { name, description: merged.description, fields };
+  return {
+    name,
+    description: merged.description,
+    fields,
+    ...(merged.constraints ? { constraints: merged.constraints } : {}),
+  };
 }
 
 /**
@@ -773,6 +787,22 @@ function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
     }
   }
   return schema;
+}
+
+/**
+ * `unwrapNullableSchema` for a field, carrying the wrapper's limits onto the
+ * branch it unwraps to. The type-array and `nullable: true` forms unwrap by
+ * spreading, so every keyword survives; the union form swaps in the bare
+ * branch, which would drop a `minProperties` written beside
+ * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
+ * conjoins that wrapper's own keywords with its branch's as the field's
+ * limits, so the model built from the branch must carry the same ones or
+ * `Model.constraints` would omit what the field declares.
+ */
+function unwrapNullableField(schema: SchemaObject): SchemaObject {
+  const inner = unwrapNullableSchema(schema);
+  if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
+  return { ...inner, ...extractConstraints(schema) };
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */
@@ -808,5 +838,5 @@ function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?:
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
-  return { name, description: schema.description, fields };
+  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
 }
