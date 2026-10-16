@@ -1586,3 +1586,167 @@ describe('shape sharing keeps property names, and element fallbacks avoid siblin
     expectConsistent(ir, ['Drawing']);
   });
 });
+
+describe('inline response objects materialize every variant, item and value model', () => {
+  const str = { kind: 'primitive', type: 'string' };
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const circle: SchemaObject = {
+    type: 'object',
+    properties: { kind: { type: 'string', const: 'circle' }, radius: { type: 'number' } },
+  };
+  const square: SchemaObject = {
+    type: 'object',
+    properties: { kind: { type: 'string', const: 'square' }, side: { type: 'number' } },
+  };
+  const byRadius: SchemaObject = { type: 'object', properties: { radius: { type: 'number' } } };
+  const bySide: SchemaObject = { type: 'object', properties: { side: { type: 'number' } } };
+  const point: SchemaObject = { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } };
+  // `id` keeps a single-field response from being read as a resource wrapper.
+  const id: SchemaObject = { type: 'string' };
+  const info = { title: 'responses', version: '1' };
+
+  /** Every `{ kind: 'model', name }` anywhere inside a value. */
+  function modelRefsAnywhere(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => modelRefsAnywhere(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      for (const v of Object.values(record)) modelRefsAnywhere(v, out);
+    }
+    return out;
+  }
+
+  type ResponseCase = {
+    label: string;
+    properties: Record<string, SchemaObject>;
+    /** The fields the inline model gets, given its name. */
+    fields: (base: string) => Record<string, unknown>;
+    /** The nested models those fields reference, given the inline model's name. */
+    models: (base: string) => string[];
+  };
+  const cases: ResponseCase[] = [
+    {
+      label: 'a oneOf of two plain objects',
+      properties: { id, shape: { oneOf: [byRadius, bySide] } },
+      fields: (b) => ({
+        id: str,
+        shape: { kind: 'union', compositionKind: 'oneOf', variants: [model(`${b}Shape`), model(`${b}Shape2`)] },
+      }),
+      models: (b) => [`${b}Shape`, `${b}Shape2`],
+    },
+    {
+      label: 'a const-discriminated oneOf',
+      properties: { id, shape: { oneOf: [circle, square] } },
+      fields: (b) => ({
+        id: str,
+        shape: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model(`${b}Shape`), model(`Square${b}Shape`)],
+          discriminator: { property: 'kind', mapping: { circle: `${b}Shape`, square: `Square${b}Shape` } },
+        },
+      }),
+      models: (b) => [`${b}Shape`, `Square${b}Shape`],
+    },
+    {
+      label: 'a nullable second variant',
+      properties: { id, shape: { oneOf: [byRadius, { ...bySide, type: ['object', 'null'] }] } },
+      fields: (b) => ({
+        id: str,
+        shape: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model(`${b}Shape`), { kind: 'nullable', inner: model(`${b}Shape2`) }],
+        },
+      }),
+      models: (b) => [`${b}Shape`, `${b}Shape2`],
+    },
+    {
+      label: 'an array whose items are a oneOf',
+      properties: { id, markers: { type: 'array', items: { oneOf: [byRadius, bySide] } } },
+      fields: (b) => ({
+        id: str,
+        markers: {
+          kind: 'array',
+          items: { kind: 'union', compositionKind: 'oneOf', variants: [model(`${b}Marker`), model(`${b}Marker2`)] },
+        },
+      }),
+      models: (b) => [`${b}Marker`, `${b}Marker2`],
+    },
+    {
+      label: 'a map with inline object values',
+      properties: { id, layers: { type: 'object', additionalProperties: point } },
+      fields: (b) => ({ id: str, layers: { kind: 'map', valueType: model(`${b}Layer`) } }),
+      models: (b) => [`${b}Layer`],
+    },
+  ];
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<Awaited<ReturnType<typeof parseSpec>>> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  /** Every model ref in the operation and in every model resolves; every model is referenced. */
+  function expectConsistent(ir: Awaited<ReturnType<typeof parseSpec>>): void {
+    const referenced = modelRefsAnywhere(ir.services.flatMap((s) => s.operations));
+    for (const m of ir.models) modelRefsAnywhere(m.fields, referenced);
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !referenced.has(name))).toEqual([]);
+  }
+
+  const operation = (schema: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/things': {
+        get: {
+          operationId: 'listThings',
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
+        },
+      },
+    },
+  });
+
+  it.each(cases)('$label, as a direct inline response', async ({ properties, fields, models }) => {
+    const ir = await parseWithoutWarnings(operation({ type: 'object', properties }));
+    const op = ir.services.flatMap((s) => s.operations)[0]!;
+    expect(op.response).toEqual(model('ListThingsResponse'));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ListThingsResponse']).toEqual(fields('ListThingsResponse'));
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['ListThingsResponse', ...models('ListThingsResponse')].sort());
+    expectConsistent(ir);
+  });
+
+  it.each(cases)('$label, on the items of a list envelope', async ({ properties, fields, models }) => {
+    const ir = await parseWithoutWarnings(
+      operation({
+        type: 'object',
+        properties: {
+          object: { type: 'string', const: 'list' },
+          data: { type: 'array', items: { type: 'object', properties } },
+          list_metadata: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } } },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ListThingsItem']).toEqual(fields('ListThingsItem'));
+    const names = new Set(ir.models.map((m) => m.name));
+    for (const nested of models('ListThingsItem')) expect(names.has(nested)).toBe(true);
+    expectConsistent(ir);
+  });
+
+  it('shows the const-discriminated second variant with its own fields', async () => {
+    const ir = await parseWithoutWarnings(operation({ type: 'object', properties: cases[1]!.properties }));
+    const types = fieldTypesByModel(ir.models);
+    expect(types['ListThingsResponseShape']).toEqual({ kind: { kind: 'literal', value: 'circle' }, radius: num });
+    expect(types['SquareListThingsResponseShape']).toEqual({ kind: { kind: 'literal', value: 'square' }, side: num });
+  });
+});

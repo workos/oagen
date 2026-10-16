@@ -12,7 +12,7 @@ import { buildFieldFromSchema, isInlineObjectSchema, resolveSchemaName, variantM
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
   // Strip ListItem/ByExternalId markers from parent name so inline model names
-  // are clean and match the names produced by qualifyNestedName() in responses.ts.
+  // are clean, for response models as much as component ones.
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
   if (baseName.startsWith(cleanParent)) return baseName;
