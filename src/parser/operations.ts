@@ -13,7 +13,14 @@ import type {
 } from '../ir/types.js';
 import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, buildFieldFromSchema, resolveSchemaName } from './schemas.js';
+import {
+  schemaToTypeRef,
+  buildFieldFromSchema,
+  resolveSchemaName,
+  nonEmptyExamples,
+  resolveExamples,
+  resolveComponentSchemaRef,
+} from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -54,6 +61,20 @@ interface OperationObject {
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
 }
 
+/**
+ * An OAS Example Object, as the entries of a parameter's `examples` map and
+ * of `components.examples`. Only `value` is read: a `$ref` entry is first
+ * resolved against `components.examples` (see `resolveExampleRef`), and an
+ * entry that carries `externalValue` instead has no inline value to surface.
+ */
+interface ExampleObject {
+  summary?: string;
+  description?: string;
+  value?: unknown;
+  externalValue?: string;
+  $ref?: string;
+}
+
 interface ParameterObject {
   name: string;
   in: 'path' | 'query' | 'header' | 'cookie';
@@ -62,6 +83,8 @@ interface ParameterObject {
   schema?: SchemaObject;
   deprecated?: boolean;
   example?: unknown;
+  /** Parameter-level examples: a map of Example Objects, not a JSON Schema list. */
+  examples?: Record<string, ExampleObject>;
   style?: string;
   explode?: boolean;
 }
@@ -193,6 +216,7 @@ export function extractOperations(
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentModels?: Model[],
   documentTags?: TagObject[],
+  componentExamples?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -228,6 +252,7 @@ export function extractOperations(
         componentSchemas,
         componentParameters,
         componentRequestBodies,
+        componentExamples,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -701,6 +726,7 @@ function buildOperation(
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentExamples?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = op.operationId ?? `${method.toUpperCase()} ${path}`;
   // Resolve a `components/requestBodies` ref up front so body extraction, body
@@ -746,12 +772,17 @@ function buildOperation(
   // Use the service name as context so inline parameter enums get qualified
   // names. e.g., service "Auth" + param "provider" → "AuthProvider".
   const opContext = serviceName;
-  const pathParams = extractParams(wireParams, 'path', opContext, componentSchemas);
-  const queryParams = extractParams(wireParams, 'query', opContext, componentSchemas);
-  const headerParams = extractParams(wireParams, 'header', opContext, componentSchemas).filter(
-    (p) => p.name.toLowerCase() !== 'idempotency-key',
-  );
-  const cookieParams = extractParams(wireParams, 'cookie', opContext, componentSchemas);
+  const pathParams = extractParams(wireParams, 'path', opContext, componentSchemas, componentExamples, opLabel);
+  const queryParams = extractParams(wireParams, 'query', opContext, componentSchemas, componentExamples, opLabel);
+  const headerParams = extractParams(
+    wireParams,
+    'header',
+    opContext,
+    componentSchemas,
+    componentExamples,
+    opLabel,
+  ).filter((p) => p.name.toLowerCase() !== 'idempotency-key');
+  const cookieParams = extractParams(wireParams, 'cookie', opContext, componentSchemas, componentExamples, opLabel);
   // Keep the body-owned declarations on the operation so downstream passes
   // (inline-enum collection, the compat surface) still see what the spec
   // declared, even though no emitter serializes them to the URL.
@@ -762,11 +793,18 @@ function buildOperation(
           'query',
           opContext,
           componentSchemas,
+          componentExamples,
+          opLabel,
         )
       : [];
 
   const reqBodyModels: Model[] = [];
-  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(requestBodyObject, op, reqBodyModels);
+  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
+    requestBodyObject,
+    op,
+    reqBodyModels,
+    componentSchemas,
+  );
   const {
     response,
     successResponses,
@@ -871,11 +909,29 @@ function extractParams(
   location: 'path' | 'query' | 'header' | 'cookie',
   operationContext?: string,
   componentSchemas?: Record<string, SchemaObject>,
+  componentExamples?: Record<string, Record<string, unknown>>,
+  opLabel?: string,
 ): Parameter[] {
   return params
     .filter((p) => p.in === location)
     .map((p) => {
-      const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
+      const refTarget = resolveComponentSchemaRef(p.schema, componentSchemas);
+      // Each level is resolved on its own — the parameter's declaration, its
+      // inline schema, then the component the schema refs — so a schema-level
+      // `example` can't mask the parameter's own `examples` map, and an
+      // explicit `null` at any level is kept rather than fallen through.
+      const { example, examples } = resolveExamples([
+        {
+          example: p.example,
+          examples: exampleObjectValues(
+            p.examples,
+            componentExamples,
+            `parameter "${p.name}" in ${opLabel ?? location}`,
+          ),
+        },
+        { example: p.schema?.example, examples: nonEmptyExamples(p.schema?.examples) },
+        { example: refTarget?.example, examples: nonEmptyExamples(refTarget?.examples) },
+      ]);
       return {
         name: p.name,
         type: p.schema
@@ -885,7 +941,8 @@ function extractParams(
         description: firstDescription(p.description, p.schema?.description, refTarget?.description),
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
         default: p.schema?.default ?? refTarget?.default,
-        example: p.example ?? p.schema?.example ?? refTarget?.example,
+        example,
+        ...(examples ? { examples } : {}),
         style: p.style as Parameter['style'],
         explode: p.explode,
       };
@@ -903,26 +960,64 @@ function firstDescription(...candidates: Array<string | undefined>): string | un
 }
 
 /**
- * If a parameter's schema is a `$ref` to `#/components/schemas/X`, return the
- * referenced component schema. Used to surface schema-level metadata (default,
- * example, deprecated, description) that wouldn't otherwise be visible at the
- * param level.
- *
- * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
- * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
- * silently loses the target's `default: desc` and the SDK stops emitting the
- * spec-mandated default value in generated method signatures.
+ * Flatten a parameter's `examples` map of Example Objects to the inline
+ * values it carries, in document order. A `$ref` entry is resolved against
+ * `components.examples` first (see `resolveExampleRef`). Entries that point
+ * elsewhere (`externalValue`) or have no `value` are skipped; `null` is a
+ * legitimate value and kept. Returns undefined when nothing remains so the
+ * caller can fall through to the schema's `examples`.
  */
-function resolveParamSchemaRef(
-  schema: SchemaObject | undefined,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-): SchemaObject | undefined {
-  if (!schema || !componentSchemas) return undefined;
-  const ref = (schema as { $ref?: string }).$ref;
-  if (!ref) return undefined;
-  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
-  if (!match) return undefined;
-  return componentSchemas[match[1]];
+function exampleObjectValues(
+  examples: Record<string, ExampleObject> | undefined,
+  componentExamples: Record<string, Record<string, unknown>> | undefined,
+  context: string,
+): unknown[] | undefined {
+  if (!examples || typeof examples !== 'object' || Array.isArray(examples)) return undefined;
+  const values: unknown[] = [];
+  for (const raw of Object.values(examples)) {
+    const entry = resolveExampleRef(raw, componentExamples, context);
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.externalValue !== undefined || entry.value === undefined) continue;
+    values.push(entry.value);
+  }
+  return values.length > 0 ? values : undefined;
+}
+
+/**
+ * Follow an Example Object's `$ref` into `components.examples`, including a
+ * component that is itself a `$ref`, with a cycle guard. The bundler keeps
+ * refs (`dereference: false`), so without this every `$ref` entry would be
+ * dropped and a map made only of refs would silently yield nothing — the
+ * parameter would then take its `examples` from the schema instead of the
+ * values the document points at. A ref that can't be resolved is skipped
+ * with a warning rather than failing the parse: a missing example is a doc
+ * gap, not a broken API surface.
+ */
+function resolveExampleRef(
+  raw: ExampleObject | undefined,
+  componentExamples: Record<string, Record<string, unknown>> | undefined,
+  context: string,
+): ExampleObject | undefined {
+  const seenRefs = new Set<string>();
+  let current = raw;
+  while (current && typeof current === 'object' && current.$ref !== undefined) {
+    const ref = current.$ref;
+    if (seenRefs.has(ref)) {
+      console.warn(`[oagen] Warning: Circular example $ref chain starting at "${ref}" on ${context}; skipping`);
+      return undefined;
+    }
+    seenRefs.add(ref);
+    const match = /^#\/components\/examples\/(.+)$/.exec(ref);
+    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
+    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+    const resolved = refName ? componentExamples?.[refName] : undefined;
+    if (!resolved) {
+      console.warn(`[oagen] Warning: Unresolved example $ref "${ref}" on ${context}; skipping`);
+      return undefined;
+    }
+    current = resolved as ExampleObject;
+  }
+  return current;
 }
 
 /**
@@ -1100,6 +1195,7 @@ function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
   inlineModels: Model[],
+  componentSchemas?: Record<string, SchemaObject>,
 ): { body?: TypeRef; encoding?: RequestBodyEncoding } {
   if (!body?.content) return {};
 
@@ -1141,7 +1237,7 @@ function extractRequestBody(
     const fields: Field[] = [];
     for (const [fieldName, fieldSchema] of Object.entries(schema.properties)) {
       if (!fieldSchema) continue;
-      fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet));
+      fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas));
     }
     inlineModels.push({ name: contextName, description: undefined, fields });
     // Nested inline objects (e.g. a `user` property that is itself an inline
@@ -1149,7 +1245,7 @@ function extractRequestBody(
     // by this branch. Recurse to materialize them, matching how component
     // schemas are handled in extractInlineModelsFromSchemas — otherwise the
     // generated body model references a model that never gets generated.
-    extractInlineModelsFromProperties(schema, inlineModels, contextName);
+    extractInlineModelsFromProperties(schema, inlineModels, contextName, componentSchemas);
     return { body: { kind: 'model', name: contextName }, encoding };
   }
 
@@ -1170,10 +1266,10 @@ function extractRequestBody(
         const fields: Field[] = [];
         for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
           if (!fieldSchema) continue;
-          fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet));
+          fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas));
         }
         inlineModels.push({ name: variantName, description: variant.description, fields });
-        extractInlineModelsFromProperties(variant, inlineModels, variantName);
+        extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);
         variants.push({ kind: 'model', name: variantName });
       } else {
         variants.push(schemaToTypeRef(variant, contextName));

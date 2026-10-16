@@ -73,6 +73,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
+      examples?: Record<string, unknown>;
       securitySchemes?: Record<string, SecuritySchemeObject>;
     };
   };
@@ -99,6 +100,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
     models,
     spec.tags,
+    spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
