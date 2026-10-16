@@ -790,4 +790,146 @@ describe('parseSpec – deprecated', () => {
       }
     `);
   });
+
+  it('collapses a nullable wrapper whose one branch has its own nested union, and never a two-variant one', async () => {
+    const circle = obj({ properties: { kind: { const: 'circle' }, r: { type: 'number' } } });
+    const square = obj({ deprecated: true, properties: { kind: { const: 'square' }, side: { type: 'number' } } });
+    // One object branch carrying an `anyOf` of constraint sets beside its
+    // properties: the union collapses at the wrapper level, and the branch's
+    // own `anyOf` is the branch's business, so the model takes the wrapper's
+    // flag exactly as a plain object branch would.
+    const constrained = {
+      deprecated: true,
+      oneOf: [obj({ anyOf: [{ required: ['k'] }, { maxProperties: 1 }] }), { type: 'null' }],
+    };
+    // One object branch whose property is itself a union of objects: the
+    // branch model takes the wrapper's flag, and the property's variants are
+    // built as written, with their fields and their own flags.
+    const nested = {
+      deprecated: true,
+      oneOf: [obj({ properties: { shape: { oneOf: [circle, square] } } }), { type: 'null' }],
+    };
+    // Two non-null variants beside `null`: not a nullable wrapper, so nothing
+    // collapses, every variant keeps its fields, and none takes the wrapper's flag.
+    const twoVariants = { deprecated: true, oneOf: [circle, square, { type: 'null' }] };
+    const body = (schema: unknown, operationId: string) => ({
+      post: {
+        operationId,
+        requestBody: { content: { 'application/json': { schema } } },
+        responses: { '201': { description: 'created' } },
+      },
+    });
+    const file = await writeSpec(
+      'nested-union.json',
+      specDoc(
+        { Thing: { type: 'object', properties: { constrained, nested, two_variants: twoVariants } } },
+        {
+          '/constrained': body(constrained, 'createConstrained'),
+          '/nested': body(nested, 'createNested'),
+          '/two': body(twoVariants, 'createTwo'),
+        },
+      ),
+    );
+    const spec = await parseSpec(file);
+    for (const m of spec.models) expect(m.fields.length, m.name).toBeGreaterThan(0);
+    expect(shapes(spec.models)).toMatchInlineSnapshot(`
+      {
+        "CircleCreateTwoRequest": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+        "CreateConstrainedRequest": {
+          "deprecated": true,
+          "fields": [
+            "k",
+          ],
+        },
+        "CreateNestedRequest": {
+          "deprecated": true,
+          "fields": [
+            "shape",
+          ],
+        },
+        "CreateNestedRequestShape": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+        "SquareCreateNestedRequestShape": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "SquareCreateTwoRequest": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "SquareThingNestedShape": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "SquareThingTwoVariant": {
+          "deprecated": true,
+          "fields": [
+            "kind",
+            "side",
+          ],
+        },
+        "Thing": {
+          "deprecated": undefined,
+          "fields": [
+            "constrained",
+            "nested",
+            "two_variants",
+          ],
+        },
+        "ThingConstrained": {
+          "deprecated": true,
+          "fields": [
+            "k",
+          ],
+        },
+        "ThingNested": {
+          "deprecated": true,
+          "fields": [
+            "shape",
+          ],
+        },
+        "ThingNestedShape": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+        "ThingTwoVariant": {
+          "deprecated": undefined,
+          "fields": [
+            "kind",
+            "r",
+          ],
+        },
+      }
+    `);
+    // Each field reads the wrapper's keyword, whether or not its union collapsed.
+    const thing = spec.models.find((m) => m.name === 'Thing')!;
+    expect(thing.fields.map((f) => [f.name, f.deprecated])).toEqual([
+      ['constrained', true],
+      ['nested', true],
+      ['two_variants', true],
+    ]);
+  });
 });

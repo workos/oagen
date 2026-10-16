@@ -322,20 +322,23 @@ export function unwrapNullableField(schema: SchemaObject): SchemaObject {
  * the wrapper's `deprecated` and limits (`unwrapNullableField`), or
  * `undefined` when `schema` is not such a wrapper: not a union, or a union
  * with more than one non-null variant — nullable or not, including
- * `type: ['object', 'null']` beside a multi-variant `oneOf`, whose unwrap is
- * a copy that still carries the union. A multi-variant union is never
- * collapsed: each variant is its own schema, built as itself with its own
- * flag, and the wrapper's stays on the field. The sites that build a model
- * from a union's variants substitute the branch this returns for the one
- * variant it stands for, and otherwise build every variant as written.
+ * `type: ['object', 'null']` beside a multi-variant `oneOf`. Decided at the
+ * wrapper's level alone: the union collapses iff discarding its `null`
+ * variants leaves exactly one, whatever that variant contains — a branch's
+ * own nested `oneOf`/`anyOf` (a union of constraint sets beside its
+ * properties, say) is the branch's business and is built as written, flag
+ * and limits carried. A multi-variant union is never collapsed: each variant
+ * is its own schema, built as itself with its own flag, and the wrapper's
+ * stays on the field. The sites that build a model from a union's variants
+ * substitute the branch this returns for the one variant it stands for, and
+ * otherwise build every variant as written.
  */
 export function collapsedNullableBranch(schema: SchemaObject): SchemaObject | undefined {
   const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
   if (!variants) return undefined;
-  const nullVariant = variants.find(isNullSchema);
-  if (!nullVariant || variants.filter((v) => v !== nullVariant).length !== 1) return undefined;
-  const branch = unwrapNullableField(schema);
-  return branch.oneOf || branch.anyOf ? undefined : branch;
+  const nonNull = variants.filter((v) => !isNullSchema(v));
+  if (nonNull.length !== 1 || nonNull.length === variants.length) return undefined;
+  return unwrapNullableField(schema);
 }
 
 /**
