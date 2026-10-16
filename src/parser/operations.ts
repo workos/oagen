@@ -12,7 +12,7 @@ import type {
   PaginationMeta,
 } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, cleanSchemaName } from '../utils/naming.js';
+import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -1296,7 +1296,7 @@ function extractRequestBody(
       } else if (variant.type === 'null') {
         // skip null variant in union, handle separately
       } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const variantName = deriveOneOfVariantName(variant, contextName, inlineModels);
+        const variantName = deriveOneOfVariantName(variant, contextName, inlineModels, Boolean(op?.operationId));
         const requiredSet = new Set(variant.required ?? []);
         const siblings = collectProperties(variant);
         const fields: Field[] = [];
@@ -1416,28 +1416,42 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
   };
 }
 
-/** Derive a unique variant name for a oneOf inline model. */
-function deriveOneOfVariantName(variant: SchemaObject, baseName: string, existingModels: Model[]): string {
+/**
+ * Derive a unique variant name for a oneOf inline model.
+ *
+ * `fromOperationId` says where `baseName` came from. An operationId-derived
+ * base is already in cleanSchemaName form and its variants go through
+ * resolveSchemaName, so they follow the same project-level naming policy as
+ * component schemas. A path-derived base is used verbatim: it is deliberately
+ * not cleaned (see derivePathModelBaseName) and resolvePathModelBaseNames
+ * reserves names by that exact prefix, so cleaning a variant here would let it
+ * slip past the reservation — `NotesPostRequest` became `NotePostRequest` and
+ * collided with a component of that name.
+ */
+function deriveOneOfVariantName(
+  variant: SchemaObject,
+  baseName: string,
+  existingModels: Model[],
+  fromOperationId: boolean,
+): string {
+  const finalize = (name: string): string => (fromOperationId ? resolveSchemaName(name) : name);
   // Try to use a distinguishing property (e.g., "grant_type" field's const/enum value)
   if (variant.properties) {
     for (const [, propSchema] of Object.entries(variant.properties)) {
       if (propSchema?.const && typeof propSchema.const === 'string') {
         const derivedName = toPascalCase(propSchema.const) + baseName.replace(/Request$/, '') + 'Request';
-        // Const-derived request variants are IR models too, so they must use
-        // the same project-level naming policy as component schemas.
-        return resolveSchemaName(derivedName);
+        return finalize(derivedName);
       }
     }
   }
-  // Fallback: append a numeric suffix
+  // Fallback: append a numeric suffix. Finalize before suffixing so every
+  // candidate stays in the same namespace as the rest of the IR.
   const existingNames = new Set(existingModels.map((m) => m.name));
-  // Apply the transform before suffixing so every fallback candidate stays in
-  // the same post-schemaNameTransform namespace as the rest of the IR.
-  const transformedBaseName = resolveSchemaName(baseName);
-  let name = transformedBaseName;
+  const finalBaseName = finalize(baseName);
+  let name = finalBaseName;
   let suffix = 2;
   while (existingNames.has(name)) {
-    name = `${transformedBaseName}${suffix}`;
+    name = `${finalBaseName}${suffix}`;
     suffix++;
   }
   return name;
@@ -1517,7 +1531,11 @@ export function derivePathBasedName(
  * and never sharing a name wrongly matter more than the rare extra hash, and
  * the reservation is unconditional — an inline body is never merged into a
  * same-named component even when the shapes agree — so the rule stays
- * simple and order-free.
+ * simple and order-free. Every name derived from a path-based prefix uses it
+ * verbatim (body `oneOf` variants included; see deriveOneOfVariantName), and
+ * as a second line of defence the check also runs on the cleaned spellings
+ * of the prefix (see prefixSpellings), so `GET /notes` yields to a component
+ * `NoteGetItem` although its own item model is `NotesGetItem`.
  *
  * These names are types SDK users read and import, so a collision costs the
  * plain name only where it must. Within a group of paths that flatten to one
@@ -1559,7 +1577,7 @@ function resolvePathModelBaseNames(paths: Record<string, PathItem>, componentMod
   const reservedList = [...reservedNames];
   const canonicalByPlainName = new Map<string, string | undefined>();
   for (const [plain, rawPaths] of rawPathsByPlainName) {
-    const reserved = reservedList.some((name) => name.startsWith(plain));
+    const reserved = prefixSpellings(plain).some((spelling) => reservedList.some((name) => name.startsWith(spelling)));
     canonicalByPlainName.set(plain, reserved ? undefined : canonicalPath(rawPaths));
   }
 
@@ -1616,6 +1634,23 @@ function compareDeviation(a: [number, number], b: [number, number]): number {
 /** The first six hex characters of the SHA-1 of a raw path. */
 function pathDisambiguator(rawPath: string): string {
   return createHash('sha1').update(rawPath).digest('hex').slice(0, 6);
+}
+
+/**
+ * The spellings a path-based prefix could take if a name derived from it were
+ * run through one of the parser's cleaning steps: the prefix itself (every
+ * path-derived name uses it verbatim), cleanSchemaName's form (lead-word
+ * singularization plus backend and ListItem-marker stripping),
+ * resolveSchemaName's form (the same plus the project's schemaNameTransform),
+ * and stripListItemMarkers alone, which nested-model and inline-enum
+ * qualification apply to a parent name. Reserving by every spelling is the
+ * second line of defence behind "use the base verbatim": a cleaning step added
+ * later cannot let a derived name slip past the reservation. Empty spellings
+ * are dropped so a degenerate prefix cannot match every reserved name.
+ */
+function prefixSpellings(prefix: string): string[] {
+  const spellings = [prefix, cleanSchemaName(prefix), resolveSchemaName(prefix), stripListItemMarkers(prefix)];
+  return [...new Set(spellings)].filter((spelling) => spelling.length > 0);
 }
 
 function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {

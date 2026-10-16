@@ -653,6 +653,117 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  /** Model names referenced by a union TypeRef, or undefined. */
+  const variantNamesOf = (body: unknown) =>
+    (body as { variants?: Array<{ name?: string }> }).variants?.map((v) => v.name);
+
+  it('names body oneOf variants from the path base verbatim and yields to a singularized component (POST /notes vs NotePostRequest)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamedUnion = {
+      post: {
+        requestBody: jsonBody({
+          oneOf: [
+            inlineObject({ a: { type: 'string' } }),
+            inlineObject({ d: { type: 'string' }, e: { type: 'string' } }),
+          ],
+        }),
+        responses: { '204': { description: 'ok' } },
+      },
+    };
+    const spec = {
+      ...api({ '/notes': unnamedUnion }),
+      components: { schemas: { NotePostRequest: inlineObject({ b: { type: 'string' }, c: { type: 'string' } }) } },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    const [op] = ops;
+    const variants = variantNamesOf(op.requestBody)!;
+    expect([op.path, variants]).toMatchInlineSnapshot(`
+      [
+        "/notes",
+        [
+          "Notes151Dd5PostRequest",
+          "Notes151Dd5PostRequest2",
+        ],
+      ]
+    `);
+
+    // The component keeps its name and fields; every variant resolves to its own model.
+    expect(fieldsOf(models, 'NotePostRequest')).toEqual(['b', 'c']);
+    expect(variants).not.toContain('NotePostRequest');
+    expect(fieldsOf(models, variants[0])).toEqual(['a']);
+    expect(fieldsOf(models, variants[1])).toEqual(['d', 'e']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps body oneOf variant names verbatim without a component: NotesPostRequest / NotesPostRequest2 and const-prefixed', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const numbered = {
+      post: {
+        requestBody: jsonBody({
+          oneOf: [inlineObject({ a: { type: 'string' } }), inlineObject({ d: { type: 'string' } })],
+        }),
+        responses: { '204': { description: 'ok' } },
+      },
+    };
+    const constPrefixed = {
+      post: {
+        requestBody: jsonBody({
+          oneOf: [
+            { type: 'object', properties: { kind: { type: 'string', const: 'email' }, to: { type: 'string' } } },
+            { type: 'object', properties: { kind: { type: 'string', const: 'sms' }, number: { type: 'string' } } },
+          ],
+        }),
+        responses: { '204': { description: 'ok' } },
+      },
+    };
+
+    const { ops, models } = await parseInline(api({ '/notes': numbered, '/tags': constPrefixed }), summarizeAll);
+    const byPath = Object.fromEntries(ops.map((o) => [o.path, variantNamesOf(o.requestBody)]));
+    expect(byPath).toMatchInlineSnapshot(`
+      {
+        "/notes": [
+          "NotesPostRequest",
+          "NotesPostRequest2",
+        ],
+        "/tags": [
+          "EmailTagsPostRequest",
+          "SmsTagsPostRequest",
+        ],
+      }
+    `);
+
+    // The union TypeRef and the materialized models agree, with the path base verbatim.
+    expect(byPath['/notes']).toEqual(['NotesPostRequest', 'NotesPostRequest2']);
+    for (const name of [...byPath['/notes']!, ...byPath['/tags']!]) {
+      expect(models.some((m) => m.name === name)).toBe(true);
+    }
+    expect(fieldsOf(models, 'NotesPostRequest')).toEqual(['a']);
+    expect(fieldsOf(models, 'NotesPostRequest2')).toEqual(['d']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('reserves the singularized spelling too: GET /notes list yields to a component NoteGetItem', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unnamedList = {
+      get: { responses: { '200': jsonResponse({ type: 'array', items: inlineObject({ a: { type: 'string' } }) }) } },
+    };
+    const spec = {
+      ...api({ '/notes': unnamedList }),
+      components: { schemas: { NoteGetItem: inlineObject({ b: { type: 'string' } }) } },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    const itemName = itemNameOf(ops[0].response);
+    expect(itemName).toMatchInlineSnapshot(`"Notes151Dd5GetItem"`);
+
+    // `NotesGetItem` would not have clashed, but the cleaned spelling `NoteGet…` is reserved. Expected.
+    expect(fieldsOf(models, 'NoteGetItem')).toEqual(['b']);
+    expect(itemName).not.toBe('NotesGetItem');
+    expect(fieldsOf(models, itemName)).toEqual(['a']);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('normalizes so request and response prefixes agree (/a/b, /v2/x/y)', async () => {
     const op = {
       post: {
