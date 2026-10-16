@@ -107,6 +107,10 @@ interface MapType {
 
 The optional `keyType` allows non-string map keys (e.g., enum-keyed maps). When absent, emitters should assume `string` keys.
 
+A map's value schema is typed the same way an array's items are: with the owning field's name and parent model. When the value is an inline object (or an array or `oneOf` of inline objects), the parser extracts it as a model named by the parent plus the singularized field name, e.g. `layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`, matching `shapes` → `CreateDrawingRequestShape` for array items. `additionalProperties: {}` or `true` keeps the value type `unknown`. The singular form is taken only when no sibling property of the same object would itself mint that name — an inline object, an inline enum, an inline union with object variants, or an array or map of such (a primitive `email` beside `emails` claims nothing); otherwise array items are `<Parent><Field>Item` (`DrawingLayersItem` beside a `layer` object with different fields) and map values `<Parent><Field>Value`; if a sibling claims that name too (a property `layers_item`), the fallback continues to `<Parent><Field>ArrayItem`, then `<Parent><Field>ArrayItem2`, and so on (`<Parent><Field>MemberValue`, `…MemberValue2` for maps), taking the first name no sibling mints. One deliberate exception: when the claiming sibling is an inline object structurally identical to the items or values (same properties, required, types, nested inline schemas and enum values; `description`, `title` and `example` ignored), both fields share one model under the singular name, since one type is right for both and a duplicate would only add noise; the split happens only once the shapes diverge. The choice reads sibling names and schema content only, so document order plays no part.
+
+Inline object variants of a `oneOf`/`anyOf` are extracted as their own models: the first keeps the field's inline name (`DrawingShape`), later ones take a const-discriminator prefix when every variant pins one (`SquareDrawingShape`) or a position suffix otherwise (`DrawingShape2`). Everything nested under a variant is named from the variant, never from the union's field: a multi-type variant such as `type: ['object', 'array']` keeps its other types beside the model (`union[model, array]`), and the inline items of that array member are `<Variant>Item` (`DrawingShape2Item`, with nested objects `DrawingShape2ItemChild`); any other non-object member is named `<Variant>Value` (an inline enum, for instance). If a property of the variant already claims that model name (`item`, or `items`, which singularizes to the same `<Variant>Item`), the member falls back to `<Variant>ArrayItem` / `<Variant>MemberValue`, then `<Variant>ArrayItem2`, `<Variant>ArrayItem3`, and so on. A variant that admits null (`['object', 'null']` or `nullable: true`) keeps its `nullable` wrapper around the model.
+
 ### UnionType
 
 ```typescript
@@ -275,7 +279,8 @@ interface Parameter {
   description?: string;
   deprecated?: boolean;
   default?: unknown;
-  example?: unknown;
+  example?: unknown; // The document's `example`, else `examples[0]`
+  examples?: unknown[]; // Every example value, in document order; only when non-empty
   style?: "form" | "simple" | "label" | "matrix";
   explode?: boolean;
   constraints?: Constraints; // Validation keywords; see Constraints below
@@ -285,6 +290,11 @@ interface Parameter {
 `Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema — the same fallback chain `deprecated`, `default`, and `example` use. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented.
 
 A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
+### Parameter Examples
+
+`example` and `examples` are read from three levels in order: the parameter itself, then its inline `schema`, then the component schema its `$ref` points at. A parameter-level `examples` is an OpenAPI map of Example Objects, so each entry's `value` is taken in document order; a `$ref` entry is resolved against `components.examples` (a dangling ref is skipped with a warning), and an `externalValue` entry is skipped. A schema-level `examples` is the JSON Schema list and is taken as-is.
+
+Each value walks the levels on its own. `examples` is the first level's non-empty list. `example` comes from the first level that has either an `example` or a list, preferring that level's own `example` over its first list entry, so a schema-level `example` can never mask the parameter's own `examples` map. A level with neither falls through; an explicit `null` is a value and is kept. Emitters that read only `example` therefore still see a value for an OAS 3.1 document that uses `examples` alone.
 
 ### Idempotency Key
 
@@ -326,10 +336,15 @@ interface Field {
   writeOnly?: boolean;
   deprecated?: boolean;
   default?: unknown;
-  example?: unknown;
+  example?: unknown; // The schema's `example`, else `examples[0]`
+  examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
   constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
 }
 ```
+
+### Field Examples
+
+OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does. A field whose schema (and `$ref` target, if any) gives neither has no `example` and no `examples` key.
 
 ### Constraints
 

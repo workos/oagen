@@ -108,6 +108,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or argument checks
+- `examples` — Every example value (the list `example` is drawn from)
 
 #### Model
 
@@ -122,6 +123,8 @@ A missing kind means an entire category of types won't generate correctly.
 - `writeOnly` — Write-only annotation
 - `deprecated` — Deprecation marker on fields
 - `default` — Default value annotation
+- `example` — Example value annotation
+- `examples` — Every example value (the list `example` is drawn from)
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or value checks
 
 #### EnumValue
@@ -145,7 +148,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -235,9 +238,12 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
 | `Parameter.default`          | Document default value                                                                                                                          |
 | `Parameter.example`          | Document example value                                                                                                                          |
+| `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                     |
 | `Field.readOnly`             | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust) |
 | `Field.writeOnly`            | Write-only annotation in doc comments                                                                                                           |
 | `Field.default`              | Document default value                                                                                                                          |
+| `Field.example`              | Document example value                                                                                                                          |
+| `Field.examples`             | Document every example value (e.g. one `@example` tag each)                                                                                     |
 | `Field.constraints`          | Document limits ("at most 100 characters") or validate before serializing                                                                       |
 | `Parameter.constraints`      | Document limits on method arguments or validate before sending                                                                                  |
 
