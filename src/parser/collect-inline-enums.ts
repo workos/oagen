@@ -1,5 +1,5 @@
-import type { Enum, Model, Operation, ResponseHeader, Service } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef } from '../ir/types.js';
+import { walkTypeRef, collectAlternateResponseContents } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
@@ -36,7 +36,14 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
-        for (const header of headers) collectHeaderEnums(header, qualifier, enums, enumNames);
+        for (const header of headers) collectDistinctEnums(header.type, qualifier, enums, enumNames);
+      }
+      // A body declared only for a secondary media type (`text/plain` next to
+      // `application/json`) is typed like a response body, so its inline enums
+      // are promoted the same way. Its name is already operation-qualified; a
+      // clash with a different value set falls back to a numeric suffix.
+      for (const content of collectAlternateResponseContents(op)) {
+        collectDistinctEnums(content.type, undefined, enums, enumNames);
       }
     }
   }
@@ -65,21 +72,22 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
 }
 
 /**
- * Promote a header's inline enums. A header enum is named from the service
+ * Promote the inline enums under `type` — a response header's, or a secondary
+ * media type's body. A header enum is named from the service
  * and header name alone, so `X-Policy` allowing `fast`/`slow` on a 200 and
  * `retry`/`stop` on a 429 would share one name and whichever was collected
  * first would silently win; a request parameter named like the header
  * collides the same way. When the name is already taken by a different value
- * set, the header's ref is renamed to a distinct name before it is promoted.
+ * set, the ref is renamed to a distinct name before it is promoted.
  * A taken name with the same values is shared, as before.
  */
-function collectHeaderEnums(
-  header: ResponseHeader,
+function collectDistinctEnums(
+  type: TypeRef,
   qualifier: string | undefined,
   enums: Enum[],
   enumNames: Set<string>,
 ): void {
-  walkTypeRef(header.type, {
+  walkTypeRef(type, {
     enum: (ref) => {
       if (!ref.values) return;
       const existing = enums.find((e) => e.name === ref.name);

@@ -1,5 +1,5 @@
 import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
-import { collectResponseHeaders } from '../ir/types.js';
+import { collectResponseHeaders, collectAlternateResponseContents } from '../ir/types.js';
 
 /**
  * Which side of the wire a model sits on, from the caller's point of view.
@@ -52,6 +52,7 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
         responseSeeds.push(op.response);
         for (const field of op.pagination?.envelopeFields ?? []) responseSeeds.push(field.type);
         for (const header of collectResponseHeaders(op)) responseSeeds.push(header.type);
+        for (const content of collectAlternateResponseContents(op)) responseSeeds.push(content.type);
         for (const success of op.successResponses ?? []) responseSeeds.push(success.type);
         for (const error of op.errors) if (error.type) responseSeeds.push(error.type);
       }

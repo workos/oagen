@@ -237,6 +237,8 @@ interface Operation {
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
   responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
+  responseContentTypes?: string[]; // Media types the primary response declares, in document order (only when any exist)
+  responseContents?: ResponseContent[]; // A type per media type above, same order (only when any exist)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -272,6 +274,13 @@ interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
   headers?: ResponseHeader[]; // Only when the spec declares at least one
+  contentTypes?: string[]; // Media types under `content`, in document order; only when at least one
+  contents?: ResponseContent[]; // One per contentTypes entry, same order; only when contentTypes is
+}
+
+interface ResponseContent {
+  contentType: string; // As written in the spec, e.g. "application/vnd.api+json", "text/html; charset=utf-8"
+  type: TypeRef;
 }
 
 interface ResponseHeader {
@@ -336,6 +345,16 @@ Each header is typed like a parameter via its `schema` (or the first media type 
 An object-shaped header (directly, inside an array, or as a oneOf variant) is materialized as an inline model named from the service and header name (`Documents` + `X-Meta` → `DocumentsXMeta`), nested objects included (`DocumentsXMetaOrigin`). Because that name can already belong to a differently shaped component schema, to the same header on another status code, or to the same header on another operation of the service, the parser keeps a spec-wide registry of model shapes: the first owner of a name keeps it (component models first, then operations in path order, then a single operation's responses in ascending status-code order), and a later header with a different shape is re-derived under the first free candidate — bare name; then the status code (`DocumentsXMeta429`) when the clash is inside the same operation, or the operation (`DocumentsCreateDocumentXMeta`) when it is with a component or another operation; then the other of those two; then both (`DocumentsCreateDocumentXMeta429`); then a numeric suffix (`DocumentsXMeta2`). A header whose shape matches the name's owner shares it and materializes nothing new, so a header matching a component schema simply references that schema. Inline header enums follow the same idea with their own, status-code-based rule.
 
 `collectResponseHeaders(op)` (exported from `@workos/oagen`) yields every header list once — the primary list is the same array as its `successResponses` entry — and is what reachability, model assignment, ref rewriting/validation, the differ, and the compat filter use, so a model or enum reached only through a header is emitted like any other.
+
+### Response Content Types
+
+A response that offers more than one media type (`text/html` and `application/pdf` for a card that renders as a page or a printout; `application/json` and `application/vnd.api+json`; `application/json` and `*/*`) keeps every media type it declares. Each `SuccessResponse` and `ErrorResponse` carries `contentTypes: string[]` — the keys of its `content` map, in document order and exactly as written, parameters (`application/json; charset=utf-8`), vendor suffixes and wildcards included, so an emitter can offer them verbatim in an `Accept` header — and `contents: ResponseContent[]`, one entry per media type in the same order, with the type that media type's schema resolves to. Both are present only when the response declares at least one media type; a response without `content` (a 204, a redirect without a body) or with an empty `content` map has neither. As with headers, the primary success response's two lists are also exposed on the operation as `responseContentTypes` and `responseContents` (the same arrays), because `successResponses` only exists when there is more than one 2xx.
+
+`Operation.response` is unchanged: it is still the type of the media type the parser's fixed-order pick chooses (`application/json` with a schema; else `application/octet-stream` or `application/pdf` as binary; else `text/plain`, `text/html`, `text/xml` or `application/xml` as a string; else the first media type's schema). The `contents` entry for that media type carries the very same `TypeRef` as `response` (and as `type` on the `SuccessResponse`), so the two can never disagree. Every other media type is typed the way `response` would be if it were the only one declared — binary for `application/octet-stream` and `application/pdf`, a string for the text and XML types whatever their schema says, the schema's type for anything else, and `unknown` for a media type with no schema. In the card example `response` is binary (the PDF wins the fixed order) while `contents` reads `[{ text/html → string }, { application/pdf → binary }]`. A 3xx entry's `type` is not read from any media type, so each of its entries is typed on its own. An error entry's `type` is still read from `application/json` alone and is otherwise untouched; its `contents` entry for that media type shares it, and the others are typed as above. Because an error's `type` is its `application/json` body by definition, an error carries the two lists only when they say something `type` does not — it declares another media type (`text/html` beside `application/json`, or `application/problem+json` alone), or an `application/json` body with no schema that `type` could not be read from. An error that declares only `application/json` with a schema, the overwhelmingly common case, keeps exactly the shape it had.
+
+An inline object declared only for a secondary media type is materialized as a model named from the operation's response stem, the media type and the entry's role — `RenderPetCardTextHtmlResponse`, `RenderPetCardApplicationProblemJsonError` — with nested objects, array items and union variants named under it as `schemaToTypeRef` names them. The media type's PascalCase form keeps its parameters (`ApplicationJsonCharsetUtf8`) so two parameterizations of one type never share a model, and reads a wildcard segment as `Any` (`ApplicationAny`). The name goes through the same spec-wide shape registry headers use: an identical shape on another status code shares the model, and a different shape under a taken name is re-derived with the status code (`…Response201`) and then a numeric suffix. An inline enum under a secondary media type is promoted to `spec.enums` like a header's; a clash with a different value set gets a numeric suffix.
+
+`collectAlternateResponseContents(op)` (exported from `@workos/oagen`) yields every content entry whose type is reachable only through it — all entries except the one that shares the response's own `type`, which `response`, `successResponses[].type` and `errors[].type` already cover — each list once, and is what reachability, model assignment, ref rewriting/validation, the differ, the compat filter and enum collection use, so a body declared only for a secondary media type is emitted like the primary one.
 
 ## Model & Field
 
@@ -445,6 +464,8 @@ interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
   headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
+  contentTypes?: string[]; // Media types under `content`, in document order; only when they add to `type` (see below)
+  contents?: ResponseContent[]; // One per contentTypes entry, same order; the application/json entry shares `type`
 }
 ```
 

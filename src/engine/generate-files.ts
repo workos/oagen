@@ -1,5 +1,5 @@
 import type { ApiSpec, Model, TypeRef, Service, Operation } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectAlternateResponseContents } from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
@@ -153,6 +153,7 @@ export function collectReferencedNames(
         for (const field of op.pagination.envelopeFields ?? []) collectFromTypeRef(field.type);
       }
       for (const header of collectResponseHeaders(op)) collectFromTypeRef(header.type);
+      for (const content of collectAlternateResponseContents(op)) collectFromTypeRef(content.type);
       for (const err of op.errors) {
         if (err.type) collectFromTypeRef(err.type);
       }

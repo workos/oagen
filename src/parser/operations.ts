@@ -8,6 +8,7 @@ import type {
   ErrorResponse,
   SuccessResponse,
   ResponseHeader,
+  ResponseContent,
   Model,
   Field,
   PaginationMeta,
@@ -929,6 +930,8 @@ function buildOperation(
   const {
     response,
     responseHeaders,
+    responseContentTypes,
+    responseContents,
     successResponses,
     errors,
     inlineModels,
@@ -1000,6 +1003,7 @@ function buildOperation(
       response,
       // Added only when present so operations without headers keep their shape.
       ...(responseHeaders && { responseHeaders }),
+      ...(responseContentTypes && { responseContentTypes, responseContents }),
       successResponses,
       errors,
       pagination,
@@ -2091,6 +2095,134 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * Media types the fixed-order response pick types as a plain string without
+ * reading their schema, in the order it checks them.
+ */
+const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html', 'text/xml', 'application/xml'];
+
+/** Where an inline body declared for a secondary media type gets its name. */
+interface ContentModelNaming {
+  /** The operation's response-model stem, e.g. `RenderPetCard`. */
+  base: string;
+  /** `Response` for a success entry, `Error` for an error entry. */
+  suffix: string;
+  statusCode: number;
+}
+
+/**
+ * Read a response's `content` map into the media types it declares — in
+ * document order and verbatim, parameters, vendor suffixes and wildcards
+ * included — with a type for each. A media type is typed the way `response`
+ * is when it is the only one declared, so the entry for `primaryContentType`
+ * (the one the fixed-order pick read `primaryType` from) carries that very
+ * TypeRef and every other entry goes through `typeSecondaryContent`. Returns
+ * `undefined` when the response declares no media type at all, so the caller
+ * leaves both keys off.
+ */
+function extractResponseContents(
+  content: Record<string, { schema?: SchemaObject }> | undefined,
+  primaryContentType: string | undefined,
+  primaryType: TypeRef | undefined,
+  naming: ContentModelNaming,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+): { contentTypes: string[]; contents: ResponseContent[] } | undefined {
+  if (!content) return undefined;
+  const contentTypes = Object.keys(content);
+  if (contentTypes.length === 0) return undefined;
+  const contents = contentTypes.map((contentType) => ({
+    contentType,
+    type:
+      primaryType !== undefined && contentType === primaryContentType
+        ? primaryType
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, models),
+  }));
+  return { contentTypes, contents };
+}
+
+/**
+ * Type a media type the fixed-order pick did not choose, exactly as it would
+ * have been typed had it been the only one declared: `application/octet-stream`
+ * and `application/pdf` are binary and the text and XML types are strings
+ * whatever their schema says, any other media type is typed from its schema,
+ * and one without a schema is `unknown`. The one addition is that an inline
+ * object under such a media type is materialized — the primary pick's
+ * `...Response` name belongs to the primary body, so this one is named after
+ * its media type as well: `RenderPetCardTextHtmlResponse`.
+ */
+function typeSecondaryContent(
+  contentType: string,
+  schema: SchemaObject | undefined,
+  naming: ContentModelNaming,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+): TypeRef {
+  if (contentType === 'application/octet-stream' || contentType === 'application/pdf') {
+    return { kind: 'primitive', type: 'string', format: 'binary' };
+  }
+  if (TEXT_RESPONSE_MEDIA_TYPES.includes(contentType)) return { kind: 'primitive', type: 'string' };
+  if (!schema) return { kind: 'primitive', type: 'unknown' };
+  const name = `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`;
+  return typeContentSchema(schema, name, naming.statusCode, ctx, models);
+}
+
+/**
+ * The PascalCase token that qualifies an inline model minted for a secondary
+ * media type: `text/html` → `TextHtml`, `application/vnd.api+json` →
+ * `ApplicationVndApiJson`. Parameters are part of it (`application/json;
+ * charset=utf-8` → `ApplicationJsonCharsetUtf8`) so two parameterizations of
+ * one type never share a model, and a wildcard segment reads as `Any`
+ * (`application/*` → `ApplicationAny`) since the caser would drop the `*`.
+ */
+function mediaTypeToken(contentType: string): string {
+  const token = toPascalCase(contentType.split('*').join('Any'));
+  return token.length > 0 ? token : 'Content';
+}
+
+/**
+ * Type a secondary media type's schema and materialize the inline models it
+ * names, the way `typeHeaderSchema` does for a header: the schema is
+ * extracted as a one-property object whose property is `name`, so an inline
+ * object becomes the model `name` and everything reachable through it — a
+ * nested object, array items, map values, `oneOf` variants — is named exactly
+ * as `schemaToTypeRef` names it. The name goes through the spec-wide shape
+ * registry: a shape identical to the name's current owner shares it (the
+ * same inline body on a 200 and a 201 yields one model), and a different
+ * shape is re-derived under the status code (`...Response201`), then a
+ * numeric suffix.
+ */
+function typeContentSchema(
+  schema: SchemaObject,
+  name: string,
+  statusCode: number,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+): TypeRef {
+  for (let attempt = 0; ; attempt++) {
+    const propertyName = attempt === 0 ? name : attempt === 1 ? `${name}${statusCode}` : `${name}${attempt}`;
+    const trial: Model[] = [];
+    extractInlineModelsFromProperties(
+      { properties: { [propertyName]: schema } },
+      trial,
+      undefined,
+      ctx.componentSchemas,
+    );
+    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
+    const collides = fingerprints.some(([model, fingerprint]) => {
+      const registered = ctx.registry.get(model.name);
+      return registered !== undefined && registered.fingerprint !== fingerprint;
+    });
+    if (collides) continue;
+    for (const [model, fingerprint] of fingerprints) {
+      if (ctx.registry.has(model.name)) continue;
+      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
+      models.push(model);
+    }
+    return schemaToTypeRef(schema, propertyName);
+  }
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2102,6 +2234,8 @@ function extractResponses(
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
+  responseContentTypes?: string[];
+  responseContents?: ResponseContent[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   inlineModels: Model[];
@@ -2114,6 +2248,8 @@ function extractResponses(
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
   let responseHeaders: ResponseHeader[] | undefined;
+  let responseContentTypes: string[] | undefined;
+  let responseContents: ResponseContent[] | undefined;
   let inlineModels: Model[] = [];
   let isPaginated = false;
   let dataPath: string | undefined;
@@ -2128,6 +2264,10 @@ function extractResponses(
   // Kept apart from `inlineModels`, which the latest 2xx body replaces
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
+  // Inline bodies declared only for a secondary media type, kept apart for
+  // the same reason; named from the operation's response stem.
+  const contentModels: Model[] = [];
+  const contentModelBase = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
@@ -2140,8 +2280,12 @@ function extractResponses(
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
+      // The media type the fixed-order pick below reads `extractedType` from,
+      // so its `contents` entry can share that TypeRef instead of re-deriving it.
+      let primaryContentType: string | undefined;
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
+        primaryContentType = 'application/json';
         const contextName = deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
         extractedType = result.response;
@@ -2156,6 +2300,9 @@ function extractResponses(
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
         if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
           extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
+          primaryContentType = resp.content['application/octet-stream']
+            ? 'application/octet-stream'
+            : 'application/pdf';
         } else if (
           resp.content['text/plain'] ||
           resp.content['text/html'] ||
@@ -2163,10 +2310,12 @@ function extractResponses(
           resp.content['application/xml']
         ) {
           extractedType = { kind: 'primitive', type: 'string' };
+          primaryContentType = TEXT_RESPONSE_MEDIA_TYPES.find((mediaType) => resp.content?.[mediaType]);
         } else {
           // Try the first available content type's schema
           const firstKey = Object.keys(resp.content)[0];
           if (firstKey) {
+            primaryContentType = firstKey;
             const firstContent = resp.content[firstKey];
             if (firstContent?.schema) {
               extractedType = schemaToTypeRef(firstContent.schema, deriveResponseName(op, pathModelBaseName));
@@ -2174,18 +2323,50 @@ function extractResponses(
           }
         }
       }
-      allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
+      const contents = extractResponseContents(
+        resp.content,
+        primaryContentType,
+        extractedType,
+        { base: contentModelBase, suffix: 'Response', statusCode: code },
+        headerContext,
+        contentModels,
+      );
+      allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }), ...contents });
     } else if (code >= 300 && code < 400) {
-      // 3xx redirects — include so emitter can detect redirect endpoints
+      // 3xx redirects — include so emitter can detect redirect endpoints. The
+      // type is not read from any media type, so every content entry is typed
+      // on its own.
+      const contents = extractResponseContents(
+        resp.content,
+        undefined,
+        undefined,
+        { base: contentModelBase, suffix: 'Response', statusCode: code },
+        headerContext,
+        contentModels,
+      );
       allSuccessResponses.push({
         statusCode: code,
         type: { kind: 'primitive', type: 'unknown' },
         ...(headers && { headers }),
+        ...contents,
       });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
-      errors.push({ statusCode: code, type, ...(headers && { headers }) });
+      const contents = extractResponseContents(
+        resp.content,
+        type ? 'application/json' : undefined,
+        type,
+        { base: contentModelBase, suffix: 'Error', statusCode: code },
+        headerContext,
+        contentModels,
+      );
+      // An error's `type` is its application/json body by definition, so the
+      // lists are kept only when they say something `type` does not: another
+      // media type, or a JSON body `type` could not be read from. The common
+      // lone `application/json` with a schema keeps its shape.
+      const beyondType = contents?.contents.some((entry) => entry.type !== type) ? contents : undefined;
+      errors.push({ statusCode: code, type, ...(headers && { headers }), ...beyondType });
     }
   }
 
@@ -2196,14 +2377,19 @@ function extractResponses(
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    responseContentTypes = primary.contentTypes;
+    responseContents = primary.contents;
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
   if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
+  if (contentModels.length > 0) inlineModels = [...inlineModels, ...contentModels];
 
   return {
     response,
     responseHeaders,
+    responseContentTypes,
+    responseContents,
     successResponses,
     errors,
     inlineModels,

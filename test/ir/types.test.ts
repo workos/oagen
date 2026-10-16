@@ -584,6 +584,52 @@ describe('assignModelsToServices — pagination envelope fields', () => {
   });
 });
 
+describe('assignModelsToServices — response content types', () => {
+  it('assigns a model reached only through a secondary media type to that service', () => {
+    const models: Model[] = [
+      { name: 'Thing', fields: [] },
+      { name: 'ThingDocument', fields: [] },
+      { name: 'Problem', fields: [] },
+    ];
+    const thing = { kind: 'model' as const, name: 'Thing' };
+    const services = [
+      {
+        name: 'Things',
+        operations: [
+          {
+            name: 'getThing',
+            httpMethod: 'get' as const,
+            path: '/things/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: thing,
+            responseContentTypes: ['application/json', 'application/vnd.api+json'],
+            responseContents: [
+              { contentType: 'application/json', type: thing },
+              { contentType: 'application/vnd.api+json', type: { kind: 'model' as const, name: 'ThingDocument' } },
+            ],
+            errors: [
+              {
+                statusCode: 500,
+                contentTypes: ['application/problem+json'],
+                contents: [
+                  { contentType: 'application/problem+json', type: { kind: 'model' as const, name: 'Problem' } },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services);
+    expect(map.get('Thing')).toBe('Things');
+    expect(map.get('ThingDocument')).toBe('Things');
+    expect(map.get('Problem')).toBe('Things');
+  });
+});
+
 describe('assignModelsToServices — response headers', () => {
   it('assigns a model reached only through a response header to that service', () => {
     const models: Model[] = [

@@ -112,6 +112,22 @@ export interface Operation {
    * need a home of their own.
    */
   responseHeaders?: ResponseHeader[];
+  /**
+   * Media types the primary success response declares under `content`, in
+   * document order and exactly as written (`application/json; charset=utf-8`,
+   * `application/vnd.api+json`, a wildcard such as `application/*`). Present
+   * only when it declares at least one. Like `responseHeaders`, this lifts
+   * the primary entry's `contentTypes`, because `successResponses` only
+   * exists when an operation has more than one 2xx.
+   */
+  responseContentTypes?: string[];
+  /**
+   * One entry per `responseContentTypes` entry, in the same order, with the
+   * type that media type's schema resolves to. The entry for the media type
+   * `response` was read from carries that same TypeRef. Present only when
+   * `responseContentTypes` is.
+   */
+  responseContents?: ResponseContent[];
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -676,6 +692,11 @@ export function assignModelsToServices(
           referencedModels.add(name);
         }
       }
+      for (const content of collectAlternateResponseContents(op)) {
+        for (const name of collectModelRefs(content.type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -802,6 +823,20 @@ export interface ErrorResponse {
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * Media types declared under `content`, in document order and as written.
+   * `type` is by definition the `application/json` body, so the list is
+   * present only when it says something `type` does not: the error declares
+   * another media type, or a JSON body `type` could not be read from. An
+   * error that declares only `application/json` with a schema keeps its shape.
+   */
+  contentTypes?: string[];
+  /**
+   * One entry per `contentTypes` entry, in the same order. The entry for
+   * `application/json` carries the same TypeRef as `type` when `type` was
+   * read from it. Present only when `contentTypes` is.
+   */
+  contents?: ResponseContent[];
 }
 
 /** A successful response entry from a 2xx status code */
@@ -810,4 +845,53 @@ export interface SuccessResponse {
   type: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * Media types declared under `content`, in document order and as written.
+   * Present only when there is at least one.
+   */
+  contentTypes?: string[];
+  /**
+   * One entry per `contentTypes` entry, in the same order. The entry for the
+   * media type `type` was read from carries that same TypeRef. Present only
+   * when `contentTypes` is.
+   */
+  contents?: ResponseContent[];
+}
+
+/**
+ * One media type a response declares under `content`, with the type its
+ * schema resolves to. `contentType` is kept exactly as written in the spec,
+ * parameters and all, so it can be sent back verbatim in an `Accept` header.
+ */
+export interface ResponseContent {
+  contentType: string;
+  type: TypeRef;
+}
+
+/**
+ * Every response content entry whose type is reachable only through it: the
+ * entries of each success and error response other than the one the
+ * response's own `type` was read from, which shares that very TypeRef and is
+ * already reached through `response`, `successResponses[].type` or
+ * `errors[].type`. The primary list is the same array as its
+ * `successResponses` entry when both exist, so it is visited once. Every pass
+ * that walks an operation's type refs (reachability, model assignment, ref
+ * rewriting and validation, direction, compat filtering, enum collection)
+ * goes through this so a body declared only for a secondary media type is
+ * treated the way the primary body is.
+ */
+export function collectAlternateResponseContents(op: Operation): ResponseContent[] {
+  const result: ResponseContent[] = [];
+  const seen = new Set<ResponseContent[]>();
+  const owners: Array<{ contents?: ResponseContent[]; type?: TypeRef }> = [
+    { contents: op.responseContents, type: op.response },
+    ...(op.successResponses ?? []),
+    ...op.errors,
+  ];
+  for (const { contents, type } of owners) {
+    if (!contents || seen.has(contents)) continue;
+    seen.add(contents);
+    for (const content of contents) if (content.type !== type) result.push(content);
+  }
+  return result;
 }

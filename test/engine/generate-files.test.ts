@@ -4,6 +4,62 @@ import { canonicalServiceKey } from '../../src/engine/scoped-services.js';
 import type { ApiSpec, Model, Service } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
+describe('collectReferencedNames — response content types', () => {
+  it('reaches models and enums referenced only by a secondary media type, on success and error entries', () => {
+    const thing = { kind: 'model' as const, name: 'Thing' };
+    const services: Service[] = [
+      {
+        name: 'Things',
+        operations: [
+          {
+            name: 'getThing',
+            httpMethod: 'get',
+            path: '/things/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: thing,
+            responseContentTypes: ['application/json', 'application/vnd.api+json', 'application/vnd.mode+json'],
+            responseContents: [
+              { contentType: 'application/json', type: thing },
+              { contentType: 'application/vnd.api+json', type: { kind: 'model', name: 'ThingDocument' } },
+              { contentType: 'application/vnd.mode+json', type: { kind: 'enum', name: 'ThingMode' } },
+            ],
+            errors: [
+              {
+                statusCode: 500,
+                contentTypes: ['application/problem+json'],
+                contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const models: Model[] = [
+      { name: 'Thing', fields: [] },
+      {
+        name: 'ThingDocument',
+        fields: [{ name: 'links', type: { kind: 'model', name: 'ThingLinks' }, required: false }],
+      },
+      { name: 'ThingLinks', fields: [] },
+      { name: 'Problem', fields: [] },
+      { name: 'Unrelated', fields: [] },
+    ];
+
+    const referenced = collectReferencedNames(services, models);
+
+    // A model reached only through a secondary media type is emitted like a body model.
+    expect(referenced.models.has('ThingDocument')).toBe(true);
+    // Chased transitively through the content model's own fields.
+    expect(referenced.models.has('ThingLinks')).toBe(true);
+    expect(referenced.models.has('Problem')).toBe(true);
+    expect(referenced.enums.has('ThingMode')).toBe(true);
+    expect(referenced.models.has('Unrelated')).toBe(false);
+  });
+});
+
 describe('collectReferencedNames', () => {
   it('preserves discriminated models even when they are not directly referenced by operations', () => {
     const services: Service[] = [
