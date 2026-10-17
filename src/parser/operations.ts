@@ -743,8 +743,10 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
  * documentApiRoot), so neither the resource nor the deeper context echoes the
  * root or the service segment into the name. Names that still collide after
  * both, and whose paths differ only by their parameters, are told apart by
- * `By<Param>` — but only for the operations in `pathNamed`, whose names are
- * the parser's own; a name taken from an operationId is never rewritten there.
+ * `By<Param>` — but only for operations in `pathNamed` that sit under a root,
+ * the population the root rule regroups; a name taken from an operationId is
+ * never rewritten there, and nothing without a root is named any differently
+ * than before the rule existed.
  */
 function disambiguateOperationNames(
   operations: Operation[],
@@ -796,13 +798,16 @@ function disambiguateOperationNames(
     }
   }
 
-  // Path-named operations that still collide differ only by their parameters:
-  // once the API root and the service segment are skipped, `GET /v1/notes`
-  // and `GET /v1/{teamId}/notes` both reach `list` in Notes with no resource
-  // or deeper context to tell them apart. `By<Param>` does, but only when the
-  // parameters differ between the colliding paths: `/v1/{id}/notes` and
-  // `/v1/{id}/Notes` would both gain `ById` and still collide, further from
-  // the plain name.
+  // Path-named operations under an API root that still collide differ only
+  // by their parameters: once the root and the service segment are skipped,
+  // `GET /v1/notes` and `GET /v1/{teamId}/notes` both reach `list` in Notes
+  // with no resource or deeper context to tell them apart. `By<Param>` does,
+  // but only when the parameters differ between the colliding paths:
+  // `/v1/{id}/notes` and `/v1/{id}/Notes` would both gain `ById` and still
+  // collide, further from the plain name. Operations with no root — a
+  // root-less document, a path outside the root, a tagged operation — are
+  // left exactly as they were, duplicates included: `/users/teams` and
+  // `/users/{id}/teams` both stay `listTeamsTeams`, as before this rule.
   const stillColliding = new Map<string, Operation[]>();
   for (const op of operations) {
     const group = stillColliding.get(op.name) ?? [];
@@ -814,7 +819,9 @@ function disambiguateOperationNames(
     const suffixes = group.map((op) => inferByParamsSuffix(op.path));
     if (new Set(suffixes).size <= 1) continue;
     group.forEach((op, i) => {
-      if (pathNamed.has(op)) (op as { name: string }).name = appendQualifier(op.name, suffixes[i]);
+      if (pathNamed.has(op) && apiRootLengthOf(op) > 0) {
+        (op as { name: string }).name = appendQualifier(op.name, suffixes[i]);
+      }
     });
   }
 }

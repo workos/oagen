@@ -2653,6 +2653,19 @@ describe('extractOperations – path-named services skip the API root (issue #20
     ]);
   });
 
+  it('qualifies parameter-only collisions under a root only, leaving root-less names as they were', () => {
+    // Without a root the By<Param> pass does not run, so a pair main left as
+    // duplicates stays exactly as main leaves it; the rooted pair is told apart.
+    expect(layout({ '/users/teams': get, '/users/{id}/teams': get })).toEqual([
+      'Users.listTeamsTeams GET /users/teams',
+      'Users.listTeamsTeams GET /users/{id}/teams',
+    ]);
+    expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes.list GET /v1/notes',
+      'Notes.listByTeamId GET /v1/{teamId}/notes',
+    ]);
+  });
+
   it('names a root-less document exactly as before, leading parameter or not', () => {
     // No API root means no new rule: a leading parameter still yields Default
     // and the fallback name still skips only the first segment, for untagged
