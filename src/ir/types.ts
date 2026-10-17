@@ -692,8 +692,8 @@ export function assignModelsToServices(
           referencedModels.add(name);
         }
       }
-      for (const content of collectAlternateResponseContents(op)) {
-        for (const name of collectModelRefs(content.type)) {
+      for (const { type } of collectResponseBodyTypes(op)) {
+        for (const name of collectModelRefs(type)) {
           referencedModels.add(name);
         }
       }
@@ -869,16 +869,42 @@ export interface ResponseContent {
 }
 
 /**
+ * A response body type other than `Operation.response`, with where it comes
+ * from for diagnostics.
+ */
+export interface ResponseBodyType {
+  type: TypeRef;
+  /** The entry it belongs to: `contents.<media type>` for a secondary media type. */
+  source: string;
+}
+
+/**
+ * Every response body type an operation declares besides `response`: today
+ * the bodies of its secondary media types (`collectAlternateResponseContents`);
+ * the fallback bodies of `default` and range responses join it when they
+ * enter the IR, as does any body a later field adds. The primary type of
+ * each alternate 2xx and error entry is not included — walkers reach those
+ * through `successResponses[].type` and `errors[].type` where they do today.
+ * Every pass that walks an operation's type refs (reachability, model
+ * assignment, ref rewriting and validation, direction, compat filtering,
+ * enum collection) calls this beside `collectResponseHeaders`, so a new kind
+ * of body is reached everywhere by extending this one function.
+ */
+export function collectResponseBodyTypes(op: Operation): ResponseBodyType[] {
+  return collectAlternateResponseContents(op).map((content) => ({
+    type: content.type,
+    source: `contents.${content.contentType}`,
+  }));
+}
+
+/**
  * Every response content entry whose type is reachable only through it: the
  * entries of each success and error response other than the one the
  * response's own `type` was read from, which shares that very TypeRef and is
  * already reached through `response`, `successResponses[].type` or
  * `errors[].type`. The primary list is the same array as its
- * `successResponses` entry when both exist, so it is visited once. Every pass
- * that walks an operation's type refs (reachability, model assignment, ref
- * rewriting and validation, direction, compat filtering, enum collection)
- * goes through this so a body declared only for a secondary media type is
- * treated the way the primary body is.
+ * `successResponses` entry when both exist, so it is visited once. Feeds
+ * `collectResponseBodyTypes`, which the walkers call.
  */
 export function collectAlternateResponseContents(op: Operation): ResponseContent[] {
   const result: ResponseContent[] = [];

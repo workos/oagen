@@ -1247,4 +1247,135 @@ describe('response content types', () => {
       expect(inlineModels).toHaveLength(1);
     });
   });
+
+  describe('one precedence for an ambiguous schema', () => {
+    /** Each form carries two keywords that could type it; `classifyInlineSchema` picks one for every site. */
+    const ambiguous = {
+      itemsOneOf: { items: obj({ id: str }), oneOf: [obj({ a: str }), obj({ b: str })] },
+      itemsProperties: { items: obj({ id: str }), properties: { name: str } },
+      propertiesAdditional: { type: 'object', properties: { name: str }, additionalProperties: obj({ value: str }) },
+      oneOfProperties: { properties: { name: str }, oneOf: [obj({ a: str }), obj({ b: str })] },
+      allOfOneOf: { allOf: [obj({ base: str })], oneOf: [obj({ a: str }), obj({ b: str })] },
+    };
+
+    it('types and materializes each form the same way under a secondary media type and as a component field', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parseDocument(
+        document(
+          {
+            '/things': getWith('listThings', {
+              'application/json': { schema: { $ref: '#/components/schemas/Thing' } },
+              'application/vnd.items-oneof+json': { schema: ambiguous.itemsOneOf },
+              'application/vnd.items-properties+json': { schema: ambiguous.itemsProperties },
+              'application/vnd.properties-additional+json': { schema: ambiguous.propertiesAdditional },
+              'application/vnd.oneof-properties+json': { schema: ambiguous.oneOfProperties },
+              'application/vnd.allof-oneof+json': { schema: ambiguous.allOfOneOf },
+            }),
+          },
+          // `Puzzle`, not `Ambiguous`: cleanSchemaName would singularize the latter.
+          { Thing: obj({ id: str }), Puzzle: obj(ambiguous) },
+        ),
+      );
+      const op = findOp(spec, 'listThings');
+      const modelNames = new Set(spec.models.map((m) => m.name));
+      for (const content of collectAlternateResponseContents(op)) {
+        for (const name of collectModelRefs(content.type)) {
+          expect(modelNames, `${content.contentType} → ${name}`).toContain(name);
+        }
+      }
+      const puzzle = spec.models.find((m) => m.name === 'Puzzle');
+      expect(puzzle).toBeDefined();
+      for (const field of puzzle?.fields ?? []) {
+        for (const name of collectModelRefs(field.type))
+          expect(modelNames, `Puzzle.${field.name} → ${name}`).toContain(name);
+      }
+      expect(unresolvedWarnings(warn)).toEqual([]);
+      // No two extractors may mint one name for different shapes.
+      expect(warn.mock.calls.map((call) => String(call[0])).filter((m) => m.includes('Two inline models'))).toEqual([]);
+
+      // `oneOf` wins over `items`: the union's variants are the models, and
+      // no item model takes the first variant's name.
+      expect(typeOf(op, 'application/vnd.items-oneof+json')).toMatchObject({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'ListThingsApplicationVndItemsOneofJsonResponse' },
+          { kind: 'model', name: 'ListThingsApplicationVndItemsOneofJsonResponseWithB' },
+        ],
+      });
+      expect(fieldsOf(spec, 'ListThingsApplicationVndItemsOneofJsonResponse')).toEqual(['a']);
+      expect(fieldsOf(spec, 'ListThingsApplicationVndItemsOneofJsonResponseWithB')).toEqual(['b']);
+      // `items` wins over `properties`.
+      expect(typeOf(op, 'application/vnd.items-properties+json')).toEqual({
+        kind: 'array',
+        items: { kind: 'model', name: 'ListThingsApplicationVndItemsPropertiesJsonResponse' },
+      });
+      expect(fieldsOf(spec, 'ListThingsApplicationVndItemsPropertiesJsonResponse')).toEqual(['id']);
+      // `properties` wins over `additionalProperties`.
+      expect(typeOf(op, 'application/vnd.properties-additional+json')).toEqual({
+        kind: 'model',
+        name: 'ListThingsApplicationVndPropertiesAdditionalJsonResponse',
+      });
+      expect(fieldsOf(spec, 'ListThingsApplicationVndPropertiesAdditionalJsonResponse')).toContain('name');
+      // `oneOf` wins over `properties`.
+      expect(typeOf(op, 'application/vnd.oneof-properties+json')).toMatchObject({ kind: 'union' });
+      expect(fieldsOf(spec, 'ListThingsApplicationVndOneofPropertiesJsonResponse')).toEqual(['a']);
+      // `allOf` wins over `oneOf`.
+      expect(typeOf(op, 'application/vnd.allof-oneof+json')).toEqual({
+        kind: 'model',
+        name: 'ListThingsApplicationVndAllofOneofJsonResponse',
+      });
+      expect(fieldsOf(spec, 'ListThingsApplicationVndAllofOneofJsonResponse')).toEqual(['base']);
+
+      // The same forms as fields of a component model, through the component
+      // and general extractors — which must agree with each other too.
+      const fieldType = (name: string) => puzzle?.fields.find((f) => f.name === name)?.type;
+      expect(fieldType('itemsOneOf')).toMatchObject({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'PuzzleItemsOneOf' },
+          { kind: 'model', name: 'PuzzleItemsOneOfWithB' },
+        ],
+      });
+      expect(fieldsOf(spec, 'PuzzleItemsOneOf')).toEqual(['a']);
+      expect(fieldType('itemsProperties')).toEqual({
+        kind: 'array',
+        items: { kind: 'model', name: 'PuzzleItemsProperty' },
+      });
+      expect(fieldsOf(spec, 'PuzzleItemsProperty')).toEqual(['id']);
+      expect(fieldType('propertiesAdditional')).toEqual({ kind: 'model', name: 'PuzzlePropertiesAdditional' });
+      expect(fieldType('oneOfProperties')).toMatchObject({ kind: 'union' });
+      expect(fieldsOf(spec, 'PuzzleOneOfProperty')).toEqual(['a']);
+      expect(fieldType('allOfOneOf')).toEqual({ kind: 'model', name: 'PuzzleAllOfOneOf' });
+      expect(fieldsOf(spec, 'PuzzleAllOfOneOf')).toEqual(['base']);
+    });
+  });
+
+  describe('media type essence', () => {
+    it('types a secondary media type by its essence — parameters stripped, case folded — and keeps the key as written', () => {
+      const { operation, inlineModels } = singleOperation(
+        getWithContent({
+          'application/json': { schema: str },
+          'application/pdf; version=1.7': {},
+          'TEXT/PLAIN; charset=utf-8': { schema: obj({ ignored: str }) },
+          'Application/JSON': { schema: { $ref: '#/components/schemas/Thing' } },
+          'image/PNG': { schema: { type: 'string', format: 'binary' } },
+        }),
+      );
+      expect(operation.responseContentTypes).toEqual([
+        'application/json',
+        'application/pdf; version=1.7',
+        'TEXT/PLAIN; charset=utf-8',
+        'Application/JSON',
+        'image/PNG',
+      ]);
+      expect(operation.responseContents?.slice(1).map((c) => c.type)).toEqual([
+        { kind: 'primitive', type: 'string', format: 'binary' },
+        { kind: 'primitive', type: 'string' },
+        { kind: 'model', name: 'Thing' },
+        { kind: 'primitive', type: 'string', format: 'binary' },
+      ]);
+      // The text body's object schema is not read, so no model is minted for it.
+      expect(inlineModels).toEqual([]);
+    });
+  });
 });

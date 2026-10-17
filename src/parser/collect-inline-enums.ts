@@ -1,5 +1,5 @@
 import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectAlternateResponseContents, collectModelRefs } from '../ir/types.js';
+import { walkTypeRef, collectResponseBodyTypes, collectModelRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
@@ -68,8 +68,8 @@ export function collectInlineEnumsFromOperations(
       // `application/json`) is typed like a response body, so its inline enums
       // are promoted the same way. Its name is already operation-qualified; a
       // clash with a different value set falls back to a numeric suffix.
-      for (const content of collectAlternateResponseContents(op)) {
-        collectThroughModels(content.type, undefined);
+      for (const { type } of collectResponseBodyTypes(op)) {
+        collectThroughModels(type, undefined);
       }
     }
   }

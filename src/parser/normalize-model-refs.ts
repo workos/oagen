@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectAlternateResponseContents } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes } from '../ir/types.js';
 
 export function validateModelRefs(spec: ApiSpec): void {
   const knownNames = new Set<string>();
@@ -35,8 +35,8 @@ export function validateModelRefs(spec: ApiSpec): void {
       for (const header of collectResponseHeaders(op)) {
         walkRef(header.type, `${service.name}.${op.name}.headers.${header.name}`);
       }
-      for (const content of collectAlternateResponseContents(op)) {
-        walkRef(content.type, `${service.name}.${op.name}.contents.${content.contentType}`);
+      for (const { type, source } of collectResponseBodyTypes(op)) {
+        walkRef(type, `${service.name}.${op.name}.${source}`);
       }
     }
   }

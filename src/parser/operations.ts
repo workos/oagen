@@ -2317,10 +2317,14 @@ function typeSecondaryContent(
   ctx: ResponseTypingContext,
   target: ResponseContent,
 ): TypeRef {
-  if (contentType === 'application/octet-stream' || contentType === 'application/pdf') {
+  // Parameters and case do not change what a body is: `application/pdf;
+  // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
+  // as much a string as `text/plain`. The key itself stays as written.
+  const essence = mediaTypeEssence(contentType);
+  if (essence === 'application/octet-stream' || essence === 'application/pdf') {
     return { kind: 'primitive', type: 'string', format: 'binary' };
   }
-  if (TEXT_RESPONSE_MEDIA_TYPES.includes(contentType)) return { kind: 'primitive', type: 'string' };
+  if (TEXT_RESPONSE_MEDIA_TYPES.includes(essence)) return { kind: 'primitive', type: 'string' };
   if (!schema) return { kind: 'primitive', type: 'unknown' };
   ctx.deferred.push({
     kind: 'content',
@@ -2346,6 +2350,15 @@ function typeSecondaryContent(
 function mediaTypeToken(contentType: string): string {
   const token = toPascalCase(contentType.split('*').join('Any'));
   return token.length > 0 ? token : 'Content';
+}
+
+/**
+ * A media type's essence — `type/subtype` without parameters, trimmed and
+ * lower-cased — which is what decides how its body is typed. Only the
+ * secondary typing reads it; the primary pick still matches keys as written.
+ */
+function mediaTypeEssence(contentType: string): string {
+  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
 }
 
 function extractResponses(
