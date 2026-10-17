@@ -145,6 +145,37 @@ export interface OperationModified {
   paginatedChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
+  /**
+   * True when a response entry gained or lost a media type, or a secondary
+   * media type's body type changed; `responseContentTypeChanges` says which.
+   */
+  responseContentTypesChanged: boolean;
+  responseContentTypeChanges: ResponseContentTypesChange[];
+  classification: 'additive' | 'breaking';
+}
+
+/**
+ * How one response entry's media types changed between two specs. Entries
+ * pair up by status code — alternate 2xx entries from `successResponses`,
+ * errors from `errors` — except the primary success response, which is read
+ * from the operation's own `responseContentTypes` and carries no code in the
+ * IR, so it is reported with `statusCode` unset. Media types are compared as
+ * written and as sets: reordering them is no change, while a key that only
+ * gained a parameter is one removed and one added.
+ */
+export interface ResponseContentTypesChange {
+  statusCode?: number;
+  /** Media types the new spec declares and the old did not: callers gain a representation to ask for. */
+  added: string[];
+  /** Media types the old spec declared and the new does not: a representation callers could ask for is gone. */
+  removed: string[];
+  /**
+   * Media types declared by both whose body type changed, other than the one
+   * the entry's own `type` is read from, which `responseChanged` and
+   * `errorsChanged` already report.
+   */
+  retyped: string[];
+  /** `breaking` when anything was removed or retyped, else `additive`. */
   classification: 'additive' | 'breaking';
 }
 

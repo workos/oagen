@@ -113,6 +113,7 @@ Emitters should handle these additional variants introduced for open-source read
 - **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`
 - **Multiple responses:** Optional `successResponses: SuccessResponse[]` on `Operation` when more than one 2xx exists
 - **Response headers:** Optional `responseHeaders: ResponseHeader[]` on `Operation` (the primary response's headers) and `headers: ResponseHeader[]` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares at least one
+- **Response content types:** Optional `responseContentTypes: string[]` and `responseContents: ResponseContent[]` on `Operation` (the primary response's media types, verbatim and in document order, with a type per media type) and `contentTypes` / `contents` on each `SuccessResponse` / `ErrorResponse`, present only when the response declares at least one media type (an error carries them only when they add to its `type`); `response` is still the fixed-order pick
 - **Idempotency:** `injectIdempotencyKey` is now spec-driven (true only when the spec declares an `Idempotency-Key` header)
 
 ## OperationPlan

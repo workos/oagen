@@ -742,7 +742,13 @@ function extractNestedSchema(
   // Same inline-object test as `schemaToTypeRef` and the field extractor, so
   // a `type: ['object', 'null']` variant is counted here too instead of
   // letting the next variant claim its name.
-  if (schema.oneOf) {
+  //
+  // One keyword types the schema (`classifyInlineSchema`, the order
+  // `schemaToTypeRef` follows), so exactly one branch below runs: a schema
+  // carrying both `items` and `properties` is an array here as it is there,
+  // and never also an object model under the same name.
+  const kind = classifyInlineSchema(schema);
+  if (kind === 'union' && schema.oneOf) {
     const models: Model[] = [];
     const variantNames = nameInlineVariants(schema, name, reserved);
 
@@ -766,7 +772,7 @@ function extractNestedSchema(
   }
 
   // Handle direct object
-  if (schema.properties && (schema.type === 'object' || !schema.type)) {
+  if (kind === 'object' && schema.properties && (schema.type === 'object' || !schema.type)) {
     const requiredSet = new Set(schema.required ?? []);
     const siblings = collectProperties(schema);
     const fields: Field[] = [];
@@ -778,7 +784,7 @@ function extractNestedSchema(
   }
 
   // Handle array with inline items
-  if (schema.type === 'array' && schema.items?.properties) {
+  if (kind === 'array' && schema.type === 'array' && schema.items?.properties) {
     const requiredSet = new Set(schema.items.required ?? []);
     const siblings = collectProperties(schema.items);
     const fields: Field[] = [];
@@ -1081,6 +1087,70 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   if (!schema || schema.$ref || !schema.properties) return false;
   const { type } = schema;
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
+/** Which of its keywords types an inline schema; see `classifyInlineSchema`. */
+export type InlineSchemaKind = 'ref' | 'allOf' | 'union' | 'const' | 'enum' | 'array' | 'object' | 'map' | 'other';
+
+/**
+ * Decide which of a schema's keywords types it when several could, in the
+ * one precedence every site follows: `$ref`; then `allOf`; then `oneOf` /
+ * `anyOf`; then `const`; then `enum`; then `items` as an array (with
+ * `type: 'array'` or no `type`); then `properties` as an object (with
+ * `type: 'object'`, no `type`, or a type list naming `object`); then a
+ * property-less `type: 'object'` as a map. Anything else — a primitive, a
+ * type list without `object`, an empty schema — is `other`.
+ *
+ * `schemaToTypeRef` and every inline-model extractor
+ * (`extractInlineModelsFromProperties`, `mintedInlineNameEntries`, and
+ * through them the response header and secondary-body paths) dispatch on
+ * this, so a schema carrying both `items` and `oneOf` is a union to all of
+ * them and the models extracted are exactly the ones the type references.
+ * Call it on a schema whose nullable wrappers are already removed.
+ */
+export function classifyInlineSchema(schema: SchemaObject): InlineSchemaKind {
+  if (schema.$ref) return 'ref';
+  if (schema.allOf && allOfTypesSchema(schema.allOf)) return 'allOf';
+  if (schema.oneOf || schema.anyOf) return 'union';
+  if (schema.const !== undefined) return 'const';
+  if (schema.enum) return 'enum';
+  if (schema.items && (schema.type === 'array' || !schema.type)) return 'array';
+  // A plain boolean: the type guard would otherwise narrow `schema` to `never` below.
+  const inlineObject: boolean = isInlineObjectSchema(schema);
+  if (inlineObject) return 'object';
+  if (schema.type === 'object') return 'map';
+  return 'other';
+}
+
+/** Keywords that give a schema a type of its own; a member carrying none of them only adds limits or documentation. */
+const TYPING_KEYWORDS: readonly string[] = [
+  '$ref',
+  'allOf',
+  'oneOf',
+  'anyOf',
+  'const',
+  'enum',
+  'items',
+  'properties',
+  'type',
+  'additionalProperties',
+  'patternProperties',
+];
+
+/**
+ * Whether an `allOf` is what types the schema, i.e. the cases its branch in
+ * `schemaToTypeRef` acts on: a `$ref` member (a reference, or an augmentation
+ * model), a member declaring `properties` (a merged model), or a lone member
+ * that types on its own (unwrapped). An `allOf` whose members only conjoin
+ * limits or documentation — `allOf: [{ minProperties: 1 }, { maxProperties:
+ * 3 }]` beside the schema's own `properties` — does not: the schema is then
+ * typed from its own keywords, and `extractConstraints` still conjoins the
+ * members' limits onto the field and the model it builds.
+ */
+function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
+  if (members.some((member) => member.$ref !== undefined || member.properties !== undefined)) return true;
+  const only = members.length === 1 ? members[0] : undefined;
+  return only !== undefined && TYPING_KEYWORDS.some((key) => (only as Record<string, unknown>)[key] !== undefined);
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable; never a variant to name. */
@@ -1868,21 +1938,27 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     if (!fieldSchema) continue;
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, schemas, siblings));
 
-    if (fieldSchema.type === 'object' && fieldSchema.properties) {
+    // One keyword types the field (`classifyInlineSchema`, the order
+    // `schemaToTypeRef` follows), so exactly one branch below runs and the
+    // models it builds are the ones the field's type references — never an
+    // `allOf` model and a `oneOf` variant under the same name.
+    const kind = classifyInlineSchema(fieldSchema);
+
+    if (kind === 'object' && fieldSchema.type === 'object' && fieldSchema.properties) {
       nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema, schemas));
     }
 
     // Array items and map values are named like the field — or `<Field>Item` /
     // `<Field>Value` when a sibling takes the singular name — exactly as
     // `schemaToTypeRef` references them (`elementContextName`).
-    if (fieldSchema.type === 'array' && fieldSchema.items?.properties) {
+    if (kind === 'array' && fieldSchema.type === 'array' && fieldSchema.items?.properties) {
       const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
       nestedModels.push(
         ...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items, schemas),
       );
     }
 
-    if (fieldSchema.type === 'object' && !fieldSchema.properties) {
+    if (kind === 'map') {
       const valueSchema = mapValueSchema(fieldSchema);
       if (valueSchema && !valueSchema.$ref && valueSchema.properties) {
         const valueContext = elementContextName(fieldName, 'value', siblings, name, valueSchema);
@@ -1890,7 +1966,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    if (fieldSchema.allOf) {
+    if (kind === 'allOf' && fieldSchema.allOf) {
       const mergedProperties: Record<string, SchemaObject | undefined> = {};
       const mergedRequired: string[] = [];
       for (const sub of fieldSchema.allOf) {
@@ -1913,7 +1989,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    if (fieldSchema.oneOf) {
+    if (kind === 'union' && fieldSchema.oneOf) {
       const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
       if (inlineObjectVariants.length > 0) {
         const variantNames = nameInlineVariants(
@@ -2040,10 +2116,15 @@ export function schemaToTypeRef(
     );
   }
 
+  // From here on the nullable wrappers are gone, so one classification
+  // decides which keyword types the schema — the same one the inline-model
+  // extractors dispatch on, so the models they build are the ones referenced.
+  const inlineKind = classifyInlineSchema(schema);
+
   // Handle allOf — merge properties from all sub-schemas.
   // This handles patterns like: allOf: [{ type: object, properties: {...} }, { oneOf: [...] }]
   // which are valid OAS 3.1 but weren't handled for field-level schemas.
-  if (schema.allOf) {
+  if (inlineKind === 'allOf' && schema.allOf) {
     // If allOf contains a $ref, prefer the ref (it's a named type)
     const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
     if (refItem) {
@@ -2069,13 +2150,14 @@ export function schemaToTypeRef(
         name: qualifyInlineModelName(baseName, parentModelName),
       };
     }
-    // Fall through to other checks
+    // Unreachable: `allOfTypesSchema` admits only the three cases above. An
+    // `allOf` of bare limits is classified from the schema's own keywords.
   }
 
   // Handle oneOf / anyOf → Union or Nullable
   // Valid OAS 3.1: properties can have { oneOf: [{ type: object }, { type: 'null' }] }
   // without a wrapping `type` field.
-  if (schema.oneOf || schema.anyOf) {
+  if (inlineKind === 'union') {
     const compositionKind: 'oneOf' | 'anyOf' = schema.oneOf ? 'oneOf' : 'anyOf';
     const rawVariants: SchemaObject[] = schema.oneOf ?? schema.anyOf ?? [];
 
@@ -2210,7 +2292,7 @@ export function schemaToTypeRef(
   }
 
   // Handle const → LiteralType (supports string, number, boolean)
-  if (schema.const !== undefined) {
+  if (inlineKind === 'const') {
     if (typeof schema.const === 'string' || typeof schema.const === 'number' || typeof schema.const === 'boolean') {
       return { kind: 'literal', value: schema.const };
     }
@@ -2233,14 +2315,14 @@ export function schemaToTypeRef(
   // us when present; `asNullable` keeps that from doubling up).
   const enumValues = nonNullEnumValues(schema.enum);
   const enumAdmitsNull = schema.enum !== undefined && enumValues.length !== schema.enum.length;
-  if (schema.enum && enumValues.length === 1) {
+  if (inlineKind === 'enum' && enumValues.length === 1) {
     const v = enumValues[0];
     const literal: TypeRef = { kind: 'literal', value: typeof v === 'number' ? v : String(v) };
     return enumAdmitsNull ? asNullable(literal) : literal;
   }
 
   // Handle enum
-  if (schema.enum) {
+  if (inlineKind === 'enum') {
     const baseName = toPascalCase(contextName ?? 'UnknownEnum');
     // Strip ListItem/ByExternalId markers from parent name so enum names are clean:
     // e.g., DirectoryListItem + State → Directory + State = DirectoryState
@@ -2268,7 +2350,7 @@ export function schemaToTypeRef(
   // union among them must still step around the models the field's siblings
   // mint, so that set is handed down (`reservedNamesFor`), exactly as the
   // extractor passes it into its items re-entry.
-  if ((schema.type === 'array' || !schema.type) && schema.items) {
+  if (inlineKind === 'array' && schema.items) {
     return {
       kind: 'array',
       items: schemaToTypeRef(
@@ -2281,11 +2363,12 @@ export function schemaToTypeRef(
     };
   }
 
-  // Handle object → ModelRef (if it has properties, it's a named model reference)
+  // Handle object → ModelRef (if it has properties, it's a named model reference,
+  // with `type: 'object'`, no `type`, or a type list naming `object`).
   // When additionalProperties is also present, we still return a ModelRef so the
   // named properties are preserved. The extractModel path will pick up the extra
   // properties as a catch-all map field named `additionalProperties`.
-  if (schema.type === 'object' && schema.properties) {
+  if (inlineKind === 'object') {
     const baseName = toPascalCase(contextName ?? 'UnknownModel');
     return {
       kind: 'model',
@@ -2301,7 +2384,7 @@ export function schemaToTypeRef(
   // extractor (`extractInlineModelsFromProperties`) emits a model of that name.
   // When a sibling property would take that singular name the values use
   // `<field>_value` instead (`<Parent><Field>Value`, see `elementContextName`).
-  if (schema.type === 'object' && !schema.properties) {
+  if (inlineKind === 'map') {
     // `mapValueSchema` picks the value schema in this branch's precedence: a
     // non-empty `additionalProperties` object, else the first
     // `patternProperties` entry; `additionalProperties: {}` or `true` means
@@ -2339,15 +2422,6 @@ export function schemaToTypeRef(
       kind: 'primitive',
       type: primitiveMap[typeStr],
       ...(schema.format ? { format: schema.format } : {}),
-    };
-  }
-
-  // Handle schemas with no type — if it has properties, treat as model
-  if (!schema.type && schema.properties) {
-    const baseName = toPascalCase(contextName ?? 'UnknownModel');
-    return {
-      kind: 'model',
-      name: qualifyInlineModelName(baseName, parentModelName),
     };
   }
 

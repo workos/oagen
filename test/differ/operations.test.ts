@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { diffOperations } from '../../src/differ/operations.js';
-import type { Operation } from '../../src/ir/types.js';
+import { extractOperations } from '../../src/parser/operations.js';
+import type { Operation, ResponseContent, TypeRef } from '../../src/ir/types.js';
 
 const listUsers: Operation = {
   name: 'listUsers',
@@ -29,6 +30,337 @@ const getUser: Operation = {
   errors: [],
   injectIdempotencyKey: false,
 };
+
+describe('diffOperations — response content types', () => {
+  const string: TypeRef = { kind: 'primitive', type: 'string' };
+  const binary: TypeRef = { kind: 'primitive', type: 'string', format: 'binary' };
+  const contents = (entries: Array<[string, TypeRef]>): ResponseContent[] =>
+    entries.map(([contentType, type]) => ({ contentType, type }));
+  /** The issue's card operation, as the parser builds it: `response` is the PDF, the entry for it shares the object. */
+  const card = (entries: Array<[string, TypeRef]>, over: Partial<Operation> = {}): Operation => ({
+    name: 'renderPetCard',
+    httpMethod: 'get',
+    path: '/pets/{petId}/card',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: binary,
+    responseContentTypes: entries.map(([contentType]) => contentType),
+    responseContents: contents(entries),
+    errors: [],
+    injectIdempotencyKey: false,
+    ...over,
+  });
+
+  it('reports a removed media type as breaking', () => {
+    const changes = diffOperations(
+      'Pets',
+      [
+        card([
+          ['text/html', string],
+          ['application/pdf', binary],
+        ]),
+      ],
+      [card([['application/pdf', binary]])],
+    );
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      responseChanged: false,
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [{ added: [], removed: ['text/html'], retyped: [], classification: 'breaking' }],
+      classification: 'breaking',
+    });
+    // The primary of a single-2xx operation carries no status code.
+    expect(
+      Object.keys((changes[0] as { responseContentTypeChanges: object[] }).responseContentTypeChanges[0]),
+    ).not.toContain('statusCode');
+  });
+
+  it('reports an added media type as additive', () => {
+    const changes = diffOperations(
+      'Pets',
+      [card([['application/pdf', binary]])],
+      [
+        card([
+          ['application/pdf', binary],
+          ['text/html', string],
+        ]),
+      ],
+    );
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [{ added: ['text/html'], removed: [], retyped: [], classification: 'additive' }],
+      classification: 'additive',
+    });
+  });
+
+  it('reports a retyped secondary media type as breaking', () => {
+    const changes = diffOperations(
+      'Pets',
+      [
+        card([
+          ['text/html', string],
+          ['application/pdf', binary],
+        ]),
+      ],
+      [
+        card([
+          ['text/html', { kind: 'model', name: 'CardPage' }],
+          ['application/pdf', binary],
+        ]),
+      ],
+    );
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [{ added: [], removed: [], retyped: ['text/html'], classification: 'breaking' }],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports no change for the same media types in another order', () => {
+    const changes = diffOperations(
+      'Pets',
+      [
+        card([
+          ['text/html', string],
+          ['application/pdf', binary],
+        ]),
+      ],
+      [
+        card([
+          ['application/pdf', binary],
+          ['text/html', string],
+        ]),
+      ],
+    );
+    expect(changes).toHaveLength(0);
+  });
+
+  it("does not report the primary media type's own retyping a second time", () => {
+    const report: TypeRef = { kind: 'model', name: 'Report' };
+    const thing: TypeRef = { kind: 'model', name: 'Thing' };
+    const changes = diffOperations(
+      'Reports',
+      [card([['application/json', report]], { name: 'getReport', response: report })],
+      [card([['application/json', thing]], { name: 'getReport', response: thing })],
+    );
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: true,
+      responseContentTypesChanged: false,
+      responseContentTypeChanges: [],
+      classification: 'breaking',
+    });
+  });
+
+  it('covers error entries, by status code, in both directions', () => {
+    const error: TypeRef = { kind: 'model', name: 'Error' };
+    const withError = (entries: Array<[string, TypeRef]>) =>
+      card([['application/pdf', binary]], {
+        errors: [
+          {
+            statusCode: 404,
+            type: error,
+            contentTypes: entries.map(([contentType]) => contentType),
+            contents: contents(entries),
+          },
+        ],
+      });
+    const both = withError([
+      ['application/json', error],
+      ['text/html', string],
+    ]);
+    const jsonOnly = withError([['application/json', error]]);
+
+    const dropped = diffOperations('Pets', [both], [jsonOnly]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toMatchObject({
+      errorsChanged: false,
+      responseContentTypeChanges: [{ statusCode: 404, removed: ['text/html'], classification: 'breaking' }],
+      classification: 'breaking',
+    });
+
+    const gained = diffOperations('Pets', [jsonOnly], [both]);
+    expect(gained).toHaveLength(1);
+    expect(gained[0]).toMatchObject({
+      responseContentTypeChanges: [{ statusCode: 404, added: ['text/html'], classification: 'additive' }],
+      classification: 'additive',
+    });
+  });
+
+  it('covers alternate 2xx entries by status code, listing the primary once', () => {
+    const job: TypeRef = { kind: 'model', name: 'Job' };
+    const startJob = (created: Array<[string, TypeRef]>): Operation => {
+      const primary = contents([['application/json', job]]);
+      return card([], {
+        name: 'startJob',
+        httpMethod: 'post',
+        path: '/jobs',
+        response: job,
+        responseContentTypes: ['application/json'],
+        responseContents: primary,
+        successResponses: [
+          { statusCode: 200, type: job, contentTypes: ['application/json'], contents: primary },
+          {
+            statusCode: 201,
+            type: job,
+            contentTypes: created.map(([contentType]) => contentType),
+            contents: contents(created),
+          },
+        ],
+      });
+    };
+    const changes = diffOperations(
+      'Jobs',
+      [startJob([['application/json', job]])],
+      [
+        startJob([
+          ['application/json', job],
+          ['application/x-ndjson', string],
+        ]),
+      ],
+    );
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [{ statusCode: 201, added: ['application/x-ndjson'], classification: 'additive' }],
+      classification: 'additive',
+    });
+  });
+});
+
+describe('diffOperations — response content types, as the parser builds them', () => {
+  /** The operations the parser extracts from an inline paths object. */
+  const parsed = (paths: Record<string, unknown>): Operation[] =>
+    extractOperations(paths as never).services.flatMap((s) => s.operations);
+  const ref = (name: string) => ({ schema: { $ref: `#/components/schemas/${name}` } });
+
+  const card = (notFound: Record<string, unknown>) => ({
+    '/pets/{petId}/card': {
+      get: {
+        operationId: 'renderPetCard',
+        responses: {
+          '200': {
+            description: 'ok',
+            content: { 'application/pdf': { schema: { type: 'string', format: 'binary' } } },
+          },
+          '404': { description: 'missing', content: notFound },
+        },
+      },
+    },
+  });
+  const jsonAndHtml = card({ 'application/json': ref('Error'), 'text/html': { schema: { type: 'string' } } });
+  // A lone application/json error with a schema carries no lists in the IR.
+  const jsonOnly = card({ 'application/json': ref('Error') });
+
+  it('reports a 404 that loses text/html but keeps its JSON schema as breaking, though the IR drops its lists', () => {
+    expect(parsed(jsonOnly)[0].errors[0].contentTypes).toBeUndefined();
+    const changes = diffOperations('Pets', parsed(jsonAndHtml), parsed(jsonOnly));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      errorsChanged: false,
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [
+        { statusCode: 404, added: [], removed: ['text/html'], retyped: [], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports a listless JSON-only 404 that gains text/html as additive', () => {
+    const changes = diffOperations('Pets', parsed(jsonOnly), parsed(jsonAndHtml));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      errorsChanged: false,
+      responseContentTypeChanges: [
+        { statusCode: 404, added: ['text/html'], removed: [], retyped: [], classification: 'additive' },
+      ],
+      classification: 'additive',
+    });
+  });
+
+  it('reports nothing for a listless JSON-only error on both sides', () => {
+    expect(diffOperations('Pets', parsed(jsonOnly), parsed(jsonOnly))).toHaveLength(0);
+  });
+
+  it('reports an alternate 2xx whose own body and vendor body both change, which no other comparison covers', () => {
+    const startJob = (type: string) => ({
+      '/jobs': {
+        post: {
+          operationId: 'startJob',
+          responses: {
+            '200': { description: 'running', content: { 'application/json': ref('Job') } },
+            '201': {
+              description: 'started',
+              content: { 'application/json': { schema: { type } }, 'application/vnd.job+json': { schema: { type } } },
+            },
+          },
+        },
+      },
+    });
+    const changes = diffOperations('Jobs', parsed(startJob('string')), parsed(startJob('integer')));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { statusCode: 201, retyped: ['application/json', 'application/vnd.job+json'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports a secondary body that comes to equal the primary type on one side only', () => {
+    const report = (vendor: string) => ({
+      '/reports': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': ref('Report'), 'application/vnd.report+json': ref(vendor) },
+            },
+          },
+        },
+      },
+    });
+    const changes = diffOperations('Reports', parsed(report('Thing')), parsed(report('Report')));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/vnd.report+json'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it("leaves the primary's own retype to responseChanged even when its secondary body is identical", () => {
+    const report = (primary: string) => ({
+      '/reports': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': ref(primary), 'application/json; charset=utf-8': ref(primary) },
+            },
+          },
+        },
+      },
+    });
+    const changes = diffOperations('Reports', parsed(report('Report')), parsed(report('Thing')));
+    expect(changes).toHaveLength(1);
+    // The charset variant is a separate object, so it is not the own entry and its retype is reported.
+    expect(changes[0]).toMatchObject({
+      responseChanged: true,
+      responseContentTypeChanges: [{ retyped: ['application/json; charset=utf-8'], classification: 'breaking' }],
+      classification: 'breaking',
+    });
+  });
+});
 
 describe('diffOperations', () => {
   it('returns empty for identical operations', () => {
