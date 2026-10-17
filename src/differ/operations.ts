@@ -38,8 +38,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const responseChanged = !typeRefsEqual(oldOp.response, newOp.response);
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
     // Only while both sides carry a body: a body appearing or disappearing is
-    // already `requestBodyChanged`. A flag absent from an IR means optional,
-    // as it does in OpenAPI, so an IR built before the field existed diffs clean.
+    // already `requestBodyChanged`. An absent flag reads as optional, as it
+    // does in OpenAPI.
     const requestBodyRequiredChanged =
       !!oldOp.requestBody &&
       !!newOp.requestBody &&
