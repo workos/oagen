@@ -103,6 +103,15 @@ export interface Operation {
   cookieParams?: Parameter[];
   requestBody?: TypeRef;
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+  /**
+   * The primary success body: the lowest explicit 2xx with a body schema,
+   * else the first explicit 2xx. Never promoted from a `2XX` range or the
+   * `default` response, so when an operation declares no explicit 2xx this is
+   * `{ kind: 'primitive', type: 'string' }` and an emitter should take the
+   * success body from `rangeResponses` (`2XX`), then `defaultResponse` —
+   * the same order it resolves any status: the explicit entry, then the
+   * matching range, then the default.
+   */
   response: TypeRef;
   /**
    * Headers the primary success response declares (the one `response` is the
@@ -122,7 +131,9 @@ export interface Operation {
    * format as one) and is not always an error — a spec may use it for its
    * success body too. An emitter should treat its `type` as the fallback for
    * any status that neither `errors`/`successResponses` nor `rangeResponses`
-   * covers, and `response` is never promoted from it.
+   * covers. `response` is never promoted from it: when the operation declares
+   * no explicit 2xx, the emitter takes the success body from the `2XX` entry
+   * of `rangeResponses`, then from here.
    */
   defaultResponse?: DefaultResponse;
   /**

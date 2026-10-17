@@ -764,6 +764,186 @@ describe('a fallback body never overwrites a model that owns its name', () => {
   });
 });
 
+describe('names no stem can move (titled variants) terminate and step around their owner', () => {
+  // Each case used to make the parser loop forever: a variant named from its
+  // own `title` keeps that name under every retry of the body's stem, so a
+  // clash with a differently shaped owner never cleared. Every test runs
+  // under the default vitest timeout, which is the regression guard.
+  const HANG_GUARD_MS = 5_000;
+  const num: TypeRef = { kind: 'primitive', type: 'number' };
+  const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+    type: 'object',
+    title,
+    properties: { kind: { type: 'string', const: kind }, ...properties },
+  });
+  const shapes = {
+    oneOf: [
+      titled('Circle', 'circle', { diameter: { type: 'number' } }),
+      titled('Square', 'square', { side: { type: 'number' } }),
+    ],
+  };
+  const union = (circle: string): TypeRef => ({
+    kind: 'union',
+    variants: [model(circle), model('Square')],
+    compositionKind: 'oneOf',
+    discriminator: { property: 'kind', mapping: { circle, square: 'Square' } },
+  });
+  const withComponent = (name: string, schema: unknown, responses: Record<string, unknown>) => {
+    const spec = petsSpec(responses) as { components: { schemas: Record<string, unknown> } };
+    spec.components.schemas[name] = schema;
+    return spec;
+  };
+
+  it(
+    'a titled variant clashing with a differently shaped component takes its context-qualified name',
+    async () => {
+      const ir = await parseWithoutWarnings(
+        withComponent(
+          'Circle',
+          { type: 'object', properties: { radius: { type: 'number' } } },
+          {
+            '200': ok,
+            default: { description: 'd', content: json(shapes) },
+          },
+        ),
+      );
+      const types = fieldTypesByModel(ir.models);
+
+      expect(only(ir).defaultResponse).toEqual({ type: union('CircleListPetsDefaultResponse') });
+      expect(types['Circle']).toEqual({ radius: num });
+      expect(types['CircleListPetsDefaultResponse']).toEqual({
+        kind: { kind: 'literal', value: 'circle' },
+        diameter: num,
+      });
+      expect(types['Square']).toEqual({ kind: { kind: 'literal', value: 'square' }, side: num });
+      expectConsistent(ir, ['Pet', 'Error', 'Circle']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    'a titled variant matching a component of the same shape shares it',
+    async () => {
+      const ir = await parseWithoutWarnings(
+        withComponent('Circle', titled('Circle', 'circle', { diameter: { type: 'number' } }), {
+          '200': ok,
+          default: { description: 'd', content: json(shapes) },
+        }),
+      );
+
+      expect(only(ir).defaultResponse).toEqual({ type: union('Circle') });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Error', 'Pet', 'Square']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    "steps around a same-named variant of another operation's primary response, which keeps its name",
+    async () => {
+      const primary = {
+        oneOf: [
+          titled('Circle', 'circle', { radius: { type: 'number' } }),
+          titled('Square', 'square', { side: { type: 'number' } }),
+        ],
+      };
+      const spec = petsSpec({ '200': ok, default: { description: 'd', content: json(shapes) } }) as {
+        paths: Record<string, unknown>;
+      };
+      spec.paths['/shapes'] = {
+        get: { operationId: 'getShape', responses: { '200': { description: 'ok', content: json(primary) } } },
+      };
+      const ir = await parseWithoutWarnings(spec);
+      const [getShape, listPets] = ir.services
+        .flatMap((s) => s.operations)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const types = fieldTypesByModel(ir.models);
+
+      expect(getShape.response).toEqual(union('Circle'));
+      expect(listPets.defaultResponse).toEqual({ type: union('CircleListPetsDefaultResponse') });
+      expect(types['Circle']).toEqual({ kind: { kind: 'literal', value: 'circle' }, radius: num });
+      expect(types['CircleListPetsDefaultResponse']).toEqual({
+        kind: { kind: 'literal', value: 'circle' },
+        diameter: num,
+      });
+      expectConsistent(ir, ['Pet', 'Error']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    "steps around a same-named variant of the same operation's primary response",
+    async () => {
+      const primary = {
+        oneOf: [
+          titled('Circle', 'circle', { radius: { type: 'number' } }),
+          titled('Square', 'square', { side: { type: 'number' } }),
+        ],
+      };
+      const ir = await parseWithoutWarnings(
+        petsSpec({
+          '200': { description: 'ok', content: json(primary) },
+          default: { description: 'd', content: json(shapes) },
+        }),
+      );
+      const op = only(ir);
+
+      expect(op.response).toEqual(union('Circle'));
+      expect(op.defaultResponse).toEqual({ type: union('CircleListPetsDefaultResponse') });
+      expectConsistent(ir, ['Pet', 'Error']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    'a titled variant nested below the top level, where no reservation reaches, is renamed under the root and its refs follow',
+    async () => {
+      const ir = await parseWithoutWarnings(
+        withComponent(
+          'Circle',
+          { type: 'object', properties: { radius: { type: 'number' } } },
+          {
+            '200': ok,
+            default: { description: 'd', content: json({ type: 'object', properties: { shape: shapes } }) },
+          },
+        ),
+      );
+      const types = fieldTypesByModel(ir.models);
+
+      expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse') });
+      expect(types['ListPetsDefaultResponse']).toEqual({ shape: union('ListPetsDefaultResponseCircle') });
+      expect(types['ListPetsDefaultResponseCircle']).toEqual({
+        kind: { kind: 'literal', value: 'circle' },
+        diameter: num,
+      });
+      expect(types['Circle']).toEqual({ radius: num });
+      expectConsistent(ir, ['Pet', 'Error', 'Circle']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    'fails loudly when a nested clashing title and a $ref to the same component cannot be told apart',
+    async () => {
+      const body = { type: 'object', properties: { shape: shapes, original: { $ref: '#/components/schemas/Circle' } } };
+      await expect(
+        parseTempSpec(
+          withComponent(
+            'Circle',
+            { type: 'object', properties: { radius: { type: 'number' } } },
+            {
+              '200': ok,
+              default: { description: 'd', content: json(body) },
+            },
+          ),
+        ),
+      ).rejects.toThrow(
+        'Inline schema "Circle" under ListPetsDefaultResponse has another shape than component "Circle"',
+      );
+    },
+    HANG_GUARD_MS,
+  );
+});
+
 describe('a fallback written as a $ref into components/responses', () => {
   const problem = {
     description: 'A problem',

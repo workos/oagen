@@ -691,6 +691,55 @@ describe('inline header models', () => {
     expectHeaderModelsMaterialized(op, inlineModels);
   });
 
+  it('a titled oneOf variant clashing with a differently shaped component terminates and takes its qualified name', () => {
+    // Used to loop forever: the variant is named from its `title`, which no
+    // retry of the header's property name could move off the component.
+    const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+      type: 'object',
+      title,
+      properties: { kind: { type: 'string', const: kind }, ...properties },
+    });
+    const circle: Model = {
+      name: 'Circle',
+      fields: [{ name: 'radius', type: { kind: 'primitive', type: 'number' }, required: false }],
+    };
+    const { services, inlineModels } = extractOperations(
+      getWithResponses({
+        '200': {
+          description: 'ok',
+          headers: {
+            'X-Shape': {
+              schema: {
+                oneOf: [
+                  titled('Circle', 'circle', { diameter: { type: 'number' } }),
+                  titled('Square', 'square', { side: { type: 'number' } }),
+                ],
+              },
+            },
+          },
+        },
+      }) as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [circle],
+    );
+    const op = services[0].operations[0];
+
+    expect(op.responseHeaders?.[0].type).toEqual({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'CircleDocumentsXShape' },
+        { kind: 'model', name: 'Square' },
+      ],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { circle: 'CircleDocumentsXShape', square: 'Square' } },
+    });
+    expect(inlineModels.map((m) => m.name).sort()).toEqual(['CircleDocumentsXShape', 'Square']);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  }, 5_000);
+
   describe('same header name, different shapes', () => {
     const object = (properties: Record<string, unknown>) => ({ schema: { type: 'object', properties } });
     const fieldsOf = (models: Model[], name: string) => models.find((m) => m.name === name)?.fields.map((f) => f.name);
