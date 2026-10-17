@@ -1034,4 +1034,97 @@ describe('parseSpec – deprecated', () => {
       warn.mockRestore();
     }
   });
+
+  it('never lets a deprecated list-envelope companion deprecate the shared model, in either document order', async () => {
+    const listMetadata = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } },
+      ...extra,
+    });
+    const envelope = (meta: Record<string, unknown>) => ({
+      allOf: [
+        { type: 'object', properties: { object: { type: 'string', const: 'list' }, list_metadata: meta } },
+        { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/User' } } } },
+      ],
+    });
+    const listOp = (operationId: string, schema: unknown) => ({
+      get: {
+        operationId,
+        parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+        responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
+      },
+    });
+    const legacy = listOp('listLegacyUsers', envelope(listMetadata({ deprecated: true })));
+    const live = listOp('listUsers', envelope(listMetadata()));
+    const User = { type: 'object', properties: { id: { type: 'string' } } };
+
+    const results = [];
+    for (const [label, paths] of [
+      ['legacy-first', { '/legacy-users': legacy, '/users': live }],
+      ['live-first', { '/users': live, '/legacy-users': legacy }],
+    ] as const) {
+      const spec = await parseSpec(await writeSpec(`${label}.json`, specDoc({ User }, paths)));
+      const ops = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+      const metaRef = (name: string) =>
+        ops[name]?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata')?.type;
+      // The live operation shares the bare name; the deprecated copy keeps its
+      // operation-qualified name and its flag.
+      expect(metaRef('listUsers'), label).toEqual({ kind: 'model', name: 'ListMetadata' });
+      expect(metaRef('listLegacyUsers'), label).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+      results.push(flags(spec.models));
+    }
+    // Both orders yield the same IR.
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]).toMatchInlineSnapshot(`
+      {
+        "ListLegacyUsersListMetadata": true,
+        "ListMetadata": undefined,
+        "User": undefined,
+      }
+    `);
+  });
+
+  it('never lets a deprecated header model share a live header model’s name, in either document order', async () => {
+    const withHeader = (operationId: string, meta: Record<string, unknown>) => ({
+      get: {
+        operationId,
+        tags: ['Users'],
+        responses: { '200': { description: 'ok', headers: { 'X-Meta': { schema: meta } } } },
+      },
+    });
+    const meta = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { etag: { type: 'string' } },
+      ...extra,
+    });
+    const legacy = withHeader('listLegacyUsers', meta({ deprecated: true }));
+    const live = withHeader('listUsers', meta());
+
+    for (const [label, paths] of [
+      ['legacy-first', { '/legacy-users': legacy, '/users': live }],
+      ['live-first', { '/users': live, '/legacy-users': legacy }],
+    ] as const) {
+      const spec = await parseSpec(await writeSpec(`header-${label}.json`, specDoc({}, paths)));
+      const ops = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+      const headerModel = (name: string) => {
+        const ref = ops[name]?.responseHeaders?.[0]?.type;
+        expect(ref?.kind, `${label}: ${name}`).toBe('model');
+        return spec.models.find((m) => m.name === (ref as { name: string }).name)!;
+      };
+      // The registry treats the flag as part of the shape, so the two headers
+      // never share one model: the live operation's is live, the deprecated
+      // operation's is deprecated, whichever came first.
+      expect(headerModel('listUsers').deprecated, label).toBeUndefined();
+      expect(headerModel('listLegacyUsers').deprecated, label).toBe(true);
+      expect(headerModel('listUsers').name, label).not.toBe(headerModel('listLegacyUsers').name);
+      expect(
+        headerModel('listUsers').fields.map((f) => f.name),
+        label,
+      ).toEqual(['etag']);
+      expect(
+        headerModel('listLegacyUsers').fields.map((f) => f.name),
+        label,
+      ).toEqual(['etag']);
+    }
+  });
 });

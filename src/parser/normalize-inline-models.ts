@@ -20,6 +20,15 @@ function keepLargestByName(models: Model[]): Model[] {
     }
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
+    } else if (existing.deprecated && !model.deprecated && haveSameFields(existing, model)) {
+      // Same shape, but the earlier copy is deprecated and this one is not.
+      // The shared name must not carry deprecation onto every live reference,
+      // so the live definition is kept; the deprecated schema's own field or
+      // operation still carries its flag.
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+      );
+      byName.set(model.name, model);
     }
   }
   return [...byName.values()];
@@ -115,6 +124,8 @@ export function mergeFieldInlineModels(
   const modelNames = new Set(existingModels.map((m) => m.name));
   const modelsByName = new Map(existingModels.map((m) => [m.name, m]));
   const fieldList = (m: Model): string => m.fields.map((f) => f.name).join(', ') || '(no fields)';
+  /** An earlier inline model replaced by a live copy of the same name and shape. */
+  const replacements = new Map<Model, Model>();
 
   const deduplicatedFieldModels = fieldInlineModels.filter((model) => {
     if (!modelNames.has(model.name)) return true;
@@ -136,12 +147,27 @@ export function mergeFieldInlineModels(
           `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,
         );
       }
+    } else if (
+      existing.deprecated &&
+      !model.deprecated &&
+      componentNames &&
+      !componentNames.has(model.name) &&
+      haveSameFields(existing, model)
+    ) {
+      // Two inline models of one name and shape, the earlier deprecated and
+      // this one live: keep the live definition under the shared name so
+      // deprecation does not reach every reference. A component's own flag,
+      // by contrast, is authoritative and is never replaced.
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+      );
+      replacements.set(existing, model);
     }
 
     return false;
   });
 
-  return [...existingModels, ...keepLargestByName(deduplicatedFieldModels)];
+  return [...existingModels.map((m) => replacements.get(m) ?? m), ...keepLargestByName(deduplicatedFieldModels)];
 }
 
 function hasModelConstDiscriminant(model: Model): boolean {
