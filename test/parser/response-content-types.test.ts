@@ -1378,4 +1378,103 @@ describe('response content types', () => {
       expect(inlineModels).toEqual([]);
     });
   });
+
+  describe('allOf members that only add limits', () => {
+    /** The reviewer's schema: an object whose `allOf` carries nothing but limits. */
+    const constraintOnly = obj({ id: str }, { allOf: [{ minProperties: 1 }, { maxProperties: 3 }] });
+    const refPlusLimits = { allOf: [{ $ref: '#/components/schemas/Thing' }, { minProperties: 1 }] };
+    const propsPlusLimits = { allOf: [obj({ a: str }), { minProperties: 1 }] };
+
+    it('types such a schema from its own keywords, carrying the conjoined limits, wherever it appears', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parseDocument(
+        document(
+          {
+            '/things': getWith('listThings', {
+              'application/json': { schema: { $ref: '#/components/schemas/Thing' } },
+              'application/vnd.limits+json': { schema: constraintOnly },
+              'application/vnd.ref-limits+json': { schema: refPlusLimits },
+              'application/vnd.props-limits+json': { schema: propsPlusLimits },
+            }),
+          },
+          {
+            Thing: obj({ id: str }),
+            Limited: obj({
+              constraintOnly,
+              lone: obj({ id: str }, { allOf: [{ minProperties: 1 }] }),
+              typedMember: obj({ id: str }, { allOf: [{ type: 'object' }, { minProperties: 1 }] }),
+              nested: obj({ constraintOnly }),
+              list: { type: 'array', items: constraintOnly },
+              referenced: refPlusLimits,
+              merged: propsPlusLimits,
+              text: { type: 'string', allOf: [{ minLength: 1 }, { maxLength: 5 }] },
+            }),
+          },
+        ),
+      );
+      const model = (name: string) => spec.models.find((m) => m.name === name);
+      const op = findOp(spec, 'listThings');
+
+      // Under a secondary media type.
+      expect(typeOf(op, 'application/vnd.limits+json')).toEqual({
+        kind: 'model',
+        name: 'ListThingsApplicationVndLimitsJsonResponse',
+      });
+      expect(model('ListThingsApplicationVndLimitsJsonResponse')).toMatchObject({
+        fields: [{ name: 'id' }],
+        constraints: { minProperties: 1, maxProperties: 3 },
+      });
+      expect(typeOf(op, 'application/vnd.ref-limits+json')).toEqual({ kind: 'model', name: 'Thing' });
+      expect(typeOf(op, 'application/vnd.props-limits+json')).toEqual({
+        kind: 'model',
+        name: 'ListThingsApplicationVndPropsLimitsJsonResponse',
+      });
+      expect(model('ListThingsApplicationVndPropsLimitsJsonResponse')).toMatchObject({ fields: [{ name: 'a' }] });
+
+      // As component fields, nested, and as array items.
+      const limited = model('Limited');
+      const field = (name: string) => limited?.fields.find((f) => f.name === name);
+      expect(field('constraintOnly')).toMatchObject({
+        type: { kind: 'model', name: 'LimitedConstraintOnly' },
+        constraints: { minProperties: 1, maxProperties: 3 },
+      });
+      expect(model('LimitedConstraintOnly')).toMatchObject({
+        fields: [{ name: 'id' }],
+        constraints: { minProperties: 1, maxProperties: 3 },
+      });
+      // A lone limits-only member types nothing on its own, so the schema's
+      // properties do (main unwrapped it into `unknown`).
+      expect(field('lone')).toMatchObject({
+        type: { kind: 'model', name: 'LimitedLone' },
+        constraints: { minProperties: 1 },
+      });
+      expect(model('LimitedLone')).toMatchObject({ fields: [{ name: 'id' }] });
+      // A bare `type: 'object'` member adds no structure either.
+      expect(field('typedMember')).toMatchObject({ type: { kind: 'model', name: 'LimitedTypedMember' } });
+      expect(model('LimitedNestedConstraintOnly')).toMatchObject({
+        fields: [{ name: 'id' }],
+        constraints: { minProperties: 1, maxProperties: 3 },
+      });
+      expect(field('list')).toMatchObject({ type: { kind: 'array', items: { kind: 'model', name: 'LimitedList' } } });
+      expect(model('LimitedList')).toMatchObject({
+        fields: [{ name: 'id' }],
+        constraints: { minProperties: 1, maxProperties: 3 },
+      });
+      // A `$ref` member or a member with properties still types the allOf.
+      expect(field('referenced')).toMatchObject({
+        type: { kind: 'model', name: 'Thing' },
+        constraints: { minProperties: 1 },
+      });
+      expect(field('merged')).toMatchObject({ type: { kind: 'model', name: 'LimitedMerged' } });
+      expect(model('LimitedMerged')).toMatchObject({ fields: [{ name: 'a' }] });
+      expect(field('text')).toMatchObject({
+        type: { kind: 'primitive', type: 'string' },
+        constraints: { minLength: 1, maxLength: 5 },
+      });
+
+      const messages = warn.mock.calls.map((call) => String(call[0]));
+      expect(messages.filter((m) => m.includes('Unknown schema shape'))).toEqual([]);
+      expect(messages.filter((m) => m.includes('Unresolved'))).toEqual([]);
+    });
+  });
 });

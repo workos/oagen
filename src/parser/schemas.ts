@@ -1110,7 +1110,7 @@ export type InlineSchemaKind = 'ref' | 'allOf' | 'union' | 'const' | 'enum' | 'a
  */
 export function classifyInlineSchema(schema: SchemaObject): InlineSchemaKind {
   if (schema.$ref) return 'ref';
-  if (schema.allOf) return 'allOf';
+  if (schema.allOf && allOfTypesSchema(schema.allOf)) return 'allOf';
   if (schema.oneOf || schema.anyOf) return 'union';
   if (schema.const !== undefined) return 'const';
   if (schema.enum) return 'enum';
@@ -1120,6 +1120,37 @@ export function classifyInlineSchema(schema: SchemaObject): InlineSchemaKind {
   if (inlineObject) return 'object';
   if (schema.type === 'object') return 'map';
   return 'other';
+}
+
+/** Keywords that give a schema a type of its own; a member carrying none of them only adds limits or documentation. */
+const TYPING_KEYWORDS: readonly string[] = [
+  '$ref',
+  'allOf',
+  'oneOf',
+  'anyOf',
+  'const',
+  'enum',
+  'items',
+  'properties',
+  'type',
+  'additionalProperties',
+  'patternProperties',
+];
+
+/**
+ * Whether an `allOf` is what types the schema, i.e. the cases its branch in
+ * `schemaToTypeRef` acts on: a `$ref` member (a reference, or an augmentation
+ * model), a member declaring `properties` (a merged model), or a lone member
+ * that types on its own (unwrapped). An `allOf` whose members only conjoin
+ * limits or documentation — `allOf: [{ minProperties: 1 }, { maxProperties:
+ * 3 }]` beside the schema's own `properties` — does not: the schema is then
+ * typed from its own keywords, and `extractConstraints` still conjoins the
+ * members' limits onto the field and the model it builds.
+ */
+function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
+  if (members.some((member) => member.$ref !== undefined || member.properties !== undefined)) return true;
+  const only = members.length === 1 ? members[0] : undefined;
+  return only !== undefined && TYPING_KEYWORDS.some((key) => (only as Record<string, unknown>)[key] !== undefined);
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable; never a variant to name. */
@@ -2119,7 +2150,8 @@ export function schemaToTypeRef(
         name: qualifyInlineModelName(baseName, parentModelName),
       };
     }
-    // Fall through to other checks
+    // Unreachable: `allOfTypesSchema` admits only the three cases above. An
+    // `allOf` of bare limits is classified from the schema's own keywords.
   }
 
   // Handle oneOf / anyOf → Union or Nullable
