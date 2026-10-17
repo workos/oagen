@@ -343,6 +343,7 @@ An object-shaped header (directly, inside an array, or as a oneOf variant) is ma
 interface Model {
   name: string; // PascalCase, e.g., "Organization"
   description?: string;
+  deprecated?: boolean; // The schema's own `deprecated: true`; absent otherwise (see Deprecation below)
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
   constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
@@ -422,12 +423,26 @@ A 3.1 document's numeric form passes through unchanged, including the legal-but-
 
 **Scope.** The keywords declared on the field, parameter or model schema are collected, conjoined with those of its inline `allOf` members: the parser unwraps a single-member `allOf`, so `{ allOf: [{ type: string, maxLength: 3 }] }` is a string field carrying `{ maxLength: 3 }`, and a `$ref` member contributes the keywords written beside the reference while the referenced model keeps its own. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried. The one exception is a nullable wrapper — a `oneOf`/`anyOf` with exactly one non-null, non-`$ref` branch, which the IR collapses to `nullable<T>` — whose branch keywords are conjoined with the wrapper's own (and its `allOf` members'), so `anyOf: [{ type: string, maxLength: 8 }, { type: "null" }]` gives `{ maxLength: 8 }` and `{ allOf: [{ maxLength: 30 }], anyOf: [{ type: string, minLength: 20 }, { type: "null" }] }` gives `{ maxLength: 30, minLength: 20 }`, and an inline model built from that branch carries the same conjoined keywords, so `minProperties` written beside `anyOf: [{ type: object, … }, { type: "null" }]` reaches both the field and its model. Limits on a general multi-variant union are not carried. Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` field gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model — a component, or an inline response, request body or field the parser rebuilds from `allOf` members — it is the wrapper's keywords conjoined with its members' (the stricter bound wins; a `$ref` member contributes the keywords written beside the reference, while the referenced model keeps its own). A variant model of a discriminated `allOf` + `oneOf` union conjoins the shared keywords — the outer wrapper's, the base members' and any written beside the `oneOf` — with the variant's own the way `allOf` does — an instance must satisfy both, so the larger `min*` and the smaller `max*` win and `dependentRequired` maps are unioned per property.
 
+### Deprecation
+
+`Model.deprecated` and `Enum.deprecated` are present, and `true`, only when the schema the type was built from says `deprecated: true`; the key is absent otherwise, as on `Field`, `Parameter` and `Operation`. Which schema that is, per model:
+
+- A component schema: its own top-level keyword. For an `allOf` component it is the wrapper's; a member's flag is not read — a `$ref` member's stays on the referenced model, so `Composed: { allOf: [{ $ref: Legacy }, …] }` is live while `Legacy` is deprecated, and an inline member's is dropped, as `Field.deprecated` drops it on a field.
+- A discriminated `allOf` + `oneOf` union: the wrapper deprecates the dispatcher model; each variant model carries its own variant's flag.
+- An inline object that becomes a model — a request body, a `oneOf` body variant (a discriminated body takes the wrapper's flag, since the variants merge into one model), a response (an `allOf` response takes the wrapper's flag), a nested field object, array items, map values, a field's `oneOf` variant — carries that schema's flag. A multi-variant union is never collapsed, nullable or not (`type: ['object', 'null']` beside a `oneOf` included): each variant model is built from its variant, with the variant's own flag, and the wrapper's flag stays on the field. A field spelled `{ deprecated: true, anyOf: [{ type: object, … }, { type: "null" }] }` or `{ deprecated: true, allOf: […] }` carries its wrapper's flag onto the model built from the branch or the merge, the same way its `constraints` travel, so the nullable and composed forms match the direct-object form — and only the wrapper's: a flag written on the null-wrapped branch or on an `allOf` member is not read, exactly as `Field.deprecated` does not read it.
+- A `<Name>Json` model folded into `<Name>` does not carry its flag over: deprecation names the type the SDK exposes, and `<Name>` keeps its own.
+
+An inline enum (one declared on a field, parameter or header rather than under `components.schemas`) carries no flag of its own: the IR reaches it through an `EnumRef`, and the field or parameter that declares it carries `deprecated`.
+
+Wherever two inline models are folded into one by structural agreement — list-envelope companions sharing a bare name, header models sharing a registry entry, same-named inline models in the merge passes — `deprecated` is part of the shape. A deprecated copy never shares a live model's name: an envelope companion keeps its operation-qualified name (`ListLegacyUsersListMetadata`) while the live copies share the component or majority name, a header model gets a qualified name of its own, and when two same-named inline models are identical in everything but the flag — fields, requiredness, types, limits, defaults — the live definition is kept under the shared name (with a warning); copies that differ in anything else take the merge pass's usual choice, so a deprecated response never starts promising a field its live twin requires. So deprecation never reaches a live operation and never depends on document order.
+
 ## Enum
 
 ```typescript
 interface Enum {
   name: string; // PascalCase
   values: EnumValue[];
+  deprecated?: boolean; // The component enum schema's own `deprecated: true`; absent otherwise
 }
 
 interface EnumValue {

@@ -5,8 +5,10 @@ import {
   schemaToTypeRef,
   buildFieldFromSchema,
   constraintsEntry,
+  deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
+  collapsedNullableBranch,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
@@ -377,7 +379,12 @@ function extractWrappedResource(
 
     if (objectVariant) {
       const modelName = deriveModelName(objectVariant, resourceName);
-      inlineModels.push(...extractInlineModel(modelName, objectVariant, componentSchemas));
+      // `oneOf: [object, null]` is a nullable wrapper: the model built from
+      // its one branch takes the wrapper's `deprecated` and limits, as every
+      // other nullable unwrap gives it (`collapsedNullableBranch`); a
+      // multi-variant union's variant is built as written.
+      const source = collapsedNullableBranch(propSchema) ?? objectVariant;
+      inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
       const hasNullVariant = propSchema.oneOf.some(
         (v) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
@@ -472,6 +479,8 @@ function extractDirectResource(
         type: 'object',
         properties: mergedProperties,
         required: mergedRequired,
+        // The wrapper's own flag, as for a component `allOf` model.
+        ...deprecatedEntry(schema),
         ...extractConstraints(schema),
       };
       // Fields merged from a $ref carry the referenced model's const
@@ -590,5 +599,8 @@ function extractInlineModel(
   // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) },
+    ...nestedModels,
+  ];
 }

@@ -379,6 +379,16 @@ export interface TypeParam {
 export interface Model {
   name: string;
   description?: string;
+  /**
+   * Present, and `true`, when the schema this model was built from says
+   * `deprecated: true` — a component, a discriminated-union variant, or an
+   * inline request body, response or field object. Only that schema's own
+   * top-level keyword counts, read as `Field.deprecated` is: an `allOf`
+   * member's or a nullable branch's flag is not read (a `$ref` member's stays
+   * on the referenced model), and a folded `<Name>Json` model's flag does not
+   * deprecate the `<Name>` it collapses into. Absent otherwise.
+   */
+  deprecated?: boolean;
   fields: Field[];
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
@@ -447,6 +457,8 @@ export interface Enum {
   values: EnumValue[];
   /** Spec-level default value (the value of `default:` on the schema). Optional. */
   default?: string | number;
+  /** Present, and `true`, when the component enum schema says `deprecated: true`; absent otherwise. */
+  deprecated?: boolean;
 }
 
 export interface EnumValue {

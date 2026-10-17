@@ -25,6 +25,8 @@ import {
   resolveComponentSchemaRef,
   extractConstraints,
   constraintsEntry,
+  deprecatedEntry,
+  collapsedNullableBranch,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
@@ -1381,7 +1383,13 @@ function extractRequestBody(
       if (!fieldSchema) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
-    inlineModels.push({ name: contextName, description: undefined, fields, ...constraintsEntry(schema) });
+    inlineModels.push({
+      name: contextName,
+      description: undefined,
+      fields,
+      ...deprecatedEntry(schema),
+      ...constraintsEntry(schema),
+    });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
     // by this branch. Recurse to materialize them, matching how component
@@ -1401,6 +1409,12 @@ function extractRequestBody(
       (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
     );
     const contentNamed: string[] = [];
+    // A nullable body (`oneOf: [object, null]`) is one schema: the model built
+    // from its object branch takes the wrapper's `deprecated` and limits, as
+    // every other nullable unwrap gives it (`collapsedNullableBranch`). The
+    // null branch still makes the body nullable below. A multi-variant union,
+    // nullable or not, is not collapsed: every variant is built as written.
+    const branch = collapsedNullableBranch(schema);
 
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
@@ -1419,10 +1433,11 @@ function extractRequestBody(
         );
         const variantName = named.name;
         if (named.fromContent) contentNamed.push(variantName);
-        const requiredSet = new Set(variant.required ?? []);
-        const siblings = collectProperties(variant);
+        const source = branch ?? variant;
+        const requiredSet = new Set(source.required ?? []);
+        const siblings = collectProperties(source);
         const fields: Field[] = [];
-        for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+        for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
           if (!fieldSchema) continue;
           fields.push(
             buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
@@ -1430,11 +1445,12 @@ function extractRequestBody(
         }
         inlineModels.push({
           name: variantName,
-          description: variant.description,
+          description: source.description,
           fields,
-          ...constraintsEntry(variant),
+          ...deprecatedEntry(source),
+          ...constraintsEntry(source),
         });
-        extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);
+        extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
         variants.push({ kind: 'model', name: variantName });
       } else {
         variants.push(schemaToTypeRef(variant, contextName));
@@ -1540,6 +1556,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     properties,
     required: requiredFields,
     ...(schema.description ? { description: schema.description } : {}),
+    // The wrapper's deprecation is the body's; a variant's is not carried,
+    // since its fields are merged away into the one body model.
+    ...deprecatedEntry(schema),
     // The wrapper's own keywords bind every branch, so they ride along; the
     // variants' keywords are alternatives and are not carried.
     ...extractConstraints(schema),
@@ -1633,20 +1652,41 @@ interface HeaderExtractionContext {
   registry: HeaderModelRegistry;
 }
 
-/** Shape of a model, independent of field order: name, requiredness, and type of every field. */
+/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'example', 'examples']);
+/** Model properties outside its shape: the name, its documentation, and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'fields']);
+
+/**
+ * Shape of a model, independent of field order, name and documentation:
+ * every field's name, type, requiredness, limits, default and access flags,
+ * plus the model's own limits, type parameters and discriminator. Two
+ * schemas share a model only when this agrees, so a body that repeats
+ * another's fields with a different `minLength` or `minProperties` keeps its
+ * own model and its own limits.
+ */
 function modelFingerprint(model: Model): string {
-  return model.fields
-    .map((f) => `${f.name}${f.required ? '!' : '?'}:${stableStringify(f.type)}`)
+  const fields = model.fields
+    .map((field) => `${field.name}:${stableStringify(omitKeys(field, FIELD_DOC_KEYS))}`)
     .sort()
     .join('|');
+  return `${fields}#${stableStringify(omitKeys(model, MODEL_IDENTITY_KEYS))}`;
 }
 
-/** `JSON.stringify` with object keys sorted, so equal shapes serialize equally. */
+/** The entries of `value` whose key is not in `keys` and whose value is set. */
+function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
+  );
+}
+
+/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
     return `{${entries.join(',')}}`;
@@ -2214,3 +2254,9 @@ function extractResponses(
     envelopeCompanions,
   };
 }
+
+/**
+ * Shared with the inline-model merge passes, which decide whether two
+ * same-named inline models are the same shape but for `deprecated` by it.
+ */
+export { modelFingerprint };
