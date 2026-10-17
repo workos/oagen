@@ -926,6 +926,11 @@ function buildOperation(
     reqBodyModels,
     componentSchemas,
   );
+  // Read off the resolved body so a `components/requestBodies` ref's flag
+  // counts. Only `true` makes the body required: OpenAPI defaults the flag
+  // to `false`, and a non-boolean value is not a declaration of requiredness.
+  // Set exactly when a body is, so the two fields can be read together.
+  const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
   const {
     response,
     responseHeaders,
@@ -997,6 +1002,9 @@ function buildOperation(
       cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
       requestBody,
       requestBodyEncoding,
+      // Added only when the operation has a body so bodiless operations keep
+      // their shape.
+      ...(requestBodyRequired !== undefined && { requestBodyRequired }),
       response,
       // Added only when present so operations without headers keep their shape.
       ...(responseHeaders && { responseHeaders }),
