@@ -51,6 +51,12 @@ interface WebhookEntry {
   label: string;
   /** How many methods the entry's path item declares; a second one qualifies a key-derived stem. */
   methodCount: number;
+  /**
+   * The operationId the stem is named from: the operation's own, unless a
+   * different operation object declares the same one (see
+   * `collectWebhookEntries`). Absent, the stem comes from the key.
+   */
+  stemOperationId?: string;
 }
 
 /** What one stem mints for a webhook: its typed parameters and payload, and the models behind them. */
@@ -64,6 +70,12 @@ interface MintedWebhook {
   /** Every model and inline-enum name the webhook minted (see `mintSchema`). */
   names: Set<string>;
 }
+
+/** The part of a minting a `Webhook` carries: its typed parameters and payload. */
+type MintedShape = Pick<
+  MintedWebhook,
+  'headerParams' | 'queryParams' | 'cookieParams' | 'requestBody' | 'requestBodyEncoding'
+>;
 
 /**
  * Read the document's top-level `webhooks` map (OpenAPI 3.1) into the IR.
@@ -113,14 +125,32 @@ export function extractWebhooks(
   }
 
   const entries = collectWebhookEntries(webhooks, components);
-  const stems = resolveWebhookModelStems(entries, new Set(reservedNames), components);
+  const { groups, groupOf } = groupEntries(entries);
+  const stems = resolveWebhookModelStems(groups, new Set(reservedNames), components);
   const inlineModels: Model[] = [];
-  const result: Webhook[] = [];
-
-  for (const entry of entries) {
-    const minted = mintWebhook(entry, stems.get(entry)!, components);
+  const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
+  for (const group of groups) {
+    const minted = mintWebhook(group.owner, stems.get(group)!, components);
     inlineModels.push(...minted.inlineModels);
-    result.push(buildWebhook(entry, minted, components));
+    mintedByGroup.set(group, minted);
+  }
+
+  // Document order of the entries, not of the groups: a shared operation's
+  // second key keeps its own place. A group's owner takes the minted
+  // parameters and payload as they are; every other member gets its own
+  // copy, so no two webhooks share IR nodes.
+  const result: Webhook[] = [];
+  for (const entry of entries) {
+    const group = groupOf.get(entry)!;
+    const minted = mintedByGroup.get(group)!;
+    const shape: MintedShape = {
+      headerParams: minted.headerParams,
+      queryParams: minted.queryParams,
+      cookieParams: minted.cookieParams,
+      requestBody: minted.requestBody,
+      requestBodyEncoding: minted.requestBodyEncoding,
+    };
+    result.push(buildWebhook(entry, entry === group.owner ? shape : structuredClone(shape), components));
   }
 
   return { webhooks: result, inlineModels };
@@ -211,6 +241,31 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
       entries.push({ name, method, op, params, body, label, methodCount: methods.length });
     }
   }
+
+  // An operationId names the stem only when exactly one operation object
+  // declares it. Two keys that `$ref` one path item resolve to the same
+  // object and are fine — they will share a stem (see `groupEntries`); two
+  // different objects declaring one id is a document error OpenAPI forbids,
+  // so neither is named from it, with a warning.
+  const objectsByOperationId = new Map<string, Set<OperationObject>>();
+  for (const entry of entries) {
+    const id = entry.op.operationId;
+    if (typeof id !== 'string' || id === '') continue;
+    const objects = objectsByOperationId.get(id) ?? new Set<OperationObject>();
+    objects.add(entry.op);
+    objectsByOperationId.set(id, objects);
+  }
+  for (const [id, objects] of objectsByOperationId) {
+    const declaring = entries.filter((entry) => entry.op.operationId === id);
+    if (objects.size === 1) {
+      for (const entry of declaring) entry.stemOperationId = id;
+      continue;
+    }
+    console.warn(
+      `[oagen] Warning: operationId "${id}" is declared by more than one webhook operation ` +
+        `(${declaring.map((entry) => entry.label).join(', ')}); naming their models from the webhook keys instead.`,
+    );
+  }
   return entries;
 }
 
@@ -288,31 +343,41 @@ function resolveComponentRef(
  * webhook and an operation with the same id name their models alike — and
  * the PascalCase of the webhook's key otherwise. When a key's path item
  * declares several methods, a key-derived stem has the method appended
- * (`PetUpdatedPut`) so the bodies never share a model; an operationId is
- * unique per document and needs no qualifier. A key that PascalCases to
- * nothing, or to something starting with a digit, gets `Webhook` in front.
+ * (`PetUpdatedPut`) so the bodies never share a model. An operationId is
+ * unique per document and needs no qualifier, with one caveat: two keys that
+ * `$ref` the same `components/pathItems` entry resolve to one operation
+ * object and so carry one operationId. Sharing a path item between events is
+ * what that section is for, so such entries form one group (`groupEntries`)
+ * that mints once and shares its stem and its models (`SharedPayload`)
+ * rather than colliding with each other; each key is still its own
+ * `Webhook`. An operationId that two different operation objects declare —
+ * which no valid document does — is ignored for naming, with a warning, and
+ * those webhooks take their key-derived stems (`collectWebhookEntries`). A
+ * key that PascalCases to nothing, or to something starting with a digit,
+ * gets `Webhook` in front.
  *
  * Whether a stem collides is decided from the names it actually mints, not
- * from a prefix: every entry is first minted with its plain stem
+ * from a prefix: every group is first minted with its plain stem
  * (`mintWebhook`) and the model and inline-enum names that produces —
  * payload, nested objects, union variants with their const or title
  * prefixes, parameter objects, parameter enums, field enums — are collected
- * (`MintedWebhook.names`). An entry collides when one of those names is reserved
- * (`collectExistingNames`: every model and enum the components and the
- * operations have decided, the components' own inline field models included)
- * or is also minted by another entry. Two keys that flatten to one stem
- * (`pet_adopted` and `petAdopted`) collide on every name; a `petEvent` union
- * variant pinning `kind: returned` and a webhook keyed `returnedPetEvent`
- * collide on the one name `ReturnedPetEventPayload`; a stem that merely
- * starts with another's (`petAdopted` beside `petAdoptedPayloadPet`) does
- * not collide unless a name coincides. A colliding stem takes the first six
- * hex characters of the SHA-1 of the webhook's key before the method
- * qualifier (`PetAdoptedB4A950`), exactly as an operationId-less operation's
- * path prefix does, and is minted again under it. Both sides of a
- * webhook-to-webhook collision are hashed, since neither key is more
- * canonical than the other. The outcome depends only on the document's keys,
- * operationIds, components and operations, never on their order, and a key
- * that stops colliding returns to its plain stem.
+ * (`MintedWebhook.names`). A group collides when one of those names is
+ * reserved (`collectExistingNames`: every model and enum the components and
+ * the operations have decided, the components' own inline field models
+ * included) or is also minted by another group. Two keys that flatten to
+ * one stem (`pet_adopted` and `petAdopted`) collide on every name; a
+ * `petEvent` union variant pinning `kind: returned` and a webhook keyed
+ * `returnedPetEvent` collide on the one name `ReturnedPetEventPayload`; a
+ * stem that merely starts with another's (`petAdopted` beside
+ * `petAdoptedPayloadPet`) does not collide unless a name coincides. A
+ * colliding stem takes the first six hex characters of the SHA-1 of the
+ * webhook's operationId when it is named from one and of its key otherwise,
+ * before the method qualifier (`PetAdoptedB4A950`), exactly as an
+ * operationId-less operation's path prefix does, and is minted again under
+ * it. Both sides of a webhook-to-webhook collision are hashed, since neither
+ * key is more canonical than the other. The outcome depends only on the
+ * document's keys, operationIds, components and operations, never on their
+ * order, and a key that stops colliding returns to its plain stem.
  *
  * A name that does not embed the stem — a title-mapped union variant, which
  * is context-free by design — cannot be moved by the hash; such a clash is
@@ -320,29 +385,61 @@ function resolveComponentRef(
  * a different one, as it does for operations.
  */
 function resolveWebhookModelStems(
-  entries: WebhookEntry[],
+  groups: WebhookGroup[],
   reserved: ReadonlySet<string>,
   components: WebhookComponents,
-): Map<WebhookEntry, string> {
-  const minted = new Map<WebhookEntry, Set<string>>();
-  for (const entry of entries) {
-    minted.set(entry, mintWebhook(entry, plainStem(entry, ''), components).names);
+): Map<WebhookGroup, string> {
+  const minted = new Map<WebhookGroup, Set<string>>();
+  for (const group of groups) {
+    minted.set(group, mintWebhook(group.owner, plainStem(group.owner, ''), components).names);
   }
 
-  const stems = new Map<WebhookEntry, string>();
-  for (const entry of entries) {
-    const names = minted.get(entry)!;
+  const stems = new Map<WebhookGroup, string>();
+  for (const group of groups) {
+    const names = minted.get(group)!;
     const taken = [...names].some(
-      (name) => reserved.has(name) || entries.some((other) => other !== entry && minted.get(other)!.has(name)),
+      (name) => reserved.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name)),
     );
-    stems.set(entry, taken ? plainStem(entry, webhookDisambiguator(entry.name)) : plainStem(entry, ''));
+    const { owner } = group;
+    const disambiguator = taken ? webhookDisambiguator(owner.stemOperationId ?? owner.name) : '';
+    stems.set(group, plainStem(owner, disambiguator));
   }
   return stems;
 }
 
+/**
+ * Entries that mint together. Those resolving to one operation object and
+ * named from its operationId share a group: `owner` is the first of them in
+ * document order, and its parameters and body stand for the group's, since
+ * every member read the same path item. Every other entry is a group of its
+ * own.
+ */
+interface WebhookGroup {
+  owner: WebhookEntry;
+  entries: WebhookEntry[];
+}
+
+function groupEntries(entries: WebhookEntry[]): { groups: WebhookGroup[]; groupOf: Map<WebhookEntry, WebhookGroup> } {
+  const groups: WebhookGroup[] = [];
+  const groupOf = new Map<WebhookEntry, WebhookGroup>();
+  const byOperation = new Map<OperationObject, WebhookGroup>();
+  for (const entry of entries) {
+    const shared = entry.stemOperationId !== undefined;
+    let group = shared ? byOperation.get(entry.op) : undefined;
+    if (!group) {
+      group = { owner: entry, entries: [] };
+      groups.push(group);
+      if (shared) byOperation.set(entry.op, group);
+    }
+    group.entries.push(entry);
+    groupOf.set(entry, group);
+  }
+  return { groups, groupOf };
+}
+
 /** The stem of `entry` with `disambiguator` (possibly empty) inserted before the method qualifier. */
 function plainStem(entry: WebhookEntry, disambiguator: string): string {
-  const operationId = entry.op.operationId;
+  const operationId = entry.stemOperationId;
   const method = !operationId && entry.methodCount > 1 ? entry.method : '';
   const base = operationId ? operationIdModelBase(operationId) : toPascalCase(entry.name);
   // `_` separators guarantee a word boundary on each side of the disambiguator
@@ -531,7 +628,7 @@ function mintSchema(
   return { ref, models, names };
 }
 
-function buildWebhook(entry: WebhookEntry, minted: MintedWebhook, components: WebhookComponents): Webhook {
+function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: WebhookComponents): Webhook {
   const { name, method, op, body, label } = entry;
   const { headerParams, queryParams, cookieParams, requestBody, requestBodyEncoding } = minted;
   const summary = presentText(op.summary);

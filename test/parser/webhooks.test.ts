@@ -442,6 +442,42 @@ describe('webhooks', () => {
       expectResolvedAndReferenced(spec, warn);
     });
 
+    it('lets two keys that reference one path item share its stem and its payload model', async () => {
+      // The reviewer's case: `a` and `b` both `$ref` `S`, so both carry
+      // `operationId: shared` and must share one `SharedPayload`, not collide.
+      const spec = await parseJson({
+        openapi: '3.1.0',
+        info: { title: 't', version: '1' },
+        paths: {},
+        webhooks: {
+          a: { $ref: '#/components/pathItems/S' },
+          other: postWith({ type: 'object', properties: { note: { type: 'string' } } }),
+          b: { $ref: '#/components/pathItems/S' },
+        },
+        components: {
+          pathItems: {
+            S: postWith(petSchema, {
+              operationId: 'shared',
+              parameters: [{ name: 'X-Sig', in: 'header', required: true, schema: { type: 'string' } }],
+            }),
+          },
+        },
+      });
+
+      expect(spec.webhooks!.map((w) => [w.name, w.operationId, w.requestBody])).toEqual([
+        ['a', 'shared', { kind: 'model', name: 'SharedPayload' }],
+        ['other', undefined, { kind: 'model', name: 'OtherPayload' }],
+        ['b', 'shared', { kind: 'model', name: 'SharedPayload' }],
+      ]);
+      // Minted once, in the order of each stem's first key.
+      expect(spec.models.map((m) => m.name)).toEqual(['SharedPayload', 'OtherPayload']);
+      expect(fieldsOf(spec, spec.webhooks![0].requestBody)).toEqual(['pet_id']);
+      expect(spec.webhooks![2].headerParams.map((p) => p.name)).toEqual(['X-Sig']);
+      // Each webhook owns its IR nodes.
+      expect(spec.webhooks![0].requestBody).not.toBe(spec.webhooks![2].requestBody);
+      expectResolvedAndReferenced(spec, warn);
+    });
+
     it('reads a webhooks map on any 3.x document, since the key is unambiguous', async () => {
       const spec = await parseJson({
         openapi: '3.0.3',
@@ -703,6 +739,39 @@ describe('webhooks', () => {
             "[oagen] Warning: Circular path item $ref chain starting at "#/components/pathItems/Loop" for webhook "loop"; skipping it.",
           ]
         `);
+      });
+
+      it('keeps key-derived stems for keys that share a path item without an operationId', () => {
+        const { webhooks, inlineModels } = extractWebhooks(
+          { a: { $ref: '#/components/pathItems/S' }, b: { $ref: '#/components/pathItems/S' } },
+          { pathItems: { S: postWith(petSchema) } },
+        );
+
+        expect(webhooks.map((w) => w.requestBody)).toEqual([
+          { kind: 'model', name: 'APayload' },
+          { kind: 'model', name: 'BPayload' },
+        ]);
+        expect(inlineModels.map((m) => m.name)).toEqual(['APayload', 'BPayload']);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('falls back to key-derived stems, with a warning, when different operations declare one operationId', () => {
+        const { webhooks, inlineModels } = extractWebhooks({
+          a: postWith(petSchema, { operationId: 'dup' }),
+          b: postWith({ type: 'object', properties: { other: { type: 'string' } } }, { operationId: 'dup' }),
+        });
+
+        expect(webhooks.map((w) => [w.operationId, w.requestBody])).toEqual([
+          ['dup', { kind: 'model', name: 'APayload' }],
+          ['dup', { kind: 'model', name: 'BPayload' }],
+        ]);
+        expect(inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+          ['APayload', ['pet_id']],
+          ['BPayload', ['other']],
+        ]);
+        expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).toEqual([
+          '[oagen] Warning: operationId "dup" is declared by more than one webhook operation (webhooks.a.post, webhooks.b.post); naming their models from the webhook keys instead.',
+        ]);
       });
 
       it('yields one webhook per method and skips a method that is not an object', () => {
