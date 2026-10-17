@@ -1,0 +1,200 @@
+import type { Parameter, Webhook } from '../ir/types.js';
+import type { Change, ParamChange } from './types.js';
+import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
+
+/**
+ * Report webhooks added, removed and modified between two specs. A webhook is
+ * keyed by `name` + `httpMethod` (one `webhooks` key may declare several
+ * methods), so a method change is a removal plus an addition.
+ */
+export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Change[] {
+  const changes: Change[] = [];
+  const key = (webhook: Webhook): string => `${webhook.httpMethod} ${webhook.name}`;
+  const oldByKey = new Map(oldWebhooks.map((w) => [key(w), w]));
+  const newByKey = new Map(newWebhooks.map((w) => [key(w), w]));
+
+  for (const [k, webhook] of newByKey) {
+    if (!oldByKey.has(k)) {
+      changes.push({
+        kind: 'webhook-added',
+        name: webhook.name,
+        httpMethod: webhook.httpMethod,
+        classification: 'additive',
+      });
+    }
+  }
+
+  for (const [k, webhook] of oldByKey) {
+    if (!newByKey.has(k)) {
+      changes.push({
+        kind: 'webhook-removed',
+        name: webhook.name,
+        httpMethod: webhook.httpMethod,
+        classification: 'breaking',
+      });
+    }
+  }
+
+  for (const [k, newWebhook] of newByKey) {
+    const oldWebhook = oldByKey.get(k);
+    if (!oldWebhook) continue;
+
+    const paramChanges = diffWebhookParams(oldWebhook, newWebhook);
+    const body = diffWebhookBody(oldWebhook, newWebhook);
+    if (paramChanges.length === 0 && body.changes.length === 0) continue;
+
+    const hasBreaking = body.breaking || paramChanges.some((pc) => pc.classification === 'breaking');
+    changes.push({
+      kind: 'webhook-modified',
+      name: newWebhook.name,
+      httpMethod: newWebhook.httpMethod,
+      paramChanges,
+      requestBodyChanged: body.changes.length > 0,
+      ...(body.changes.length > 0 ? { details: body.changes.join('; ') } : {}),
+      classification: hasBreaking ? 'breaking' : 'additive',
+    });
+  }
+
+  return changes;
+}
+
+/**
+ * Compare what the handler is handed as a body, from the receiver's side:
+ *
+ * - type changed, gained or lost: breaking — it is the handler's parameter type.
+ * - encoding changed: breaking — the handler decodes a different wire format.
+ * - required → optional: breaking — a handler that assumed a body may get none.
+ * - optional → required: additive — the body is now always there.
+ */
+function diffWebhookBody(oldWebhook: Webhook, newWebhook: Webhook): { changes: string[]; breaking: boolean } {
+  const changes: string[] = [];
+  let breaking = false;
+
+  const oldBody = oldWebhook.requestBody;
+  const newBody = newWebhook.requestBody;
+  const sameType = oldBody && newBody ? typeRefsEqual(oldBody, newBody) : !oldBody && !newBody;
+  if (!sameType) {
+    changes.push(!oldBody ? 'payload added' : !newBody ? 'payload removed' : 'payload type changed');
+    breaking = true;
+  }
+
+  const oldEncoding = oldWebhook.requestBodyEncoding ?? '<none>';
+  const newEncoding = newWebhook.requestBodyEncoding ?? '<none>';
+  if (oldEncoding !== newEncoding) {
+    changes.push(`encoding ${oldEncoding} → ${newEncoding}`);
+    breaking = true;
+  }
+
+  const wasRequired = oldWebhook.requestBodyRequired === true;
+  const isRequired = newWebhook.requestBodyRequired === true;
+  if (wasRequired !== isRequired) {
+    changes.push(isRequired ? 'body optional → required' : 'body required → optional');
+    if (!isRequired) breaking = true;
+  }
+
+  return { changes, breaking };
+}
+
+/**
+ * Diff a webhook's header, query and cookie parameters from the receiver's
+ * side, which inverts the request-side rules `classifyParamChange` applies
+ * to an operation: the receiver reads these values and never supplies them.
+ * Parameters are matched by location and name, since OpenAPI lets a header
+ * and a query parameter share a name, and every change carries its
+ * `paramLocation`.
+ *
+ * - added: additive, required or not — the sender simply starts carrying it.
+ * - removed: breaking — handler code that read it has nothing to read.
+ * - type changed: breaking; format-only changes are additive, as elsewhere.
+ * - optional → required: additive (now always present);
+ *   required → optional: breaking (code that assumed presence breaks).
+ * - default changed: additive with details, as the receiver sets no defaults;
+ *   kept visible because it may still change what the receiver observes.
+ */
+function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChange[] {
+  const changes: ParamChange[] = [];
+  const oldByKey = new Map(locatedParams(oldWebhook).map((e) => [`${e.loc}:${e.p.name}`, e]));
+  const newByKey = new Map(locatedParams(newWebhook).map((e) => [`${e.loc}:${e.p.name}`, e]));
+
+  for (const [k, { p, loc }] of newByKey) {
+    if (!oldByKey.has(k)) {
+      changes.push({ kind: 'param-added', paramName: p.name, classification: 'additive', paramLocation: loc });
+    }
+  }
+
+  for (const [k, { p, loc }] of oldByKey) {
+    if (!newByKey.has(k)) {
+      changes.push({ kind: 'param-removed', paramName: p.name, classification: 'breaking', paramLocation: loc });
+    }
+  }
+
+  for (const [k, { p: newParam, loc }] of newByKey) {
+    const oldEntry = oldByKey.get(k);
+    if (!oldEntry) continue;
+    const oldParam = oldEntry.p;
+    const name = newParam.name;
+
+    if (!typeRefsEqual(oldParam.type, newParam.type)) {
+      if (primitivesDifferOnlyByFormat(oldParam.type, newParam.type)) {
+        changes.push({
+          kind: 'param-format-changed',
+          paramName: name,
+          classification: 'additive',
+          paramLocation: loc,
+          details: formatChangeDetails(oldParam.type, newParam.type),
+        });
+      } else {
+        changes.push({ kind: 'param-type-changed', paramName: name, classification: 'breaking', paramLocation: loc });
+      }
+    }
+
+    if (oldParam.required !== newParam.required) {
+      changes.push({
+        kind: 'param-required-changed',
+        paramName: name,
+        classification: newParam.required ? 'additive' : 'breaking',
+        paramLocation: loc,
+        details: newParam.required ? 'optional → required' : 'required → optional',
+      });
+    }
+
+    const oldDefault = serializeDefault(oldParam.default);
+    const newDefault = serializeDefault(newParam.default);
+    if (oldDefault !== newDefault) {
+      changes.push({
+        kind: 'param-default-changed',
+        paramName: name,
+        classification: 'additive',
+        oldDefault,
+        newDefault,
+        paramLocation: loc,
+        details: `default ${oldDefault ?? '<unset>'} → ${newDefault ?? '<unset>'}`,
+      });
+    }
+  }
+
+  return changes;
+}
+
+type ParamLocation = 'header' | 'query' | 'cookie';
+
+function locatedParams(webhook: Webhook): Array<{ p: Parameter; loc: ParamLocation }> {
+  const tagged = (loc: ParamLocation, params: Parameter[]) => params.map((p) => ({ p, loc }));
+  return [
+    ...tagged('header', webhook.headerParams),
+    ...tagged('query', webhook.queryParams),
+    ...tagged('cookie', webhook.cookieParams ?? []),
+  ];
+}
+
+function serializeDefault(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
