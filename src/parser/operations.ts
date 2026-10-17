@@ -13,7 +13,14 @@ import type {
   PaginationMeta,
 } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import {
+  toPascalCase,
+  toCamelCase,
+  splitWords,
+  cleanSchemaName,
+  stripListItemMarkers,
+  singularizePathSegment,
+} from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -312,6 +319,10 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
+  // Operations named from their method and path because they have no
+  // `operationId`. Only these may be renamed when names collide within a
+  // service (see disambiguateOperationNames); an `operationId` is kept as is.
+  const pathNamedOperations = new Set<Operation>();
   // One registry for the whole spec, seeded with the component models: a
   // header model's name must not collide with a differently shaped component
   // (a request body may already use `DocumentsXMeta`) or with another
@@ -319,6 +330,9 @@ export function extractOperations(
   const headerModelRegistry: HeaderModelRegistry = new Map(
     (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
   );
+  // Headers with a schema are typed after the loop (materializeHeaderModels),
+  // when every inline model a header must not be confused with is known.
+  const pendingHeaderModels: PendingHeaderModel[] = [];
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -349,12 +363,14 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        pendingHeaderModels,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
+      if (!op.operationId) pathNamedOperations.add(operation);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -364,6 +380,10 @@ export function extractOperations(
   // Companion models of list envelopes are named once every list operation is
   // known, so copies of one envelope shape can share a model.
   inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+
+  // Header models come last, named against every other inline model so that
+  // a header can never take a name a body model owns.
+  materializeHeaderModels(pendingHeaderModels, headerModelRegistry, inlineModels);
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"
@@ -396,7 +416,7 @@ export function extractOperations(
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
   for (const [, operations] of serviceMap) {
-    disambiguateOperationNames(operations);
+    disambiguateOperationNames(operations, pathNamedOperations);
   }
 
   const declaredTags = indexDocumentTags(documentTags);
@@ -469,6 +489,22 @@ function resolveServiceDescription(
   return undefined;
 }
 
+/**
+ * Words that mark where an API is mounted rather than naming a resource.
+ * Deliberately tiny: `mountRules` regroup whatever this does not cover.
+ */
+const API_MARKER_SEGMENTS: ReadonlySet<string> = new Set(['api', 'rest']);
+
+/**
+ * Whether a path segment marks the API root rather than naming a resource:
+ * one of API_MARKER_SEGMENTS in any case, or a version such as `v1`,
+ * `v2beta`, `1.0` or `2010-04-01`.
+ */
+function isApiMarkerSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return API_MARKER_SEGMENTS.has(lower) || /^v\d/.test(lower) || /^\d+([.-]\d+)*$/.test(lower);
+}
+
 function inferServiceName(path: string, tag?: string): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
   // (e.g., "multi-factor-auth" for /auth/factors/* endpoints).
@@ -531,14 +567,18 @@ function inferOperationName(
   }
 
   // Fallback when no operationId is available — use method + path to build
-  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor"
+  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor",
+  // or "adoptPet" for a POST action on one item.
+  const action = method === 'post' ? inferPostAction(path) : null;
+  if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
   const verb = inferVerb(method, path);
   const resource = inferResourceFromPath(path);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
 }
 
 /**
- * Infer the CRUD verb from HTTP method and path shape.
+ * Infer the CRUD verb from HTTP method and path shape. A POST is `create`
+ * unless `inferPostAction` recognised it as an action first.
  */
 function inferVerb(method: HttpMethod, path: string): string {
   const segments = path.split('/').filter(Boolean);
@@ -567,12 +607,15 @@ function inferVerb(method: HttpMethod, path: string): string {
 
 /**
  * Extract a resource noun from the path for operation naming.
- * Uses the last non-param segment (the resource being operated on).
+ * Uses the last non-param segment (the resource being operated on). An item
+ * operation — the last literal segment is followed by a path parameter —
+ * addresses one entity, so its noun is singularised (`singularizePathSegment`).
  *
  * Examples:
  *   /accounts/users → "Users"
  *   /accounts/users/{id} → "User" (singular for item operations)
  *   /accounts/users/{id}/auth_factors → "AuthFactors"
+ *   /accounts/users/{id}/auth_factors/{factor_id} → "AuthFactor"
  *   /organizations/{id}/api_keys → "ApiKeys"
  *   /auth/authorize → "Authorize" (action endpoint)
  */
@@ -582,9 +625,11 @@ function inferResourceFromPath(path: string): string | null {
 
   // Find the last meaningful (non-param) segment
   let resourceSegment: string | null = null;
+  let isItem = false;
   for (let i = segments.length - 1; i >= 0; i--) {
     if (!segments[i].startsWith('{')) {
       resourceSegment = segments[i];
+      isItem = i < segments.length - 1;
       break;
     }
   }
@@ -593,7 +638,44 @@ function inferResourceFromPath(path: string): string | null {
   // Skip the service name (first segment) — it would be redundant
   if (resourceSegment === segments[0]) return null;
 
-  return toPascalCase(resourceSegment);
+  return toPascalCase(isItem ? singularizePathSegment(resourceSegment) : resourceSegment);
+}
+
+/**
+ * Recognise a POST action on one item: `/pets/{petId}/adopt`,
+ * `/owners/{o}/pets/{p}/vaccinate`. The last segment is a literal that follows
+ * a path parameter, so it names something done to that item rather than a
+ * collection to create into. The verb is the segment itself and the resource
+ * is the singular parent (`adopt` + `Pet`): the nearest literal before the
+ * parameter that is not an API marker (isApiMarkerSegment), so
+ * `/api/v1/{companyId}/sendDocument` has no parent and is the bare verb
+ * `sendDocument` rather than `sendDocumentV1`. The parent is kept even when it
+ * is the service segment so that `/pets/{id}/archive` and `/users/{id}/archive`
+ * under one tag do not both become `archive`; the caller leaves it off when
+ * the verb already ends with it (`restart-id-verification` under
+ * `verification` is `restartIdVerification`, see appendQualifier).
+ *
+ * Not an action, so still a `create`: a literal ending in `s` after the
+ * parameter, which is read as a nested collection (`/orgs/{id}/api_keys`,
+ * and conservatively `/orders/{id}/status`), and a literal with no parameter
+ * before it, which is indistinguishable from a nested collection
+ * (`/pets/search` looks like `/accounts/users/auth_factors`). A singleton
+ * noun after the parameter (`/users/{id}/avatar`) is misread as a verb; give
+ * it an `operationId`.
+ */
+function inferPostAction(path: string): { verb: string; resource: string | null } | null {
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 2) return null;
+  const last = segments[segments.length - 1];
+  if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
+  if (last.toLowerCase().endsWith('s')) return null;
+
+  for (let i = segments.length - 3; i >= 0; i--) {
+    if (!segments[i].startsWith('{') && !isApiMarkerSegment(segments[i])) {
+      return { verb: last, resource: toPascalCase(singularizePathSegment(segments[i])) };
+    }
+  }
+  return { verb: last, resource: null };
 }
 
 /**
@@ -604,8 +686,15 @@ function inferResourceFromPath(path: string): string | null {
  * from the path. Only renames operations on DIFFERENT paths — same-name
  * operations on the same path (e.g., PUT + PATCH both "update") are left as-is
  * since they represent the same logical resource.
+ *
+ * A name taken from an `operationId` is the author's choice: when a
+ * path-derived name (inferOperationName) collides with one `operationId`,
+ * only the path-named operations are qualified and the `operationId` keeps
+ * its name. When two or more `operationId`s collide with each other, every
+ * member of the group is qualified as before — a path-named operation in the
+ * group never stops explicit names from being told apart.
  */
-function disambiguateOperationNames(operations: Operation[]): void {
+function disambiguateOperationNames(operations: Operation[], pathNamed: ReadonlySet<Operation>): void {
   // Group by name
   const byName = new Map<string, Operation[]>();
   for (const op of operations) {
@@ -622,7 +711,10 @@ function disambiguateOperationNames(operations: Operation[]): void {
     const uniquePaths = new Set(group.map((op) => op.path));
     if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
 
-    for (const op of group) {
+    const explicitCount = group.filter((op) => !pathNamed.has(op)).length;
+    const renamable = explicitCount === 1 ? group.filter((op) => pathNamed.has(op)) : group;
+
+    for (const op of renamable) {
       const resource = inferResourceFromPath(op.path);
       if (resource) {
         const newName = toCamelCase(`${name}_${resource}`);
@@ -643,6 +735,7 @@ function disambiguateOperationNames(operations: Operation[]): void {
       // Still colliding — different paths map to same resource name.
       // Use deeper path context to disambiguate.
       for (const op of rGroup) {
+        if (!renamable.includes(op)) continue;
         const deeper = inferDeeperContext(op.path);
         if (deeper) {
           (op as { name: string }).name = toCamelCase(`${op.name}_${deeper}`);
@@ -650,6 +743,22 @@ function disambiguateOperationNames(operations: Operation[]): void {
       }
     }
   }
+}
+
+/**
+ * Append a qualifier to an operation name unless the name already ends with
+ * its words, so a qualifier never repeats what the name already says:
+ * `listNotes` + `Notes` stays `listNotes`, `listOAuth2Tokens` + `OAuth2Tokens`
+ * stays as is. Words are compared case-insensitively on the camelCase
+ * boundary, so `listNotes` + `Note` is not a match and does get appended.
+ */
+function appendQualifier(name: string, qualifier: string | null): string {
+  if (!qualifier) return name;
+  const have = splitWords(name).map((w) => w.toLowerCase());
+  const want = splitWords(qualifier).map((w) => w.toLowerCase());
+  const tail = have.slice(have.length - want.length);
+  if (want.length > 0 && want.length <= have.length && want.every((w, i) => w === tail[i])) return name;
+  return toCamelCase(`${name}_${qualifier}`);
 }
 
 /**
@@ -846,6 +955,7 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  pendingHeaderModels?: PendingHeaderModel[],
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -941,8 +1051,9 @@ function buildOperation(
     componentHeaders,
     componentSchemas,
     serviceName: opContext,
-    operationQualifier: toPascalCase(operationName),
+    operationQualifier: headerOperationQualifier(op, operationName, pathModelBaseName, opContext),
     registry: headerModelRegistry,
+    pending: pendingHeaderModels,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -1012,6 +1123,29 @@ function buildOperation(
     inlineModels,
     envelopeCompanions,
   };
+}
+
+/**
+ * The qualifier that tells one operation's header models from another's
+ * (typeHeaderSchema's `byOperation` candidate). An `operationId` names the
+ * operation. A path-named operation uses the path-derived stem its request
+ * and response models are built from, so the model name depends only on the
+ * method and path and never on the derived operation name — a verb or
+ * singular change in inferOperationName must not rename a generated type.
+ * The stem's leading service word is dropped when it ends on a word boundary,
+ * since the model name already starts with the service:
+ * `Notes` + `ByIdPinPost` + `XMeta`, beside `NotesByIdPinPostResponse`.
+ */
+function headerOperationQualifier(
+  op: OperationObject,
+  operationName: string,
+  pathModelBaseName: string,
+  serviceName: string | undefined,
+): string {
+  if (op.operationId) return toPascalCase(operationName);
+  const parent = serviceName ? toPascalCase(serviceName) : '';
+  const rest = pathModelBaseName.slice(parent.length);
+  return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
 }
 
 /**
@@ -1631,6 +1765,23 @@ interface HeaderExtractionContext {
   /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
   operationQualifier: string;
   registry: HeaderModelRegistry;
+  /**
+   * When present, a header with a schema is typed later, by
+   * materializeHeaderModels, instead of as it is read: its model is then
+   * named once every inline body, response, nested, variant and
+   * envelope-companion model of the document is known, so it can never take
+   * a name one of those owns.
+   */
+  pending?: PendingHeaderModel[];
+}
+
+/** A header whose typing extractResponseHeaders deferred; `header.type` is filled in later. */
+interface PendingHeaderModel {
+  header: ResponseHeader;
+  schema: SchemaObject;
+  name: string;
+  statusCode: number;
+  ctx: HeaderExtractionContext;
 }
 
 /** Shape of a model, independent of field order: name, requiredness, and type of every field. */
@@ -1741,6 +1892,30 @@ function typeHeaderSchema(
 }
 
 /**
+ * Type the headers extractResponseHeaders deferred, in document order, once
+ * every inline model of the document is in `inlineModels`. Each of those
+ * names is reserved in the registry first, so a header model can never take
+ * a name a body, response, nested, variant or envelope-companion model owns
+ * — `POST /notes/{id}/pin` with a header named `Response` would otherwise
+ * name its header model `NotesByIdPinPostResponse`, the same as its response
+ * body, and the later merge by name would drop one of the two shapes. On such
+ * a clash the registry's other candidates apply (status code, then a numeric
+ * suffix). Header models are appended to `inlineModels` as they are named.
+ */
+function materializeHeaderModels(
+  pending: PendingHeaderModel[],
+  registry: HeaderModelRegistry,
+  inlineModels: Model[],
+): void {
+  for (const model of inlineModels) {
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
+  }
+  for (const job of pending) {
+    job.header.type = typeHeaderSchema(job.schema, job.name, job.statusCode, job.ctx, inlineModels);
+  }
+}
+
+/**
  * Read a Response Object's `headers` map into IR response headers, resolving
  * `components/headers` refs. Returns `undefined` rather than `[]` when nothing
  * survives so callers can leave the `headers` key off entirely.
@@ -1771,17 +1946,19 @@ function extractResponseHeaders(
     // `content`, the first (only) media type's schema types the header.
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
-    const type: TypeRef = schema
-      ? typeHeaderSchema(schema, name, statusCode, ctx, models)
-      : { kind: 'primitive', type: 'string' };
-
-    result.push({
+    const responseHeader: ResponseHeader = {
       name,
-      type,
+      type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
       deprecated: header.deprecated || undefined,
-    });
+    };
+    if (schema && ctx.pending) {
+      ctx.pending.push({ header: responseHeader, schema, name, statusCode, ctx });
+    } else if (schema) {
+      responseHeader.type = typeHeaderSchema(schema, name, statusCode, ctx, models);
+    }
+    result.push(responseHeader);
   }
 
   return result.length > 0 ? result : undefined;
