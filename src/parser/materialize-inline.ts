@@ -89,6 +89,14 @@ export interface MaterializeInlineOptions {
 const MAX_ATTEMPTS = 32;
 
 /**
+ * Rename rounds before settling gives up. Every rename picks a name nothing
+ * owns and nothing in the trial uses, so each round settles at least one
+ * model for good and the rounds end within the trial's size; the cap only
+ * backs that.
+ */
+const MAX_RENAME_ROUNDS = 64;
+
+/**
  * Type `schema` and materialize every model it names into `options.models`,
  * under names the registry does not already give another shape.
  *
@@ -109,13 +117,18 @@ const MAX_ATTEMPTS = 32;
  * The clashing set is compared between attempts: when a stem advance leaves
  * it unchanged, neither move can clear it (a titled variant nested below the
  * top level, where the reservation does not reach) — the fixed point — and
- * the loop stops rather than retrying forever. The last trial is then kept
- * and the clashing names themselves are renamed, qualified by the root model
- * name (`ListPetsDefaultResponseCircle`) then numbered, with every reference
- * among the trial's models and in the returned type rewritten to match. That
- * rewrite cannot tell an inline model's reference from a `$ref` to a
- * component of the same name, so a schema that both inlines a clashing
- * `Circle` and references component `Circle` fails loudly instead.
+ * the loop stops rather than retrying forever. The earlier trial is then kept
+ * and settled in place (`renameClashing`): the clashing names themselves are
+ * renamed, qualified by the root model name (`ListPetsDefaultResponseCircle`)
+ * then numbered, with every reference among the trial's models and in the
+ * returned type rewritten to match; and because renaming a child changes its
+ * parent's shape, the trial is checked again on its new fingerprints, so a
+ * parent that matched a registered model before and differs from it now
+ * moves to the next free stem with its children, instead of being dropped at
+ * commit as already defined. That rewrite cannot tell an inline model's
+ * reference from a `$ref` to a component of the same name, so a schema that
+ * both inlines a clashing `Circle` and references component `Circle` fails
+ * loudly instead.
  */
 export function materializeInlineSchema(schema: SchemaObject, options: MaterializeInlineOptions): TypeRef {
   const { registry } = options;
@@ -141,13 +154,13 @@ export function materializeInlineSchema(schema: SchemaObject, options: Materiali
     if (previous?.move === 'stem' && sameNames(previous.trial.clashing, trial.clashing)) {
       // The stem advance changed nothing: the fixed point. The earlier of the
       // two identical trials carries the lower stem, so it is the one kept.
-      return commit(renameClashing(previous.trial, options), options);
+      return commit(renameClashing(previous.trial, options, firstClashOwners), options);
     }
     stemIndex++;
     previous = { trial, move: 'stem' };
   }
 
-  return commit(renameClashing(previous!.trial, options), options);
+  return commit(renameClashing(previous!.trial, options, firstClashOwners), options);
 }
 
 interface Trial {
@@ -193,45 +206,129 @@ function sameNames(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((name, i) => name === b[i]);
 }
 
-/** Register and emit the trial's new models; a name the registry already owns with the same shape is shared. */
+/**
+ * Register and emit the trial's new models. A name the registry already owns
+ * is shared only when the owner has the same shape — decided on the trial's
+ * final fingerprints, after every rename — so a model whose references were
+ * rewritten is never dropped as "already defined" in favour of an owner that
+ * no longer matches it. The trial has no such clash left when it gets here
+ * (`runTrial` found none, or `renameClashing` cleared them all), so the
+ * remaining branch is a guard against a regression, not an expected path.
+ */
 function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
   for (const model of trial.models) {
-    if (options.registry.has(model.name)) continue;
-    options.registry.set(model.name, { fingerprint: trial.fingerprints.get(model)!, operation: options.operation });
+    const fingerprint = trial.fingerprints.get(model)!;
+    const owner = options.registry.get(model.name);
+    if (owner?.fingerprint === fingerprint) continue;
+    if (owner !== undefined) {
+      throw new Error(
+        `Inline model "${model.name}" would overwrite a model of another shape; this is a bug in materializeInlineSchema.`,
+      );
+    }
+    options.registry.set(model.name, { fingerprint, operation: options.operation });
     options.models.push(model);
   }
   return trial.type ?? schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
 }
 
 /**
- * Rename the trial's clashing models in place — qualified by the root model
- * name, then numbered — and rewrite every reference to them, so the trial can
- * be committed as it stands. See `materializeInlineSchema`.
+ * Settle the fixed-point trial in place so it can be committed as it stands:
+ * rename every model whose name the registry gives another shape, rewrite
+ * every reference to it among the trial's models and in the returned type,
+ * and check again, since renaming a child changes its parent's shape. Round
+ * by round, until no name is owned by another shape:
+ *
+ *   - a clashing name other than the root — a titled or const-named variant
+ *     the reservation did not reach — is qualified by the root model name
+ *     (`ListPetsDefaultResponseCircle`), or kept as is when it already starts
+ *     with it, then numbered until free;
+ *   - a clashing root — its shape changed when a child under it moved, so a
+ *     registered model of that name no longer matches it — moves the whole
+ *     body to the next free stem the caller would have tried next
+ *     (`ListPetsDefaultResponse2`; a header's qualified candidates), every
+ *     model named under it following (`ListPetsDefaultResponse2Circle`), as
+ *     a stem advance would have named them.
+ *
+ * Every new name is one nothing owns and nothing in the trial uses, so a
+ * renamed model can never clash again and the rounds end within the trial's
+ * size. A name the schema also `$ref`s cannot be rewritten safely (see
+ * `materializeInlineSchema`) and fails loudly.
  */
-function renameClashing(trial: Trial, options: MaterializeInlineOptions): Trial {
-  const rootName = qualifyInlineModelName(toPascalCase(trial.propertyName), options.parentName);
+function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstClashOwners: InlineModelOwner[]): Trial {
+  const { registry } = options;
+  const rootOf = (propertyName: string): string =>
+    qualifyInlineModelName(toPascalCase(propertyName), options.parentName);
+  let rootName = rootOf(trial.propertyName);
   const referenced = componentRefTargets(trial.schema);
-  const taken = new Set([...options.registry.keys(), ...trial.models.map((m) => m.name)]);
   const type = schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
+  const taken = new Set([...registry.keys(), ...trial.models.map((m) => m.name)]);
 
-  for (const name of trial.clashing) {
-    if (referenced.has(name)) {
+  /** `candidate(1)`, `candidate(2)`, ... until one nothing owns or uses; claimed. */
+  const claim = (candidate: (n: number) => string): string => {
+    let n = 1;
+    let name = candidate(n);
+    while (taken.has(name)) name = candidate(++n);
+    taken.add(name);
+    return name;
+  };
+  const rename = (from: string, to: string): void => {
+    if (referenced.has(from)) {
       throw new Error(
-        `Inline schema "${name}" under ${rootName} has another shape than component "${name}", which the same ` +
+        `Inline schema "${from}" under ${rootName} has another shape than component "${from}", which the same ` +
           `schema also references; rename the inline schema's title or the component so the two can be told apart.`,
       );
     }
-    let renamed = `${rootName}${name}`;
-    for (let n = 2; taken.has(renamed); n++) renamed = `${rootName}${name}${n}`;
-    taken.add(renamed);
     for (const model of trial.models) {
-      if (model.name === name) model.name = renamed;
-      for (const field of model.fields) rewriteModelRef(field.type, name, renamed);
+      if (model.name === from) model.name = to;
+      for (const field of model.fields) rewriteModelRef(field.type, from, to);
     }
-    rewriteModelRef(type, name, renamed);
+    rewriteModelRef(type, from, to);
+  };
+
+  let fingerprints = trial.fingerprints;
+  let clashing = trial.clashing;
+  for (let round = 0; clashing.length > 0; round++) {
+    if (round >= MAX_RENAME_ROUNDS) {
+      throw new Error(
+        `Could not settle the inline models under ${rootName} in ${MAX_RENAME_ROUNDS} rounds; ` +
+          `this is a bug in materializeInlineSchema.`,
+      );
+    }
+    if (clashing.includes(rootName)) {
+      const oldRoot = rootName;
+      let movedRoot: string | undefined;
+      for (let index = 1; index <= MAX_RENAME_ROUNDS && movedRoot === undefined; index++) {
+        const candidate = rootOf(options.stem(index, firstClashOwners));
+        if (!taken.has(candidate)) movedRoot = candidate;
+      }
+      if (movedRoot === undefined) movedRoot = claim((n) => `${oldRoot}${n + 1}`);
+      taken.add(movedRoot);
+      const under = trial.models.map((m) => m.name).filter((name) => name === oldRoot || name.startsWith(oldRoot));
+      for (const name of under) {
+        const suffix = name.slice(oldRoot.length);
+        rename(name, name === oldRoot ? movedRoot : claim((n) => `${movedRoot}${suffix}${n === 1 ? '' : n}`));
+      }
+      rootName = movedRoot;
+    } else {
+      for (const name of clashing) {
+        const base = name.startsWith(rootName) ? name : `${rootName}${name}`;
+        rename(
+          name,
+          claim((n) => `${base}${n === 1 ? '' : n}`),
+        );
+      }
+    }
+
+    fingerprints = new Map(trial.models.map((model) => [model, modelFingerprint(model)]));
+    clashing = trial.models
+      .filter((model) => {
+        const owner = registry.get(model.name);
+        return owner !== undefined && owner.fingerprint !== fingerprints.get(model);
+      })
+      .map((model) => model.name)
+      .sort();
   }
 
-  const fingerprints = new Map(trial.models.map((model) => [model, modelFingerprint(model)]));
   return { ...trial, fingerprints, clashing: [], type };
 }
 

@@ -740,6 +740,81 @@ describe('inline header models', () => {
     expectHeaderModelsMaterialized(op, inlineModels);
   }, 5_000);
 
+  it('moves a header model whose nested titled child differs from a same-named component, child following', () => {
+    // The header's parent matches component `DocumentsXShape` until its
+    // nested `Circle` is renamed off component `Circle{radius}`; it must then
+    // move too (to the header's next candidate) instead of being dropped at
+    // commit, which would leave the header typed as the component.
+    const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+      type: 'object',
+      title,
+      properties: { kind: { type: 'string', const: kind }, ...properties },
+    });
+    const union = (circle: string) => ({
+      kind: 'union' as const,
+      variants: [
+        { kind: 'model' as const, name: circle },
+        { kind: 'model' as const, name: 'Square' },
+      ],
+      compositionKind: 'oneOf' as const,
+      discriminator: { property: 'kind', mapping: { circle, square: 'Square' } },
+    });
+    const num = { kind: 'primitive' as const, type: 'number' as const };
+    const componentModels: Model[] = [
+      { name: 'DocumentsXShape', fields: [{ name: 'shape', type: union('Circle'), required: false }] },
+      {
+        name: 'Circle',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'circle' }, required: false },
+          { name: 'radius', type: num, required: false },
+        ],
+      },
+      {
+        name: 'Square',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'square' }, required: false },
+          { name: 'side', type: num, required: false },
+        ],
+      },
+    ];
+    const shapes = {
+      oneOf: [
+        titled('Circle', 'circle', { diameter: { type: 'number' } }),
+        titled('Square', 'square', { side: { type: 'number' } }),
+      ],
+    };
+    const { services, inlineModels } = extractOperations(
+      getWithResponses({
+        '200': {
+          description: 'ok',
+          headers: { 'X-Shape': { schema: { type: 'object', properties: { shape: shapes } } } },
+        },
+      }) as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      componentModels,
+    );
+    const op = services[0].operations[0];
+    const fields = (name: string) =>
+      Object.fromEntries(inlineModels.find((m) => m.name === name)!.fields.map((f) => [f.name, f.type]));
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsListDocumentsXShape' });
+    expect(fields('DocumentsListDocumentsXShape')).toEqual({ shape: union('DocumentsListDocumentsXShapeCircle') });
+    expect(fields('DocumentsListDocumentsXShapeCircle')).toEqual({
+      kind: { kind: 'literal', value: 'circle' },
+      diameter: num,
+    });
+    expect(inlineModels.map((m) => m.name).sort()).toEqual([
+      'DocumentsListDocumentsXShape',
+      'DocumentsListDocumentsXShapeCircle',
+    ]);
+    // The component models were handed in, not materialized, and are untouched.
+    expect(componentModels[0].fields[0].type).toEqual(union('Circle'));
+    expectHeaderModelsMaterialized(op, inlineModels);
+  }, 5_000);
+
   describe('same header name, different shapes', () => {
     const object = (properties: Record<string, unknown>) => ({ schema: { type: 'object', properties } });
     const fieldsOf = (models: Model[], name: string) => models.find((m) => m.name === name)?.fields.map((f) => f.name);

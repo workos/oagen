@@ -942,6 +942,55 @@ describe('names no stem can move (titled variants) terminate and step around the
     },
     HANG_GUARD_MS,
   );
+
+  it(
+    'a parent matching a component whose nested titled child differs moves with its child; the component keeps its own',
+    async () => {
+      // Renaming the child changes the parent's shape: it matched component
+      // `ListPetsDefaultResponse` before and must not be dropped at commit as
+      // "already defined", or the body would resolve to the component and so
+      // to the component's `Circle{radius}` instead of the renamed `{diameter}`.
+      const refShapes = {
+        oneOf: [{ $ref: '#/components/schemas/Circle' }, { $ref: '#/components/schemas/Square' }],
+        discriminator: {
+          propertyName: 'kind',
+          mapping: { circle: '#/components/schemas/Circle', square: '#/components/schemas/Square' },
+        },
+      };
+      const spec = petsSpec({
+        '200': ok,
+        default: { description: 'd', content: json({ type: 'object', properties: { shape: shapes } }) },
+      }) as { components: { schemas: Record<string, unknown> } };
+      Object.assign(spec.components.schemas, {
+        Circle: titled('Circle', 'circle', { radius: { type: 'number' } }),
+        Square: titled('Square', 'square', { side: { type: 'number' } }),
+        ListPetsDefaultResponse: { type: 'object', properties: { shape: refShapes } },
+      });
+      const ir = await parseWithoutWarnings(spec);
+      const types = fieldTypesByModel(ir.models);
+
+      expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2') });
+      expect(types['ListPetsDefaultResponse2']).toEqual({ shape: union('ListPetsDefaultResponse2Circle') });
+      expect(types['ListPetsDefaultResponse2Circle']).toEqual({
+        kind: { kind: 'literal', value: 'circle' },
+        diameter: num,
+      });
+      // The component and its own child are exactly what they were.
+      expect(types['ListPetsDefaultResponse']).toEqual({ shape: union('Circle') });
+      expect(types['Circle']).toEqual({ kind: { kind: 'literal', value: 'circle' }, radius: num });
+      expect(ir.models.map((m) => m.name).sort()).toEqual([
+        'Circle',
+        'Error',
+        'ListPetsDefaultResponse',
+        'ListPetsDefaultResponse2',
+        'ListPetsDefaultResponse2Circle',
+        'Pet',
+        'Square',
+      ]);
+      expectConsistent(ir, ['Pet', 'Error', 'ListPetsDefaultResponse']);
+    },
+    HANG_GUARD_MS,
+  );
 });
 
 describe('a fallback written as a $ref into components/responses', () => {
