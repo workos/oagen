@@ -613,9 +613,11 @@ function inferResourceFromPath(path: string): string | null {
  * represent the same logical resource.
  *
  * Qualifiers are tried in order, each on every group still colliding after
- * the one before. A qualifier the name already ends with is not repeated
- * (`listNotes` never becomes `listNotesNotes`), compared word by word on the
- * camelCase boundary rather than as a substring:
+ * the one before. A qualifier never puts the same word twice in a row into a
+ * name, whether the name already ends with it (`listNotes` never becomes
+ * `listNotesNotes`) or the qualifier repeats it itself
+ * (`/api/analytics/analytics/teams` → `listTeamsAnalytics`), compared word by
+ * word on the camelCase boundary rather than as a substring:
  *
  *   1. the resource noun (inferResourceFromPath);
  *   2. the path segments between the service and the resource
@@ -730,19 +732,26 @@ function collidingGroups(operations: Operation[]): Operation[][] {
 }
 
 /**
- * Append a qualifier to an operation name unless the name already ends with
- * its words, so a qualifier never repeats what the name already says:
- * `listNotes` + `Notes` stays `listNotes`, `listOAuth2Tokens` + `OAuth2Tokens`
- * stays as is. Words are compared case-insensitively on the camelCase
- * boundary, so `listNotes` + `Note` is not a match and does get appended.
+ * Append a qualifier to an operation name without repeating what the name
+ * already says. A qualifier never contributes the same word twice in a row:
+ * the deeper context of `/api/analytics/analytics/teams` is
+ * `AnalyticsAnalytics`, which joins as `listTeamsAnalytics`. The words that
+ * remain are then joined where they overlap the end of the name: `listNotes`
+ * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
+ * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
+ * case-insensitively on the camelCase boundary, so `listNotes` + `Note` does
+ * not overlap and is appended whole. The name's own words are never touched.
  */
 function appendQualifier(name: string, qualifier: string | null): string {
   if (!qualifier) return name;
   const have = splitWords(name).map((w) => w.toLowerCase());
-  const want = splitWords(qualifier).map((w) => w.toLowerCase());
-  const tail = have.slice(have.length - want.length);
-  if (want.length > 0 && want.length <= have.length && want.every((w, i) => w === tail[i])) return name;
-  return toCamelCase(`${name}_${qualifier}`);
+  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || w.toLowerCase() !== all[i - 1].toLowerCase());
+  const want = words.map((w) => w.toLowerCase());
+  // The longest run of words that both ends the name and starts the qualifier.
+  let overlap = Math.min(have.length, want.length);
+  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
+  const rest = words.slice(overlap);
+  return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
 }
 
 /**

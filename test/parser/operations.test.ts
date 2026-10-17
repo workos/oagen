@@ -2633,6 +2633,26 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     });
   });
 
+  it('collapses a word the deeper path context repeats, in a row or against the end of the name', () => {
+    expect(
+      names({
+        '/api/teams': { get: ok },
+        '/api/analytics/analytics/teams': { get: ok },
+        '/api/companies': { get: ok },
+        '/api/analytics/analytics/analytics/companies': { get: ok },
+        '/api/users': { get: ok },
+        '/api/users/analytics/users': { get: ok },
+      }),
+    ).toEqual({
+      'GET /api/teams': 'listTeams',
+      'GET /api/analytics/analytics/teams': 'listTeamsAnalytics',
+      'GET /api/companies': 'listCompanies',
+      'GET /api/analytics/analytics/analytics/companies': 'listCompaniesAnalytics',
+      'GET /api/users': 'listUsers',
+      'GET /api/users/analytics/users': 'listUsersAnalytics',
+    });
+  });
+
   it("tells a three-way collision apart by each path's own parameters", () => {
     expect(
       names({
