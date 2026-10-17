@@ -2572,13 +2572,23 @@ describe('extractOperations – path-named services skip the API root (issue #20
       .sort();
   }
 
+  /** `Service.operation METHOD /path` for every operation, sorted. */
+  function layout(paths: Paths): string[] {
+    return extractOperations(paths)
+      .services.flatMap((s) =>
+        s.operations.map((op) => `${s.name}.${op.name} ${op.httpMethod.toUpperCase()} ${op.path}`),
+      )
+      .sort();
+  }
+
   it('names each service from the segment after a shared /api root (the issue repro)', () => {
-    const { services } = extractOperations({ '/api/notes': get, '/api/tags': get, '/api/users': get });
-    expect(
-      services.flatMap((s) =>
-        s.operations.map((op) => `${s.name} ${op.name} ${op.httpMethod.toUpperCase()} ${op.path}`),
-      ),
-    ).toEqual(['Notes listNotes GET /api/notes', 'Tags listTags GET /api/tags', 'Users listUsers GET /api/users']);
+    // The fallback operation name skips the root too, so /api/notes reads
+    // exactly as /notes does without one: Notes.list, not Notes.listNotes.
+    expect(layout({ '/api/notes': get, '/api/tags': get, '/api/users': get })).toEqual([
+      'Notes.list GET /api/notes',
+      'Tags.list GET /api/tags',
+      'Users.list GET /api/users',
+    ]);
   });
 
   it('skips a two-segment root such as /api/v1', () => {
@@ -2629,18 +2639,81 @@ describe('extractOperations – path-named services skip the API root (issue #20
     expect(grouped({ '/api/{id}': getById, '/api/notes': get })).toEqual(['Api GET /api/{id}', 'Notes GET /api/notes']);
   });
 
-  it('ends the shared run at a parameter', () => {
+  it('names the service from the first literal segment past a parameter that follows the root', () => {
+    // A tenant or team parameter right after the root is a common shape;
+    // /v1/notes and /v1/{teamId}/notes must meet in one Notes service.
+    expect(grouped({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes GET /v1/notes',
+      'Notes GET /v1/{teamId}/notes',
+    ]);
     expect(grouped({ '/api/{tenant}/notes': get, '/api/{tenant}/tags': get })).toEqual([
-      'Api GET /api/{tenant}/notes',
-      'Api GET /api/{tenant}/tags',
+      'Notes GET /api/{tenant}/notes',
+      'Tags GET /api/{tenant}/tags',
     ]);
   });
 
-  it('skips nothing when one path sits outside the root', () => {
-    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': get })).toEqual([
-      'Api GET /api/notes',
-      'Api GET /api/tags',
+  it('keeps a marker-less path outside the root without switching the root off', () => {
+    // A /health or /metrics next to an otherwise /api/… document is common.
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': get, '/metrics': get })).toEqual([
       'Health GET /health',
+      'Metrics GET /metrics',
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('computes the root over untagged operations only', () => {
+    // A tagged /health, or a tagged path under another root, never switches
+    // the root off: only path-named services use it.
+    const ops = { get: { tags: ['ops'], responses } };
+    const legacy = { get: { tags: ['legacy'], responses } };
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': ops, '/v2/legacy': legacy })).toEqual([
+      'Legacy GET /v2/legacy',
+      'Notes GET /api/notes',
+      'Ops GET /health',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('has no root when the untagged rooted paths disagree on it, so API versions stay apart', () => {
+    expect(grouped({ '/v1/users': get, '/v2/users': get })).toEqual(['V1 GET /v1/users', 'V2 GET /v2/users']);
+    expect(grouped({ '/api/v1/users': get, '/api/v2/users': get })).toEqual([
+      'V1 GET /api/v1/users',
+      'V2 GET /api/v2/users',
+    ]);
+    expect(grouped({ '/api/v1/notes': get, '/v1/legacy': get })).toEqual([
+      'Api GET /api/v1/notes',
+      'V1 GET /v1/legacy',
+    ]);
+  });
+
+  it('never echoes the root or the service segment into a fallback operation name', () => {
+    const del = { delete: { responses } };
+    const rooted: Paths = {
+      '/api/v1/core/auth/permissions': get,
+      '/api/v1/core/global/permissions': get,
+      '/api/v1/admin/support/companies/{id}/document_types': get,
+      '/api/v1/admin/billing/companies/{id}/document_types': get,
+      '/api/v1/documents': get,
+      '/api/v1/documents/{id}': del,
+    };
+    const bare = Object.fromEntries(Object.entries(rooted).map(([path, item]) => [path.replace('/api/v1', ''), item]));
+    // Every name is exactly what the document produces without the root.
+    expect(layout(rooted).map((line) => line.replace(' /api/v1/', ' /'))).toEqual(layout(bare));
+    expect(layout(rooted)).toMatchInlineSnapshot(`
+      [
+        "Admin.listDocumentTypesDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
+        "Admin.listDocumentTypesDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
+        "Core.listPermissionsPermissionsAuth GET /api/v1/core/auth/permissions",
+        "Core.listPermissionsPermissionsGlobal GET /api/v1/core/global/permissions",
+        "Documents.delete DELETE /api/v1/documents/{id}",
+        "Documents.list GET /api/v1/documents",
+      ]
+    `);
+    // A path with nothing literal after the root names its operation from the verb alone.
+    expect(layout({ '/api/v1/{id}': del, '/api/v1/notes': get })).toEqual([
+      'Api.delete DELETE /api/v1/{id}',
+      'Notes.list GET /api/v1/notes',
     ]);
   });
 

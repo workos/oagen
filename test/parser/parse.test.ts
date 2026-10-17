@@ -600,9 +600,9 @@ describe('parseSpec – path-named services skip a shared API root (issue #209)'
       ),
     ).toMatchInlineSnapshot(`
       [
-        "Notes listNotes GET /api/notes",
-        "Tags listTags GET /api/tags",
-        "Users listUsers GET /api/users",
+        "Notes list GET /api/notes",
+        "Tags list GET /api/tags",
+        "Users list GET /api/users",
       ]
     `);
   });
