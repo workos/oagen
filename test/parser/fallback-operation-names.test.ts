@@ -185,7 +185,7 @@ describe('fallback operation names (issue #210)', () => {
     ]);
   });
 
-  it('keeps a POST a create when no literal precedes the parameter, and camel-cases a multi-word action', () => {
+  it('names an action with no literal parent by the bare verb, and camel-cases a multi-word action', () => {
     const result = names({
       '/{id}/adopt': { post: item('id') },
       '/users/{id}/reset_password': { post: item('id') },
@@ -194,7 +194,37 @@ describe('fallback operation names (issue #210)', () => {
     expect(result).toEqual([
       'deactivateUser               POST   /users/{id}/Deactivate',
       'resetPasswordUser            POST   /users/{id}/reset_password',
-      'createAdopt                  POST   /{id}/adopt',
+      'adopt                        POST   /{id}/adopt',
+    ]);
+  });
+
+  it('skips API root and version markers when picking the parent of an action', () => {
+    const result = names({
+      '/api/v1/{companyId}/sendDocument': { post: item('companyId') },
+      '/api/v1/{teamId}/subscription': { post: item('teamId') },
+      '/api/v1/pets/{petId}/adopt': { post: item('petId') },
+      '/v2/pets/{petId}/adopt': { post: item('petId') },
+      '/store/pets/{petId}/adopt': { post: item('petId') },
+    });
+    expect(result).toEqual([
+      'adoptPet                     POST   /api/v1/pets/{petId}/adopt',
+      'sendDocument                 POST   /api/v1/{companyId}/sendDocument',
+      'subscription                 POST   /api/v1/{teamId}/subscription',
+      'adoptPet                     POST   /store/pets/{petId}/adopt',
+      'adoptPet                     POST   /v2/pets/{petId}/adopt',
+    ]);
+  });
+
+  it('does not repeat the parent when the action already ends with it', () => {
+    const result = names({
+      '/companies/verification/{id}/restart-id-verification': { post: item('id') },
+      '/companies/verification/{id}/submit-playground-verification': { post: item('id') },
+      '/companies/verification/{id}/restart': { post: item('id') },
+    });
+    expect(result).toEqual([
+      'restartVerification          POST   /companies/verification/{id}/restart',
+      'restartIdVerification        POST   /companies/verification/{id}/restart-id-verification',
+      'submitPlaygroundVerification POST   /companies/verification/{id}/submit-playground-verification',
     ]);
   });
 

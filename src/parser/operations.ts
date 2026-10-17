@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import {
   toPascalCase,
   toCamelCase,
+  splitWords,
   cleanSchemaName,
   stripListItemMarkers,
   singularizePathSegment,
@@ -488,6 +489,22 @@ function resolveServiceDescription(
   return undefined;
 }
 
+/**
+ * Words that mark where an API is mounted rather than naming a resource.
+ * Deliberately tiny: `mountRules` regroup whatever this does not cover.
+ */
+const API_MARKER_SEGMENTS: ReadonlySet<string> = new Set(['api', 'rest']);
+
+/**
+ * Whether a path segment marks the API root rather than naming a resource:
+ * one of API_MARKER_SEGMENTS in any case, or a version such as `v1`,
+ * `v2beta`, `1.0` or `2010-04-01`.
+ */
+function isApiMarkerSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return API_MARKER_SEGMENTS.has(lower) || /^v\d/.test(lower) || /^\d+([.-]\d+)*$/.test(lower);
+}
+
 function inferServiceName(path: string, tag?: string): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
   // (e.g., "multi-factor-auth" for /auth/factors/* endpoints).
@@ -553,7 +570,7 @@ function inferOperationName(
   // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor",
   // or "adoptPet" for a POST action on one item.
   const action = method === 'post' ? inferPostAction(path) : null;
-  if (action) return toCamelCase(`${action.verb}_${action.resource}`);
+  if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
   const verb = inferVerb(method, path);
   const resource = inferResourceFromPath(path);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
@@ -629,32 +646,36 @@ function inferResourceFromPath(path: string): string | null {
  * `/owners/{o}/pets/{p}/vaccinate`. The last segment is a literal that follows
  * a path parameter, so it names something done to that item rather than a
  * collection to create into. The verb is the segment itself and the resource
- * is the singular parent (`adopt` + `Pet`); the parent is kept even when it is
- * the service segment so that `/pets/{id}/archive` and `/users/{id}/archive`
- * under one tag do not both become `archive`.
+ * is the singular parent (`adopt` + `Pet`): the nearest literal before the
+ * parameter that is not an API marker (isApiMarkerSegment), so
+ * `/api/v1/{companyId}/sendDocument` has no parent and is the bare verb
+ * `sendDocument` rather than `sendDocumentV1`. The parent is kept even when it
+ * is the service segment so that `/pets/{id}/archive` and `/users/{id}/archive`
+ * under one tag do not both become `archive`; the caller leaves it off when
+ * the verb already ends with it (`restart-id-verification` under
+ * `verification` is `restartIdVerification`, see appendQualifier).
  *
  * Not an action, so still a `create`: a literal ending in `s` after the
  * parameter, which is read as a nested collection (`/orgs/{id}/api_keys`,
- * and conservatively `/orders/{id}/status`); a literal with no parameter
+ * and conservatively `/orders/{id}/status`), and a literal with no parameter
  * before it, which is indistinguishable from a nested collection
- * (`/pets/search` looks like `/accounts/users/auth_factors`); and a path with
- * no literal before the parameter (`/{id}/adopt`). A singleton noun after the
- * parameter (`/users/{id}/avatar`) is misread as a verb; give it an
- * `operationId`.
+ * (`/pets/search` looks like `/accounts/users/auth_factors`). A singleton
+ * noun after the parameter (`/users/{id}/avatar`) is misread as a verb; give
+ * it an `operationId`.
  */
-function inferPostAction(path: string): { verb: string; resource: string } | null {
+function inferPostAction(path: string): { verb: string; resource: string | null } | null {
   const segments = path.split('/').filter(Boolean);
-  if (segments.length < 3) return null;
+  if (segments.length < 2) return null;
   const last = segments[segments.length - 1];
   if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
   if (last.toLowerCase().endsWith('s')) return null;
 
   for (let i = segments.length - 3; i >= 0; i--) {
-    if (!segments[i].startsWith('{')) {
+    if (!segments[i].startsWith('{') && !isApiMarkerSegment(segments[i])) {
       return { verb: last, resource: toPascalCase(singularizePathSegment(segments[i])) };
     }
   }
-  return null;
+  return { verb: last, resource: null };
 }
 
 /**
@@ -722,6 +743,22 @@ function disambiguateOperationNames(operations: Operation[], pathNamed: Readonly
       }
     }
   }
+}
+
+/**
+ * Append a qualifier to an operation name unless the name already ends with
+ * its words, so a qualifier never repeats what the name already says:
+ * `listNotes` + `Notes` stays `listNotes`, `listOAuth2Tokens` + `OAuth2Tokens`
+ * stays as is. Words are compared case-insensitively on the camelCase
+ * boundary, so `listNotes` + `Note` is not a match and does get appended.
+ */
+function appendQualifier(name: string, qualifier: string | null): string {
+  if (!qualifier) return name;
+  const have = splitWords(name).map((w) => w.toLowerCase());
+  const want = splitWords(qualifier).map((w) => w.toLowerCase());
+  const tail = have.slice(have.length - want.length);
+  if (want.length > 0 && want.length <= have.length && want.every((w, i) => w === tail[i])) return name;
+  return toCamelCase(`${name}_${qualifier}`);
 }
 
 /**
@@ -1089,12 +1126,6 @@ function buildOperation(
 }
 
 /**
- * Combine an operation's `summary` and `description` into one doc text.
- * Empty or whitespace-only text counts as absent, so `summary: "List pets"`
- * with `description: ""` yields `"List pets"` rather than `""`. Text that has
- * content is kept verbatim, surrounding whitespace included.
- */
-/**
  * The qualifier that tells one operation's header models from another's
  * (typeHeaderSchema's `byOperation` candidate). An `operationId` names the
  * operation. A path-named operation uses the path-derived stem its request
@@ -1117,6 +1148,12 @@ function headerOperationQualifier(
   return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
 }
 
+/**
+ * Combine an operation's `summary` and `description` into one doc text.
+ * Empty or whitespace-only text counts as absent, so `summary: "List pets"`
+ * with `description: ""` yields `"List pets"` rather than `""`. Text that has
+ * content is kept verbatim, surrounding whitespace included.
+ */
 function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
   const presentSummary = presentText(summary);
   const presentDescription = presentText(description);
