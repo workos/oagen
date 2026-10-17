@@ -1,5 +1,5 @@
-import type { ErrorResponse, Operation } from '../ir/types.js';
-import type { Change, ParamChange } from './types.js';
+import type { ErrorResponse, Operation, ResponseContent, TypeRef } from '../ir/types.js';
+import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
 import { classifyParamChange } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
@@ -43,6 +43,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
+    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp);
+    const responseContentTypesChanged = responseContentTypeChanges.length > 0;
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -52,7 +54,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       pathChanged ||
       paginatedChanged ||
       injectIdempotencyKeyChanged ||
-      errorsChanged;
+      errorsChanged ||
+      responseContentTypesChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -62,6 +65,9 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       // injectIdempotencyKey: true→false is breaking (SDK loses idempotency key)
       const injectIdempotencyKeyBreaking = injectIdempotencyKeyChanged && !newOp.injectIdempotencyKey;
       const errorsBreaking = errorsDiff === 'breaking';
+      // A media type callers could ask for that is gone, or a secondary body
+      // that changed shape, breaks them; one they can newly ask for does not.
+      const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
 
       const hasBreaking =
         responseChanged ||
@@ -71,6 +77,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedBreaking ||
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
+        responseContentTypesBreaking ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
         kind: 'operation-modified',
@@ -84,11 +91,113 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedChanged,
         injectIdempotencyKeyChanged,
         errorsChanged,
+        responseContentTypesChanged,
+        responseContentTypeChanges,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
   }
 
+  return changes;
+}
+
+/** One response entry's media types, with the body type the entry's own `type` is read from. */
+interface ContentEntry {
+  key: string;
+  statusCode?: number;
+  contentTypes: string[];
+  contents: ResponseContent[];
+  ownType?: TypeRef;
+}
+
+/**
+ * Every response entry of an operation that declares media types, keyed so
+ * the two specs' entries pair up: the primary success response as `primary`
+ * (from the operation's own lists, whether or not `successResponses` exists),
+ * every other 2xx/3xx entry as `success:<code>`, and every error as
+ * `error:<code>`. With several 2xx the primary is the lowest-coded entry
+ * whose type is the operation's `response` (the parser's own pick), listed
+ * once, under `primary`.
+ */
+function contentEntries(op: Operation): ContentEntry[] {
+  const entries: ContentEntry[] = [];
+  if (op.responseContentTypes && op.responseContents) {
+    entries.push({
+      key: 'primary',
+      contentTypes: op.responseContentTypes,
+      contents: op.responseContents,
+      ownType: op.response,
+    });
+  }
+  let primaryListed = false;
+  const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
+  for (const entry of successes) {
+    if (!entry.contentTypes || !entry.contents) continue;
+    if (!primaryListed && (entry.contents === op.responseContents || typeRefsEqual(entry.type, op.response))) {
+      primaryListed = true;
+      continue;
+    }
+    entries.push({
+      key: `success:${entry.statusCode}`,
+      statusCode: entry.statusCode,
+      contentTypes: entry.contentTypes,
+      contents: entry.contents,
+      ownType: entry.type,
+    });
+  }
+  for (const error of op.errors) {
+    if (!error.contentTypes || !error.contents) continue;
+    entries.push({
+      key: `error:${error.statusCode}`,
+      statusCode: error.statusCode,
+      contentTypes: error.contentTypes,
+      contents: error.contents,
+      ownType: error.type,
+    });
+  }
+  return entries;
+}
+
+function contentTypeOf(entry: ContentEntry, mediaType: string): TypeRef | undefined {
+  return entry.contents.find((c) => c.contentType === mediaType)?.type;
+}
+
+/**
+ * Per response entry both specs declare, the media types the new spec added,
+ * removed, or — for a media type other than the one the entry's own `type`
+ * is read from — retyped. An entry only one spec has is not a media-type
+ * change: a status code that came or went is the errors diff's business, and
+ * the primary is always present.
+ */
+function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
+  const before = new Map(contentEntries(oldOp).map((entry) => [entry.key, entry]));
+  const changes: ResponseContentTypesChange[] = [];
+  for (const entry of contentEntries(newOp)) {
+    const old = before.get(entry.key);
+    if (!old) continue;
+    const oldTypes = new Set(old.contentTypes);
+    const newTypes = new Set(entry.contentTypes);
+    const added = entry.contentTypes.filter((mediaType) => !oldTypes.has(mediaType));
+    const removed = old.contentTypes.filter((mediaType) => !newTypes.has(mediaType));
+    const retyped = entry.contentTypes.filter((mediaType) => {
+      if (!oldTypes.has(mediaType)) return false;
+      const oldType = contentTypeOf(old, mediaType);
+      const newType = contentTypeOf(entry, mediaType);
+      if (!oldType || !newType || typeRefsEqual(oldType, newType)) return false;
+      // The entry's own body is what `responseChanged` / `errorsChanged` report.
+      const wasOwn = old.ownType !== undefined && typeRefsEqual(oldType, old.ownType);
+      const isOwn = entry.ownType !== undefined && typeRefsEqual(newType, entry.ownType);
+      return !(wasOwn && isOwn);
+    });
+    if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
+    changes.push({
+      ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
+      added,
+      removed,
+      retyped,
+      classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
+    });
+  }
   return changes;
 }
 
