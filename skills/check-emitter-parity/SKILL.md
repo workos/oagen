@@ -101,6 +101,8 @@ A missing kind means an entire category of types won't generate correctly.
 - `successResponses` — Multiple 2xx response types
 - `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits)
 - `errors` — Error responses for exception/error documentation
+- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape)
+- `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse`
 - `cookieParams` — Cookie parameter handling
 
 #### Parameter

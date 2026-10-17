@@ -239,6 +239,8 @@ interface Operation {
   responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
+  defaultResponse?: DefaultResponse; // The `default` response (only when declared)
+  rangeResponses?: RangeResponse[]; // `1XX`–`5XX` range responses, in declaration order (only when any exist)
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean; // true when spec declares Idempotency-Key header
   deprecated?: boolean;
@@ -336,6 +338,30 @@ Each header is typed like a parameter via its `schema` (or the first media type 
 An object-shaped header (directly, inside an array, or as a oneOf variant) is materialized as an inline model named from the service and header name (`Documents` + `X-Meta` → `DocumentsXMeta`), nested objects included (`DocumentsXMetaOrigin`). Because that name can already belong to a differently shaped component schema, to the same header on another status code, or to the same header on another operation of the service, the parser keeps a spec-wide registry of model shapes: the first owner of a name keeps it (component models first, then operations in path order, then a single operation's responses in ascending status-code order), and a later header with a different shape is re-derived under the first free candidate — bare name; then the status code (`DocumentsXMeta429`) when the clash is inside the same operation, or the operation (`DocumentsCreateDocumentXMeta`) when it is with a component or another operation; then the other of those two; then both (`DocumentsCreateDocumentXMeta429`); then a numeric suffix (`DocumentsXMeta2`). A header whose shape matches the name's owner shares it and materializes nothing new, so a header matching a component schema simply references that schema. Inline header enums follow the same idea with their own, status-code-based rule.
 
 `collectResponseHeaders(op)` (exported from `@workos/oagen`) yields every header list once — the primary list is the same array as its `successResponses` entry — and is what reachability, model assignment, ref rewriting/validation, the differ, and the compat filter use, so a model or enum reached only through a header is emitted like any other.
+
+### Default and Range Responses
+
+OpenAPI lets a Responses Object carry two kinds of key besides explicit status codes: `default`, which applies to every status the operation does not list, and the ranges `1XX`–`5XX`, each of which applies to every status in its hundred that is not listed explicitly. Neither has a status code, and `ErrorResponse.statusCode` / `SuccessResponse.statusCode` are numbers that emitters compare and format as such, so they live in two additive fields instead of being folded into `errors` or `successResponses`:
+
+| Document key     | IR                                                                        |
+| ---------------- | ------------------------------------------------------------------------- |
+| `default`        | `Operation.defaultResponse: { type?, headers? }`                          |
+| `4XX` (or `4xx`) | an entry of `Operation.rangeResponses: { range: '4XX', type?, headers? }` |
+
+To resolve what an operation returns for a status, an emitter follows OpenAPI's own precedence: the explicit entry (`successResponses`/`errors`), then the range the status falls in (`rangeResponses`), then `defaultResponse`. In practice `defaultResponse.type` is the API's error shape, so an emitter can type the errors it does not list individually. Both fields are absent — not empty — on an operation that declares neither.
+
+What the parser deliberately does not do:
+
+- **No promotion.** `response` is still the lowest explicit 2xx with a body; an operation whose only success is `default` or `2XX` keeps the `response` it has today (`{ kind: 'primitive', type: 'string' }`). What to use instead: an emitter resolves any status as the explicit entry, then the matching `rangeResponses` entry, then `defaultResponse` — so when no explicit 2xx exists, the success body is the `2XX` range's `type`, then `defaultResponse.type`. `errors` is likewise untouched.
+- **No synthetic codes.** A `4XX` is never recorded as a `400`, which would make an emitter claim a code the spec does not.
+
+A fallback response written as a Reference Object (`default: { $ref: '#/components/responses/Problem' }`) is resolved first — chains are followed, JSON Pointer escapes honored, and an OAS 3.1 sibling `description` wins over the component's; a ref nothing answers fails the parse. The body is then read from `application/json`, else the first `+json` media type (`application/problem+json`); other media types leave `type` unset, as they do for `errors`.
+
+The body is typed as if it were a field named `<Op>DefaultResponse` or, for a range, `<Op>` + the range's word + `Response` — `Informational`, `Success`, `Redirect`, `ClientError`, `ServerError` (`ListPetsClientErrorResponse`), because `4XX` does not survive PascalCasing — of a parent with no name, through the same extractor every field goes through. So a `$ref` is the referenced model, and every shape a field can take is materialized under that name by the field rules: an inline object (`ListPetsDefaultResponse`), a nullable one, nested objects (`…Detail`), array items and map values (they take the body's name, as a field's items take the field's), `oneOf`/`anyOf` variants (`…`, `…WithReason`), an `allOf` merge. The ref and the models agree by construction, so nothing dangles. The names are checked against the spec-wide model registry (components, every operation's request body and primary response models, header and fallback models so far) by the same `materializeInlineSchema` helper header models use: a body whose shape matches the name's owner shares it and materializes nothing new, and a clash is cleared by the cheapest move that can still change something — a `oneOf`/`anyOf` variant named from its own `title` or const is reserved so variant naming steps around it (`CircleListPetsDefaultResponse`, as beside a sibling's model), and a name derived from the stem (the root, nested objects, array items) moves the whole body to the next free stem (`ListPetsDefaultResponse2`, `…3`), nested models and ref together. The clashing set is compared between attempts, so when a stem advance changes nothing the loop stops (no input can make it retry forever; a hard cap backs the test) and the clashing names themselves are renamed under the root (`ListPetsDefaultResponseCircle`), then numbered, with every reference rewritten to match — the case of a titled variant nested below the top level, where no reservation reaches. Sameness is decided on the final shapes, after every rename: renaming a child changes its parent's shape, so a parent that matched a registered model (a component `ListPetsDefaultResponse` whose `shape` points at the component's own `Circle`) and no longer does moves to the next free stem with its children (`ListPetsDefaultResponse2`, `ListPetsDefaultResponse2Circle`; a header's next qualified candidate) rather than being dropped as already defined, which would leave the body resolving to the component and its old child. The move is decided per model, by shape: a child whose name an identical definition already owns (a component, an earlier operation's model) stays shared under that name and the moved parent keeps referencing it, exactly as it is shared when nothing moves; only the root and the children that need distinct names move. A schema that both inlines such a clashing `Circle` and `$ref`s component `Circle` fails the parse with a message naming both, since the rewrite could not tell the two references apart. So a component, or another operation's response or request body, that happens to carry a fallback's name is never overwritten by inline-model merging. A body that is itself an inline enum, or an array of one, is typed like a parameter and promoted to `spec.enums` under the same name, numbered on a clash with an enum of other values; enums nested in a fallback's models are collected with every other model's. List-envelope and pagination detection are skipped, since a fallback body is not what the SDK method returns.
+
+Headers declared on these responses are kept as `headers` and qualified by the response's label where a status code would qualify an explicit response's (`PetsXMetaDefault`, `PetsXPolicyClientError`); `collectResponseHeaders(op)` yields them after the explicit lists. `collectFallbackResponseTypes(op)` (exported from `@workos/oagen`) yields the `default` body then each range body, and every pass that walks an operation's type refs — reachability, model assignment, ref rewriting and validation, direction, the compat filter, enum collection — goes through it. The differ reports a `default` or range response added as additive and one removed or retyped as breaking (`OperationModified.fallbackResponsesChanged`).
+
+Keys the specification does not define are no longer dropped silently: an `x-` extension key is skipped, and any other unrecognized key (`error`, `Default`) is warned about and ignored. A duplicate range (`4XX` beside `4xx`) keeps the first and warns.
 
 ## Model & Field
 
@@ -447,6 +473,27 @@ interface ErrorResponse {
   headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
 }
 ```
+
+## DefaultResponse & RangeResponse
+
+```typescript
+// The `default` response: every status the operation does not list.
+interface DefaultResponse {
+  type?: TypeRef; // Response body type, if any
+  headers?: ResponseHeader[]; // Only when the spec declares at least one
+}
+
+type StatusRange = "1XX" | "2XX" | "3XX" | "4XX" | "5XX";
+
+// A range response: every status in its hundred the operation does not list explicitly.
+interface RangeResponse {
+  range: StatusRange; // Uppercase as OpenAPI writes it; `4xx` is read as `4XX`
+  type?: TypeRef; // Response body type, if any
+  headers?: ResponseHeader[]; // Only when the spec declares at least one
+}
+```
+
+See [Default and Range Responses](#default-and-range-responses) for how they are resolved and named.
 
 ## Operation Resolution
 
