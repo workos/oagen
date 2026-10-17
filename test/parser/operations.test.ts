@@ -2641,14 +2641,30 @@ describe('extractOperations – path-named services skip the API root (issue #20
 
   it('names the service from the first literal segment past a parameter that follows the root', () => {
     // A tenant or team parameter right after the root is a common shape;
-    // /v1/notes and /v1/{teamId}/notes must meet in one Notes service.
-    expect(grouped({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
-      'Notes GET /v1/notes',
-      'Notes GET /v1/{teamId}/notes',
+    // /v1/notes and /v1/{teamId}/notes must meet in one Notes service, with
+    // the parameter telling the two list operations apart.
+    expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes.list GET /v1/notes',
+      'Notes.listByTeamId GET /v1/{teamId}/notes',
     ]);
     expect(grouped({ '/api/{tenant}/notes': get, '/api/{tenant}/tags': get })).toEqual([
       'Notes GET /api/{tenant}/notes',
       'Tags GET /api/{tenant}/tags',
+    ]);
+  });
+
+  it('names a root-less document exactly as before, leading parameter or not', () => {
+    // No API root means no new rule: a leading parameter still yields Default
+    // and the fallback name still skips only the first segment, for untagged
+    // and tagged operations alike.
+    const tagged = { get: { tags: ['tenants'], responses } };
+    expect(layout({ '/{tenant}/users': get })).toEqual(['Default.listUsers GET /{tenant}/users']);
+    expect(layout({ '/{tenant}/users': tagged })).toEqual(['Tenants.listUsers GET /{tenant}/users']);
+    // A path outside the root is root-less in the same way.
+    expect(layout({ '/api/notes': get, '/api/tags': get, '/{tenant}/users': get })).toEqual([
+      'Default.listUsers GET /{tenant}/users',
+      'Notes.list GET /api/notes',
+      'Tags.list GET /api/tags',
     ]);
   });
 

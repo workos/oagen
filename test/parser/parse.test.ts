@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { parseSpec } from '../../src/parser/parse.js';
-import { resolveOperations } from '../../src/ir/operation-hints.js';
+import { resolveOperations, findResolvedMethodCollisions } from '../../src/ir/operation-hints.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as fs from 'node:fs/promises';
@@ -581,16 +581,17 @@ describe('parseSpec – path-named services skip a shared API root (issue #209)'
     paths: { '/api/notes': { get: ok }, '/api/tags': { get: ok }, '/api/users': { get: ok } },
   };
 
-  async function parseRepro() {
+  async function parseDoc(paths: Record<string, unknown>) {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-209-'));
     try {
       const specFile = path.join(tmpDir, 'repro.json');
-      await fs.writeFile(specFile, JSON.stringify(repro), 'utf-8');
+      await fs.writeFile(specFile, JSON.stringify({ ...repro, paths }), 'utf-8');
       return await parseSpec(specFile);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   }
+  const parseRepro = () => parseDoc(repro.paths);
 
   it('groups the issue repro into Notes, Tags and Users', async () => {
     const ir = await parseRepro();
@@ -619,5 +620,18 @@ describe('parseSpec – path-named services skip a shared API root (issue #209)'
       ['/api/tags', 'Tags', 'Labels'],
       ['/api/users', 'Users', 'People'],
     ]);
+  });
+
+  it('keeps a pair that differs only by a path parameter unique through operation resolution', async () => {
+    // /v1/notes and /v1/{teamId}/notes now share Notes; both the IR names and
+    // the resolved SDK method names must stay distinct, with nothing for
+    // findResolvedMethodCollisions to report.
+    const ir = await parseDoc({ '/v1/notes': { get: ok }, '/v1/{teamId}/notes': { get: ok } });
+    expect(ir.services.map((s) => [s.name, s.operations.map((op) => op.name)])).toEqual([
+      ['Notes', ['list', 'listByTeamId']],
+    ]);
+    const resolved = resolveOperations(ir);
+    expect(resolved.map((r) => `${r.mountOn}.${r.methodName}`)).toEqual(['Notes.list_notes', 'Notes.list_v1_notes']);
+    expect(findResolvedMethodCollisions(resolved)).toEqual([]);
   });
 });

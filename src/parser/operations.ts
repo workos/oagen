@@ -13,7 +13,7 @@ import type {
   PaginationMeta,
 } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import { toPascalCase, toCamelCase, splitWords, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -317,6 +317,9 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
+  // Operations named from the method and path rather than an operationId;
+  // only their names are qualified further when they collide.
+  const pathNamed = new Set<Operation>();
   // One registry for the whole spec, seeded with the component models: a
   // header model's name must not collide with a differently shaped component
   // (a request body may already use `DocumentsXMeta`) or with another
@@ -362,6 +365,7 @@ export function extractOperations(
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
+      if (!op.operationId) pathNamed.add(operation);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -403,7 +407,7 @@ export function extractOperations(
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
   for (const [, operations] of serviceMap) {
-    disambiguateOperationNames(operations, (op) =>
+    disambiguateOperationNames(operations, pathNamed, (op) =>
       tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot),
     );
   }
@@ -564,14 +568,21 @@ function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
 }
 
 /**
- * Index of the segment a path-named service takes its name from: the first
- * literal segment after the API root, so `/v1/notes` and `/v1/{teamId}/notes`
- * both name `Notes`; else the first segment, so `/api` and `/api/{id}` name
- * `Api` as they always did rather than `Default`. The fallback operation
- * name skips the same segment (see inferResourceFromPath), so it is never
- * echoed as `Api.getApi`.
+ * Index of the segment a path-named service takes its name from. Under an
+ * API root it is the first literal segment after the root, so `/v1/notes` and
+ * `/v1/{teamId}/notes` both name `Notes`; when nothing literal follows the
+ * root, the first segment, so `/api` and `/api/{id}` name `Api` as they
+ * always did rather than `Default`. The fallback operation name skips the
+ * same segment (see inferResourceFromPath), so it is never echoed as
+ * `Api.getApi`.
+ *
+ * Without a root (`apiRootLength` of 0: a root-less document, a path outside
+ * the root, or a tagged operation) it is always the first segment, parameter
+ * or not, so every such operation is named exactly as before this rule
+ * existed: an untagged `/{tenant}/users` stays `Default.listUsers`.
  */
 function serviceSegmentIndex(segments: readonly string[], apiRootLength: number): number {
+  if (apiRootLength === 0) return 0;
   const index = segments.findIndex((segment, i) => i >= apiRootLength && !segment.startsWith('{'));
   return index === -1 ? 0 : index;
 }
@@ -730,9 +741,16 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
- * root or the service segment into the name.
+ * root or the service segment into the name. Names that still collide after
+ * both, and whose paths differ only by their parameters, are told apart by
+ * `By<Param>` — but only for the operations in `pathNamed`, whose names are
+ * the parser's own; a name taken from an operationId is never rewritten there.
  */
-function disambiguateOperationNames(operations: Operation[], apiRootLengthOf: (op: Operation) => number): void {
+function disambiguateOperationNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  apiRootLengthOf: (op: Operation) => number,
+): void {
   // Group by name
   const byName = new Map<string, Operation[]>();
   for (const op of operations) {
@@ -777,6 +795,65 @@ function disambiguateOperationNames(operations: Operation[], apiRootLengthOf: (o
       }
     }
   }
+
+  // Path-named operations that still collide differ only by their parameters:
+  // once the API root and the service segment are skipped, `GET /v1/notes`
+  // and `GET /v1/{teamId}/notes` both reach `list` in Notes with no resource
+  // or deeper context to tell them apart. `By<Param>` does, but only when the
+  // parameters differ between the colliding paths: `/v1/{id}/notes` and
+  // `/v1/{id}/Notes` would both gain `ById` and still collide, further from
+  // the plain name.
+  const stillColliding = new Map<string, Operation[]>();
+  for (const op of operations) {
+    const group = stillColliding.get(op.name) ?? [];
+    group.push(op);
+    stillColliding.set(op.name, group);
+  }
+  for (const [, group] of stillColliding) {
+    if (new Set(group.map((op) => op.path)).size <= 1) continue;
+    const suffixes = group.map((op) => inferByParamsSuffix(op.path));
+    if (new Set(suffixes).size <= 1) continue;
+    group.forEach((op, i) => {
+      if (pathNamed.has(op)) (op as { name: string }).name = appendQualifier(op.name, suffixes[i]);
+    });
+  }
+}
+
+/**
+ * Append a qualifier to an operation name without repeating what the name
+ * already says. A qualifier never contributes the same word twice in a row:
+ * the deeper context of `/api/analytics/analytics/teams` is
+ * `AnalyticsAnalytics`, which joins as `listTeamsAnalytics`. The words that
+ * remain are then joined where they overlap the end of the name: `listNotes`
+ * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
+ * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
+ * case-insensitively on the camelCase boundary, so `listNotes` + `Note` does
+ * not overlap and is appended whole. The name's own words are never touched.
+ */
+function appendQualifier(name: string, qualifier: string | null): string {
+  if (!qualifier) return name;
+  const have = splitWords(name).map((w) => w.toLowerCase());
+  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || w.toLowerCase() !== all[i - 1].toLowerCase());
+  const want = words.map((w) => w.toLowerCase());
+  // The longest run of words that both ends the name and starts the qualifier.
+  let overlap = Math.min(have.length, want.length);
+  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
+  const rest = words.slice(overlap);
+  return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
+}
+
+/**
+ * `By<Param>` for each path parameter, in path order, as one qualifier:
+ * `/v1/{teamId}/notes` → `ByTeamId`, `/a/{x}/b/{y}/c` → `ByXByY`. Empty for a
+ * path without parameters. Mirrors derivePathModelBaseName's `By` + PascalCase
+ * spelling of a parameter segment, so `{team_id}` and `{teamId}` read alike.
+ */
+function inferByParamsSuffix(path: string): string {
+  return path
+    .split('/')
+    .filter((segment) => segment.startsWith('{'))
+    .map((segment) => 'By' + toPascalCase(segment.replace(/[{}]/g, '')))
+    .join('');
 }
 
 /**
