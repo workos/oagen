@@ -243,15 +243,19 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
  *     (`ListPetsDefaultResponseCircle`), or kept as is when it already starts
  *     with it, then numbered until free;
  *   - a clashing root — its shape changed when a child under it moved, so a
- *     registered model of that name no longer matches it — moves the whole
- *     body to the next free stem the caller would have tried next
- *     (`ListPetsDefaultResponse2`; a header's qualified candidates), every
- *     model named under it following (`ListPetsDefaultResponse2Circle`), as
- *     a stem advance would have named them.
+ *     registered model of that name no longer matches it — moves the body to
+ *     the next free stem the caller would have tried next
+ *     (`ListPetsDefaultResponse2`; a header's qualified candidates), and with
+ *     it every model named under it (`ListPetsDefaultResponse2Circle`), as a
+ *     stem advance would have named them — except one whose name an
+ *     identical definition already owns, which stays shared under that name
+ *     with the moved parent still referencing it, exactly as it is shared
+ *     when nothing moves.
  *
  * Every new name is one nothing owns and nothing in the trial uses, so a
- * renamed model can never clash again and the rounds end within the trial's
- * size. A name the schema also `$ref`s cannot be rewritten safely (see
+ * renamed model can never clash again, a shared model never changes and so
+ * never starts a round, and the rounds end within the trial's size. A name
+ * the schema also `$ref`s cannot be rewritten safely (see
  * `materializeInlineSchema`) and fails loudly.
  */
 function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstClashOwners: InlineModelOwner[]): Trial {
@@ -303,8 +307,19 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
       }
       if (movedRoot === undefined) movedRoot = claim((n) => `${oldRoot}${n + 1}`);
       taken.add(movedRoot);
-      const under = trial.models.map((m) => m.name).filter((name) => name === oldRoot || name.startsWith(oldRoot));
-      for (const name of under) {
+      // Decided per model, by shape: a model named under the root whose name
+      // an identical definition already owns (a component, an earlier
+      // operation's model) stays shared under that name, exactly as it would
+      // had the root not moved, and the moved parent keeps referencing it.
+      // The root itself, and every other model named under it, moves.
+      const moving = trial.models
+        .filter((model) => {
+          if (model.name === oldRoot) return true;
+          if (!model.name.startsWith(oldRoot)) return false;
+          return registry.get(model.name)?.fingerprint !== fingerprints.get(model);
+        })
+        .map((model) => model.name);
+      for (const name of moving) {
         const suffix = name.slice(oldRoot.length);
         rename(name, name === oldRoot ? movedRoot : claim((n) => `${movedRoot}${suffix}${n === 1 ? '' : n}`));
       }

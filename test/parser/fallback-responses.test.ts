@@ -991,6 +991,141 @@ describe('names no stem can move (titled variants) terminate and step around the
     },
     HANG_GUARD_MS,
   );
+
+  it(
+    'moving the parent keeps a child that matches an existing component shared, even one the body also $refs',
+    async () => {
+      // The reviewer's extension of the case above: `detail` is an inline
+      // object identical to component `ListPetsDefaultResponseDetail`, which
+      // `original` references. Moving the parent must not rename that child
+      // (it is the component's, exactly as when nothing moves), or the
+      // rewrite would trip over the reference and the parse would fail.
+      const detail = { type: 'object', properties: { field: { type: 'string' } } };
+      const refShapes = {
+        oneOf: [{ $ref: '#/components/schemas/Circle' }, { $ref: '#/components/schemas/Square' }],
+        discriminator: {
+          propertyName: 'kind',
+          mapping: { circle: '#/components/schemas/Circle', square: '#/components/schemas/Square' },
+        },
+      };
+      const spec = petsSpec({
+        '200': ok,
+        default: {
+          description: 'd',
+          content: json({
+            type: 'object',
+            properties: {
+              shape: shapes,
+              detail,
+              original: { $ref: '#/components/schemas/ListPetsDefaultResponseDetail' },
+            },
+          }),
+        },
+      }) as { components: { schemas: Record<string, unknown> } };
+      Object.assign(spec.components.schemas, {
+        Circle: titled('Circle', 'circle', { radius: { type: 'number' } }),
+        Square: titled('Square', 'square', { side: { type: 'number' } }),
+        ListPetsDefaultResponseDetail: detail,
+        ListPetsDefaultResponse: {
+          type: 'object',
+          properties: {
+            shape: refShapes,
+            detail: { $ref: '#/components/schemas/ListPetsDefaultResponseDetail' },
+            original: { $ref: '#/components/schemas/ListPetsDefaultResponseDetail' },
+          },
+        },
+      });
+      const ir = await parseWithoutWarnings(spec);
+      const types = fieldTypesByModel(ir.models);
+
+      expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2') });
+      // Only the parent and the clashing child moved; the matching child is the component's.
+      expect(types['ListPetsDefaultResponse2']).toEqual({
+        shape: union('ListPetsDefaultResponse2Circle'),
+        detail: model('ListPetsDefaultResponseDetail'),
+        original: model('ListPetsDefaultResponseDetail'),
+      });
+      expect(types['ListPetsDefaultResponseDetail']).toEqual({ field: str });
+      expect(types['ListPetsDefaultResponse']).toEqual({
+        shape: union('Circle'),
+        detail: model('ListPetsDefaultResponseDetail'),
+        original: model('ListPetsDefaultResponseDetail'),
+      });
+      expect(ir.models.map((m) => m.name).sort()).toEqual([
+        'Circle',
+        'Error',
+        'ListPetsDefaultResponse',
+        'ListPetsDefaultResponse2',
+        'ListPetsDefaultResponse2Circle',
+        'ListPetsDefaultResponseDetail',
+        'Pet',
+        'Square',
+      ]);
+      expectConsistent(ir, ['Pet', 'Error', 'ListPetsDefaultResponse']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    "keeps a nested child shared with an earlier operation's inline model while the clashing sibling moves",
+    async () => {
+      // `getShape`, first in the document, materializes `Square{kind,side}`
+      // from its 200. The fallback's nested `Square` is the same shape and
+      // shares it; its `Circle{diameter}` differs from `getShape`'s
+      // `Circle{radius}` and is renamed; the root clashes with a component
+      // of another shape and takes the next stem.
+      const primary = {
+        oneOf: [
+          titled('Circle', 'circle', { radius: { type: 'number' } }),
+          titled('Square', 'square', { side: { type: 'number' } }),
+        ],
+      };
+      const spec = {
+        openapi: '3.1.0',
+        info,
+        paths: {
+          '/shapes': {
+            get: { operationId: 'getShape', responses: { '200': { description: 'ok', content: json(primary) } } },
+          },
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              responses: {
+                '200': ok,
+                default: { description: 'd', content: json({ type: 'object', properties: { shape: shapes } }) },
+              },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            Pet: petSchema,
+            Error: errorSchema,
+            ListPetsDefaultResponse: { type: 'object', properties: { x: { type: 'string' } } },
+          },
+        },
+      };
+      const ir = await parseWithoutWarnings(spec);
+      const [getShape, listPets] = ir.services
+        .flatMap((s) => s.operations)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const types = fieldTypesByModel(ir.models);
+
+      expect(getShape.response).toEqual(union('Circle'));
+      expect(listPets.defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2') });
+      expect(types['ListPetsDefaultResponse2']).toEqual({ shape: union('ListPetsDefaultResponse2Circle') });
+      expect(types['ListPetsDefaultResponse2Circle']).toEqual({
+        kind: { kind: 'literal', value: 'circle' },
+        diameter: num,
+      });
+      expect(types['Circle']).toEqual({ kind: { kind: 'literal', value: 'circle' }, radius: num });
+      // One `Square`, owned by getShape, referenced from both operations.
+      expect(ir.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+      expect(types['Square']).toEqual({ kind: { kind: 'literal', value: 'square' }, side: num });
+      expectConsistent(ir, ['Pet', 'Error', 'ListPetsDefaultResponse']);
+    },
+    HANG_GUARD_MS,
+  );
 });
 
 describe('a fallback written as a $ref into components/responses', () => {

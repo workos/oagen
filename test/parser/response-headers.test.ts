@@ -815,6 +815,115 @@ describe('inline header models', () => {
     expectHeaderModelsMaterialized(op, inlineModels);
   }, 5_000);
 
+  it('moving a header model keeps a child matching a component shared, even one the header also $refs', () => {
+    // Mirror of the fallback case: the header's `detail` is identical to
+    // component `CatalogXShapeDetail`, which `original` references. Only the
+    // parent and its clashing `Circle` move; `detail` stays the component's.
+    // (A singular service name, since `cleanSchemaName` singularizes the
+    // leading word of a `$ref` target: `Documents…` would become `Document…`.)
+    const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+      type: 'object',
+      title,
+      properties: { kind: { type: 'string', const: kind }, ...properties },
+    });
+    const union = (circle: string) => ({
+      kind: 'union' as const,
+      variants: [
+        { kind: 'model' as const, name: circle },
+        { kind: 'model' as const, name: 'Square' },
+      ],
+      compositionKind: 'oneOf' as const,
+      discriminator: { property: 'kind', mapping: { circle, square: 'Square' } },
+    });
+    const num = { kind: 'primitive' as const, type: 'number' as const };
+    const str = { kind: 'primitive' as const, type: 'string' as const };
+    const detailRef = { kind: 'model' as const, name: 'CatalogXShapeDetail' };
+    const detail = { type: 'object', properties: { field: { type: 'string' } } };
+    const componentModels: Model[] = [
+      {
+        name: 'CatalogXShape',
+        fields: [
+          { name: 'shape', type: union('Circle'), required: false },
+          { name: 'detail', type: detailRef, required: false },
+          { name: 'original', type: detailRef, required: false },
+        ],
+      },
+      { name: 'CatalogXShapeDetail', fields: [{ name: 'field', type: str, required: false }] },
+      {
+        name: 'Circle',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'circle' }, required: false },
+          { name: 'radius', type: num, required: false },
+        ],
+      },
+      {
+        name: 'Square',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'square' }, required: false },
+          { name: 'side', type: num, required: false },
+        ],
+      },
+    ];
+    const shapes = {
+      oneOf: [
+        titled('Circle', 'circle', { diameter: { type: 'number' } }),
+        titled('Square', 'square', { side: { type: 'number' } }),
+      ],
+    };
+    const { services, inlineModels } = extractOperations(
+      {
+        '/catalog': {
+          get: {
+            operationId: 'listCatalog',
+            responses: {
+              '200': {
+                description: 'ok',
+                headers: {
+                  'X-Shape': {
+                    schema: {
+                      type: 'object',
+                      properties: {
+                        shape: shapes,
+                        detail,
+                        original: { $ref: '#/components/schemas/CatalogXShapeDetail' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      undefined,
+      { CatalogXShapeDetail: detail },
+      undefined,
+      undefined,
+      componentModels,
+    );
+    const op = services[0].operations[0];
+    const fields = (name: string) =>
+      Object.fromEntries(inlineModels.find((m) => m.name === name)!.fields.map((f) => [f.name, f.type]));
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'CatalogListCatalogXShape' });
+    expect(fields('CatalogListCatalogXShape')).toEqual({
+      shape: union('CatalogListCatalogXShapeCircle'),
+      detail: detailRef,
+      original: detailRef,
+    });
+    expect(fields('CatalogListCatalogXShapeCircle')).toEqual({
+      kind: { kind: 'literal', value: 'circle' },
+      diameter: num,
+    });
+    // `detail` was not materialized again: it is the component's.
+    expect(inlineModels.map((m) => m.name).sort()).toEqual([
+      'CatalogListCatalogXShape',
+      'CatalogListCatalogXShapeCircle',
+    ]);
+    expect(componentModels[0].fields.map((f) => f.type)).toEqual([union('Circle'), detailRef, detailRef]);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  }, 5_000);
+
   describe('same header name, different shapes', () => {
     const object = (properties: Record<string, unknown>) => ({ schema: { type: 'object', properties } });
     const fieldsOf = (models: Model[], name: string) => models.find((m) => m.name === name)?.fields.map((f) => f.name);
