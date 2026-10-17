@@ -101,58 +101,92 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
   return changes;
 }
 
-/** One response entry's media types, with the body type the entry's own `type` is read from. */
+/**
+ * One response entry's media types, normalized so the two specs' entries
+ * compare as sets whatever the parser left off: an error that declares only
+ * `application/json` with a schema carries no lists in the IR, so its
+ * implicit JSON entry is restored from `type`; a response without content
+ * has the empty set.
+ */
 interface ContentEntry {
   key: string;
   statusCode?: number;
   contentTypes: string[];
   contents: ResponseContent[];
-  ownType?: TypeRef;
+  /**
+   * The media type the entry's own `type` was read from: the content entry
+   * that shares `type`'s very object (how the parser builds it), or, for an
+   * error, `application/json` — the only media type an error's `type` is ever
+   * read from. Never decided by structural equality, which a secondary body
+   * can coincidentally satisfy. Unset when no entry is the own one (a 3xx, or
+   * a hand-built IR without that identity).
+   */
+  ownMediaType?: string;
+  /**
+   * Whether another comparison already reports a change to the own body:
+   * `responseChanged` for the primary, `errorsChanged` for an error. An
+   * alternate 2xx has none, so even its own body is compared here.
+   */
+  ownCoveredElsewhere: boolean;
+}
+
+const JSON_MEDIA_TYPE = 'application/json';
+
+function ownMediaTypeOf(
+  contents: ResponseContent[],
+  ownType: TypeRef | undefined,
+  fallback?: string,
+): string | undefined {
+  if (!ownType) return undefined;
+  return contents.find((c) => c.type === ownType)?.contentType ?? fallback;
 }
 
 /**
- * Every response entry of an operation that declares media types, keyed so
- * the two specs' entries pair up: the primary success response as `primary`
- * (from the operation's own lists, whether or not `successResponses` exists),
- * every other 2xx/3xx entry as `success:<code>`, and every error as
- * `error:<code>`. With several 2xx the primary is the lowest-coded entry
- * whose type is the operation's `response` (the parser's own pick), listed
- * once, under `primary`.
+ * Every response entry of an operation, keyed so the two specs' entries pair
+ * up: the primary success response as `primary` (from the operation's own
+ * lists, whether or not `successResponses` exists), every other 2xx/3xx
+ * entry as `success:<code>`, and every error as `error:<code>`. With several
+ * 2xx the primary is the lowest-coded entry whose type is the operation's
+ * `response` (the parser's own pick), listed once, under `primary`.
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
-  if (op.responseContentTypes && op.responseContents) {
-    entries.push({
-      key: 'primary',
-      contentTypes: op.responseContentTypes,
-      contents: op.responseContents,
-      ownType: op.response,
-    });
-  }
+  const primaryContents = op.responseContents ?? [];
+  entries.push({
+    key: 'primary',
+    contentTypes: op.responseContentTypes ?? [],
+    contents: primaryContents,
+    ownMediaType: ownMediaTypeOf(primaryContents, op.response),
+    ownCoveredElsewhere: true,
+  });
   let primaryListed = false;
   const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
   for (const entry of successes) {
-    if (!entry.contentTypes || !entry.contents) continue;
-    if (!primaryListed && (entry.contents === op.responseContents || typeRefsEqual(entry.type, op.response))) {
+    const sharesPrimaryLists = op.responseContents !== undefined && entry.contents === op.responseContents;
+    if (!primaryListed && (sharesPrimaryLists || typeRefsEqual(entry.type, op.response))) {
       primaryListed = true;
       continue;
     }
+    const contents = entry.contents ?? [];
     entries.push({
       key: `success:${entry.statusCode}`,
       statusCode: entry.statusCode,
-      contentTypes: entry.contentTypes,
-      contents: entry.contents,
-      ownType: entry.type,
+      contentTypes: entry.contentTypes ?? [],
+      contents,
+      ownMediaType: ownMediaTypeOf(contents, entry.type),
+      ownCoveredElsewhere: false,
     });
   }
   for (const error of op.errors) {
-    if (!error.contentTypes || !error.contents) continue;
+    const implicitJson: ResponseContent[] = error.type ? [{ contentType: JSON_MEDIA_TYPE, type: error.type }] : [];
+    const contents = error.contents ?? implicitJson;
     entries.push({
       key: `error:${error.statusCode}`,
       statusCode: error.statusCode,
-      contentTypes: error.contentTypes,
-      contents: error.contents,
-      ownType: error.type,
+      contentTypes: error.contentTypes ?? implicitJson.map((c) => c.contentType),
+      contents,
+      ownMediaType: ownMediaTypeOf(contents, error.type, error.type ? JSON_MEDIA_TYPE : undefined),
+      ownCoveredElsewhere: true,
     });
   }
   return entries;
@@ -163,11 +197,12 @@ function contentTypeOf(entry: ContentEntry, mediaType: string): TypeRef | undefi
 }
 
 /**
- * Per response entry both specs declare, the media types the new spec added,
- * removed, or — for a media type other than the one the entry's own `type`
- * is read from — retyped. An entry only one spec has is not a media-type
- * change: a status code that came or went is the errors diff's business, and
- * the primary is always present.
+ * Per response entry both specs have, the media types the new spec added,
+ * removed, or retyped. A retype is left out only when another comparison
+ * reports that very body: the entry's own media type on both sides, for the
+ * primary (`responseChanged`) or an error (`errorsChanged`). An entry only
+ * one spec has is not a media-type change: a status code that came or went
+ * is the errors diff's business.
  */
 function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
   const before = new Map(contentEntries(oldOp).map((entry) => [entry.key, entry]));
@@ -184,10 +219,8 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
       const oldType = contentTypeOf(old, mediaType);
       const newType = contentTypeOf(entry, mediaType);
       if (!oldType || !newType || typeRefsEqual(oldType, newType)) return false;
-      // The entry's own body is what `responseChanged` / `errorsChanged` report.
-      const wasOwn = old.ownType !== undefined && typeRefsEqual(oldType, old.ownType);
-      const isOwn = entry.ownType !== undefined && typeRefsEqual(newType, entry.ownType);
-      return !(wasOwn && isOwn);
+      const ownOnBothSides = old.ownMediaType === mediaType && entry.ownMediaType === mediaType;
+      return !(ownOnBothSides && entry.ownCoveredElsewhere);
     });
     if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
     changes.push({

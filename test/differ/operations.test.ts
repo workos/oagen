@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { diffOperations } from '../../src/differ/operations.js';
+import { extractOperations } from '../../src/parser/operations.js';
 import type { Operation, ResponseContent, TypeRef } from '../../src/ir/types.js';
 
 const listUsers: Operation = {
@@ -227,6 +228,136 @@ describe('diffOperations — response content types', () => {
       responseChanged: false,
       responseContentTypeChanges: [{ statusCode: 201, added: ['application/x-ndjson'], classification: 'additive' }],
       classification: 'additive',
+    });
+  });
+});
+
+describe('diffOperations — response content types, as the parser builds them', () => {
+  /** The operations the parser extracts from an inline paths object. */
+  const parsed = (paths: Record<string, unknown>): Operation[] =>
+    extractOperations(paths as never).services.flatMap((s) => s.operations);
+  const ref = (name: string) => ({ schema: { $ref: `#/components/schemas/${name}` } });
+
+  const card = (notFound: Record<string, unknown>) => ({
+    '/pets/{petId}/card': {
+      get: {
+        operationId: 'renderPetCard',
+        responses: {
+          '200': {
+            description: 'ok',
+            content: { 'application/pdf': { schema: { type: 'string', format: 'binary' } } },
+          },
+          '404': { description: 'missing', content: notFound },
+        },
+      },
+    },
+  });
+  const jsonAndHtml = card({ 'application/json': ref('Error'), 'text/html': { schema: { type: 'string' } } });
+  // A lone application/json error with a schema carries no lists in the IR.
+  const jsonOnly = card({ 'application/json': ref('Error') });
+
+  it('reports a 404 that loses text/html but keeps its JSON schema as breaking, though the IR drops its lists', () => {
+    expect(parsed(jsonOnly)[0].errors[0].contentTypes).toBeUndefined();
+    const changes = diffOperations('Pets', parsed(jsonAndHtml), parsed(jsonOnly));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      errorsChanged: false,
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [
+        { statusCode: 404, added: [], removed: ['text/html'], retyped: [], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports a listless JSON-only 404 that gains text/html as additive', () => {
+    const changes = diffOperations('Pets', parsed(jsonOnly), parsed(jsonAndHtml));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      errorsChanged: false,
+      responseContentTypeChanges: [
+        { statusCode: 404, added: ['text/html'], removed: [], retyped: [], classification: 'additive' },
+      ],
+      classification: 'additive',
+    });
+  });
+
+  it('reports nothing for a listless JSON-only error on both sides', () => {
+    expect(diffOperations('Pets', parsed(jsonOnly), parsed(jsonOnly))).toHaveLength(0);
+  });
+
+  it('reports an alternate 2xx whose own body and vendor body both change, which no other comparison covers', () => {
+    const startJob = (type: string) => ({
+      '/jobs': {
+        post: {
+          operationId: 'startJob',
+          responses: {
+            '200': { description: 'running', content: { 'application/json': ref('Job') } },
+            '201': {
+              description: 'started',
+              content: { 'application/json': { schema: { type } }, 'application/vnd.job+json': { schema: { type } } },
+            },
+          },
+        },
+      },
+    });
+    const changes = diffOperations('Jobs', parsed(startJob('string')), parsed(startJob('integer')));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { statusCode: 201, retyped: ['application/json', 'application/vnd.job+json'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports a secondary body that comes to equal the primary type on one side only', () => {
+    const report = (vendor: string) => ({
+      '/reports': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': ref('Report'), 'application/vnd.report+json': ref(vendor) },
+            },
+          },
+        },
+      },
+    });
+    const changes = diffOperations('Reports', parsed(report('Thing')), parsed(report('Report')));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/vnd.report+json'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it("leaves the primary's own retype to responseChanged even when its secondary body is identical", () => {
+    const report = (primary: string) => ({
+      '/reports': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': ref(primary), 'application/json; charset=utf-8': ref(primary) },
+            },
+          },
+        },
+      },
+    });
+    const changes = diffOperations('Reports', parsed(report('Report')), parsed(report('Thing')));
+    expect(changes).toHaveLength(1);
+    // The charset variant is a separate object, so it is not the own entry and its retype is reported.
+    expect(changes[0]).toMatchObject({
+      responseChanged: true,
+      responseContentTypeChanges: [{ retyped: ['application/json; charset=utf-8'], classification: 'breaking' }],
+      classification: 'breaking',
     });
   });
 });
