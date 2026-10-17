@@ -2254,3 +2254,9 @@ function extractResponses(
     envelopeCompanions,
   };
 }
+
+/**
+ * Shared with the inline-model merge passes, which decide whether two
+ * same-named inline models are the same shape but for `deprecated` by it.
+ */
+export { modelFingerprint };

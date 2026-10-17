@@ -9,7 +9,11 @@ import {
   deprecatedEntry,
 } from '../../src/parser/schemas.js';
 import { extractOperations } from '../../src/parser/operations.js';
-import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
+import {
+  collapseJsonSuffixModels,
+  mergeInlineResponseModels,
+  mergeFieldInlineModels,
+} from '../../src/parser/normalize-inline-models.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import type { Model } from '../../src/ir/types.js';
 
@@ -441,6 +445,55 @@ describe('collapseJsonSuffixModels – deprecated', () => {
       expect(merged.map((m) => m.name)).toEqual(['Widget', 'Gadget']);
       expect(merged.find((m) => m.name === 'Widget')).not.toHaveProperty('deprecated');
       expect(merged.find((m) => m.name === 'Gadget')).toMatchObject({ deprecated: true });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('inline-model merges – deprecated', () => {
+  const str = { kind: 'primitive', type: 'string' } as const;
+  /** A `Widget` inline model with one string field `k`. */
+  const widget = (deprecated: boolean, required: boolean): Model => ({
+    name: 'Widget',
+    fields: [{ name: 'k', type: str, required }],
+    ...(deprecated ? { deprecated: true } : {}),
+  });
+  const describeModel = (m: Model | undefined) => m && { deprecated: m.deprecated, kRequired: m.fields[0]?.required };
+  const swapWarnings = (warn: { mock: { calls: unknown[][] } }) =>
+    warn.mock.calls.filter(([message]) => String(message).includes('both deprecated and live'));
+
+  it('does not swap in a live copy whose requiredness differs (the reviewer’s case)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // Deprecated with optional `k`, then live with required `k`: not
+      // interchangeable, so the merge keeps its usual first definition — the
+      // deprecated response never starts promising `k`.
+      const first = mergeInlineResponseModels([], [widget(true, false), widget(false, true)]);
+      expect(first.map(describeModel)).toEqual([{ deprecated: true, kRequired: false }]);
+      // The other order keeps the live, required one for the same reason.
+      const second = mergeInlineResponseModels([], [widget(false, true), widget(true, false)]);
+      expect(second.map(describeModel)).toEqual([{ deprecated: undefined, kRequired: true }]);
+      // And an existing inline model is not replaced by a differing live copy.
+      const kept = mergeFieldInlineModels([widget(true, false)], [widget(false, true)], new Set());
+      expect(kept.map(describeModel)).toEqual([{ deprecated: true, kRequired: false }]);
+      expect(swapWarnings(warn)).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the live copy when the two are identical but for the flag, and says so', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const response = mergeInlineResponseModels([], [widget(true, true), widget(false, true)]);
+      expect(response.map(describeModel)).toEqual([{ deprecated: undefined, kRequired: true }]);
+      const field = mergeFieldInlineModels([widget(true, true)], [widget(false, true)], new Set());
+      expect(field.map(describeModel)).toEqual([{ deprecated: undefined, kRequired: true }]);
+      expect(swapWarnings(warn)).toHaveLength(2);
+      // A component's own flag is authoritative: it is never replaced.
+      const component = mergeFieldInlineModels([widget(true, true)], [widget(false, true)], new Set(['Widget']));
+      expect(component.map(describeModel)).toEqual([{ deprecated: true, kRequired: true }]);
     } finally {
       warn.mockRestore();
     }
@@ -1126,5 +1179,47 @@ describe('parseSpec – deprecated', () => {
         label,
       ).toEqual(['etag']);
     }
+  });
+
+  it('never flips a shared inline response model’s requiredness when only deprecation differs', async () => {
+    const response = (operationId: string, schema: unknown) => ({
+      get: { operationId, responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } } },
+    });
+    const widget = (over: Record<string, unknown>) => ({
+      type: 'object',
+      properties: { object: { const: 'widget' }, k: { type: 'string' } },
+      ...over,
+    });
+    const describeWidget = (spec: Awaited<ReturnType<typeof parseSpec>>) => {
+      const models = spec.models.filter((m) => m.name === 'Widget');
+      return models.map((m) => ({
+        deprecated: m.deprecated,
+        kRequired: m.fields.find((f) => f.name === 'k')?.required,
+      }));
+    };
+    const parse = async (label: string, paths: Record<string, unknown>) =>
+      describeWidget(await parseSpec(await writeSpec(`${label}.json`, specDoc({}, paths))));
+
+    // The reviewer's case: deprecated with optional `k`, live with required
+    // `k`, both named `Widget` from the shared const. Not interchangeable, so
+    // the merge keeps whichever came first — exactly as before — and the
+    // deprecated endpoint never starts promising `k`.
+    const legacyOptional = response('getLegacy', widget({ deprecated: true }));
+    const liveRequired = response('getLive', widget({ required: ['k'] }));
+    expect(await parse('differ-legacy-first', { '/legacy': legacyOptional, '/live': liveRequired })).toEqual([
+      { deprecated: true, kRequired: false },
+    ]);
+    expect(await parse('differ-live-first', { '/live': liveRequired, '/legacy': legacyOptional })).toEqual([
+      { deprecated: undefined, kRequired: true },
+    ]);
+
+    // Identical but for the flag: the live definition wins in either order.
+    const legacyRequired = response('getLegacy', widget({ deprecated: true, required: ['k'] }));
+    expect(await parse('same-legacy-first', { '/legacy': legacyRequired, '/live': liveRequired })).toEqual([
+      { deprecated: undefined, kRequired: true },
+    ]);
+    expect(await parse('same-live-first', { '/live': liveRequired, '/legacy': legacyRequired })).toEqual([
+      { deprecated: undefined, kRequired: true },
+    ]);
   });
 });

@@ -1,5 +1,6 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
+import { modelFingerprint } from './operations.js';
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
@@ -20,11 +21,13 @@ function keepLargestByName(models: Model[]): Model[] {
     }
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
-    } else if (existing.deprecated && !model.deprecated && haveSameFields(existing, model)) {
-      // Same shape, but the earlier copy is deprecated and this one is not.
-      // The shared name must not carry deprecation onto every live reference,
-      // so the live definition is kept; the deprecated schema's own field or
-      // operation still carries its flag.
+    } else if (differOnlyByDeprecation(existing, model) && !model.deprecated) {
+      // Identical in everything but the flag, the earlier copy deprecated and
+      // this one not. The shared name must not carry deprecation onto every
+      // live reference, so the live definition is kept; the deprecated
+      // schema's own field or operation still carries its flag. A copy that
+      // differs in anything else — requiredness, a type, a limit — is not
+      // interchangeable and takes the usual largest-or-first choice above.
       console.warn(
         `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
       );
@@ -32,6 +35,21 @@ function keepLargestByName(models: Model[]): Model[] {
     }
   }
   return [...byName.values()];
+}
+
+/**
+ * Whether `a` and `b` are the same model but for `deprecated` — one flagged,
+ * the other not, and otherwise identical in everything the header registry's
+ * `modelFingerprint` reads: every field's name, type, requiredness, limits,
+ * default and access flags, and the model's own limits, type parameters and
+ * discriminator (names and documentation aside). Only such a pair is
+ * interchangeable under one name; a difference in requiredness alone would
+ * make a deprecated response promise a field the wire may omit.
+ */
+function differOnlyByDeprecation(a: Model, b: Model): boolean {
+  if (!!a.deprecated === !!b.deprecated) return false;
+  const shape = (m: Model): string => modelFingerprint({ ...m, deprecated: undefined });
+  return shape(a) === shape(b);
 }
 
 /**
@@ -148,16 +166,17 @@ export function mergeFieldInlineModels(
         );
       }
     } else if (
-      existing.deprecated &&
       !model.deprecated &&
       componentNames &&
       !componentNames.has(model.name) &&
-      haveSameFields(existing, model)
+      differOnlyByDeprecation(existing, model)
     ) {
-      // Two inline models of one name and shape, the earlier deprecated and
-      // this one live: keep the live definition under the shared name so
-      // deprecation does not reach every reference. A component's own flag,
-      // by contrast, is authoritative and is never replaced.
+      // Two inline models of one name, identical but for the flag, the
+      // earlier deprecated and this one live: keep the live definition under
+      // the shared name so deprecation does not reach every reference. A
+      // component's own flag, by contrast, is authoritative and is never
+      // replaced, and a copy that differs in anything else keeps the earlier
+      // definition exactly as before.
       console.warn(
         `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
       );
