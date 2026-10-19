@@ -143,7 +143,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `requestBody?` — `TypeRef` of the request body
   - `requestBodyEncoding?` — `json` | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization
   - `requestBodyRequired?` — whether the caller must send the body; present exactly when `requestBody` is
-  - `response` — `TypeRef` of the primary response: the lowest 2xx with a body, else the lowest declared 2xx/3xx
+  - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`string` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
   - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag
   - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
@@ -221,6 +221,9 @@ Mostly static code with namespace interpolation. Required error types:
 ## Config
 
 Configuration class/module with: `api_key`, `base_url`, `max_retries`, `timeout`. Environment variable default for API key.
+
+- `base_url` defaults to `spec.baseUrl` — the first `servers` entry with each variable's `default` filled in (`https://eu.api.example.com/v1`, never the `{region}` template) — and stays overridable by the caller.
+- When `spec.servers` has more than one entry, or an entry declares `variables`, expose the choice (named constants, or an environment/region picker) instead of only the default. Each entry keeps its `url` template, `description` and `variables` (`default`, `enum`, `description`); `resolveServerUrl(entry)` from `@workos/oagen` fills the defaults exactly as the parser produced `baseUrl`, so do not re-implement the template substitution. `check-emitter-parity` reports `ApiSpec.servers` as a gap when an emitter never reads it.
 
 ---
 

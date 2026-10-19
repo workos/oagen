@@ -117,6 +117,7 @@ A missing kind means an entire category of types won't generate correctly.
 #### Model
 
 - `description` — Model-level doc comment
+- `deprecated` — Deprecation marker on models (present, and `true`, only when the schema says `deprecated: true`)
 - `typeParams` — Generic type parameters
 - `constraints` — Object-level limits (`minProperties`, `maxProperties`, `dependentRequired`)
 
@@ -130,6 +131,12 @@ A missing kind means an entire category of types won't generate correctly.
 - `example` — Example value annotation
 - `examples` — Every example value (the list `example` is drawn from)
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or value checks
+
+#### Enum
+
+- `default` — The schema's `default:` value, for a default-value annotation
+- `externalDocs` — Link to external documentation, for a `@see`-style tag
+- `deprecated` — Deprecation marker on enums (present, and `true`, only when the component enum schema says `deprecated: true`)
 
 #### EnumValue
 
@@ -242,6 +249,9 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
+| `Model.deprecated`           | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                     |
+| `Enum.deprecated`            | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                        |
+| `Enum.default`               | Document the enum's default value                                                                                                               |
 | `Parameter.default`          | Document default value                                                                                                                          |
 | `Parameter.example`          | Document example value                                                                                                                          |
 | `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                     |

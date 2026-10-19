@@ -157,10 +157,15 @@ export interface Operation {
   requestBodyRequired?: boolean;
   /**
    * The primary success response's body type: the lowest declared status code
-   * from 200 to 399 whose type is not `unknown` — in practice the lowest 2xx
-   * with a body, since a 3xx entry is always `unknown` — falling back to the
-   * lowest declared code (a bodiless 2xx, or a 3xx when no 2xx is declared).
-   * `responseHeaders` and `responseDescription` come from the same entry.
+   * from 200 to 399 whose type is not `unknown` — the lowest 2xx with a typed
+   * body, so a `200` left `unknown` by the media-type rules (a schema-less
+   * `text/csv`) yields to a `201` typed from a schema, and a 3xx entry (always
+   * `unknown`) never wins over a typed 2xx — falling back to the lowest
+   * declared code (an untyped 2xx, or a 3xx when no 2xx is declared).
+   * `responseHeaders` and `responseDescription` come from the same entry. An
+   * operation declaring no 2xx or 3xx response at all (only `default`, or only
+   * a `404`) keeps the parser's initial `{ kind: 'primitive', type: 'string' }`
+   * here, with no `responseHeaders` or `responseDescription`.
    */
   response: TypeRef;
   /**
@@ -196,7 +201,8 @@ export interface Operation {
    * and `301` + `302` all set it, while a lone `200` (or a lone `302`) leaves
    * it `undefined` and `response` / `responseHeaders` / `responseDescription`
    * describe that single response alone. 4xx and 5xx responses go to
-   * `errors`; `default` and 1xx responses are not carried.
+   * `errors`; `default`, 1xx and range (`2XX`, `4XX`) responses are not
+   * carried.
    */
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
