@@ -2557,6 +2557,281 @@ describe('operation summary and description with empty or whitespace-only text',
   });
 });
 
+describe('fallback operation names stay unique within a service (issue #208)', () => {
+  const ok = { responses: { '204': { description: 'ok' } } };
+  const withParam = (name: string) => ({
+    parameters: [{ name, in: 'path' as const, required: true, schema: { type: 'string' } }],
+    ...ok,
+  });
+  /** `METHOD /path` → operation name, across every service. */
+  const names = (paths: Parameters<typeof extractOperations>[0]) =>
+    Object.fromEntries(
+      extractOperations(paths).services.flatMap((s) =>
+        s.operations.map((o) => [`${o.httpMethod.toUpperCase()} ${o.path}`, o.name]),
+      ),
+    );
+
+  it('names the issue repro without repeating a word, using the path parameter that tells the paths apart', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        names({
+          '/v1/notes': { get: ok },
+          '/v1/{teamId}/notes': { get: withParam('teamId') },
+          '/v1/notes/all': { delete: ok },
+          '/v1/{teamId}/notes/all': { delete: withParam('teamId') },
+        }),
+      ).toEqual({
+        // All four sit in one `Notes` service under the `/v1` root (#224), so
+        // the service word is not echoed, and the parameter does the rest.
+        'GET /v1/notes': 'list',
+        'GET /v1/{teamId}/notes': 'listByTeamId',
+        'DELETE /v1/notes/all': 'deleteAll',
+        'DELETE /v1/{teamId}/notes/all': 'deleteAllByTeamId',
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('never echoes the API root or the service segment into a qualifier', () => {
+    // Review examples on #224: `DELETE /api/v1/notes/all` must not become
+    // `deleteAllV1Notes`, and the deeper context of `/api/stats/stats/stores`
+    // must not repeat the `Stats` its service was named from.
+    expect(
+      names({
+        '/api/v1/notes/all': { delete: ok },
+        '/api/v1/{teamId}/notes/all': { delete: withParam('teamId') },
+      }),
+    ).toEqual({
+      'DELETE /api/v1/notes/all': 'deleteAll',
+      'DELETE /api/v1/{teamId}/notes/all': 'deleteAllByTeamId',
+    });
+    const { services } = extractOperations({ '/api/stores': { get: ok }, '/api/stats/stats/stores': { get: ok } });
+    expect(services.map((s) => [s.name, s.operations.map((o) => o.name)])).toEqual([
+      ['Stores', ['list']],
+      ['Stats', ['listStores']],
+    ]);
+  });
+
+  it('qualifies each HTTP method separately, so sibling methods get parallel names', () => {
+    expect(
+      names({
+        '/v1/notes': { get: ok, post: ok },
+        '/v1/{teamId}/notes': { get: withParam('teamId'), post: withParam('teamId') },
+      }),
+    ).toEqual({
+      'GET /v1/notes': 'list',
+      'POST /v1/notes': 'create',
+      'GET /v1/{teamId}/notes': 'listByTeamId',
+      'POST /v1/{teamId}/notes': 'createByTeamId',
+    });
+  });
+
+  it('appends one By<Param> per parameter, in path order, after the deeper path context', () => {
+    expect(
+      names({
+        '/orgs/teams/members': { get: ok },
+        '/orgs/{orgId}/teams/members': { get: withParam('orgId') },
+        '/orgs/{orgId}/teams/{teamId}/members': { get: withParam('orgId') },
+      }),
+    ).toEqual({
+      'GET /orgs/teams/members': 'listMembersTeams',
+      'GET /orgs/{orgId}/teams/members': 'listMembersTeamsByOrgId',
+      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersTeamsByOrgIdByTeamId',
+    });
+  });
+
+  it('does not repeat a deeper path context the name already ends with', () => {
+    expect(
+      names({
+        '/orgs/notes/{id}/notes': { get: withParam('id') },
+        '/orgs/{x}/notes/{id}/notes': { get: withParam('x') },
+      }),
+    ).toEqual({
+      'GET /orgs/notes/{id}/notes': 'listNotesById',
+      'GET /orgs/{x}/notes/{id}/notes': 'listNotesByXById',
+    });
+  });
+
+  it('collapses a word the deeper path context repeats, in a row or against the end of the name', () => {
+    expect(
+      names({
+        '/org/teams': { get: ok },
+        '/org/analytics/analytics/teams': { get: ok },
+        '/org/companies': { get: ok },
+        '/org/analytics/analytics/analytics/companies': { get: ok },
+        '/org/users': { get: ok },
+        '/org/users/analytics/users': { get: ok },
+      }),
+    ).toEqual({
+      'GET /org/teams': 'listTeams',
+      'GET /org/analytics/analytics/teams': 'listTeamsAnalytics',
+      'GET /org/companies': 'listCompanies',
+      'GET /org/analytics/analytics/analytics/companies': 'listCompaniesAnalytics',
+      'GET /org/users': 'listUsers',
+      'GET /org/users/analytics/users': 'listUsersAnalytics',
+    });
+  });
+
+  it("tells a three-way collision apart by each path's own parameters", () => {
+    expect(
+      names({
+        '/v1/notes': { get: ok },
+        '/v1/{teamId}/notes': { get: withParam('teamId') },
+        '/v1/{orgId}/notes': { get: withParam('orgId') },
+      }),
+    ).toEqual({
+      'GET /v1/notes': 'list',
+      'GET /v1/{teamId}/notes': 'listByTeamId',
+      'GET /v1/{orgId}/notes': 'listByOrgId',
+    });
+  });
+
+  it('falls back to a silent numeric suffix when the paths flatten to the same words, whatever the document order', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const expected = {
+        'GET /v1/{userId}/notes': 'list',
+        'GET /v1/{user_id}/notes': 'list2',
+      };
+      expect(
+        names({
+          '/v1/{userId}/notes': { get: withParam('userId') },
+          '/v1/{user_id}/notes': { get: withParam('user_id') },
+        }),
+      ).toEqual(expected);
+      expect(
+        names({
+          '/v1/{user_id}/notes': { get: withParam('user_id') },
+          '/v1/{userId}/notes': { get: withParam('userId') },
+        }),
+      ).toEqual(expected);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('allocates suffixes in name order when two groups reach the same suffixed name, whatever the document order', () => {
+    // Twelve spellings that all flatten to `listNotes`, whose suffixes run up to
+    // `listNotes12`, and two that flatten to `listNotes1`, whose first suffix is
+    // also `listNotes12`. The `listNotes` group is served first by name, so the
+    // second `listNotes1` path gets `listNotes13` however the document is ordered.
+    const twelve = [
+      '/x/notes',
+      '/x/Notes',
+      '/x/NOTES',
+      '/x/notes_',
+      '/x/notes-',
+      '/x/notes.',
+      '/x/_notes',
+      '/x/-notes',
+      '/x/.notes',
+      '/x/notes__',
+      '/x/notes--',
+      '/x/notes..',
+    ];
+    const two = ['/x/notes1', '/x/notes_1'];
+    const entries = (paths: string[]) => paths.map((path) => [path, { get: ok }] as const);
+    const orders = [
+      [...entries(twelve), ...entries(two)],
+      [...entries(two), ...entries(twelve)],
+      [...entries(twelve), ...entries(two)].reverse(),
+    ];
+
+    const results = orders.map((order) => names(Object.fromEntries(order)));
+    expect(results[1]).toEqual(results[0]);
+    expect(results[2]).toEqual(results[0]);
+    expect(new Set(Object.values(results[0])).size).toBe(14);
+    expect(results[0]['GET /x/-notes']).toBe('listNotes');
+    expect(results[0]['GET /x/notes1']).toBe('listNotes1');
+    expect(results[0]['GET /x/notes_1']).toBe('listNotes13');
+  });
+
+  it('keeps same-path PUT and PATCH on one name while a third path gets the suffix', () => {
+    expect(
+      names({
+        '/things/{userId}': { put: withParam('userId'), patch: withParam('userId') },
+        '/things/{user_id}': { put: withParam('user_id') },
+      }),
+    ).toEqual({
+      'PUT /things/{userId}': 'update',
+      'PATCH /things/{userId}': 'update',
+      'PUT /things/{user_id}': 'update2',
+    });
+  });
+
+  it('skips a numeric suffix another operation already uses', () => {
+    expect(
+      names({
+        '/x/{userId}/notes': { get: withParam('userId') },
+        '/x/{user_id}/notes': { get: withParam('user_id') },
+        '/x/other': { get: { operationId: 'listNotes2', ...ok } },
+      }),
+    ).toEqual({
+      'GET /x/{userId}/notes': 'listNotes',
+      'GET /x/{user_id}/notes': 'listNotes3',
+      'GET /x/other': 'listNotes2',
+    });
+  });
+
+  it('never renames an operationId-named operation; a colliding path-named one is qualified instead', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // The path-named operation comes first in the document and still yields.
+      expect(
+        names({
+          '/x/{teamId}/notes': { get: withParam('teamId') },
+          '/x/notes': { get: { operationId: 'listNotes', ...ok } },
+        }),
+      ).toEqual({
+        'GET /x/{teamId}/notes': 'listNotesByTeamId',
+        'GET /x/notes': 'listNotes',
+      });
+      // When the path-named operation has nothing of its own to add, it takes the suffix.
+      expect(
+        names({
+          '/x/notes': { get: ok },
+          '/x/{teamId}/notes': { get: { operationId: 'listNotes', ...withParam('teamId') } },
+        }),
+      ).toEqual({
+        'GET /x/notes': 'listNotes2',
+        'GET /x/{teamId}/notes': 'listNotes',
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('suffixes a reused operationId with a warning instead of appending path words to both', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        names({
+          '/x/notes': { get: { operationId: 'listNotes', ...ok } },
+          '/x/items': { get: { operationId: 'listNotes', ...ok } },
+        }),
+      ).toEqual({
+        // `/x/items` sorts before `/x/notes`, so it keeps the name regardless of document order.
+        'GET /x/notes': 'listNotes2',
+        'GET /x/items': 'listNotes',
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(
+        /^\[oagen\] Warning: Operations GET \/x\/items and GET \/x\/notes in service X/,
+      );
+      expect(warn.mock.calls[0][0]).toMatch(
+        /both take the name "listNotes" from their operationId; the latter is renamed "listNotes2"/,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe('extractOperations – path-named services skip the API root (issue #209)', () => {
   type Paths = NonNullable<Parameters<typeof extractOperations>[0]>;
   const responses = { '200': { description: 'ok' } };
@@ -2653,12 +2928,13 @@ describe('extractOperations – path-named services skip the API root (issue #20
     ]);
   });
 
-  it('qualifies parameter-only collisions under a root only, leaving root-less names as they were', () => {
-    // Without a root the By<Param> pass does not run, so a pair main left as
-    // duplicates stays exactly as main leaves it; the rooted pair is told apart.
+  it('qualifies parameter-only collisions by their parameters, under a root and without one alike', () => {
+    // Fallback names are unique within every service (#208): the root-less
+    // pair that once stayed a duplicate `listTeamsTeams` is told apart by its
+    // parameter just as the rooted pair is.
     expect(layout({ '/users/teams': get, '/users/{id}/teams': get })).toEqual([
-      'Users.listTeamsTeams GET /users/teams',
-      'Users.listTeamsTeams GET /users/{id}/teams',
+      'Users.listTeams GET /users/teams',
+      'Users.listTeamsById GET /users/{id}/teams',
     ]);
     expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
       'Notes.list GET /v1/notes',
@@ -2731,10 +3007,10 @@ describe('extractOperations – path-named services skip the API root (issue #20
     expect(layout(rooted).map((line) => line.replace(' /api/v1/', ' /'))).toEqual(layout(bare));
     expect(layout(rooted)).toMatchInlineSnapshot(`
       [
-        "Admin.listDocumentTypesDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
-        "Admin.listDocumentTypesDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
-        "Core.listPermissionsPermissionsAuth GET /api/v1/core/auth/permissions",
-        "Core.listPermissionsPermissionsGlobal GET /api/v1/core/global/permissions",
+        "Admin.listDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
+        "Admin.listDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
+        "Core.listPermissionsAuth GET /api/v1/core/auth/permissions",
+        "Core.listPermissionsGlobal GET /api/v1/core/global/permissions",
         "Documents.delete DELETE /api/v1/documents/{id}",
         "Documents.list GET /api/v1/documents",
       ]

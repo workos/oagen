@@ -321,8 +321,9 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
-  // Operations named from the method and path rather than an operationId;
-  // only their names are qualified further when they collide.
+  // Operations named from the method and path rather than an operationId.
+  // Only these may be renamed when names collide within a service (see
+  // disambiguateOperationNames); a name taken from an operationId is kept as is.
   const pathNamed = new Set<Operation>();
   // One registry for the whole spec, seeded with the component models: a
   // header model's name must not collide with a differently shaped component
@@ -410,8 +411,8 @@ export function extractOperations(
   // Disambiguate operation names within each service.
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
-  for (const [, operations] of serviceMap) {
-    disambiguateOperationNames(operations, pathNamed, (op) =>
+  for (const [serviceName, operations] of serviceMap) {
+    disambiguateOperationNames(operations, pathNamed, serviceName, (op) =>
       tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot),
     );
   }
@@ -773,97 +774,142 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
 /**
  * Detect and resolve name collisions within a service's operations.
  *
- * When multiple operations share the same name (e.g., several "list" from
- * different sub-resources), disambiguate by appending the resource noun
- * from the path. Only renames operations on DIFFERENT paths — same-name
- * operations on the same path (e.g., PUT + PATCH both "update") are left as-is
- * since they represent the same logical resource.
+ * A name taken from an `operationId` is the author's choice and is never
+ * rewritten here. A name derived from the method and path (inferOperationName)
+ * is only as unique as the path words it was built from, so when operations on
+ * different paths share one, the path-named operations are qualified until
+ * every path in the service has a name of its own. Same-name operations on
+ * the same path (PUT + PATCH both "update") are left as-is since they
+ * represent the same logical resource.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
- * root or the service segment into the name. Names that still collide after
- * both, and whose paths differ only by their parameters, are told apart by
- * `By<Param>` — but only for operations in `pathNamed` that sit under a root,
- * the population the root rule regroups; a name taken from an operationId is
- * never rewritten there, and nothing without a root is named any differently
- * than before the rule existed.
+ * root or the service segment into a name: `DELETE /api/v1/notes/all` in
+ * `Notes` is `deleteAll`, never `deleteAllV1Notes`.
+ *
+ * Qualifiers are tried in order, each on every group still colliding after
+ * the one before. A qualifier never puts the same word twice in a row into a
+ * name, whether the name already ends with it (`listNotes` never becomes
+ * `listNotesNotes`) or the qualifier repeats it itself
+ * (`/api/analytics/analytics/teams` → `listTeamsAnalytics`), compared word by
+ * word on the camelCase boundary rather than as a substring:
+ *
+ *   1. the resource noun (inferResourceFromPath);
+ *   2. the path segments between the service and the resource
+ *      (inferDeeperContext): `GET /users/{id}/sso/factors` next to
+ *      `GET /users/{id}/factors` → `listFactorsSso`;
+ *   3. `By<Param>` for each path parameter, in path order, when the
+ *      parameters are what tell the paths apart: `GET /v1/notes` keeps `list`
+ *      while `GET /v1/{teamId}/notes` becomes `listByTeamId`, and with no
+ *      root `GET /users/teams` keeps `listTeams` while `GET /users/{id}/teams`
+ *      becomes `listTeamsById`;
+ *   4. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
+ *      sees two methods with one name in one class. An operationId-named
+ *      operation keeps the plain name over a path-named one; otherwise the
+ *      lexically first path keeps it, whatever the document order. The suffix
+ *      is silent for a path-derived name, like a hashed inline model name; it
+ *      comes with a warning when the document reuses an operationId, since
+ *      that changes a name the author chose.
  */
 function disambiguateOperationNames(
   operations: Operation[],
   pathNamed: ReadonlySet<Operation>,
+  serviceName: string,
   apiRootLengthOf: (op: Operation) => number,
 ): void {
-  // Group by name
+  const rename = (op: Operation, name: string) => {
+    (op as { name: string }).name = name;
+  };
+
+  const qualifiers: Array<(group: Operation[]) => void> = [
+    (group) => {
+      for (const op of group) {
+        if (!pathNamed.has(op)) continue;
+        rename(op, appendQualifier(op.name, inferResourceFromPath(op.path, apiRootLengthOf(op))));
+      }
+    },
+    (group) => {
+      for (const op of group) {
+        if (!pathNamed.has(op)) continue;
+        rename(op, appendQualifier(op.name, inferDeeperContext(op.path, apiRootLengthOf(op))));
+      }
+    },
+    (group) => {
+      // Parameters only help when they differ between the colliding paths:
+      // `/v1/{id}/notes` and `/v1/{id}/Notes` would both gain `ById` and
+      // still collide, further from the plain name. Every path-named
+      // operation takes part, under an API root or not: a service must not
+      // hand an emitter two methods with one name.
+      const suffixes = group.map((op) => inferByParamsSuffix(op.path));
+      if (new Set(suffixes).size <= 1) return;
+      group.forEach((op, i) => {
+        if (pathNamed.has(op)) rename(op, appendQualifier(op.name, suffixes[i]));
+      });
+    },
+  ];
+
+  for (const qualify of qualifiers) {
+    for (const group of collidingGroups(operations)) qualify(group);
+  }
+
+  // Groups come in name order and members are sorted below, so suffixes are
+  // allocated from the shared pool in an order that depends only on the data.
+  const taken = new Set(operations.map((op) => op.name));
+  for (const group of collidingGroups(operations)) {
+    const name = group[0].name;
+    // An operationId-named operation outranks a path-named one for the plain
+    // name; within a rank the lexically first path wins, so the outcome does
+    // not depend on document order. Operations on one path share the outcome.
+    const rank = (op: Operation) => (pathNamed.has(op) ? 1 : 0);
+    const ordered = [...group].sort((a, b) => rank(a) - rank(b) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const keeper = ordered[0];
+    const nameByPath = new Map<string, string>([[keeper.path, name]]);
+    let n = 2;
+    for (const op of ordered) {
+      let next = nameByPath.get(op.path);
+      if (next === undefined) {
+        while (taken.has(`${name}${n}`)) n++;
+        next = `${name}${n}`;
+        taken.add(next);
+        nameByPath.set(op.path, next);
+        // A path-derived name is the parser's own and is refined silently,
+        // like a hashed inline model name. A name the document chose is only
+        // changed when the document reuses it, which is worth saying.
+        if (!pathNamed.has(op)) {
+          console.warn(
+            `[oagen] Warning: Operations ${keeper.httpMethod.toUpperCase()} ${keeper.path} and ` +
+              `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
+              `"${name}" from their operationId; the latter is renamed "${next}" — give each a distinct operationId`,
+          );
+        }
+      }
+      rename(op, next);
+    }
+  }
+}
+
+/**
+ * The groups of operations that share a name but not a path, in name order.
+ * A name shared only by operations on one path (PUT + PATCH) is not a
+ * collision and is excluded.
+ *
+ * Name order, not document order: the numeric pass draws suffixed names from
+ * one pool per service, and two groups can reach the same one (`listNotes` +
+ * `12` and `listNotes1` + `2`), so whichever is served first decides. Names
+ * are unique per group, so this is a total order, and with the members of a
+ * group also sorted the whole assignment depends only on the paths.
+ */
+function collidingGroups(operations: Operation[]): Operation[][] {
   const byName = new Map<string, Operation[]>();
   for (const op of operations) {
     const group = byName.get(op.name) ?? [];
     group.push(op);
     byName.set(op.name, group);
   }
-
-  for (const [name, group] of byName) {
-    if (group.length <= 1) continue;
-
-    // Check if these are genuinely different resources (different paths)
-    // vs the same resource with different methods (PUT + PATCH)
-    const uniquePaths = new Set(group.map((op) => op.path));
-    if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
-
-    for (const op of group) {
-      const resource = inferResourceFromPath(op.path, apiRootLengthOf(op));
-      if (resource) {
-        const newName = toCamelCase(`${name}_${resource}`);
-        (op as { name: string }).name = newName;
-      }
-    }
-
-    // If disambiguation still left collisions (same sub-resource),
-    // use the full distinguishing path segment chain
-    const renamed = new Map<string, Operation[]>();
-    for (const op of group) {
-      const rGroup = renamed.get(op.name) ?? [];
-      rGroup.push(op);
-      renamed.set(op.name, rGroup);
-    }
-    for (const [, rGroup] of renamed) {
-      if (rGroup.length <= 1) continue;
-      // Still colliding — different paths map to same resource name.
-      // Use deeper path context to disambiguate.
-      for (const op of rGroup) {
-        const deeper = inferDeeperContext(op.path, apiRootLengthOf(op));
-        if (deeper) {
-          (op as { name: string }).name = toCamelCase(`${op.name}_${deeper}`);
-        }
-      }
-    }
-  }
-
-  // Path-named operations under an API root that still collide differ only
-  // by their parameters: once the root and the service segment are skipped,
-  // `GET /v1/notes` and `GET /v1/{teamId}/notes` both reach `list` in Notes
-  // with no resource or deeper context to tell them apart. `By<Param>` does,
-  // but only when the parameters differ between the colliding paths:
-  // `/v1/{id}/notes` and `/v1/{id}/Notes` would both gain `ById` and still
-  // collide, further from the plain name. Operations with no root — a
-  // root-less document, a path outside the root, a tagged operation — are
-  // left exactly as they were, duplicates included: `/users/teams` and
-  // `/users/{id}/teams` both stay `listTeamsTeams`, as before this rule.
-  const stillColliding = new Map<string, Operation[]>();
-  for (const op of operations) {
-    const group = stillColliding.get(op.name) ?? [];
-    group.push(op);
-    stillColliding.set(op.name, group);
-  }
-  for (const [, group] of stillColliding) {
-    if (new Set(group.map((op) => op.path)).size <= 1) continue;
-    const suffixes = group.map((op) => inferByParamsSuffix(op.path));
-    if (new Set(suffixes).size <= 1) continue;
-    group.forEach((op, i) => {
-      if (pathNamed.has(op) && apiRootLengthOf(op) > 0) {
-        (op as { name: string }).name = appendQualifier(op.name, suffixes[i]);
-      }
-    });
-  }
+  return [...byName.entries()]
+    .filter(([, group]) => new Set(group.map((op) => op.path)).size > 1)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, group]) => group);
 }
 
 /**
