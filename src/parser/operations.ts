@@ -11,6 +11,7 @@ import type {
   Model,
   Field,
   PaginationMeta,
+  ExternalDocs,
 } from '../ir/types.js';
 import { createHash } from 'node:crypto';
 import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
@@ -31,6 +32,7 @@ import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
+import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 
 interface PathItem {
   get?: OperationObject;
@@ -56,6 +58,7 @@ interface OperationObject {
   summary?: string;
   description?: string;
   tags?: string[];
+  externalDocs?: RawExternalDocs;
   parameters?: RawParameterObject[];
   requestBody?: RawRequestBodyObject;
   responses?: Record<string, ResponseObject>;
@@ -284,6 +287,7 @@ export interface OperationExtractionResult {
 export interface TagObject {
   name?: string;
   description?: string;
+  externalDocs?: RawExternalDocs;
 }
 
 export function extractOperations(
@@ -401,72 +405,108 @@ export function extractOperations(
 
   const declaredTags = indexDocumentTags(documentTags);
   const services: Service[] = Array.from(serviceMap.entries()).map(([name, operations]) => {
-    const description = resolveServiceDescription(name, operations, tagServiceByOperation, declaredTags);
-    // Omit the key entirely when no tag describes the service so the IR shape
-    // is unchanged for documents without tag descriptions.
-    return description === undefined ? { name, operations } : { name, description, operations };
+    const { description, externalDocs } = resolveServiceDocs(name, operations, tagServiceByOperation, declaredTags);
+    // Omit each key entirely when no tag gives it so the IR shape is
+    // unchanged for documents without tag descriptions or links.
+    return {
+      name,
+      ...(description !== undefined ? { description } : {}),
+      ...(externalDocs !== undefined ? { externalDocs } : {}),
+      operations,
+    };
   });
 
   return { services, inlineModels };
 }
 
 /**
+ * What a document tag contributes to the service it names. Both keys are
+ * absent when the tag declares neither, so a declared-but-undocumented tag is
+ * an empty record — still an entry in the index, which is what marks its
+ * service as one that must not borrow another tag's wording.
+ */
+interface TagDocs {
+  description?: string;
+  externalDocs?: ExternalDocs;
+}
+
+/**
+ * `base` with each doc field it lacks filled in from `extra`; a field `base`
+ * already has is kept. The one rule for combining tag docs — among duplicate
+ * tags in the index and among the tags a split-off service inherits from —
+ * so `description` and `externalDocs` cannot resolve by different rules.
+ */
+function fillMissingTagDocs(base: TagDocs, extra: TagDocs): TagDocs {
+  return { ...extra, ...base };
+}
+
+/**
  * Index the document's top-level `tags[]` by the service name each tag
  * produces, so a tag spelled `user_management`, `User Management`, or
  * `user-management` all map to the `UserManagement` service. Every named tag
- * is indexed — with its description when it declares a non-blank one, and
- * `undefined` otherwise — because a declared-but-undescribed tag still marks
- * its service as one that must not borrow another tag's wording. When several
- * tags normalize to the same service name, the first described one wins.
+ * is indexed — with its description when it declares a non-blank one, with
+ * its `externalDocs` when it declares a usable one, and as an empty record
+ * otherwise — because a declared-but-undocumented tag still marks its service
+ * as one that must not borrow another tag's wording. When several tags
+ * normalize to the same service name, each field is taken from the first of
+ * them that gives it, so adding a link to one spelling never changes which
+ * description the service shows.
  *
  * `parseSpec` ignored `tags` entirely before descriptions were read, so a
  * document with a malformed value — `tags` written as an object, a `null`
  * entry, a numeric `name` — used to parse and must keep parsing. Anything
- * that cannot be matched is skipped rather than thrown on.
+ * that cannot be matched is skipped rather than thrown on, and a malformed
+ * `externalDocs` is dropped the same way (see `readExternalDocs`).
  */
-function indexDocumentTags(documentTags: unknown): Map<string, string | undefined> {
-  const index = new Map<string, string | undefined>();
+function indexDocumentTags(documentTags: unknown): Map<string, TagDocs> {
+  const index = new Map<string, TagDocs>();
   if (!Array.isArray(documentTags)) return index;
   for (const tag of documentTags as unknown[]) {
     if (typeof tag !== 'object' || tag === null) continue;
-    const { name, description } = tag as TagObject;
+    const { name, description, externalDocs } = tag as TagObject;
     if (typeof name !== 'string' || name === '') continue;
     const serviceName = toPascalCase(name);
-    if (index.get(serviceName) !== undefined) continue;
     const described = typeof description === 'string' && description.trim() !== '';
-    index.set(serviceName, described ? description : undefined);
+    const docs: TagDocs = { ...(described ? { description } : {}), ...externalDocsEntry(externalDocs) };
+    index.set(serviceName, fillMissingTagDocs(index.get(serviceName) ?? {}, docs));
   }
   return index;
 }
 
 /**
- * Pick a service's description from the document's tags.
+ * Pick a service's docs — its `description` and `externalDocs` — from the
+ * document's tags. Both fields go through this one path so they cannot
+ * resolve to different tags by different rules.
  *
- * A service whose own name is a declared tag is described by that tag alone:
- * its description when it has one, nothing otherwise. Another tag's wording is
- * never borrowed for it — operations tagged `api_keys` that the path-prefix
- * split merges into `UserManagement` must not label that service "API keys".
+ * A service whose own name is a declared tag is documented by that tag alone:
+ * its description and link when it has them, nothing otherwise. Another tag's
+ * wording is never borrowed for it — operations tagged `api_keys` that the
+ * path-prefix split merges into `UserManagement` must not label that service
+ * "API keys".
  *
  * A service whose own name is not declared is one the split carved out of a
  * tag (e.g. `OrganizationDomains` from operations tagged `organizations`); it
- * inherits the description of the first described tag its operations carry.
- * Path-named services whose operations have no tag carry nothing and stay
- * undescribed.
+ * inherits each field on its own from the first tag its operations carry that
+ * gives it: the description of the first described tag, the link of the first
+ * linked one, which need not be the same tag. Path-named services whose
+ * operations have no tag carry nothing and stay undocumented.
  */
-function resolveServiceDescription(
+function resolveServiceDocs(
   serviceName: string,
   operations: Operation[],
   tagServiceByOperation: Map<Operation, string>,
-  declaredTags: Map<string, string | undefined>,
-): string | undefined {
-  if (declaredTags.has(serviceName)) return declaredTags.get(serviceName);
+  declaredTags: Map<string, TagDocs>,
+): TagDocs {
+  const declared = declaredTags.get(serviceName);
+  if (declared !== undefined) return declared;
+  let docs: TagDocs = {};
   for (const op of operations) {
     const tagService = tagServiceByOperation.get(op);
     if (tagService === undefined) continue;
-    const description = declaredTags.get(tagService);
-    if (description !== undefined) return description;
+    const inherited = declaredTags.get(tagService);
+    if (inherited !== undefined) docs = fillMissingTagDocs(docs, inherited);
   }
-  return undefined;
+  return docs;
 }
 
 function inferServiceName(path: string, tag?: string): string {
@@ -988,6 +1028,9 @@ function buildOperation(
       // description; the key is omitted (not set to undefined) when absent.
       ...(summary !== undefined ? { summary } : {}),
       description: buildDescription(summary, op.description),
+      // Same conditional shape as `summary`: present only when the document
+      // declares a usable link, absent (not undefined) otherwise.
+      ...externalDocsEntry(op.externalDocs),
       httpMethod: method,
       path,
       pathParams,
@@ -1381,7 +1424,13 @@ function extractRequestBody(
       if (!fieldSchema) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
-    inlineModels.push({ name: contextName, description: undefined, fields, ...constraintsEntry(schema) });
+    inlineModels.push({
+      name: contextName,
+      description: undefined,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...constraintsEntry(schema),
+    });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
     // by this branch. Recurse to materialize them, matching how component
@@ -1431,6 +1480,7 @@ function extractRequestBody(
         inlineModels.push({
           name: variantName,
           description: variant.description,
+          ...externalDocsEntry(variant.externalDocs),
           fields,
           ...constraintsEntry(variant),
         });
@@ -1540,6 +1590,8 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     properties,
     required: requiredFields,
     ...(schema.description ? { description: schema.description } : {}),
+    // The wrapper's link is the body's, like its description.
+    ...externalDocsEntry(schema.externalDocs),
     // The wrapper's own keywords bind every branch, so they ride along; the
     // variants' keywords are alternatives and are not carried.
     ...extractConstraints(schema),

@@ -201,6 +201,10 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     if (jsonModel.constraints || baseModel.constraints) {
       baseModel.constraints = { ...baseModel.constraints, ...jsonModel.constraints };
     }
+    // The base keeps its own documentation, link included, as it keeps its
+    // description; the Json model's link only fills in where the base has none,
+    // so folding the shape never drops the one link the document gave it.
+    if (!baseModel.externalDocs && jsonModel.externalDocs) baseModel.externalDocs = jsonModel.externalDocs;
     toRemove.add(jsonModel.name);
     rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name);
     console.warn(
