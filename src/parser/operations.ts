@@ -11,7 +11,10 @@ import type {
   Model,
   Field,
   PaginationMeta,
+  Enum,
+  EnumRef,
 } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import { createHash } from 'node:crypto';
 import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -300,6 +303,7 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  componentEnums?: Enum[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -326,9 +330,19 @@ export function extractOperations(
   // the later merge would overwrite the first. A top-level component keeps
   // its name over a child of the same name, as the merge keeps it too.
   const headerModelRegistry: HeaderModelRegistry = new Map();
+  // Likewise every enum name the component pass owns, with its members: the
+  // component enums and the inline enums of every component field (`GetPet.
+  // error422_severity` owns `GetPetError422Severity`), so an enum nested in
+  // an error body steps around one of other members (`typeErrorSchema`).
+  const enumRegistry: EnumRegistry = new Map(
+    (componentEnums ?? []).map((e) => [e.name, enumMembersKey(e.values.map((v) => v.value))]),
+  );
   for (const model of [...(componentModels ?? []), ...extractInlineModelsFromSchemas(componentSchemas)]) {
     if (!headerModelRegistry.has(model.name)) {
       headerModelRegistry.set(model.name, { fingerprint: modelFingerprint(model) });
+    }
+    for (const ref of nestedEnumRefs(model)) {
+      if (!enumRegistry.has(ref.name)) enumRegistry.set(ref.name, enumMembersKey(ref.values));
     }
   }
 
@@ -361,6 +375,7 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        enumRegistry,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -860,6 +875,7 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  enumRegistry: EnumRegistry = new Map(),
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -957,6 +973,7 @@ function buildOperation(
     serviceName: opContext,
     operationQualifier: toPascalCase(operationName),
     registry: headerModelRegistry,
+    enums: enumRegistry,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -1646,6 +1663,34 @@ interface HeaderExtractionContext {
   /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
   operationQualifier: string;
   registry: HeaderModelRegistry;
+  /**
+   * Every enum name the spec already owns with its members (`enumMembersKey`):
+   * the component enums and the inline enums of component fields, seeded up
+   * front, plus the enums nested in each error body model minted so far. Read
+   * only when typing error bodies (`typeErrorSchema`).
+   */
+  enums?: EnumRegistry;
+}
+
+/** Enum name → `enumMembersKey` of its members. */
+type EnumRegistry = Map<string, string>;
+
+/** Members of an enum, independent of order, so equal member sets compare equal. */
+function enumMembersKey(values: readonly (string | number)[]): string {
+  return values.map(String).sort().join('|');
+}
+
+/** Every inline enum (one carrying `values`) reachable from a model's field types. */
+function nestedEnumRefs(model: Model): Array<EnumRef & { values: (string | number)[] }> {
+  const refs: Array<EnumRef & { values: (string | number)[] }> = [];
+  for (const field of model.fields) {
+    walkTypeRef(field.type, {
+      enum: (ref) => {
+        if (ref.values) refs.push(ref as EnumRef & { values: (string | number)[] });
+      },
+    });
+  }
+  return refs;
 }
 
 /** Shape of a model, independent of field order: name, requiredness, and type of every field. */
@@ -1780,6 +1825,15 @@ function typeHeaderSchema(
  * later header or error model steps around it in turn — two operations whose
  * operationIds share a stem (`getPet`, `get-pet`) and declare different
  * inline 404 bodies get `GetPetError404` and `GetPetError404Body`.
+ *
+ * An enum nested in the body (`GetPetError422.severity` →
+ * `GetPetError422Severity`) is checked the same way against the enum
+ * registry: a name a component enum or component field enum owns with other
+ * members is a collision too, and the whole body steps
+ * (`GetPetError422Body`, `GetPetError422BodySeverity`) so the field's
+ * reference and the promoted enum agree by construction, as for a nested
+ * model; identical members share the existing enum. The nested enums are
+ * registered with the models.
  */
 function typeErrorSchema(
   schema: SchemaObject,
@@ -1794,16 +1848,25 @@ function typeErrorSchema(
     extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, undefined, componentSchemas);
 
     const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
-    const collides = fingerprints.some(([model, fingerprint]) => {
-      const registered = ctx.registry.get(model.name);
-      return registered !== undefined && registered.fingerprint !== fingerprint;
-    });
+    const nestedEnums = trial.flatMap(nestedEnumRefs);
+    const collides =
+      fingerprints.some(([model, fingerprint]) => {
+        const registered = ctx.registry.get(model.name);
+        return registered !== undefined && registered.fingerprint !== fingerprint;
+      }) ||
+      nestedEnums.some((ref) => {
+        const registered = ctx.enums?.get(ref.name);
+        return registered !== undefined && registered !== enumMembersKey(ref.values);
+      });
     if (collides) continue;
 
     for (const [model, fingerprint] of fingerprints) {
       if (ctx.registry.has(model.name)) continue;
       ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
       models.push(model);
+    }
+    for (const ref of nestedEnums) {
+      if (!ctx.enums?.has(ref.name)) ctx.enums?.set(ref.name, enumMembersKey(ref.values));
     }
     return schemaToTypeRef(schema, propertyName);
   }

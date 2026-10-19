@@ -962,4 +962,75 @@ describe('round 1: the reserved set covers every name the component and header p
     ]);
     expect(enumValues(both, 'GetPetError404Body')).toEqual(['absent', 'unknown']);
   });
+
+  const unprocessable = (schema: SchemaObject) => ({ '422': { description: 'unprocessable', ...json(schema) } });
+  const severityBody = obj({ severity: en(['warning', 'fatal']) });
+
+  it('an enum nested in the body steps the whole body around a component enum of the same name and other members', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet(unprocessable(severityBody)), { GetPetError422Severity: en(['x', 'y']) }),
+    );
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422Body') }]);
+    // The field reference and the promoted enum move together, as for a nested model.
+    expect(fieldTypes(ir, 'GetPetError422Body')).toEqual({
+      severity: { kind: 'enum', name: 'GetPetError422BodySeverity', values: ['warning', 'fatal'] },
+    });
+    expect(enumValues(ir, 'GetPetError422Severity')).toEqual(['x', 'y']);
+    expect(enumValues(ir, 'GetPetError422BodySeverity')).toEqual(['warning', 'fatal']);
+    expect(modelNames(ir)).not.toContain('GetPetError422');
+    expectConsistent(ir);
+  });
+
+  it('an enum nested in the body shares a component enum of the same name and the same members', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet(unprocessable(severityBody)), { GetPetError422Severity: en(['fatal', 'warning']) }),
+    );
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422') }]);
+    expect(fieldTypes(ir, 'GetPetError422')).toEqual({
+      severity: { kind: 'enum', name: 'GetPetError422Severity', values: ['warning', 'fatal'] },
+    });
+    expect(enumNames(ir)).toEqual(['GetPetError422Severity']);
+    expect(enumValues(ir, 'GetPetError422Severity')).toEqual(['fatal', 'warning']);
+    expectConsistent(ir);
+  });
+
+  it("a component field's inline enum reserves its name too (GetPet.error422_severity)", async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet(unprocessable(severityBody)), { GetPet: obj({ error422_severity: en(['x', 'y']) }) }),
+    );
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422Body') }]);
+    expect(fieldTypes(ir, 'GetPet')).toEqual({
+      error422_severity: { kind: 'enum', name: 'GetPetError422Severity', values: ['x', 'y'] },
+    });
+    expect(enumValues(ir, 'GetPetError422Severity')).toEqual(['x', 'y']);
+    expect(enumValues(ir, 'GetPetError422BodySeverity')).toEqual(['warning', 'fatal']);
+    expectConsistent(ir, ['GetPet']);
+  });
+
+  it("the enum check is scoped to error bodies: a header model's nested enum is named as before", async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        {
+          '/pets/{petId}': {
+            get: {
+              tags: ['getPet'],
+              operationId: 'getPet',
+              responses: {
+                '200': {
+                  description: 'ok',
+                  ...json(petRef),
+                  headers: { 'X-Meta': { schema: obj({ level: en(['a', 'b']) }) } },
+                },
+              },
+            },
+          },
+        },
+        { GetPetXMetaLevel: en(['x', 'y']) },
+      ),
+    );
+    expect(onlyOperation(ir).responseHeaders?.[0].type).toEqual(model('GetPetXMeta'));
+    expect(fieldTypes(ir, 'GetPetXMeta')).toEqual({
+      level: { kind: 'enum', name: 'GetPetXMetaLevel', values: ['a', 'b'] },
+    });
+  });
 });
