@@ -8,11 +8,17 @@
  * not only `deprecated`. Every `paramChanges` entry now carries
  * `paramLocation`, since the name alone no longer says which one it is about.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffOperations } from '../../src/differ/operations.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Operation, Parameter } from '../../src/ir/types.js';
+
+const fixtures = path.resolve(import.meta.dirname, '../fixtures');
 
 const pathId: Parameter = { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true };
 const queryId: Parameter = { name: 'id', type: { kind: 'primitive', type: 'string' }, required: false };
@@ -226,5 +232,98 @@ describe('diffOperations – same-name parameters in different locations', () =>
     expect(paramChangesOf(diffOperations('Pets', [withHeader], [getPet]))).toEqual([
       { kind: 'param-removed', paramName: 'X-Trace', classification: 'breaking', paramLocation: 'header' },
     ]);
+  });
+});
+
+describe('diffSpecs – end to end (issue #262 repro)', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  async function writeSpec(name: string, doc: unknown): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-diff-param-location-'));
+    dirs.push(dir);
+    const file = path.join(dir, name);
+    await fs.writeFile(file, JSON.stringify(doc));
+    return file;
+  }
+
+  it('reports the path id changing type beside an unchanged query id, breaking, and nothing for the query id', async () => {
+    const before = await parseSpec(path.join(fixtures, 'same-name-param-before.json'));
+    const after = await parseSpec(path.join(fixtures, 'same-name-param-after.json'));
+    const diff = diffSpecs(before, after);
+
+    expect(diff.changes).toHaveLength(1);
+    expect(diff.changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'getPet',
+      classification: 'breaking',
+    });
+    if (diff.changes[0].kind === 'operation-modified') {
+      expect(diff.changes[0].paramChanges).toEqual([
+        { kind: 'param-type-changed', paramName: 'id', classification: 'breaking', paramLocation: 'path' },
+      ]);
+    }
+    expect(diff.behaviorChanges).toEqual([]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 1, additive: 0, behaviorChanges: 0 });
+  });
+
+  it('reports the same change as when the path id is the only id', async () => {
+    const strip = (doc: { paths: Record<string, { get: { parameters: { in: string }[] } }> }) => {
+      doc.paths['/pets/{id}'].get.parameters = doc.paths['/pets/{id}'].get.parameters.filter((p) => p.in === 'path');
+      return doc;
+    };
+    const beforeDoc = strip(JSON.parse(await fs.readFile(path.join(fixtures, 'same-name-param-before.json'), 'utf8')));
+    const afterDoc = strip(JSON.parse(await fs.readFile(path.join(fixtures, 'same-name-param-after.json'), 'utf8')));
+    const alone = diffSpecs(
+      await parseSpec(await writeSpec('before-alone.json', beforeDoc)),
+      await parseSpec(await writeSpec('after-alone.json', afterDoc)),
+    );
+    const beside = diffSpecs(
+      await parseSpec(path.join(fixtures, 'same-name-param-before.json')),
+      await parseSpec(path.join(fixtures, 'same-name-param-after.json')),
+    );
+    expect(beside.changes).toEqual(alone.changes);
+    expect(beside.summary).toEqual(alone.summary);
+  });
+
+  it('reports only the path id becoming deprecated beside an unchanged query id (the #261 mirror case)', async () => {
+    const doc = JSON.parse(await fs.readFile(path.join(fixtures, 'same-name-param-before.json'), 'utf8'));
+    doc.paths['/pets/{id}'].get.parameters[0].deprecated = true;
+    const before = await parseSpec(path.join(fixtures, 'same-name-param-before.json'));
+    const after = await parseSpec(await writeSpec('path-deprecated.json', doc));
+    const diff = diffSpecs(before, after);
+
+    expect(diff.changes).toHaveLength(1);
+    expect(diff.changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'getPet',
+      deprecatedChanged: false,
+      classification: 'additive',
+    });
+    if (diff.changes[0].kind === 'operation-modified') {
+      expect(diff.changes[0].paramChanges).toEqual([
+        {
+          kind: 'param-deprecated-changed',
+          paramName: 'id',
+          classification: 'additive',
+          paramLocation: 'path',
+          oldDeprecated: false,
+          newDeprecated: true,
+          details: 'live → deprecated',
+        },
+      ]);
+    }
+    expect(diff.behaviorChanges).toMatchObject([
+      { kind: 'deprecated-changed', node: 'parameter', paramName: 'id', paramLocation: 'path', newDeprecated: true },
+    ]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+  });
+
+  it('reports nothing when the same document is parsed twice', async () => {
+    const a = await parseSpec(path.join(fixtures, 'same-name-param-before.json'));
+    const b = await parseSpec(path.join(fixtures, 'same-name-param-before.json'));
+    expect(diffSpecs(a, b).changes).toEqual([]);
   });
 });
