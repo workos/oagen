@@ -274,3 +274,62 @@ describe('expandDocUrls response descriptions', () => {
     expect(op.errors[0]).not.toHaveProperty('description');
   });
 });
+
+describe('expandDocUrls – externalDocs (issue #217)', () => {
+  const link = { url: '/reference/pets', description: 'See [pets](/reference/pets).' };
+  const expanded = {
+    url: '/reference/pets',
+    description: 'See [pets](https://workos.com/docs/reference/pets).',
+  };
+
+  it('expands relative links in externalDocs descriptions and keeps every url verbatim', () => {
+    const spec = minimalSpec({
+      externalDocs: link,
+      services: [
+        {
+          name: 'Pets',
+          externalDocs: link,
+          operations: [
+            {
+              name: 'listPets',
+              externalDocs: link,
+              httpMethod: 'get',
+              path: '/pets',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'primitive', type: 'string' },
+              errors: [],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      models: [{ name: 'Pet', externalDocs: link, fields: [] }],
+      enums: [{ name: 'Status', externalDocs: link, values: [{ name: 'ACTIVE', value: 'active' }] }],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    // A relative url is relative to the document, not the doc site, so the
+    // base is never prepended to it; only the CommonMark description changes.
+    expect(result.externalDocs).toEqual(expanded);
+    expect(result.services[0].externalDocs).toEqual(expanded);
+    expect(result.services[0].operations[0].externalDocs).toEqual(expanded);
+    expect(result.models[0].externalDocs).toEqual(expanded);
+    expect(result.enums[0].externalDocs).toEqual(expanded);
+  });
+
+  it('keeps a link without a description as it is and leaves the key absent on nodes without one', () => {
+    const spec = minimalSpec({
+      services: [{ name: 'Pets', externalDocs: { url: 'https://docs.example.com/pets' }, operations: [] }],
+      models: [{ name: 'Pet', fields: [] }],
+      enums: [{ name: 'Status', values: [] }],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    expect(result.services[0].externalDocs).toEqual({ url: 'https://docs.example.com/pets' });
+    expect('externalDocs' in result).toBe(false);
+    expect('externalDocs' in result.models[0]).toBe(false);
+    expect('externalDocs' in result.enums[0]).toBe(false);
+  });
+});
