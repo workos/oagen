@@ -114,6 +114,45 @@ describe('diffModels — named unions', () => {
     };
     expect(diffModels([plain], [renamed])[0]).not.toHaveProperty('variantChanges');
   });
+
+  it('reports a change of composition keyword between two unions as breaking', () => {
+    const { discriminator: _d, ...oneOf } = pet;
+    const anyOf: Model = { ...oneOf, compositionKind: 'anyOf' };
+    expect(diffModels([anyOf], [oneOf])).toEqual([
+      {
+        kind: 'model-modified',
+        name: 'Pet',
+        fieldChanges: [],
+        variantChanges: [
+          {
+            kind: 'composition-changed',
+            variant: 'oneOf',
+            classification: 'breaking',
+            details: "composition changed from 'anyOf' to 'oneOf'",
+          },
+        ],
+        classification: 'breaking',
+      },
+    ]);
+    // Becoming a union is reported through its variants, not as a composition change.
+    const plain: Model = { name: 'Pet', fields: [] };
+    const gained = diffModels([plain], [oneOf])[0];
+    expect(gained?.kind === 'model-modified' && gained.variantChanges?.map((c) => c.kind)).toEqual([
+      'variant-added',
+      'variant-added',
+    ]);
+  });
+
+  it('compares mapping entries by own key, so an inherited name is not read off the prototype', () => {
+    const withProto: Model = {
+      ...pet,
+      discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog', constructor: 'ConstructorPet' } },
+    };
+    expect(diffModels([pet], [withProto])[0]).toMatchObject({
+      variantChanges: [{ kind: 'discriminator-changed', details: "mapping changed for 'constructor'" }],
+    });
+    expect(diffModels([withProto], [withProto])).toEqual([]);
+  });
 });
 
 const op = (over: Partial<Operation>): Operation => ({

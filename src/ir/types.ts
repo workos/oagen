@@ -606,6 +606,32 @@ export function collectModelTypeRefs(model: Model): TypeRef[] {
 }
 
 /**
+ * Rename the models a model refers to: every `model` ref in its fields' types
+ * and its union variants, and every `discriminator.mapping` target, that
+ * `renames` maps is pointed at the new name. Each reference is looked up
+ * once, so a map `{ A → B, B → C }` moves `A` to `B`, never on to `C`. The
+ * model's own `name` is left to the caller. Every rename and fold site goes
+ * through this, so a dispatcher's mapping can never keep naming a model that
+ * was renamed away while its variants moved on.
+ */
+export function renameModelRefs(model: Model, renames: ReadonlyMap<string, string>): void {
+  for (const ref of collectModelTypeRefs(model)) {
+    walkTypeRef(ref, {
+      model: (r) => {
+        const renamed = renames.get(r.name);
+        if (renamed !== undefined) r.name = renamed;
+      },
+    });
+  }
+  const mapping = model.discriminator?.mapping;
+  if (!mapping) return;
+  for (const [value, target] of Object.entries(mapping)) {
+    const renamed = renames.get(target);
+    if (renamed !== undefined) mapping[value] = renamed;
+  }
+}
+
+/**
  * Collect all model names referenced (directly or transitively) by a TypeRef.
  */
 export function collectModelRefs(ref: TypeRef): string[] {

@@ -1291,7 +1291,9 @@ function mapVariantToDiscriminatorEntry(
 ): string | null {
   const value = getConstPropertyValue(variant, discriminator.property);
   if (value === null) return null;
-  return discriminator.mapping[value] ?? null;
+  // Own keys only: a const spelled like an inherited property (`constructor`)
+  // must not resolve to `Object.prototype`'s.
+  return Object.hasOwn(discriminator.mapping, value) ? (discriminator.mapping[value] ?? null) : null;
 }
 
 /**
@@ -1487,7 +1489,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   };
 }
 
-/** The union members of a named `oneOf`/`anyOf` component schema (see `namedUnionMembers`). */
+/** One non-null variant of a named `oneOf`/`anyOf` component schema (see `namedUnionMembers`). */
 interface NamedUnionMember {
   /** The variant as written. */
   raw: SchemaObject;
@@ -1503,60 +1505,131 @@ interface NamedUnionMember {
 }
 
 /**
+ * Everything the parser decides about a named union, decided once and read by
+ * both the model (`namedUnionEntry`) and the extractor
+ * (`extractNamedUnionVariantModels`), so the variant TypeRefs and the models
+ * and enums minted for them agree by construction.
+ */
+interface NamedUnionPlan {
+  compositionKind: 'oneOf' | 'anyOf';
+  /** The non-null variants, in document order; `variants[i]` is built from `members[i]`. */
+  members: NamedUnionMember[];
+  /** The inline object variants' model names (`nameNamedUnionVariants`). */
+  inlineNames: ReadonlyMap<SchemaObject, string>;
+  /**
+   * Every other non-`$ref` variant (a primitive, an inline enum, an array, a
+   * map, an `allOf`, a nested union) as a property of one synthetic object:
+   * `variant_<n>` → schema, where n is the variant's 1-based position among
+   * the non-null variants. Both sides type and extract that object as a
+   * field's parent (`schemaToTypeRef` / `extractInlineModelsFromProperties`
+   * under the union's name), so whatever a variant mints — an enum, an
+   * array's inline items, a map's values, a nested union's variants — is
+   * named `<Union>Variant<n>…` by the one rule the field path uses, and two
+   * variants of the same kind can never share a name.
+   */
+  memberProperties: ReadonlyMap<string, SchemaObject>;
+  /** The same, keyed by variant. */
+  memberContexts: ReadonlyMap<SchemaObject, string>;
+  discriminator?: { property: string; mapping: Record<string, string> };
+}
+
+/**
  * True when a component schema is a named union: a `oneOf`/`anyOf` with no
  * `allOf` and no `properties` of its own. A `oneOf` beside `properties` keeps
  * today's object model (the properties are its fields, the branches are
  * ignored), as does a component that is only a nullable wrapper around one
- * inline object — `oneOf: [{ type: object, … }, { type: 'null' }]` — whose
- * merged fields already are the object (an inline wrapper collapses to
- * `nullable<model>`, not to a union). A wrapper around one `$ref` or one
- * primitive is a union of one: the model has nothing else to say about it.
+ * plain inline object — `oneOf: [{ type: object, … }, { type: 'null' }]` —
+ * whose merged fields already are the object (an inline wrapper collapses to
+ * `nullable<model>`, not to a union). A wrapper around one `$ref`, one
+ * primitive, or one object that also admits another type
+ * (`type: ['object', 'string']`) is a union of one: the model has nothing
+ * else to say about it, and the other type would be lost.
  */
 function isNamedUnionSchema(schema: SchemaObject): boolean {
   if (schema.allOf || (!schema.oneOf && !schema.anyOf)) return false;
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
   const nonNull = (schema.oneOf ?? schema.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
-  return !(nonNull.length === 1 && isInlineObjectSchema(nonNull[0]));
+  return !(nonNull.length === 1 && isPlainObjectSchema(nonNull[0]));
+}
+
+/**
+ * An inline object that admits nothing but an object (and null): `type:
+ * 'object'`, no `type`, `type: ['object', 'null']`, or OAS 3.0 `nullable:
+ * true` on one of those. A type list with another member
+ * (`['object', 'string']`) is not plain.
+ */
+function isPlainObjectSchema(schema: SchemaObject | undefined): boolean {
+  if (!isInlineObjectSchema(schema)) return false;
+  const { type } = schema;
+  return !Array.isArray(type) || type.every((t) => t === 'object' || t === 'null');
+}
+
+/**
+ * The plan for a named union component, or null for any other schema (see
+ * `NamedUnionPlan`).
+ */
+function planNamedUnion(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): NamedUnionPlan | null {
+  if (!isNamedUnionSchema(schema)) return null;
+  const compositionKind: 'oneOf' | 'anyOf' = schema.oneOf ? 'oneOf' : 'anyOf';
+  const inlineNames = nameNamedUnionVariants(name, schema, schemas);
+  const members = namedUnionMembers(schema, inlineNames, schemas);
+  const memberProperties = new Map<string, SchemaObject>();
+  const memberContexts = new Map<SchemaObject, string>();
+  members.forEach(({ raw }, index) => {
+    if (raw.$ref || inlineNames.has(raw)) return;
+    const key = `variant_${index + 1}`;
+    memberProperties.set(key, raw);
+    memberContexts.set(raw, key);
+  });
+  const discriminator = namedUnionDiscriminator(schema, compositionKind, members);
+  return {
+    compositionKind,
+    members,
+    inlineNames,
+    memberProperties,
+    memberContexts,
+    ...(discriminator ? { discriminator } : {}),
+  };
 }
 
 /**
  * The `variants`, `compositionKind` and `discriminator` of a named union
  * component (`Model.variants`), or nothing for any other schema. Built the
  * way `schemaToTypeRef` builds the same union inline: a `$ref` variant is a
- * model/enum ref, an inline object variant is referenced by the model
- * extracted for it (`extractNamedUnionVariantModels`), a nullable or
- * multi-type inline variant keeps its wrapper (`inlineVariantTypeRef`), a
- * `type: 'null'` variant is dropped, and anything else — a primitive, an
- * inline enum, an array — is typed under the member key `variantMemberKeys`
- * picks (`<Model>Item` for an array's inline items, `<Model>Value` for an
- * inline enum), which is also where the extractor materializes it. The
- * spec's own `mapping:` substitutes for an inline variant's name exactly as
- * it does inline (`mapVariantToDiscriminatorEntry`); derived mappings are
- * read from the same names, so they can only point at models that exist.
+ * model/enum ref; an inline object variant is referenced by the model
+ * extracted for it, a nullable or multi-type one keeping its wrapper
+ * (`inlineVariantTypeRef`); a `type: 'null'` variant is dropped; and every
+ * other variant is typed as the `variant_<n>` property of the plan's
+ * synthetic object, under the union's name, exactly as the extractor
+ * materializes it. The spec's own `mapping:` substitutes for an inline
+ * variant's name exactly as it does inline (`mapVariantToDiscriminatorEntry`);
+ * derived mappings are read from the same names, so they can only point at
+ * models that exist.
  */
 function namedUnionEntry(
   name: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
 ): Pick<Model, 'variants' | 'compositionKind' | 'discriminator'> {
-  if (!isNamedUnionSchema(schema)) return {};
-  const compositionKind: 'oneOf' | 'anyOf' = schema.oneOf ? 'oneOf' : 'anyOf';
-  const inlineNames = nameNamedUnionVariants(schema, name);
-  const members = namedUnionMembers(schema, inlineNames, schemas);
-  const discriminator = namedUnionDiscriminator(schema, compositionKind, members);
+  const plan = planNamedUnion(name, schema, schemas);
+  if (!plan) return {};
+  const { inlineNames, memberContexts, memberProperties, discriminator } = plan;
 
-  const variants: TypeRef[] = members.map(({ raw }) => {
+  const variants: TypeRef[] = plan.members.map(({ raw }) => {
     const inlineName = inlineNames.get(raw);
     if (inlineName !== undefined) {
       const mappedName = discriminator ? mapVariantToDiscriminatorEntry(raw, discriminator) : null;
       return inlineVariantTypeRef(raw, mappedName ?? inlineName);
     }
     if (raw.$ref) return schemaToTypeRef(raw);
-    const keys = variantMemberKeys(raw, name);
-    return schemaToTypeRef(raw, raw.type === 'array' ? keys.item : keys.value, name);
+    return schemaToTypeRef(raw, memberContexts.get(raw), name, memberProperties);
   });
 
-  return { variants, compositionKind, ...(discriminator ? { discriminator } : {}) };
+  return { variants, compositionKind: plan.compositionKind, ...(discriminator ? { discriminator } : {}) };
 }
 
 /**
@@ -1576,7 +1649,8 @@ function namedUnionMembers(
     let resolved = raw;
     if (raw.$ref) {
       const refName = raw.$ref.split('/').pop() ?? '';
-      if (schemas?.[refName]) resolved = schemas[refName];
+      const target = schemas && Object.hasOwn(schemas, refName) ? schemas[refName] : undefined;
+      if (target) resolved = target;
     }
     members.push({ raw, resolved, name: inlineNames.get(raw) ?? resolveVariantModelName(raw) });
   }
@@ -1588,14 +1662,59 @@ function namedUnionMembers(
  * field's union names its own (`nameInlineVariants`), with the union's model
  * name as the base. The base is taken — the union's own model holds it — so
  * variant 0 steps off it like any later variant (`CatPet`, `PetWithLivesLeft`,
- * `Pet1`), and every component schema's name is reserved, so a variant titled
- * like one never shadows it, the way a field's variant never takes a name a
- * sibling property mints.
+ * `Pet1`), and the names in `namedUnionReservedNames` are stepped around.
  */
-function nameNamedUnionVariants(schema: SchemaObject, name: string): Map<SchemaObject, string> {
-  const reserved = new Set<string>();
-  for (const key of activeComponentSchemaKeys) reserved.add(resolveSchemaName(key));
-  return nameInlineVariants(schema, name, reserved, true);
+function nameNamedUnionVariants(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): Map<SchemaObject, string> {
+  return nameInlineVariants(schema, name, namedUnionReservedNames(name, schema, schemas), true);
+}
+
+/** The IR name of every component schema being extracted. */
+function componentModelNames(): Set<string> {
+  const names = new Set<string>();
+  for (const key of activeComponentSchemaKeys) names.add(resolveSchemaName(key));
+  return names;
+}
+
+/**
+ * The names a named union's inline variants must not take: every component
+ * schema's name, so a variant titled like a component never shadows it, and
+ * every context-free title another named union component keeps for a variant
+ * whose shape differs from the one this union gives the same title — the
+ * comparison the field path makes between sibling unions
+ * (`reservedInlineNames`, `schemaShapeKey`). Each union is read in isolation
+ * against the component names alone, so the decision is symmetric: when
+ * `Circle` is `{ radius }` on `Shape` and `{ diameter }` on `Marker`, both
+ * fall back to their context-qualified names (`CircleShape`, `CircleMarker`)
+ * and neither keeps the bare title; when the shapes are identical, both keep
+ * `Circle` and one model is emitted. Context-qualified names carry their own
+ * union's name and cannot collide across unions.
+ */
+function namedUnionReservedNames(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): ReadonlySet<string> {
+  const componentNames = componentModelNames();
+  const reserved = new Set(componentNames);
+  if (!schemas) return reserved;
+
+  const ownShapes = new Map<string, string>();
+  for (const [variant, entry] of nameInlineVariantEntries(schema, name, componentNames, true)) {
+    if (entry.contextFree) ownShapes.set(entry.name, schemaShapeKey(variant));
+  }
+  for (const [key, other] of Object.entries(schemas)) {
+    if (other === schema || !isNamedUnionSchema(other)) continue;
+    const otherName = resolveSchemaName(key);
+    if (otherName === name) continue;
+    for (const [variant, entry] of nameInlineVariantEntries(other, otherName, componentNames, true)) {
+      if (entry.contextFree && ownShapes.get(entry.name) !== schemaShapeKey(variant)) reserved.add(entry.name);
+    }
+  }
+  return reserved;
 }
 
 /**
@@ -1610,11 +1729,13 @@ function nameNamedUnionVariants(schema: SchemaObject, name: string): Map<SchemaO
  *   2. An explicit `discriminator:` without `mapping:` — each variant's const
  *      on the property paired with its model name; `{}` when any variant
  *      pins none or is unnamed, as `deriveInlineVariantMapping` leaves it.
- *   3./4. No keyword, `oneOf` only — when every variant is named and pins
- *      the same property to a distinct const, that property and mapping
- *      (`titleMappedDiscriminatorProperty` / `deriveConstNamingDiscriminator`
- *      for an inline union). A duplicate value or an unnamed variant is no
- *      signal, and an `anyOf` is never discriminated implicitly.
+ *   3./4. No keyword, `oneOf` only — when every variant is named, the first
+ *      property the first variant pins whose values are distinct across all
+ *      of them, with that mapping (`titleMappedDiscriminatorProperty` /
+ *      `deriveConstNamingDiscriminator` for an inline union). A constant
+ *      every variant shares (`version: 'v1'`) is passed over, not taken as
+ *      proof there is no discriminator; an unnamed variant is no signal, and
+ *      an `anyOf` is never discriminated implicitly.
  */
 function namedUnionDiscriminator(
   schema: SchemaObject,
@@ -1637,9 +1758,8 @@ function namedUnionDiscriminator(
   const first = members[0];
   if (!first) return undefined;
   for (const property of Object.keys(getEffectiveProperties(first.resolved))) {
-    if (!members.every((m) => getEffectiveConstPropertyValue(m.resolved, property) !== null)) continue;
     const mapping = namedUnionConstMapping(members, property);
-    return mapping ? { property, mapping } : undefined;
+    if (mapping) return { property, mapping };
   }
   return undefined;
 }
@@ -1648,52 +1768,55 @@ function namedUnionDiscriminator(
  * `property`'s const value on every member paired with the member's model
  * name, or null when any member is unnamed, pins no string const on the
  * property (through its `allOf` wrappers, like an allOf+oneOf variant), or
- * repeats another member's value.
+ * repeats another member's value. Collected in a Map, so a value spelled like
+ * an inherited property (`constructor`, `toString`) is neither mistaken for a
+ * duplicate nor lost; the result has every value as an own key.
  */
 function namedUnionConstMapping(members: readonly NamedUnionMember[], property: string): Record<string, string> | null {
   if (members.length === 0) return null;
-  const mapping: Record<string, string> = {};
+  const mapping = new Map<string, string>();
   for (const member of members) {
     if (member.name === null) return null;
     const value = getEffectiveConstPropertyValue(member.resolved, property);
-    if (value === null || value in mapping) return null;
-    mapping[value] = member.name;
+    if (value === null || mapping.has(value)) return null;
+    mapping.set(value, member.name);
   }
-  return mapping;
+  return Object.fromEntries(mapping);
 }
 
 /**
  * The models a named union component's variants reference that nothing else
- * materializes: one per inline object variant, under the name
- * `nameNamedUnionVariants` gave it, with everything nested under it — and,
- * for a multi-type variant, the items of its array member — extracted the
- * way `extractInlineModelDeep` extracts a field's union variants; plus
- * whatever is inline under a non-object variant (an array's inline items),
- * under the member key the TypeRef used (`namedUnionEntry`). Nothing for a
- * schema that is not a named union.
+ * materializes, extracted by the field extractor so every object shape
+ * `schemaToTypeRef` references — a nested object with or without `type`, an
+ * array's or map's inline items, an `allOf`, a nested union — is
+ * materialized under the name the reference uses: each inline object variant
+ * under the name `nameNamedUnionVariants` gave it, with everything nested
+ * under it and, for a multi-type variant, the members of its other types,
+ * exactly as the extractor's own union branch does; and the plan's synthetic
+ * object of every other variant (`variant_<n>`), extracted under the union's
+ * name as the TypeRefs were typed. Nothing for a schema that is not a named
+ * union.
  */
 function extractNamedUnionVariantModels(
   schema: SchemaObject,
   name: string,
   schemas?: Record<string, SchemaObject>,
 ): Model[] {
-  if (!isNamedUnionSchema(schema)) return [];
+  const plan = planNamedUnion(name, schema, schemas);
+  if (!plan) return [];
   const models: Model[] = [];
-  const inlineNames = nameNamedUnionVariants(schema, name);
-  for (const variant of schema.oneOf ?? schema.anyOf ?? []) {
-    if (isNullVariantSchema(variant) || variant.$ref) continue;
-    const variantName = inlineNames.get(variant);
-    if (variantName !== undefined) {
-      models.push(...extractInlineModelDeep(variantName, variant, schemas));
-      const memberSchemas = variantMemberSchemas(variant, variantName);
-      if (Object.keys(memberSchemas).length > 0) {
-        models.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }, schemas).slice(1));
-      }
-      continue;
-    }
-    const keys = variantMemberKeys(variant, name);
-    const memberKey = variant.type === 'array' ? keys.item : keys.value;
-    models.push(...extractInlineModelDeep(name, { properties: { [memberKey]: variant } }, schemas).slice(1));
+  for (const [variant, variantName] of plan.inlineNames) {
+    models.push(buildInlineModel(variantName, variant, schemas));
+    extractInlineModelsFromProperties(variant, models, variantName, schemas);
+    extractInlineModelsFromProperties(
+      { properties: variantMemberSchemas(variant, variantName) },
+      models,
+      variantName,
+      schemas,
+    );
+  }
+  if (plan.memberProperties.size > 0) {
+    extractInlineModelsFromProperties({ properties: Object.fromEntries(plan.memberProperties) }, models, name, schemas);
   }
   return models;
 }
@@ -2611,11 +2734,14 @@ export function schemaToTypeRef(
 }
 
 import {
+  buildInlineModel,
   collectProperties,
   elementContextName,
+  extractInlineModelsFromProperties,
   mapValueSchema,
   qualifyInlineModelName,
   reservedInlineNames,
+  schemaShapeKey,
 } from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';

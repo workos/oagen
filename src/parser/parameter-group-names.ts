@@ -9,6 +9,7 @@ import type {
   Service,
   TypeRef,
 } from '../ir/types.js';
+import { unionShapeKey } from './union-shape.js';
 
 /**
  * Assign `ParameterGroup.wrapperName` across the whole spec.
@@ -373,10 +374,12 @@ function fingerprintType(
       const fields = [...m.fields]
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((f) => `${f.name}${f.required ? '!' : '?'}:${fingerprintType(f.type, modelMap, enumMap, next)}`);
-      // A named union's variants are its shape too; sorted like a union
-      // TypeRef's, since order does not change what it accepts.
-      const variants = (m.variants ?? []).map((v) => fingerprintType(v, modelMap, enumMap, next)).sort();
-      return `M<${fields.join(',')}>${variants.length > 0 ? `u<${variants.join(',')}>` : ''}`;
+      // A named union's variants are its shape too — sorted like a union
+      // TypeRef's, since order does not change what it accepts — and so are
+      // its dispatch rules: two unions with the same members but different
+      // discriminators are different member types and must not share a
+      // wrapper.
+      return `M<${fields.join(',')}>${unionShapeKey(m, (v) => fingerprintType(v, modelMap, enumMap, next), { sorted: true })}`;
     }
     default:
       return 'unknown';

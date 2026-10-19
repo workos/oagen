@@ -55,13 +55,25 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
  * value the API may now produce or accept; a removed variant is breaking,
  * since callers may construct or match it. Any discriminator change (the
  * property, or an entry of its mapping) is breaking: it changes how a
- * payload is dispatched to a variant. A model that gains or loses `variants`
- * altogether reports each variant added or removed.
+ * payload is dispatched to a variant, and so is a change of composition
+ * keyword between two unions (`anyOf` → `oneOf` rejects values that match
+ * more than one branch; the reverse loosens what callers may receive). A
+ * model that gains or loses `variants` altogether reports each variant added
+ * or removed, not a composition change.
  */
 function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
   const changes: VariantChange[] = [];
   const oldVariants = oldModel.variants ?? [];
   const newVariants = newModel.variants ?? [];
+
+  if (oldModel.compositionKind && newModel.compositionKind && oldModel.compositionKind !== newModel.compositionKind) {
+    changes.push({
+      kind: 'composition-changed',
+      variant: newModel.compositionKind,
+      classification: 'breaking',
+      details: `composition changed from '${oldModel.compositionKind}' to '${newModel.compositionKind}'`,
+    });
+  }
 
   for (const variant of newVariants) {
     if (!oldVariants.some((v) => typeRefsEqual(v, variant))) {
@@ -92,8 +104,13 @@ function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
         details: `property changed from '${oldDisc.property}' to '${newDisc.property}'`,
       });
     } else {
+      // Own keys only, so a value spelled like an inherited property
+      // (`constructor`) on one side is compared against nothing, not against
+      // `Object.prototype`'s.
+      const own = (mapping: Record<string, string>, key: string): string | undefined =>
+        Object.hasOwn(mapping, key) ? mapping[key] : undefined;
       const keys = new Set([...Object.keys(oldDisc.mapping), ...Object.keys(newDisc.mapping)]);
-      const differing = [...keys].filter((k) => oldDisc.mapping[k] !== newDisc.mapping[k]).sort();
+      const differing = [...keys].filter((k) => own(oldDisc.mapping, k) !== own(newDisc.mapping, k)).sort();
       if (differing.length > 0) {
         changes.push({
           kind: 'discriminator-changed',

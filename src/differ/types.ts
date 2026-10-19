@@ -74,10 +74,11 @@ export interface ModelModified {
 }
 
 export interface VariantChange {
-  kind: 'variant-added' | 'variant-removed' | 'discriminator-changed';
+  kind: 'variant-added' | 'variant-removed' | 'discriminator-changed' | 'composition-changed';
   /**
    * The variant, as a short type label (`Cat`, `string`, `nullable<Cat>`,
-   * `array<Cat>`), or the discriminator property for `discriminator-changed`.
+   * `array<Cat>`); the discriminator property for `discriminator-changed`;
+   * the new composition keyword for `composition-changed`.
    */
   variant: string;
   classification: 'additive' | 'breaking';

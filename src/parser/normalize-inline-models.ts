@@ -1,5 +1,5 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs, renameModelRefs } from '../ir/types.js';
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
@@ -51,11 +51,9 @@ function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
 }
 
 function rewriteModelRefs(models: Model[], services: Service[], oldName: string, newName: string): void {
-  for (const model of models) {
-    for (const ref of collectModelTypeRefs(model)) {
-      rewriteModelRef(ref, oldName, newName);
-    }
-  }
+  // Fields, named-union variants and discriminator mappings alike.
+  const renames = new Map([[oldName, newName]]);
+  for (const model of models) renameModelRefs(model, renames);
   for (const service of services) {
     for (const op of service.operations) {
       rewriteModelRef(op.response, oldName, newName);
@@ -87,7 +85,13 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
       model.fields.some((f) => !existingFieldNames.has(f.name)) ||
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
 
-    if (hasDifference && model.fields.length > existing.fields.length) {
+    // A named union's merged fields are not its shape — its variants are —
+    // so a field count never argues for replacing it with a plain object.
+    if (hasDifference && existing.variants && !model.variants) {
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" has different fields than the named union component — using component schema`,
+      );
+    } else if (hasDifference && model.fields.length > existing.fields.length) {
       const idx = mergedSchemaModels.indexOf(existing);
       if (idx !== -1) mergedSchemaModels[idx] = model;
       schemaModelsByName.set(model.name, model);
@@ -171,6 +175,24 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
   return false;
 }
 
+/**
+ * Make `target` describe `source`'s shape: its fields and its named-union
+ * metadata — `variants`, `compositionKind` and `discriminator`, each present
+ * or absent exactly as on `source` — so a fold never turns a named union back
+ * into a plain object, or leaves a dispatcher behind on a model that is no
+ * longer a union. Every site that copies one model's shape onto another goes
+ * through this.
+ */
+function adoptShape(target: Model, source: Model): void {
+  target.fields = source.fields;
+  if (source.variants) target.variants = source.variants;
+  else delete target.variants;
+  if (source.compositionKind) target.compositionKind = source.compositionKind;
+  else delete target.compositionKind;
+  if (source.discriminator) target.discriminator = source.discriminator;
+  else delete target.discriminator;
+}
+
 export function collapseJsonSuffixModels(models: Model[], services: Service[]): Model[] {
   const normalizedModels = [...models];
   const byName = new Map(normalizedModels.map((m) => [m.name, m]));
@@ -199,7 +221,7 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
   // Pass 2: apply merges
   const toRemove = new Set<string>();
   for (const { jsonModel, baseModel } of mergeCandidates) {
-    baseModel.fields = jsonModel.fields;
+    adoptShape(baseModel, jsonModel);
     // The base model now describes the Json schema's shape, so carry that
     // schema's own limits (minProperties, dependentRequired, ...) with the
     // fields; the base's keywords fill in wherever the Json model is silent.

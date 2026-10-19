@@ -516,13 +516,16 @@ components:
               tag: { type: string }
 ${animals}`);
 
+    // Each non-object variant is typed as `variant_<n>` (its 1-based position
+    // among the non-null variants) of a synthetic object under the union, so
+    // what it mints is `PetVariant<n>…` and never shared with another variant.
     expect(model(ir, 'Pet').variants).toEqual([
       modelRef('Cat'),
-      { kind: 'enum', name: 'PetValue', values: ['happy', 'sad'] },
-      { kind: 'array', items: modelRef('PetItem') },
+      { kind: 'enum', name: 'PetVariant2', values: ['happy', 'sad'] },
+      { kind: 'array', items: modelRef('PetVariant3') },
     ]);
-    expect(ir.enums.find((e) => e.name === 'PetValue')?.values.map((v) => v.value)).toEqual(['happy', 'sad']);
-    expect(model(ir, 'PetItem').fields.map((f) => f.name)).toEqual(['tag']);
+    expect(ir.enums.find((e) => e.name === 'PetVariant2')?.values.map((v) => v.value)).toEqual(['happy', 'sad']);
+    expect(model(ir, 'PetVariant3').fields.map((f) => f.name)).toEqual(['tag']);
     expect(unresolvedRefs(ir)).toEqual([]);
   });
 
@@ -633,5 +636,342 @@ ${animals}`);
     expect(assigned.get('Pet')).toBe(ir.services[0]?.name);
     expect(assigned.get('Cat')).toBe(ir.services[0]?.name);
     expect(assigned.get('Dog')).toBe(ir.services[0]?.name);
+  });
+});
+
+describe('named unions: every variant is typed and extracted under its own context', () => {
+  it('gives two array variants with different item shapes their own item models', async () => {
+    const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - type: array
+          items:
+            type: object
+            properties:
+              a: { type: string }
+        - type: array
+          items:
+            type: object
+            properties:
+              b: { type: integer }
+`);
+
+    expect(model(ir, 'Pet').variants).toEqual([
+      { kind: 'array', items: modelRef('PetVariant1') },
+      { kind: 'array', items: modelRef('PetVariant2') },
+    ]);
+    expect(model(ir, 'PetVariant1').fields.map((f) => f.name)).toEqual(['a']);
+    expect(model(ir, 'PetVariant2').fields.map((f) => f.name)).toEqual(['b']);
+    expect(unresolvedRefs(ir)).toEqual([]);
+  });
+
+  it('gives two inline enum variants their own enums, keeping both value lists', async () => {
+    const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - type: string
+          enum: [happy, sad]
+        - type: string
+          enum: [hot, cold]
+`);
+
+    expect(model(ir, 'Pet').variants).toEqual([
+      { kind: 'enum', name: 'PetVariant1', values: ['happy', 'sad'] },
+      { kind: 'enum', name: 'PetVariant2', values: ['hot', 'cold'] },
+    ]);
+    const values = (name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+    expect(values('PetVariant1')).toEqual(['happy', 'sad']);
+    expect(values('PetVariant2')).toEqual(['hot', 'cold']);
+  });
+
+  it('materializes every object shape nested under a variant: untyped objects, map values, allOf, nested unions', async () => {
+    const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - type: object
+          properties:
+            kind: { const: cat }
+            config:
+              properties:
+                city: { type: string }
+        - type: object
+          properties:
+            kind: { const: dog }
+            home:
+              type: object
+              additionalProperties:
+                properties:
+                  street: { type: string }
+        - allOf:
+            - properties:
+                x: { type: string }
+            - properties:
+                y: { type: string }
+        - oneOf:
+            - type: object
+              properties:
+                p: { type: string }
+            - type: object
+              properties:
+                q: { type: string }
+`);
+
+    const pet = model(ir, 'Pet');
+    expect(pet.variants).toEqual([
+      modelRef('CatPet'),
+      modelRef('DogPet'),
+      modelRef('PetVariant3'),
+      { kind: 'union', variants: [modelRef('PetVariant4'), modelRef('PetVariant4WithQ')], compositionKind: 'oneOf' },
+    ]);
+    // An untyped nested object (no `type: object`) is extracted under the variant.
+    expect(model(ir, 'CatPet').fields.find((f) => f.name === 'config')?.type).toEqual(modelRef('CatPetConfig'));
+    expect(model(ir, 'CatPetConfig').fields.map((f) => f.name)).toEqual(['city']);
+    expect(model(ir, 'DogPet').fields.find((f) => f.name === 'home')?.type).toEqual({
+      kind: 'map',
+      valueType: modelRef('DogPetHome'),
+    });
+    expect(model(ir, 'DogPetHome').fields.map((f) => f.name)).toEqual(['street']);
+    expect(model(ir, 'PetVariant3').fields.map((f) => f.name)).toEqual(['x', 'y']);
+    expect(model(ir, 'PetVariant4').fields.map((f) => f.name)).toEqual(['p']);
+    expect(model(ir, 'PetVariant4WithQ').fields.map((f) => f.name)).toEqual(['q']);
+    // Everything a variant references resolves (the merged fields' own
+    // nested refs are the pre-existing merged-field path, checked apart).
+    const known = new Set([...ir.models.map((m) => m.name), ...ir.enums.map((e) => e.name)]);
+    for (const v of pet.variants ?? []) for (const n of collectModelRefs(v)) expect(known.has(n)).toBe(true);
+    for (const name of ['CatPet', 'DogPet', 'PetVariant3', 'PetVariant4', 'PetVariant4WithQ']) {
+      for (const f of model(ir, name).fields) for (const n of collectModelRefs(f.type)) expect(known.has(n)).toBe(true);
+    }
+  });
+
+  it('keeps the other type of a single multi-type object variant as a union of one', async () => {
+    const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - type: [object, string]
+          properties:
+            a: { type: string }
+`);
+
+    const pet = model(ir, 'Pet');
+    expect(pet.variants).toEqual([
+      { kind: 'union', variants: [modelRef('PetWithA'), { kind: 'primitive', type: 'string' }] },
+    ]);
+    expect(pet.compositionKind).toBe('oneOf');
+    expect(model(ir, 'PetWithA').fields.map((f) => f.name)).toEqual(['a']);
+  });
+});
+
+describe('named unions: titled variants across unions', () => {
+  const shape = `
+    Shape:
+      oneOf:
+        - title: Circle
+          type: object
+          properties:
+            kind: { const: circle }
+            radius: { type: number }
+        - title: Square
+          type: object
+          properties:
+            kind: { const: square }
+            side: { type: number }
+`;
+  const marker = `
+    Marker:
+      oneOf:
+        - title: Circle
+          type: object
+          properties:
+            kind: { const: circle }
+            diameter: { type: number }
+        - title: Cross
+          type: object
+          properties:
+            kind: { const: cross }
+            arm: { type: number }
+`;
+  const twin = `
+    Twin:
+      oneOf:
+        - title: Square
+          type: object
+          properties:
+            kind: { const: square }
+            side: { type: number }
+        - title: Dot
+          type: object
+          properties:
+            kind: { const: dot }
+`;
+  const unions = (...components: string[]) => `${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/Shape'
+        - $ref: '#/components/schemas/Marker'
+        - $ref: '#/components/schemas/Twin'
+${components.join('')}`;
+
+  it('qualifies a title two unions give different shapes, symmetrically, and lets identical shapes share one model', async () => {
+    const ir = await parseInline(unions(shape, marker, twin));
+
+    // `Circle` is { radius } on Shape and { diameter } on Marker: neither keeps it.
+    expect(model(ir, 'Shape').variants).toEqual([modelRef('CircleShape'), modelRef('Square')]);
+    expect(model(ir, 'Marker').variants).toEqual([modelRef('CircleMarker'), modelRef('Cross')]);
+    expect(model(ir, 'Shape').discriminator).toEqual({
+      property: 'kind',
+      mapping: { circle: 'CircleShape', square: 'Square' },
+    });
+    expect(model(ir, 'Marker').discriminator).toEqual({
+      property: 'kind',
+      mapping: { circle: 'CircleMarker', cross: 'Cross' },
+    });
+    expect(model(ir, 'CircleShape').fields.map((f) => f.name)).toEqual(['kind', 'radius']);
+    expect(model(ir, 'CircleMarker').fields.map((f) => f.name)).toEqual(['kind', 'diameter']);
+    expect(ir.models.some((m) => m.name === 'Circle')).toBe(false);
+    // `Square` is the same shape on Shape and Twin: one model, shared.
+    expect(model(ir, 'Twin').variants).toEqual([modelRef('Square'), modelRef('Dot')]);
+    expect(ir.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+    expect(unresolvedRefs(ir)).toEqual([]);
+  });
+
+  it('does not depend on the order the unions are declared in', async () => {
+    for (const order of [
+      [twin, marker, shape],
+      [marker, shape, twin],
+    ]) {
+      const ir = await parseInline(unions(...order));
+      expect(model(ir, 'Shape').variants).toEqual([modelRef('CircleShape'), modelRef('Square')]);
+      expect(model(ir, 'Marker').variants).toEqual([modelRef('CircleMarker'), modelRef('Cross')]);
+      expect(model(ir, 'Twin').variants).toEqual([modelRef('Square'), modelRef('Dot')]);
+      expect(ir.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+    }
+  });
+});
+
+describe('named unions: discriminator derivation', () => {
+  it('maps values spelled like inherited properties', async () => {
+    const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - type: object
+          properties:
+            kind: { const: constructor }
+            a: { type: string }
+        - type: object
+          properties:
+            kind: { const: toString }
+            b: { type: string }
+      discriminator:
+        propertyName: kind
+`);
+
+    const pet = model(ir, 'Pet');
+    expect(pet.discriminator).toEqual({
+      property: 'kind',
+      mapping: { constructor: 'ConstructorPet', toString: 'ToStringPet' },
+    });
+    expect(Object.hasOwn(pet.discriminator!.mapping, 'constructor')).toBe(true);
+    expect(pet.variants).toEqual([modelRef('ConstructorPet'), modelRef('ToStringPet')]);
+  });
+
+  it('passes over a constant every variant shares to find the property that tells them apart', async () => {
+    const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/Cat'
+        - $ref: '#/components/schemas/Dog'
+    Cat:
+      type: object
+      properties:
+        version: { const: v1 }
+        kind: { const: cat }
+    Dog:
+      type: object
+      properties:
+        version: { const: v1 }
+        kind: { const: dog }
+`);
+
+    expect(model(ir, 'Pet').discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } });
+  });
+});
+
+describe('named unions: renames and folds', () => {
+  it('carries variants and discriminator onto the base when a Json-suffixed union folds into it', async () => {
+    const ir = await parseInline(`
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /foos:
+    post:
+      operationId: createFoo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FooJson' }
+      responses:
+        '204': { description: Created }
+components:
+  schemas:
+    Foo:
+      type: object
+    FooJson:
+      oneOf:
+        - type: object
+          properties:
+            kind: { const: a }
+            a: { type: string }
+          required: [kind]
+        - type: object
+          properties:
+            kind: { const: b }
+            b: { type: string }
+          required: [kind]
+      discriminator:
+        propertyName: kind
+`);
+
+    expect(ir.models.some((m) => m.name === 'FooJson')).toBe(false);
+    const foo = model(ir, 'Foo');
+    expect(foo.fields.map((f) => f.name)).toEqual(['kind', 'a', 'b']);
+    expect(foo.variants).toEqual([modelRef('AFooJson'), modelRef('BFooJson')]);
+    expect(foo.compositionKind).toBe('oneOf');
+    expect(foo.discriminator).toEqual({ property: 'kind', mapping: { a: 'AFooJson', b: 'BFooJson' } });
+    expect(ir.services[0]?.operations[0]?.requestBody).toEqual(modelRef('Foo'));
+    expect(unresolvedRefs(ir)).toEqual([]);
+  });
+
+  it('never replaces a named union component with a same-named inline response model on field count', async () => {
+    const { mergeInlineResponseModels } = await import('../../src/parser/normalize-inline-models.js');
+    const union: Model = { name: 'Pet', fields: [], variants: [modelRef('Cat')], compositionKind: 'oneOf' };
+    const inline: Model = {
+      name: 'Pet',
+      fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const merged = mergeInlineResponseModels([union], [inline]);
+      expect(merged).toEqual([union]);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Inline model "Pet" has different fields than the named union component — using component schema',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
