@@ -113,6 +113,8 @@ Emitters should handle these additional variants introduced for open-source read
 - **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`. Each entry keeps its URL template and, when declared, its `variables` (`default`, `enum`, `description`); `baseUrl` already has the defaults filled in, and `resolveServerUrl` from `@workos/oagen` does the same for any other entry
 - **Multiple responses:** Optional `successResponses: SuccessResponse[]` on `Operation` when more than one 2xx exists
 - **Response headers:** Optional `responseHeaders: ResponseHeader[]` on `Operation` (the primary response's headers) and `headers: ResponseHeader[]` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares at least one
+- **Response descriptions:** Optional `responseDescription: string` on `Operation` (the primary response's description, e.g. for a `@returns` tag) and `description: string` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares one with non-whitespace content
+- **Request body required:** Optional `requestBodyRequired: boolean` on `Operation`, present exactly when `requestBody` is; `false` when the spec omits the flag (the OpenAPI default)
 - **Idempotency:** `injectIdempotencyKey` is now spec-driven (true only when the spec declares an `Idempotency-Key` header)
 
 ## OperationPlan
