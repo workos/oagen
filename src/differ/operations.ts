@@ -43,12 +43,16 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     // Only comparable when both versions paginate; presence is paginatedChanged's job.
     const oldPagination = oldOp.pagination;
     const newPagination = newOp.pagination;
-    const paginationStrategyChanged =
-      !!oldPagination && !!newPagination && oldPagination.strategy !== newPagination.strategy;
+    const bothPaginated = !!oldPagination && !!newPagination;
+    const paginationFieldChanged = (field: 'strategy' | 'param' | 'limitParam' | 'dataPath' | 'pageStart'): boolean =>
+      bothPaginated && oldPagination?.[field] !== newPagination?.[field];
+    const paginationStrategyChanged = paginationFieldChanged('strategy');
+    const paginationParamChanged = paginationFieldChanged('param');
+    const paginationLimitParamChanged = paginationFieldChanged('limitParam');
+    const paginationDataPathChanged = paginationFieldChanged('dataPath');
+    const paginationPageStartChanged = paginationFieldChanged('pageStart');
     const paginationEndOfIterationChanged =
-      !!oldPagination &&
-      !!newPagination &&
-      !endOfIterationEqual(oldPagination.endOfIteration, newPagination.endOfIteration);
+      bothPaginated && !endOfIterationEqual(oldPagination?.endOfIteration, newPagination?.endOfIteration);
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
@@ -61,6 +65,10 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       pathChanged ||
       paginatedChanged ||
       paginationStrategyChanged ||
+      paginationParamChanged ||
+      paginationLimitParamChanged ||
+      paginationDataPathChanged ||
+      paginationPageStartChanged ||
       paginationEndOfIterationChanged ||
       injectIdempotencyKeyChanged ||
       errorsChanged;
@@ -84,7 +92,13 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
+        // The iterator sends a different parameter, page size or first page,
+        // or reads a different array: a behavior change for every caller.
         paginationStrategyChanged ||
+        paginationParamChanged ||
+        paginationLimitParamChanged ||
+        paginationDataPathChanged ||
+        paginationPageStartChanged ||
         paginationEndOfIterationBreaking ||
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
@@ -100,6 +114,10 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         pathChanged,
         paginatedChanged,
         paginationStrategyChanged,
+        paginationParamChanged,
+        paginationLimitParamChanged,
+        paginationDataPathChanged,
+        paginationPageStartChanged,
         paginationEndOfIterationChanged,
         injectIdempotencyKeyChanged,
         errorsChanged,
