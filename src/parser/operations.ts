@@ -29,6 +29,7 @@ import {
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
+import type { ResponseExtractionResult } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 
@@ -2155,8 +2156,11 @@ function extractResponses(
 
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
-  // Kept apart from `inlineModels`, which the latest 2xx body replaces
-  // wholesale below; merged once every status code has been read.
+  // Every 2xx body's classification, by status code. The models of all of
+  // them are kept — `successResponses` references each — while the paging
+  // fields are read from the status chosen as primary once every status code
+  // has been read.
+  const bodyResults = new Map<number, ResponseExtractionResult>();
   const headerModels: Model[] = [];
 
   for (const [statusCode, resp] of Object.entries(responses)) {
@@ -2196,13 +2200,7 @@ function extractResponses(
         const contextName = deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
         extractedType = result.response;
-        // Keep track of inline models and pagination from the latest 2xx with a schema
-        inlineModels = result.inlineModels;
-        isPaginated = result.isPaginated;
-        dataPath = result.dataPath;
-        itemType = result.itemType;
-        envelopeFields = result.envelopeFields;
-        envelopeCompanions = result.envelopeCompanions;
+        bodyResults.set(code, result);
       }
       allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
     } else if (code >= 300 && code < 400) {
@@ -2220,12 +2218,44 @@ function extractResponses(
   }
 
   // Primary response = lowest 2xx with a body schema, falling back to first 2xx
+  let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
     const primary =
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    primaryStatus = primary.statusCode;
+  }
+
+  // The paging fields describe `response`, so they come from the primary's
+  // body — not from whichever 2xx body happened to be read last.
+  const primaryBody = primaryStatus === undefined ? undefined : bodyResults.get(primaryStatus);
+  if (primaryBody) {
+    isPaginated = primaryBody.isPaginated;
+    dataPath = primaryBody.dataPath;
+    itemType = primaryBody.itemType;
+    envelopeFields = primaryBody.envelopeFields;
+    envelopeCompanions = primaryBody.envelopeCompanions;
+  }
+
+  // Keep the models of every 2xx body: `successResponses` references each of
+  // them, so keeping only one body's would leave the others dangling. Every
+  // status derives the same `<Op>Response` context name, so on a name clash
+  // the primary's definition — the one `response` points at — goes first and
+  // wins; the other bodies follow in status order, then the header models.
+  const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
+    if (a === primaryStatus) return -1;
+    if (b === primaryStatus) return 1;
+    return a - b;
+  });
+  const seenModelNames = new Set<string>();
+  for (const [, result] of bodiesByPrimacy) {
+    for (const model of result.inlineModels) {
+      if (seenModelNames.has(model.name)) continue;
+      seenModelNames.add(model.name);
+      inlineModels.push(model);
+    }
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;

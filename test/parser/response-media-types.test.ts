@@ -268,4 +268,278 @@ describe('response media types are matched by essence (issue #237)', () => {
       expect(inlineModels).toEqual([]);
     });
   });
+
+  /** Every model reachable from the operation — primary and secondary responses, and the models' own fields. */
+  function expectClosed(op: Operation, inlineModels: Model[]): void {
+    const known = new Set(inlineModels.map((m) => m.name));
+    const refs = [op.response, ...(op.successResponses ?? []).map((r) => r.type)];
+    for (const model of inlineModels) for (const field of model.fields) refs.push(field.type);
+    for (const ref of refs) for (const name of collectModelRefs(ref)) expect(known).toContain(name);
+  }
+
+  describe('several 2xx bodies', () => {
+    /** Extract the only operation of a GET /pets/{petId} with the given `responses`. */
+    function getPetWith(responses: Record<string, unknown>): { op: Operation; inlineModels: Model[] } {
+      const paths = {
+        '/pets/{petId}': {
+          get: {
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+            responses,
+          },
+        },
+      };
+      const { services, inlineModels } = extractOperations(paths as never);
+      const operations = services.flatMap((s) => s.operations);
+      expect(operations).toHaveLength(1);
+      return { op: operations[0], inlineModels };
+    }
+
+    const ENVELOPE = {
+      type: 'object',
+      properties: {
+        data: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+        list_metadata: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } } },
+      },
+    };
+
+    it('keeps the model of an earlier body when a later 2xx body is a primitive', () => {
+      const { op, inlineModels } = getPetWith({
+        '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } },
+        '201': { description: 'created', content: { 'application/yaml': { schema: { type: 'string' } } } },
+      });
+      expect(op.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
+      expect(op.successResponses?.map((r) => r.type)).toEqual([
+        { kind: 'model', name: 'GetPetResponse' },
+        { kind: 'primitive', type: 'string' },
+      ]);
+      expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['name']);
+      expectClosed(op, inlineModels);
+    });
+
+    it('keeps the models of every 2xx body, the primary first on a name clash', () => {
+      const { op, inlineModels } = getPetWith({
+        '200': {
+          description: 'ok',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: { owner: { type: 'object', properties: { email: { type: 'string' } } } },
+              },
+            },
+          },
+        },
+        '201': {
+          description: 'created',
+          content: {
+            'application/x-ndjson': {
+              schema: {
+                type: 'object',
+                properties: {
+                  tags: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' } } } },
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(op.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
+      // Both statuses derive `GetPetResponse`; the primary's definition is the one kept.
+      expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['owner']);
+      const names = inlineModels.map((m) => m.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContain('GetPetResponseOwner');
+      expect(names.some((n) => n.startsWith('GetPetResponseTag'))).toBe(true);
+      expectClosed(op, inlineModels);
+    });
+
+    it('reads the paging fields from the primary response, not the last body read', () => {
+      const baseline = getPetWith({
+        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+      });
+      expect(baseline.op.pagination).toBeDefined();
+
+      const laterPlain = getPetWith({
+        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+        '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+      });
+      expect(laterPlain.op.response).toEqual(baseline.op.response);
+      expect(laterPlain.op.pagination).toEqual(baseline.op.pagination);
+      expectClosed(laterPlain.op, laterPlain.inlineModels);
+
+      // Document order does not matter: the lowest 2xx with a body is primary.
+      const declaredFirst = getPetWith({
+        '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+      });
+      expect(declaredFirst.op.response).toEqual(baseline.op.response);
+      expect(declaredFirst.op.pagination).toEqual(baseline.op.pagination);
+    });
+
+    it('does not take paging fields from a secondary envelope', () => {
+      const { op, inlineModels } = getPetWith({
+        '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } },
+        '202': { description: 'accepted', content: { 'application/json': { schema: ENVELOPE } } },
+      });
+      expect(op.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
+      expect(op.pagination).toBeUndefined();
+      expectClosed(op, inlineModels);
+    });
+  });
+
+  describe('bodies typed through schemaToTypeRef still get their inline models', () => {
+    const INLINE_OBJECT = { type: 'object', properties: { email: { type: 'string' } } };
+
+    it('a map whose values are an inline object, under a non-JSON media type', () => {
+      const { op, inlineModels } = getPet({
+        'application/yaml': { schema: { type: 'object', additionalProperties: INLINE_OBJECT } },
+      });
+      expect(collectModelRefs(op.response).length).toBeGreaterThan(0);
+      expectClosed(op, inlineModels);
+    });
+
+    it('a map whose values are an inline object, under application/json', () => {
+      const { op, inlineModels } = getPet({
+        'application/json': { schema: { type: 'object', additionalProperties: INLINE_OBJECT } },
+      });
+      expect(collectModelRefs(op.response).length).toBeGreaterThan(0);
+      expectClosed(op, inlineModels);
+    });
+
+    it('an array whose items are a union of inline objects', () => {
+      const { op, inlineModels } = getPet({
+        'application/json': {
+          schema: {
+            type: 'array',
+            items: {
+              oneOf: [
+                { type: 'object', properties: { kind: { const: 'cat' }, lives: { type: 'integer' } } },
+                { type: 'object', properties: { kind: { const: 'dog' }, barks: { type: 'boolean' } } },
+              ],
+            },
+          },
+        },
+      });
+      expect(op.response.kind).toBe('array');
+      expect(collectModelRefs(op.response).length).toBeGreaterThan(1);
+      expectClosed(op, inlineModels);
+    });
+
+    it('a nullable map of inline objects', () => {
+      const { op, inlineModels } = getPet({
+        'application/json': { schema: { type: ['object', 'null'], additionalProperties: INLINE_OBJECT } },
+      });
+      expect(collectModelRefs(op.response).length).toBeGreaterThan(0);
+      expectClosed(op, inlineModels);
+    });
+
+    it('a map of arrays of inline objects', () => {
+      const { op, inlineModels } = getPet({
+        'application/json': {
+          schema: {
+            type: 'object',
+            additionalProperties: {
+              type: 'array',
+              items: { type: 'object', properties: { label: { type: 'string' } } },
+            },
+          },
+        },
+      });
+      expect(collectModelRefs(op.response).length).toBeGreaterThan(0);
+      expectClosed(op, inlineModels);
+    });
+
+    it('a nullable inline object', () => {
+      const { op, inlineModels } = getPet({
+        'application/json': {
+          schema: { type: ['object', 'null'], properties: { name: { type: 'string' } } },
+        },
+      });
+      expect(collectModelRefs(op.response)).toEqual(['GetPetResponse']);
+      expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['name']);
+      expectClosed(op, inlineModels);
+    });
+
+    it('does not duplicate the variants of a top-level union', () => {
+      const { op, inlineModels } = getPet({
+        'application/json': {
+          schema: {
+            oneOf: [
+              { type: 'object', properties: { kind: { const: 'cat' } } },
+              { type: 'object', properties: { kind: { const: 'dog' } } },
+            ],
+          },
+        },
+      });
+      const names = inlineModels.map((m) => m.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(collectModelRefs(op.response).length).toBeGreaterThan(1);
+      expectClosed(op, inlineModels);
+    });
+
+    it('leaves a primitive body without models', () => {
+      const { op, inlineModels } = getPet({ 'application/json': { schema: { type: 'integer' } } });
+      expect(op.response).toEqual({ kind: 'primitive', type: 'integer' });
+      expect(inlineModels).toEqual([]);
+    });
+
+    describe('through parseSpec', () => {
+      let dir: string;
+      let specPath: string;
+
+      beforeAll(() => {
+        dir = mkdtempSync(join(tmpdir(), 'oagen-237-map-'));
+        specPath = join(dir, 'map.json');
+        writeFileSync(
+          specPath,
+          JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'map', version: '1' },
+            paths: {
+              '/pets/{petId}': {
+                get: {
+                  operationId: 'getPet',
+                  parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+                  responses: {
+                    '200': {
+                      description: 'ok',
+                      content: {
+                        'application/yaml': { schema: { type: 'object', additionalProperties: INLINE_OBJECT } },
+                      },
+                    },
+                    '201': {
+                      description: 'created',
+                      content: { 'application/json; charset=utf-8': { schema: PET_SCHEMA } },
+                    },
+                  },
+                },
+              },
+            },
+            components: {},
+          }),
+        );
+      });
+
+      afterAll(() => {
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it('emits no unresolved model reference', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const spec = await parseSpec(specPath);
+        const [operation] = spec.services.flatMap(({ operations }) => operations);
+        const known = new Set(spec.models.map((m) => m.name));
+        for (const ref of [operation.response, ...(operation.successResponses ?? []).map((r) => r.type)]) {
+          for (const name of collectModelRefs(ref)) expect(known).toContain(name);
+        }
+        const unresolved = warn.mock.calls.filter((call) => String(call[0]).includes('Unresolved model reference'));
+        expect(unresolved).toEqual([]);
+      });
+    });
+  });
 });

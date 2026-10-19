@@ -526,7 +526,23 @@ function extractDirectResource(
     }
   }
 
-  // Non-object schema (primitive, union, etc.) — delegate to schemaToTypeRef
+  // Anything else is typed by schemaToTypeRef (primitive, union, map, array
+  // of unions, nullable object, …). Such a TypeRef can still reach an inline
+  // model — a map whose values are an inline object (`additionalProperties`),
+  // an array whose items are a union of inline objects, a nullable
+  // `type: ['object', 'null']` object, a map of arrays of objects — so
+  // materialize them the way the oneOf branch does: as a field of this name
+  // under no parent, which names every nested model exactly as the TypeRef
+  // references it. The oneOf branch may already have pushed some of them, so
+  // dedupe by name.
+  const nested: Model[] = [];
+  extractInlineModelsFromProperties({ properties: { [contextName]: schema } }, nested, undefined, componentSchemas);
+  const known = new Set(inlineModels.map((m) => m.name));
+  for (const model of nested) {
+    if (known.has(model.name)) continue;
+    known.add(model.name);
+    inlineModels.push(model);
+  }
   return {
     response: schemaToTypeRef(schema, contextName),
     inlineModels,
