@@ -871,3 +871,179 @@ describe('a rename repoints references by identity, never by name (review round 
     }
   });
 });
+
+describe('review round 2', () => {
+  const str = { type: 'string' };
+
+  it('repoints every operation sharing a deprecated companion when the companion is renamed, in either order', async () => {
+    const listMetadata = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } },
+      ...extra,
+    });
+    const envelope = {
+      allOf: [
+        {
+          type: 'object',
+          properties: { object: { type: 'string', const: 'list' }, list_metadata: listMetadata({ deprecated: true }) },
+        },
+        { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/User' } } } },
+      ],
+    };
+    const listOp = (operationId: string) => ({
+      get: {
+        operationId,
+        parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+        responses: { '200': { description: 'ok', content: { 'application/json': { schema: envelope } } } },
+      },
+    });
+    // Two list operations share one deprecated companion, so the envelope
+    // pass folds one copy onto the other and the bare `ListMetadata` is
+    // deprecated. A third operation's live inline response, pinned to
+    // `object: list_metadata`, mints the same name with other fields — a
+    // clash the envelope pass cannot see (a component of that name, or a
+    // component field's model, it already steps around). The companion is
+    // renamed, and both list operations must follow it.
+    const schemas = { User: { type: 'object', properties: { id: str } } };
+    const liveMetadata = getOp('getListMetadata', {
+      type: 'object',
+      properties: { object: { type: 'string', const: 'list_metadata' }, page: { type: 'integer' } },
+    });
+    for (const { order, spec } of await parseBothOrders('shared-companion', schemas, [
+      ['/legacy-users', listOp('listLegacyUsers')],
+      ['/old-users', listOp('listOldUsers')],
+      ['/list-metadata', liveMetadata],
+    ])) {
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      const ops = opsOf(spec);
+      const metaRef = (name: string) =>
+        ops[name]?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata')?.type;
+      const legacy = metaRef('listLegacyUsers');
+      const old = metaRef('listOldUsers');
+      expect(legacy, order).toEqual(old);
+      expect(legacy?.kind, order).toBe('model');
+      const shared = byName[(legacy as { name: string }).name]!;
+      // The qualifier follows the envelope pass's owner (first declared), so
+      // the name itself follows document order; what it is not is
+      // `ListMetadata`, and what it references is the deprecated shape.
+      expect(shared.name, order).not.toBe('ListMetadata');
+      expect(shared.deprecated, order).toBe(true);
+      expect(
+        shared.fields.map((f) => f.name),
+        order,
+      ).toEqual(['before', 'after']);
+      expect(ops.getListMetadata?.response, order).toEqual({ kind: 'model', name: 'ListMetadata' });
+      expect(byName.ListMetadata?.deprecated, order).toBeUndefined();
+      expect(
+        byName.ListMetadata?.fields.map((f) => f.name),
+        order,
+      ).toEqual(['object', 'page']);
+      expectSound(spec, Object.keys(schemas));
+    }
+  });
+
+  it('keeps a `$ref` to the component inside the renamed inline copy, in both flag directions (MichaelDeBoey)', async () => {
+    const widget = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { object: { type: 'string', const: 'widget' }, parent: { $ref: '#/components/schemas/Widget' } },
+      ...extra,
+    });
+    for (const [label, componentFlag, inlineFlag] of [
+      ['component live, inline deprecated', false, true],
+      ['component deprecated, inline live', true, false],
+    ] as const) {
+      const schemas = { Widget: widget(componentFlag ? { deprecated: true } : {}) };
+      for (const { order, spec } of await parseBothOrders(`self-ref-${componentFlag}`, schemas, [
+        ['/legacy-widgets/{id}', getOp('getLegacyWidget', widget(inlineFlag ? { deprecated: true } : {}))],
+        ['/widgets/{id}', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+      ])) {
+        const where = `${label}, ${order}`;
+        const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+        expect(opsOf(spec).getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+        // The `$ref` stays the component; only the inline model was renamed.
+        expect(byName.GetLegacyWidgetWidget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
+          kind: 'model',
+          name: 'Widget',
+        });
+        expect(byName.Widget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
+          kind: 'model',
+          name: 'Widget',
+        });
+        expect(byName.GetLegacyWidgetWidget?.deprecated, where).toBe(inlineFlag ? true : undefined);
+        expect(byName.Widget?.deprecated, where).toBe(componentFlag ? true : undefined);
+        expectSound(
+          spec,
+          ['Widget'],
+          componentFlag
+            ? ['getWidget.response → Widget', 'GetLegacyWidgetWidget.parent → Widget']
+            : ['getLegacyWidget.response → GetLegacyWidgetWidget'],
+        );
+      }
+    }
+  });
+
+  it('renames only the inline variant of a `oneOf` beside a `$ref` to the deprecated component (MichaelDeBoey)', async () => {
+    const schemas = {
+      Pet: {
+        type: 'object',
+        properties: {
+          owner: { oneOf: [{ $ref: '#/components/schemas/PetOwner' }, { type: 'object', properties: { name: str } }] },
+        },
+      },
+      PetOwner: { type: 'object', deprecated: true, properties: { name: str } },
+    };
+    for (const order of ['as-written', 'reversed'] as const) {
+      const entries = Object.entries(schemas);
+      const ordered = Object.fromEntries(order === 'as-written' ? entries : [...entries].reverse());
+      const spec = await parseSpec(await writeSpec(`oneof-ref-${order}.json`, specDoc(ordered)));
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      expect(byName.Pet?.fields[0]?.type, order).toEqual({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'PetOwner' },
+          { kind: 'model', name: 'PetOwner2' },
+        ],
+        compositionKind: 'oneOf',
+      });
+      expect(byName.PetOwner?.deprecated, order).toBe(true);
+      expect(byName.PetOwner2?.deprecated, order).toBeUndefined();
+      // The `$ref` variant is the document's own reference to the deprecated component.
+      expectSound(spec, Object.keys(schemas), ['Pet.owner → PetOwner']);
+    }
+  });
+
+  it('qualifies a deprecated copy whenever the live copies disagree among themselves, in either order (MichaelDeBoey)', async () => {
+    const widget = (extra: Record<string, unknown>) => ({
+      type: 'object',
+      properties: { object: { type: 'string', const: 'widget' }, a: str, b: str },
+      ...extra,
+    });
+    const x = getOp('getX', widget({ required: ['a'] }));
+    const y = getOp('getY', widget({ required: ['b'] }));
+    const z = getOp('getZ', widget({ required: ['b'], deprecated: true }));
+    for (const [order, paths] of [
+      ['x-first', { '/x': x, '/y': y, '/z': z }],
+      ['y-first', { '/y': y, '/x': x, '/z': z }],
+      ['z-first', { '/z': z, '/y': y, '/x': x }],
+    ] as const) {
+      const spec = await parseSpec(await writeSpec(`tie-${order}.json`, specDoc({}, paths)));
+      const ops = opsOf(spec);
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      // `getZ` matches `getY` but not `getX` modulo the flag, so it never
+      // folds — whichever live copy the shared name ends up carrying.
+      expect(ops.getZ?.response, order).toEqual({ kind: 'model', name: 'GetZWidget' });
+      expect(ops.getX?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(ops.getY?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(byName.GetZWidget?.deprecated, order).toBe(true);
+      expect(
+        byName.GetZWidget?.fields.filter((f) => f.required).map((f) => f.name),
+        order,
+      ).toEqual(['b']);
+      // The live tie still follows document order, as on main: the first
+      // declared live copy's requiredness is the shared one.
+      const required = byName.Widget?.fields.filter((f) => f.required).map((f) => f.name);
+      expect(required, order).toEqual(order === 'x-first' ? ['a'] : ['b']);
+      expectSound(spec, [], ['getZ.response → GetZWidget']);
+    }
+  });
+});

@@ -153,10 +153,13 @@ function keepLargestByName(models: Model[]): Model[] {
  *
  * - folds onto the live definition — the one `keepLargestByName` would keep
  *   among the live contenders — when there is no owner and it is identical
- *   to that definition in everything but the flag (`differOnlyByDeprecation`):
- *   the shared name keeps the live definition, with a warning, in either
- *   order; the deprecated schema's own field or operation still carries its
- *   flag;
+ *   to every live contender in everything but the flag
+ *   (`differOnlyByDeprecation`): the shared name keeps the live definition,
+ *   with a warning, in either order; the deprecated schema's own field or
+ *   operation still carries its flag. Live contenders that disagree among
+ *   themselves are settled by document order (first declared, or the one with
+ *   more fields), as they always were; a deprecated copy never inherits that
+ *   tie and is qualified instead, so its name is the same in every order;
  * - otherwise takes a name of its own (`mintQualifiedName`): its site's
  *   qualifier prefixed — `GetLegacyWidgetWidget` for a response of
  *   `getLegacyWidget`, `CreateNoteRequest2` for a body already named from its
@@ -208,23 +211,29 @@ function separateDeprecatedCopies(
     const group = byName.get(name)!;
     const owner = owners.get(name);
     let nameDeprecated: boolean;
-    let liveWinner: Model | undefined;
+    /** The live contenders a deprecated copy may fold onto; empty under an owner, which is never folded onto. */
+    let live: Model[] = [];
     if (owner) {
       nameDeprecated = !!owner.deprecated;
     } else {
-      const live = group.filter((m) => !m.deprecated);
+      live = group.filter((m) => !m.deprecated);
       if (live.length === 0 || live.length === group.length) continue;
       nameDeprecated = false;
-      liveWinner = preferredDefinition(live);
     }
 
     for (const copy of group) {
       if (!!copy.deprecated === nameDeprecated) continue;
-      if (liveWinner && differOnlyByDeprecation(liveWinner, copy)) {
+      // A deprecated copy folds only when every live copy of the name is its
+      // twin but for the flag: then whichever live definition the shared name
+      // carries, the copy is interchangeable with it. Live copies that
+      // disagree among themselves (requiredness, say) are settled by document
+      // order, as always; a deprecated copy must not inherit that order, so it
+      // is qualified whenever they disagree.
+      if (live.length > 0 && live.every((l) => differOnlyByDeprecation(l, copy))) {
         console.warn(
           `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
         );
-        folded.set(copy, liveWinner);
+        folded.set(copy, preferredDefinition(live));
         continue;
       }
       const bundle = naming && bundleOf.get(copy);
@@ -270,7 +279,8 @@ function bottomUp(groups: ReadonlyMap<string, Model[]>): string[] {
       for (const field of model.fields) {
         walkTypeRef(field.type, {
           model: (ref) => {
-            if (groups.has(ref.name)) visit(ref.name);
+            // An explicit `$ref` names a component, never a contender.
+            if (!isComponentModelRef(ref) && groups.has(ref.name)) visit(ref.name);
           },
         });
       }

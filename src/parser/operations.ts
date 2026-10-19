@@ -34,7 +34,7 @@ import { collectProperties, extractInlineModelsFromProperties, type InlineModelB
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
-import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
+import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 
 interface PathItem {
@@ -398,22 +398,17 @@ export function extractOperations(
 
   // Companion models of list envelopes are named once every list operation is
   // known, so copies of one envelope shape can share a model.
-  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels);
+  const companionFolds = new Map<EnvelopeCompanion, EnvelopeCompanion>();
+  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels, companionFolds);
   inlineModels.push(...companionModels);
-  // Each companion that kept its own models is a site of its own: its
-  // envelope field owns the reference, so a merge pass that must rename one
-  // of its models (a deprecated companion named like a live component field's
-  // model, say) repoints that field and nothing else.
-  const survivingCompanionModels = new Set(companionModels);
-  for (const companion of envelopeCompanions) {
-    const first = companion.models[0];
-    if (!first || !survivingCompanionModels.has(first)) continue;
-    inlineModelBundles.push({
-      qualifier: companionQualifiers.get(companion) ?? '',
-      roots: [companion.field.type],
-      models: companion.models,
-    });
-  }
+  // Each companion that kept its models is a site of its own, owning its
+  // envelope field and the envelope field of every operation whose copy
+  // folded onto it, so a merge pass that must rename one of its models (a
+  // deprecated companion named like a live component field's model, say)
+  // repoints every operation sharing it and nothing else.
+  inlineModelBundles.push(
+    ...companionBundles(envelopeCompanions, companionModels, companionFolds, companionQualifiers),
+  );
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"

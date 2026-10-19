@@ -1,5 +1,6 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, walkTypeRef } from '../ir/types.js';
+import type { InlineModelBundle } from './inline-models.js';
 
 /**
  * A list-envelope companion that was lifted to one or more inline models:
@@ -67,8 +68,18 @@ export interface EnvelopeCompanion {
  *
  * Enums declared inline in a companion stay operation-qualified, exactly like
  * enums declared inline in a parameter.
+ *
+ * `foldedOnto`, when given, receives every copy that folded onto another
+ * companion's definition, keyed to that companion (a copy folded onto a
+ * component is not recorded: nothing of it is emitted), so the caller can
+ * tell which envelope fields a surviving companion's models serve
+ * (`companionBundles`).
  */
-export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], componentModels?: Model[]): Model[] {
+export function resolveEnvelopeCompanionNames(
+  companions: EnvelopeCompanion[],
+  componentModels?: Model[],
+  foldedOnto?: Map<EnvelopeCompanion, EnvelopeCompanion>,
+): Model[] {
   const byBareName = new Map<string, EnvelopeCompanion[]>();
   /** Copies folded onto another definition; their own models are not emitted. */
   const folded = new Set<EnvelopeCompanion>();
@@ -137,11 +148,47 @@ export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], c
     const collapsing = group.filter(folds);
     for (const companion of collapsing) {
       renameCompanion(companion, finalNames);
-      if (companion !== owner) folded.add(companion);
+      if (companion !== owner) {
+        folded.add(companion);
+        if (owner) foldedOnto?.set(companion, owner);
+      }
     }
   }
 
   return companions.filter((c) => !folded.has(c)).flatMap((c) => c.models);
+}
+
+/**
+ * One site (`InlineModelBundle`) per companion that kept its models after
+ * `resolveEnvelopeCompanionNames`: the envelope field that lifted it, plus
+ * the envelope field of every copy that folded onto it (`foldedOnto`) — those
+ * fields were repointed at its models and reference nothing else — so a merge
+ * pass that later renames one of its models (a deprecated companion named
+ * like a live component field's model, say) repoints every operation that
+ * shares it, and nothing else. `survivingModels` is what the resolver
+ * returned; a companion is a survivor when its own model is among them.
+ * `qualifiers` gives each companion the PascalCase name of the operation that
+ * lifted it, to prefix a renamed model as a header model is prefixed.
+ */
+export function companionBundles(
+  companions: EnvelopeCompanion[],
+  survivingModels: Model[],
+  foldedOnto: ReadonlyMap<EnvelopeCompanion, EnvelopeCompanion>,
+  qualifiers: ReadonlyMap<EnvelopeCompanion, string>,
+): InlineModelBundle[] {
+  const surviving = new Set(survivingModels);
+  const bundles: InlineModelBundle[] = [];
+  for (const companion of companions) {
+    const own = companion.models[0];
+    if (!own || !surviving.has(own)) continue;
+    const sharers = companions.filter((c) => foldedOnto.get(c) === companion);
+    bundles.push({
+      qualifier: qualifiers.get(companion) ?? '',
+      roots: [companion.field.type, ...sharers.map((c) => c.field.type)],
+      models: companion.models,
+    });
+  }
+  return bundles;
 }
 
 /**
