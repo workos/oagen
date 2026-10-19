@@ -1,4 +1,11 @@
-import type { TypeRef, Parameter, PaginationMeta, PaginationEndOfIteration, PaginationStrategy } from '../ir/types.js';
+import type {
+  TypeRef,
+  Parameter,
+  Model,
+  PaginationMeta,
+  PaginationEndOfIteration,
+  PaginationStrategy,
+} from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
 import { resolveComponentSchemaRef } from './schemas.js';
@@ -18,7 +25,7 @@ const LIMIT_PARAMS = ['limit', 'page_size', 'per_page', 'size', 'count'];
  * 2. **Offset-based**: an item offset (`offset`, `skip`) plus a limit-like parameter
  * 3. **Page-number**: a page number (`page`, `page_number`, `page_num`) plus a
  *    limit-like parameter — the iterator advances it by one per request, not
- *    by the number of items received
+ *    by the number of items received, starting at `pageStart`
  *
  * An offset or page parameter without a page-size parameter is not treated as
  * pagination. Returns null if no pattern is detected.
@@ -69,6 +76,7 @@ export function detectPagination(
       strategy: 'page',
       param: pageParam.name,
       limitParam: limitParam.name,
+      pageStart: derivePageStart(pageParam),
       dataPath: dataPath,
       itemType,
     };
@@ -77,13 +85,35 @@ export function detectPagination(
   return null;
 }
 
+/**
+ * The first page number an API expects: the page parameter's `default`, else
+ * its `minimum`, else 1. Only a non-negative integer counts — a `default` of
+ * `"1"` or `1.5` is not a page number, so the next source is tried.
+ */
+export function derivePageStart(param: Parameter | undefined): number {
+  for (const candidate of [param?.default, param?.constraints?.minimum]) {
+    if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate >= 0) return candidate;
+  }
+  return 1;
+}
+
 // ---------------------------------------------------------------------------
 // End of iteration — the envelope field that says the list is exhausted
 // ---------------------------------------------------------------------------
 
-const HAS_MORE_FIELDS = ['has_more', 'hasMore', 'has_next', 'hasNext', 'has_next_page', 'hasNextPage'];
-const TOTAL_PAGES_FIELDS = ['total_pages', 'totalPages', 'page_count', 'pageCount'];
-const TOTAL_COUNT_FIELDS = [
+/** Boolean companions that are `false` on the last page. */
+export const HAS_MORE_FIELDS: readonly string[] = [
+  'has_more',
+  'hasMore',
+  'has_next',
+  'hasNext',
+  'has_next_page',
+  'hasNextPage',
+];
+/** Integer companions counting the pages. */
+export const TOTAL_PAGES_FIELDS: readonly string[] = ['total_pages', 'totalPages', 'page_count', 'pageCount'];
+/** Integer companions counting the items. */
+export const TOTAL_COUNT_FIELDS: readonly string[] = [
   'total',
   'total_count',
   'totalCount',
@@ -91,6 +121,17 @@ const TOTAL_COUNT_FIELDS = [
   'totalItems',
   'total_results',
   'totalResults',
+];
+/**
+ * Every companion name that can end an iteration. List-envelope detection
+ * treats a companion with one of these names as pagination metadata, and
+ * `detectEndOfIteration` reads it, so the two can never disagree about which
+ * envelopes carry a stop field.
+ */
+export const END_OF_ITERATION_FIELDS: readonly string[] = [
+  ...HAS_MORE_FIELDS,
+  ...TOTAL_PAGES_FIELDS,
+  ...TOTAL_COUNT_FIELDS,
 ];
 const END_KIND_PRIORITY: ReadonlyArray<PaginationEndOfIteration['kind']> = ['hasMore', 'totalPages', 'totalCount'];
 
@@ -100,12 +141,13 @@ const END_KIND_PRIORITY: ReadonlyArray<PaginationEndOfIteration['kind']> = ['has
  * `dataPath` names the data array among them.
  *
  * Top-level fields are considered first, then the fields one level down
- * inside each object companion (an inline object, a `$ref` to a component, or
- * an `allOf` of those), and the path follows the `dataPath` convention:
- * `has_more` or `pagination.totalPages`. When several candidates exist, a
- * `hasMore` boolean wins over a `totalPages` integer, which wins over a
- * `totalCount` integer; within one kind the first in scan order wins. A
- * candidate whose type does not fit its kind (a string `total`) is ignored.
+ * inside each object companion (an inline object, a `$ref` to a component, an
+ * `allOf` of those, or a nullable wrapper around one), and the path follows
+ * the `dataPath` convention: `has_more` or `pagination.totalPages`. When
+ * several candidates exist, a `hasMore` boolean wins over a `totalPages`
+ * integer, which wins over a `totalCount` integer; within one kind the first
+ * in scan order wins. A candidate whose type does not fit its kind (a string
+ * `total`) is ignored.
  */
 export function detectEndOfIteration(
   properties: Record<string, SchemaObject | undefined>,
@@ -155,10 +197,15 @@ function isNumeric(schema: SchemaObject): boolean {
   return hasType(schema, 'integer') || hasType(schema, 'number');
 }
 
+function isNullSchema(schema: SchemaObject): boolean {
+  return schema.type === 'null' || (Array.isArray(schema.type) && schema.type.every((t) => t === 'null'));
+}
+
 /**
- * The properties of an object companion: its own, merged with those of its
- * `allOf` members, following `$ref`s to component schemas. Anything that is
- * not an object yields none.
+ * The properties of an object schema: its own, merged with those of its
+ * `allOf` members, following `$ref`s to component schemas and looking through
+ * a nullable `oneOf`/`anyOf` wrapper with a single non-null variant. Anything
+ * that is not an object yields none.
  */
 function objectProperties(
   schema: SchemaObject,
@@ -171,10 +218,61 @@ function objectProperties(
     const resolved = resolveComponentSchemaRef(schema, componentSchemas);
     return resolved ? objectProperties(resolved, componentSchemas, seen) : {};
   }
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (variants && !schema.properties && !schema.allOf) {
+    const nonNull = variants.filter((variant) => !isNullSchema(variant));
+    return nonNull.length === 1 ? objectProperties(nonNull[0], componentSchemas, seen) : {};
+  }
   const out: Record<string, SchemaObject | undefined> = {};
   for (const member of schema.allOf ?? []) Object.assign(out, objectProperties(member, componentSchemas, seen));
   if (schema.properties) Object.assign(out, schema.properties);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Resolving a dotted `dataPath`
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a dotted property path (the `dataPath` convention) against a
+ * response schema: each segment is looked up among the object's properties —
+ * through `$ref`s, `allOf` members and nullable wrappers — and the schema it
+ * lands on is returned with a final `$ref` resolved. `undefined` when a
+ * segment is missing.
+ */
+export function resolveSchemaPath(
+  schema: SchemaObject,
+  path: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | undefined {
+  let current: SchemaObject | undefined = schema;
+  for (const segment of path.split('.')) {
+    if (!current) return undefined;
+    current = objectProperties(current, componentSchemas)[segment];
+  }
+  if (!current) return undefined;
+  return resolveComponentSchemaRef(current, componentSchemas) ?? current;
+}
+
+/**
+ * Resolve a dotted `dataPath` against the IR rather than the document: walk
+ * from the response type through model fields, unwrapping nullables, and
+ * return the element type of the array the path lands on. `models` is where
+ * each model along the way is looked up by name, so the item type is exactly
+ * the one the parser already assigned. `undefined` when a segment is missing,
+ * a model is unknown, or the path does not end on an array.
+ */
+export function resolveDataPathItemType(response: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
+  let current: TypeRef = response;
+  for (const segment of dataPath.split('.')) {
+    const container = current.kind === 'nullable' ? current.inner : current;
+    if (container.kind !== 'model') return undefined;
+    const field = models.find((m) => m.name === container.name)?.fields.find((f) => f.name === segment);
+    if (!field) return undefined;
+    current = field.type;
+  }
+  const target = current.kind === 'nullable' ? current.inner : current;
+  return target.kind === 'array' ? target.items : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,37 +288,59 @@ export interface PaginationOverrides {
   hint?: unknown;
 }
 
+/** The validated, merged override for one operation, with the source(s) it came from for warnings. */
+export interface ResolvedPaginationOverride {
+  hint: PaginationHint;
+  source: string;
+}
+
 /**
- * Layer the explicit overrides onto the detected pagination. Precedence per
- * field: config hint, then `x-pagination`, then `detected`; a field no
- * override sets keeps the detected value, so `{ strategy: 'page' }` alone
- * re-labels a detected offset iterator without restating its parameters.
+ * Validate and merge the two override sources. Precedence per field: config
+ * hint, then `x-pagination`; a source that fails validation is dropped with
+ * an `[oagen] Warning:` and the other still applies. `undefined` when neither
+ * source is present or usable.
  *
- * Returns `detected` unchanged when no override is present, or when the
- * overrides are unusable — unknown strategy, no strategy or no `param` from
- * any source, a `param`/`limitParam` the operation does not declare as a
- * query parameter, a malformed field — after an `[oagen] Warning:` naming the
- * problem. `strategy: 'none'` turns pagination off and yields `undefined`.
+ * Resolved before the response is classified, because `strategy: 'none'`
+ * must keep a list envelope from being unwrapped and an explicit `dataPath`
+ * is resolved against the response while its schema is at hand.
  */
-export function applyPaginationOverrides(
+export function resolvePaginationOverride(
+  sources: PaginationOverrides,
+  opLabel: string,
+): ResolvedPaginationOverride | undefined {
+  const extension =
+    sources.extension === undefined ? undefined : validatePaginationHint(sources.extension, 'x-pagination', opLabel);
+  const hint =
+    sources.hint === undefined ? undefined : validatePaginationHint(sources.hint, 'operationHints pagination', opLabel);
+  if (!extension && !hint) return undefined;
+  const source = [extension && 'x-pagination', hint && 'operationHints pagination'].filter(Boolean).join(' / ');
+  return { hint: { ...extension, ...hint }, source };
+}
+
+/**
+ * Layer the resolved override onto the detected pagination. A field the
+ * override does not set keeps the detected value, so `{ strategy: 'page' }`
+ * alone re-labels a detected offset iterator without restating its
+ * parameters. `overrideItemType` is the element type an explicit `dataPath`
+ * resolved to; without it the detected item type (or the response itself)
+ * stands.
+ *
+ * Returns `detected` unchanged when there is no override or it is unusable —
+ * no strategy or no `param` from any source, a `param`/`limitParam` the
+ * operation does not declare as a query parameter — after an `[oagen]
+ * Warning:` naming the problem. `strategy: 'none'` yields `undefined`.
+ */
+export function applyPaginationOverride(
   detected: PaginationMeta | undefined,
-  overrides: PaginationOverrides,
+  override: ResolvedPaginationOverride | undefined,
   queryParams: Parameter[],
   response: TypeRef,
   opLabel: string,
+  overrideItemType?: TypeRef,
 ): PaginationMeta | undefined {
-  const extension =
-    overrides.extension === undefined
-      ? undefined
-      : validatePaginationHint(overrides.extension, 'x-pagination', opLabel);
-  const hint =
-    overrides.hint === undefined
-      ? undefined
-      : validatePaginationHint(overrides.hint, 'operationHints pagination', opLabel);
-  if (!extension && !hint) return detected;
-
-  const merged: PaginationHint = { ...extension, ...hint };
-  const where = `${[extension && 'x-pagination', hint && 'operationHints pagination'].filter(Boolean).join(' / ')} on ${opLabel}`;
+  if (!override) return detected;
+  const merged = override.hint;
+  const where = `${override.source} on ${opLabel}`;
 
   if (merged.strategy === 'none') return undefined;
 
@@ -247,12 +367,18 @@ export function applyPaginationOverrides(
   const limitParam = merged.limitParam ?? detected?.limitParam;
   const dataPath = merged.dataPath ?? detected?.dataPath;
   const endOfIteration = merged.endOfIteration ?? detected?.endOfIteration;
+  // The page base belongs to the page parameter actually in use, which the
+  // override may have swapped, so it is derived from that parameter rather
+  // than carried over from detection.
+  const pageStart =
+    strategy === 'page' ? (merged.pageStart ?? derivePageStart(queryParams.find((p) => p.name === param))) : undefined;
   return {
     strategy,
     param,
     ...(limitParam !== undefined && { limitParam }),
+    ...(pageStart !== undefined && { pageStart }),
     ...(dataPath !== undefined && { dataPath }),
-    itemType: detected?.itemType ?? (response.kind === 'array' ? response.items : response),
+    itemType: overrideItemType ?? detected?.itemType ?? (response.kind === 'array' ? response.items : response),
     ...(detected?.envelopeFields && { envelopeFields: detected.envelopeFields }),
     ...(endOfIteration && { endOfIteration }),
   };
@@ -291,6 +417,13 @@ export function validatePaginationHint(raw: unknown, source: string, opLabel: st
           return undefined;
         }
         out[key] = value;
+        break;
+      case 'pageStart':
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+          warn(`${where}: pageStart must be a non-negative integer — ignoring it`);
+          return undefined;
+        }
+        out.pageStart = value;
         break;
       case 'endOfIteration': {
         const end = validateEndOfIteration(value);

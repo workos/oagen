@@ -77,6 +77,7 @@ describe('parseSpec — pagination envelope fields', () => {
       strategy: 'page',
       param: 'page',
       limitParam: 'limit',
+      pageStart: 1,
       dataPath: 'customers',
       itemType: { kind: 'model', name: 'Customer' },
       envelopeFields: [{ name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true }],

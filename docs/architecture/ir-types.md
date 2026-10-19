@@ -175,6 +175,7 @@ interface PaginationMeta {
   strategy: PaginationStrategy;
   param: string; // Query param that selects the page (e.g., "after" for cursor, "offset" for offset, "page" for page)
   limitParam?: string; // Page-size param (offset and page strategies, e.g., "limit")
+  pageStart?: number; // First page number (page strategy only): the param's default, else its minimum, else 1
   dataPath?: string; // JSON path to the data array (e.g., "data", "results") — undefined means the response IS the data
   itemType: TypeRef; // Type of each item in the paginated list
   envelopeFields?: Field[]; // Every envelope property besides the data array, in document order
@@ -184,16 +185,24 @@ interface PaginationMeta {
 
 Present on `Operation` when pagination is detected. The `strategy` discriminant tells emitters how an auto-paging iterator reaches the next page:
 
-| Strategy      | Detected from                                                  | Next page                                                                               |
-| ------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `cursor`      | a cursor-like query param (`cursor`, `after`, `page_token`, …) | send the cursor the previous response returned in `param`                               |
-| `offset`      | `offset` or `skip` plus a page-size param                      | add the number of items received to `param`; send the page size in `limitParam`         |
-| `page`        | `page`, `page_number` or `page_num` plus a page-size param     | start at the param's `default`, else its `minimum`, else 1; add exactly one per request |
-| `link-header` | never detected — set through an override                       | follow the RFC 5988 `Link: <…>; rel="next"` response header (e.g., GitHub API)          |
+| Strategy      | Detected from                                                  | Next page                                                                       |
+| ------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `cursor`      | a cursor-like query param (`cursor`, `after`, `page_token`, …) | send the cursor the previous response returned in `param`                       |
+| `offset`      | `offset` or `skip` plus a page-size param                      | add the number of items received to `param`; send the page size in `limitParam` |
+| `page`        | `page`, `page_number` or `page_num` plus a page-size param     | send `pageStart` first and add exactly one per request                          |
+| `link-header` | never detected — set through an override                       | follow the RFC 5988 `Link: <…>; rel="next"` response header (e.g., GitHub API)  |
 
 A cursor param wins over an offset param, which wins over a page param, when an operation declares more than one; a page or offset param without a page-size param (`limit`, `page_size`, `per_page`, `size`, `count`) is not pagination.
 
-Every iterator stops on an empty page. `endOfIteration`, when present, lets it stop one request sooner: for `hasMore` the field is a boolean that is `false` on the last page; for `totalPages` an integer the current page number is compared against (`page >= totalPages`); for `totalCount` an integer the items received so far are compared against. It is detected from a recognized envelope — a boolean `has_more`/`hasMore`/`has_next`, an integer `total_pages`/`totalPages`/`page_count`, or an integer `total`/`total_count`/`total_items` — at the top level first, then one level down inside each companion object (inline, `$ref`, or `allOf`), and the path follows the `dataPath` convention. When several candidates exist, `hasMore` beats `totalPages`, which beats `totalCount`.
+`pageStart` is set for the `page` strategy only: the page parameter's integer `default`, else its `minimum`, else 1 (`?page=0` APIs declare `default: 0` or `minimum: 0`), or whatever an override sets. Emitters read it instead of re-deriving the base.
+
+Every iterator stops on an empty page. `endOfIteration`, when present, lets it stop one request sooner:
+
+- `hasMore` — a boolean that is `false` on the last page.
+- `totalPages` — an integer count of pages; stop once the pages fetched so far reach it. Under `page` that is `page - pageStart + 1 >= totalPages` (`page >= totalPages` for a 1-based API, `page + 1 >= totalPages` for a 0-based one); under `offset` it is `floor(offset / limit) + 1 >= totalPages`.
+- `totalCount` — an integer count of items; stop once the items received so far reach it.
+
+It is detected from a recognized envelope — a boolean `has_more`/`hasMore`/`has_next`/`hasNext`/`has_next_page`/`hasNextPage`, an integer `total_pages`/`totalPages`/`page_count`/`pageCount`, or an integer `total`/`total_count`/`totalCount`/`total_items`/`totalItems`/`total_results`/`totalResults` — at the top level first, then one level down inside each companion object (inline, `$ref`, `allOf`, or a nullable wrapper), and the path follows the `dataPath` convention. When several candidates exist, `hasMore` beats `totalPages`, which beats `totalCount`. List-envelope recognition shares that list of names, so an envelope whose only companion is a stop field (`{ data, hasMore }`) is unwrapped like any other.
 
 The `dataPath` is dynamically detected from the response envelope — when `undefined`, emitters should treat the entire response as the data array or use their own default.
 
@@ -235,7 +244,8 @@ paths:
         strategy: page # cursor | offset | page | link-header | none
         param: page # must be a query parameter of the operation
         limitParam: limit
-        dataPath: pets
+        pageStart: 1 # page strategy only; defaults to the param's default, else minimum, else 1
+        dataPath: pets # resolved against the response; the array's element type becomes itemType
         endOfIteration: { kind: totalPages, path: pagination.totalPages }
 ```
 
@@ -248,7 +258,11 @@ export default {
 };
 ```
 
-`strategy: "none"` turns pagination off for the operation. An override that cannot be applied — an unknown strategy, a strategy with no `param` from any source, a `param` or `limitParam` the operation does not declare as a query parameter, a malformed field — is reported as an `[oagen] Warning:` and ignored, leaving the detected metadata in place; an unknown key is skipped with a warning. `itemType` and `envelopeFields` always come from the response.
+`strategy: "none"` turns pagination off for the operation. The decision is made before the response is classified, so a list envelope is not unwrapped: the body becomes one plain response model carrying every field (`pets`, `pagination`, …), exactly as a non-list body does, and nothing about the wire shape is lost.
+
+An explicit `dataPath` is resolved against the response — through a root `$ref` wrapper, `allOf` members and nullable wrappers — and the element type of the array it lands on becomes `itemType`, so a wrapper with `pets: Pet[]` iterates `Pet` rather than the wrapper. An inline item object found only this way is materialized as `<Op>Item`, like a recognized envelope's items.
+
+An override that cannot be applied — an unknown strategy, a strategy with no `param` from any source, a `param` or `limitParam` the operation does not declare as a query parameter, a `dataPath` that does not reach an array in the response, a malformed field — is reported as an `[oagen] Warning:` and ignored, leaving the detected metadata in place; an unknown key is skipped with a warning. `envelopeFields` always comes from the response.
 
 ## Service & Operation
 

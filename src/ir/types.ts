@@ -199,9 +199,9 @@ export interface ParameterGroupVariant {
  *   response; iteration ends when the response yields no next cursor.
  * - `offset` — `param` is the number of items to skip; advance it by the
  *   number of items received, with `limitParam` as the page size.
- * - `page` — `param` is a page *number*; start at the parameter's `default`,
- *   else its `minimum`, else 1, and advance it by exactly one per request,
- *   with `limitParam` as the page size.
+ * - `page` — `param` is a page *number*; start at `pageStart` (the
+ *   parameter's `default`, else its `minimum`, else 1) and advance it by
+ *   exactly one per request, with `limitParam` as the page size.
  * - `link-header` — follow the RFC 5988 `Link: <…>; rel="next"` response
  *   header instead of building the next request from `param`.
  *
@@ -217,8 +217,15 @@ export type PaginationStrategy = 'cursor' | 'offset' | 'page' | 'link-header';
  * level down inside the pagination companion.
  *
  * - `hasMore` — a boolean; stop when it is `false`.
- * - `totalPages` — an integer; stop once the page just fetched is `>=` it.
- * - `totalCount` — an integer; stop once the items received so far reach it.
+ * - `totalPages` — an integer count of pages; stop once the pages fetched so
+ *   far reach it. For the `page` strategy that is
+ *   `page - pageStart + 1 >= totalPages` — `page >= totalPages` when pages
+ *   start at 1, `page + 1 >= totalPages` when they start at 0 — and for
+ *   `offset` it is `floor(offset / limit) + 1 >= totalPages`.
+ * - `totalCount` — an integer count of items; stop once the items received
+ *   so far reach it.
+ *
+ * An empty page ends the iteration under every kind and every strategy.
  */
 export interface PaginationEndOfIteration {
   kind: 'hasMore' | 'totalPages' | 'totalCount';
@@ -232,6 +239,14 @@ export interface PaginationMeta {
   param: string;
   /** Query parameter that sets the page size (`offset` and `page` strategies). */
   limitParam?: string;
+  /**
+   * First page number the API expects; set for the `page` strategy only. The
+   * page parameter's integer `default`, else its `minimum`, else 1 — or the
+   * value an override sets. An iterator sends `pageStart` first and
+   * `pageStart + n` after `n` pages; `PaginationEndOfIteration` shows how the
+   * base enters the `totalPages` stop rule, so emitters never re-derive it.
+   */
+  pageStart?: number;
   dataPath?: string;
   itemType: TypeRef;
   /**

@@ -106,7 +106,7 @@ The `httpKeyByMethod` reverse map is only populated when an `operations` map is 
 Emitters should handle these additional variants introduced for open-source readiness:
 
 - **Auth:** `'cookie'` in the `apiKey` auth scheme `in` field
-- **Pagination:** `'page'` strategy for page-number pagination — advance `param` by one per request, starting at the parameter's `default`, else `minimum`, else 1 — next to `'link-header'` for RFC 5988 Link header pagination; optional `endOfIteration` (`{ kind: 'hasMore' | 'totalPages' | 'totalCount', path }`) naming the response field that ends the iteration, in addition to the empty-page stop every strategy has; `dataPath` may be `undefined` (meaning the response IS the data)
+- **Pagination:** `'page'` strategy for page-number pagination — send `pageStart` first and advance `param` by one per request — next to `'link-header'` for RFC 5988 Link header pagination; optional `endOfIteration` (`{ kind: 'hasMore' | 'totalPages' | 'totalCount', path }`) naming the response field that ends the iteration (`hasMore === false`; `page - pageStart + 1 >= totalPages`; items received `>= totalCount`), in addition to the empty-page stop every strategy has; `dataPath` may be `undefined` (meaning the response IS the data)
 - **Encoding:** `'form-urlencoded'` for `application/x-www-form-urlencoded` request bodies
 - **HTTP methods:** `head`, `options`, `trace` — HEAD returns no body, OPTIONS/TRACE are informational
 - **Cookie params:** Optional `cookieParams` array on operations that use cookie parameters

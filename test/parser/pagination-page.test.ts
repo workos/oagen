@@ -1,29 +1,42 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   detectPagination,
+  derivePageStart,
   detectEndOfIteration,
-  applyPaginationOverrides,
+  resolveSchemaPath,
+  resolveDataPathItemType,
+  resolvePaginationOverride,
+  applyPaginationOverride,
   validatePaginationHint,
+  END_OF_ITERATION_FIELDS,
 } from '../../src/parser/pagination.js';
-import type { Parameter, PaginationMeta, TypeRef } from '../../src/ir/types.js';
+import type { PaginationOverrides } from '../../src/parser/pagination.js';
+import { resolveDataPathFromSchema } from '../../src/parser/responses.js';
+import type { Model, Parameter, PaginationMeta, TypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 
 /**
  * Page-number pagination (#221): `page`-style parameters are their own
- * strategy, the envelope's end-of-iteration field is detected, and an explicit
- * override (`x-pagination` / `operationHints[...].pagination`) wins over the
- * name-based guess.
+ * strategy with an explicit first page, the envelope's end-of-iteration field
+ * is detected, and an explicit override (`x-pagination` /
+ * `operationHints[...].pagination`) wins over the name-based guess.
  */
-const param = (name: string): Parameter => ({ name, type: { kind: 'primitive', type: 'string' }, required: false });
+const param = (name: string, extra: Partial<Parameter> = {}): Parameter => ({
+  name,
+  type: { kind: 'primitive', type: 'string' },
+  required: false,
+  ...extra,
+});
 const pets: TypeRef = { kind: 'array', items: { kind: 'model', name: 'Pet' } };
 const pet: TypeRef = { kind: 'model', name: 'Pet' };
 
 describe('detectPagination — page-number strategy', () => {
-  it('reports page + limit as the page strategy, advanced by one rather than by items', () => {
+  it('reports page + limit as the page strategy, advanced by one from pageStart', () => {
     expect(detectPagination(pets, [param('page'), param('limit')], 'pets')).toEqual({
       strategy: 'page',
       param: 'page',
       limitParam: 'limit',
+      pageStart: 1,
       dataPath: 'pets',
       itemType: pet,
     });
@@ -40,10 +53,13 @@ describe('detectPagination — page-number strategy', () => {
     expect(detectPagination(pets, [param('page'), param(name)])).toMatchObject({ strategy: 'page', limitParam: name });
   });
 
-  it('keeps offset and skip as the offset strategy', () => {
-    expect(detectPagination(pets, [param('offset'), param('limit')])).toMatchObject({
+  it('keeps offset and skip as the offset strategy, without a pageStart', () => {
+    expect(detectPagination(pets, [param('offset'), param('limit')])).toEqual({
       strategy: 'offset',
       param: 'offset',
+      limitParam: 'limit',
+      dataPath: undefined,
+      itemType: pet,
     });
     expect(detectPagination(pets, [param('skip'), param('count')])).toMatchObject({
       strategy: 'offset',
@@ -64,6 +80,42 @@ describe('detectPagination — page-number strategy', () => {
   it('does not treat a page parameter without a page-size parameter as pagination', () => {
     expect(detectPagination(pets, [param('page')])).toBeNull();
     expect(detectPagination(pets, [param('page_number'), param('sort')])).toBeNull();
+  });
+
+  it("takes pageStart from the page parameter's default, else its minimum, else 1", () => {
+    expect(detectPagination(pets, [param('page', { default: 0 }), param('limit')])?.pageStart).toBe(0);
+    expect(detectPagination(pets, [param('page', { constraints: { minimum: 0 } }), param('limit')])?.pageStart).toBe(0);
+    expect(
+      detectPagination(pets, [param('page', { default: 2, constraints: { minimum: 0 } }), param('limit')])?.pageStart,
+    ).toBe(2);
+  });
+});
+
+describe('derivePageStart', () => {
+  it('skips a default that is not a non-negative integer and falls through to the next source', () => {
+    expect(derivePageStart(param('page', { default: '1' }))).toBe(1);
+    expect(derivePageStart(param('page', { default: 1.5, constraints: { minimum: 0 } }))).toBe(0);
+    expect(derivePageStart(param('page', { default: -1 }))).toBe(1);
+    expect(derivePageStart(undefined)).toBe(1);
+  });
+});
+
+describe('END_OF_ITERATION_FIELDS', () => {
+  it('lists every stop-field spelling the detector reads, for envelope recognition to share', () => {
+    const expected = [
+      'hasMore',
+      'has_more',
+      'hasNext',
+      'has_next',
+      'totalPages',
+      'total_pages',
+      'pageCount',
+      'page_count',
+      'totalCount',
+      'total_count',
+      'total',
+    ];
+    for (const name of expected) expect(END_OF_ITERATION_FIELDS).toContain(name);
   });
 });
 
@@ -145,6 +197,16 @@ describe('detectEndOfIteration', () => {
     });
   });
 
+  it('looks through a nullable oneOf wrapper around the companion', () => {
+    const pagination: SchemaObject = {
+      oneOf: [{ type: 'null' }, { type: 'object', properties: { has_more: boolean } }],
+    };
+    expect(detectEndOfIteration({ data, pagination }, 'data')).toEqual({
+      kind: 'hasMore',
+      path: 'pagination.has_more',
+    });
+  });
+
   it('ignores a candidate whose type does not fit its kind', () => {
     expect(detectEndOfIteration({ data, total: { type: 'string' }, has_more: integer }, 'data')).toBeUndefined();
   });
@@ -159,7 +221,116 @@ describe('detectEndOfIteration', () => {
   });
 });
 
-describe('applyPaginationOverrides', () => {
+describe('resolveSchemaPath', () => {
+  const components: Record<string, SchemaObject> = {
+    PetList: { type: 'object', properties: { result: { $ref: '#/components/schemas/Result' } } },
+    Result: { allOf: [{ type: 'object', properties: { items: { type: 'array', items: { type: 'string' } } } }] },
+  };
+
+  it('walks a dotted path through nullable wrappers, $refs and allOf members', () => {
+    const root: SchemaObject = { oneOf: [{ $ref: '#/components/schemas/PetList' }, { type: 'null' }] };
+    expect(resolveSchemaPath(root, 'result.items', components)).toEqual({ type: 'array', items: { type: 'string' } });
+  });
+
+  it('resolves a $ref the path ends on', () => {
+    const root: SchemaObject = { type: 'object', properties: { result: { $ref: '#/components/schemas/Result' } } };
+    expect(resolveSchemaPath(root, 'result', components)).toBe(components.Result);
+  });
+
+  it('returns undefined for a missing segment or a non-object along the way', () => {
+    expect(resolveSchemaPath({ $ref: '#/components/schemas/PetList' }, 'result.pets', components)).toBeUndefined();
+    expect(resolveSchemaPath({ type: 'string' }, 'items')).toBeUndefined();
+  });
+});
+
+describe('resolveDataPathItemType', () => {
+  const models: Model[] = [
+    {
+      name: 'PetList',
+      fields: [
+        { name: 'pets', type: pets, required: true },
+        { name: 'meta', type: { kind: 'nullable', inner: { kind: 'model', name: 'Meta' } }, required: false },
+        { name: 'count', type: { kind: 'primitive', type: 'integer' }, required: false },
+      ],
+    },
+    {
+      name: 'Meta',
+      fields: [
+        {
+          name: 'ids',
+          type: { kind: 'nullable', inner: { kind: 'array', items: { kind: 'primitive', type: 'string' } } },
+          required: false,
+        },
+      ],
+    },
+  ];
+  const wrapper: TypeRef = { kind: 'model', name: 'PetList' };
+
+  it('returns the element type of the array the path lands on', () => {
+    expect(resolveDataPathItemType(wrapper, 'pets', models)).toEqual(pet);
+  });
+
+  it('unwraps nullables along the way and at the end', () => {
+    expect(resolveDataPathItemType({ kind: 'nullable', inner: wrapper }, 'meta.ids', models)).toEqual({
+      kind: 'primitive',
+      type: 'string',
+    });
+  });
+
+  it('returns undefined for a missing field, an unknown model, a non-array target, or a non-model root', () => {
+    expect(resolveDataPathItemType(wrapper, 'items', models)).toBeUndefined();
+    expect(resolveDataPathItemType({ kind: 'model', name: 'Nope' }, 'pets', models)).toBeUndefined();
+    expect(resolveDataPathItemType(wrapper, 'count', models)).toBeUndefined();
+    expect(resolveDataPathItemType(pets, 'pets', models)).toBeUndefined();
+  });
+});
+
+describe('resolveDataPathFromSchema — the document fallback', () => {
+  const components: Record<string, SchemaObject> = {
+    Pet: { type: 'object', properties: { id: { type: 'string' } } },
+    PetList: {
+      type: 'object',
+      properties: {
+        pets: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+        result: {
+          type: 'object',
+          properties: { items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } } },
+        },
+        tags: { type: ['array', 'null'], items: { type: 'string' } },
+        count: { type: 'integer' },
+      },
+    },
+  };
+  const root: SchemaObject = { $ref: '#/components/schemas/PetList' };
+
+  it('types $ref items by name without materializing anything', () => {
+    expect(resolveDataPathFromSchema(root, 'pets', 'ListPetsResponse', components)).toEqual({
+      itemType: { kind: 'model', name: 'Pet' },
+      inlineModels: [],
+    });
+  });
+
+  it('materializes inline object items as <Op>Item, like a recognized envelope does', () => {
+    const resolved = resolveDataPathFromSchema(root, 'result.items', 'ListPetsResponse', components);
+    expect(resolved?.itemType).toEqual({ kind: 'model', name: 'ListPetsItem' });
+    expect(resolved?.inlineModels.map((m) => m.name)).toEqual(['ListPetsItem']);
+    expect(resolved?.inlineModels[0].fields.map((f) => f.name)).toEqual(['id']);
+  });
+
+  it('types primitive items, including those of a nullable array', () => {
+    expect(resolveDataPathFromSchema(root, 'tags', 'ListPetsResponse', components)?.itemType).toEqual({
+      kind: 'primitive',
+      type: 'string',
+    });
+  });
+
+  it('returns undefined when the path does not land on an array', () => {
+    expect(resolveDataPathFromSchema(root, 'count', 'ListPetsResponse', components)).toBeUndefined();
+    expect(resolveDataPathFromSchema(root, 'missing', 'ListPetsResponse', components)).toBeUndefined();
+  });
+});
+
+describe('resolvePaginationOverride + applyPaginationOverride', () => {
   const detected: PaginationMeta = {
     strategy: 'offset',
     param: 'page',
@@ -168,34 +339,55 @@ describe('applyPaginationOverrides', () => {
     itemType: pet,
     endOfIteration: { kind: 'totalPages', path: 'pagination.totalPages' },
   };
-  const params = [param('page'), param('limit'), param('cursor')];
+  const params = [param('page', { default: 1 }), param('limit'), param('cursor')];
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+  const apply = (base: PaginationMeta | undefined, sources: PaginationOverrides, overrideItemType?: TypeRef) =>
+    applyPaginationOverride(
+      base,
+      resolvePaginationOverride(sources, 'listPets'),
+      params,
+      pets,
+      'listPets',
+      overrideItemType,
+    );
 
   afterEach(() => {
     warn.mockClear();
   });
 
   it('returns the detected metadata untouched when no override is given', () => {
-    expect(applyPaginationOverrides(detected, {}, params, pets, 'listPets')).toBe(detected);
+    expect(resolvePaginationOverride({}, 'listPets')).toBeUndefined();
+    expect(apply(detected, {})).toBe(detected);
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('merges the sources field by field, hint over extension, and names both for warnings', () => {
+    const resolved = resolvePaginationOverride(
+      { extension: { strategy: 'page', dataPath: 'items' }, hint: { strategy: 'cursor', param: 'cursor' } },
+      'listPets',
+    );
+    expect(resolved).toEqual({
+      hint: { strategy: 'cursor', param: 'cursor', dataPath: 'items' },
+      source: 'x-pagination / operationHints pagination',
+    });
+  });
+
   it('re-labels the strategy and keeps every detected field it does not restate', () => {
-    expect(applyPaginationOverrides(detected, { extension: { strategy: 'page' } }, params, pets, 'listPets')).toEqual({
+    expect(apply(detected, { extension: { strategy: 'page' } })).toEqual({
       ...detected,
       strategy: 'page',
+      pageStart: 1,
     });
   });
 
   it('layers the config hint over the extension over detection, field by field', () => {
-    const result = applyPaginationOverrides(
-      detected,
-      { extension: { strategy: 'page', dataPath: 'items' }, hint: { strategy: 'cursor', param: 'cursor' } },
-      params,
-      pets,
-      'listPets',
-    );
-    expect(result).toEqual({
+    expect(
+      apply(detected, {
+        extension: { strategy: 'page', dataPath: 'items' },
+        hint: { strategy: 'cursor', param: 'cursor' },
+      }),
+    ).toEqual({
       strategy: 'cursor',
       param: 'cursor',
       limitParam: 'limit',
@@ -206,19 +398,15 @@ describe('applyPaginationOverrides', () => {
   });
 
   it('turns pagination off with strategy none, from either source', () => {
-    expect(applyPaginationOverrides(detected, { extension: { strategy: 'none' } }, params, pets, 'x')).toBeUndefined();
-    expect(applyPaginationOverrides(detected, { hint: { strategy: 'none' } }, params, pets, 'x')).toBeUndefined();
+    expect(apply(detected, { extension: { strategy: 'none' } })).toBeUndefined();
+    expect(apply(detected, { hint: { strategy: 'none' } })).toBeUndefined();
     expect(warn).not.toHaveBeenCalled();
   });
 
   it('builds pagination from scratch when nothing was detected', () => {
-    const result = applyPaginationOverrides(
-      undefined,
-      { extension: { strategy: 'cursor', param: 'cursor', endOfIteration: { kind: 'hasMore', path: 'has_more' } } },
-      params,
-      pets,
-      'listPets',
-    );
+    const result = apply(undefined, {
+      extension: { strategy: 'cursor', param: 'cursor', endOfIteration: { kind: 'hasMore', path: 'has_more' } },
+    });
     expect(result).toEqual({
       strategy: 'cursor',
       param: 'cursor',
@@ -227,56 +415,69 @@ describe('applyPaginationOverrides', () => {
     });
   });
 
+  it('uses the item type an explicit dataPath resolved to', () => {
+    const result = apply(detected, { extension: { dataPath: 'result.items' } }, { kind: 'primitive', type: 'string' });
+    expect(result).toMatchObject({ dataPath: 'result.items', itemType: { kind: 'primitive', type: 'string' } });
+  });
+
   it('replaces the detected end-of-iteration field when the override names one', () => {
     const end = { kind: 'hasMore', path: 'meta.more' } as const;
-    const result = applyPaginationOverrides(detected, { extension: { endOfIteration: end } }, params, pets, 'x');
+    const result = apply(detected, { extension: { endOfIteration: end } });
     expect(result?.endOfIteration).toEqual(end);
     expect(result?.strategy).toBe('offset');
   });
 
+  it('derives pageStart from the page parameter in use, or takes it from the override', () => {
+    expect(apply(detected, { extension: { strategy: 'page' } })?.pageStart).toBe(1);
+    expect(apply(detected, { hint: { strategy: 'page', pageStart: 5 } })?.pageStart).toBe(5);
+    const zeroBased = applyPaginationOverride(
+      detected,
+      resolvePaginationOverride({ extension: { strategy: 'page' } }, 'x'),
+      [param('page', { default: 0 }), param('limit')],
+      pets,
+      'x',
+    );
+    expect(zeroBased?.pageStart).toBe(0);
+  });
+
+  it('drops pageStart when the resulting strategy is not page', () => {
+    expect(apply(detected, { extension: { strategy: 'offset', pageStart: 5 } })?.pageStart).toBeUndefined();
+    expect(
+      apply({ ...detected, strategy: 'page', pageStart: 1 }, { hint: { strategy: 'cursor', param: 'cursor' } }),
+    ).not.toHaveProperty('pageStart');
+  });
+
   it('warns and falls back to detection on an unknown strategy', () => {
-    const result = applyPaginationOverrides(detected, { extension: { strategy: 'bogus' } }, params, pets, 'listPets');
-    expect(result).toBe(detected);
+    expect(apply(detected, { extension: { strategy: 'bogus' } })).toBe(detected);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('[oagen] Warning: x-pagination on listPets: unknown strategy "bogus"'),
     );
   });
 
   it('warns and falls back when a strategy is given but no param exists from any source', () => {
-    const result = applyPaginationOverrides(undefined, { extension: { strategy: 'page' } }, params, pets, 'listPets');
-    expect(result).toBeUndefined();
+    expect(apply(undefined, { extension: { strategy: 'page' } })).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('strategy "page" needs a param'));
   });
 
   it('warns and falls back when only a param is given and no strategy exists from any source', () => {
-    const result = applyPaginationOverrides(undefined, { extension: { param: 'page' } }, params, pets, 'listPets');
-    expect(result).toBeUndefined();
+    expect(apply(undefined, { extension: { param: 'page' } })).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('sets no strategy and none was detected'));
   });
 
   it('warns and falls back when the named param is not a query parameter of the operation', () => {
-    const result = applyPaginationOverrides(detected, { hint: { param: 'pg' } }, params, pets, 'listPets');
-    expect(result).toBe(detected);
+    expect(apply(detected, { hint: { param: 'pg' } })).toBe(detected);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('operationHints pagination on listPets: param "pg" is not a query parameter'),
     );
   });
 
   it('warns and falls back when the named limitParam is not a query parameter', () => {
-    const result = applyPaginationOverrides(detected, { extension: { limitParam: 'size' } }, params, pets, 'listPets');
-    expect(result).toBe(detected);
+    expect(apply(detected, { extension: { limitParam: 'size' } })).toBe(detected);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('limitParam "size" is not a query parameter'));
   });
 
   it('still applies a valid hint when the extension is malformed', () => {
-    const result = applyPaginationOverrides(
-      detected,
-      { extension: 'page', hint: { strategy: 'page' } },
-      params,
-      pets,
-      'listPets',
-    );
-    expect(result?.strategy).toBe('page');
+    expect(apply(detected, { extension: 'page', hint: { strategy: 'page' } })?.strategy).toBe('page');
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('x-pagination on listPets must be an object'));
   });
 });
@@ -322,6 +523,14 @@ describe('validatePaginationHint', () => {
     expect(validatePaginationHint({ dataPath: 3 }, 'x-pagination', 'op')).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('param must be a non-empty string'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('dataPath must be a non-empty string'));
+  });
+
+  it('rejects a pageStart that is not a non-negative integer', () => {
+    expect(validatePaginationHint({ pageStart: -1 }, 'x-pagination', 'op')).toBeUndefined();
+    expect(validatePaginationHint({ pageStart: 1.5 }, 'x-pagination', 'op')).toBeUndefined();
+    expect(validatePaginationHint({ pageStart: '1' }, 'x-pagination', 'op')).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(validatePaginationHint({ pageStart: 0 }, 'x-pagination', 'op')).toEqual({ pageStart: 0 });
   });
 
   it('rejects a malformed endOfIteration', () => {

@@ -47,11 +47,13 @@ export interface OperationHint {
  * lower-precedence sources (config hint > `x-pagination` > detection), so
  * `{ strategy: 'page' }` alone keeps the detected `param` and `limitParam`.
  *
- * `strategy: 'none'` turns pagination off for the operation. Any other
+ * `strategy: 'none'` turns pagination off for the operation; a list envelope
+ * is then kept as a plain response model rather than unwrapped. Any other
  * strategy needs a `param`, from some source, that names one of the
  * operation's query parameters. An override that fails validation — unknown
- * strategy, missing or undeclared parameter, malformed field — is reported
- * with an `[oagen] Warning:` and ignored, leaving the detected metadata as is.
+ * strategy, missing or undeclared parameter, a `dataPath` that does not reach
+ * an array, malformed field — is reported with an `[oagen] Warning:` and
+ * ignored, leaving the detected metadata as is.
  */
 export interface PaginationHint {
   strategy?: PaginationStrategy | 'none';
@@ -59,7 +61,16 @@ export interface PaginationHint {
   param?: string;
   /** Query parameter that sets the page size. */
   limitParam?: string;
-  /** Dotted path to the data array inside the response envelope. */
+  /**
+   * First page number the API expects (`page` strategy only). Defaults to the
+   * page parameter's integer `default`, else its `minimum`, else 1.
+   */
+  pageStart?: number;
+  /**
+   * Dotted path to the data array inside the response. Resolved against the
+   * response, so the array's element type — not the wrapper — becomes
+   * `itemType`.
+   */
   dataPath?: string;
   /** Response field that ends the iteration. */
   endOfIteration?: PaginationEndOfIteration;

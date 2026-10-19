@@ -1,6 +1,6 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
-import { detectEndOfIteration } from './pagination.js';
+import { detectEndOfIteration, END_OF_ITERATION_FIELDS, resolveSchemaPath } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -43,10 +43,21 @@ export interface ResponseExtractionResult {
   envelopeCompanions?: EnvelopeCompanion[];
 }
 
+export interface ResponseClassificationOptions {
+  /**
+   * The operation's pagination was switched off explicitly (`strategy:
+   * 'none'`). A list envelope is then not unwrapped: the body becomes a plain
+   * response model carrying every field, exactly as a non-list body does, so
+   * the wire shape survives without a `pagination` entry to describe it.
+   */
+  paginationDisabled?: boolean;
+}
+
 export function classifyAndExtractResponse(
   schema: SchemaObject,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
+  options: ResponseClassificationOptions = {},
 ): ResponseExtractionResult {
   // 1. If schema is a $ref, resolve to model name (Phase 1)
   if (schema.$ref) {
@@ -54,9 +65,11 @@ export function classifyAndExtractResponse(
   }
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
-  const envelope = detectListEnvelope(schema);
-  if (envelope.isEnvelope) {
-    return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+  if (!options.paginationDisabled) {
+    const envelope = detectListEnvelope(schema);
+    if (envelope.isEnvelope) {
+      return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+    }
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
@@ -128,8 +141,15 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   if (arrayProps.length === 1 && nonArrayKeys.length >= 1) {
     const arrayPropName = arrayProps[0];
 
-    const hasPaginationCompanion = nonArrayKeys.some((key) =>
-      PAGINATION_METADATA_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern)),
+    // A companion is pagination metadata when it is one of the stop fields
+    // the end-of-iteration detector reads (`hasMore`, `hasNext`, `pageCount`,
+    // …) — one shared list, so an envelope that carries a stop field is
+    // always recognized — or when its name contains one of the metadata
+    // patterns (`meta`, `pagination`, `cursor`, …).
+    const hasPaginationCompanion = nonArrayKeys.some(
+      (key) =>
+        END_OF_ITERATION_FIELDS.includes(key) ||
+        PAGINATION_METADATA_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern)),
     );
 
     if (KNOWN_DATA_PATHS.has(arrayPropName) && hasPaginationCompanion) {
@@ -194,6 +214,38 @@ function extractListResponse(
     endOfIteration,
     envelopeCompanions: envelopeCompanions.length > 0 ? envelopeCompanions : undefined,
   };
+}
+
+/**
+ * Element type of the array an explicit `dataPath` points at, read from the
+ * response document when the IR cannot answer — a `$ref` wrapper whose path
+ * runs through an inline object the parser has not materialized yet, or an
+ * envelope the parser did not recognize. Items are typed the way
+ * `extractListResponse` types them: a `$ref` by name, an inline object as
+ * `<Op>Item` (materialized here), anything else through `schemaToTypeRef`.
+ * `undefined` when the path does not land on an array.
+ */
+export function resolveDataPathFromSchema(
+  schema: SchemaObject,
+  dataPath: string,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { itemType: TypeRef; inlineModels: Model[] } | undefined {
+  const target = resolveSchemaPath(schema, dataPath, componentSchemas);
+  if (!target) return undefined;
+  const isArray = Array.isArray(target.type) ? target.type.includes('array') : target.type === 'array';
+  if (!isArray || !target.items) return undefined;
+
+  const items = target.items;
+  if (items.$ref) return { itemType: schemaToTypeRef(items, contextName), inlineModels: [] };
+  if (items.properties && (items.type === 'object' || !items.type)) {
+    const itemName = contextName.replace(/Response$/, '') + 'Item';
+    return {
+      itemType: { kind: 'model', name: itemName },
+      inlineModels: extractInlineModel(itemName, items, componentSchemas),
+    };
+  }
+  return { itemType: schemaToTypeRef(items, contextName), inlineModels: [] };
 }
 
 /**
