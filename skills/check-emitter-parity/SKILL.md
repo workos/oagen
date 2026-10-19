@@ -217,18 +217,18 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 
 ### HIGH priority suggestions
 
-| IR Field                         | What to Generate                                                                                        |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Missing TypeRef kinds            | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                     |
-| `ApiSpec.auth`                   | Client constructor auth configuration (API key header, bearer token, OAuth flow)                        |
-| `Operation.pagination`           | Auto-paging iterator/generator that handles cursor, offset, or link-header strategies                   |
-| `Operation.requestBodyEncoding`  | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary             |
-| `Operation.requestBodyRequired`  | Make the body argument mandatory when `true`; optional, and omitted from the request, when `false`      |
-| `Operation.injectIdempotencyKey` | Generate and attach `Idempotency-Key` header on applicable requests                                     |
-| `UnionType.discriminator`        | Tagged union deserialization using the discriminator property and mapping                               |
-| `UnionType.compositionKind`      | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization |
-| `PrimitiveType.format`           | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`) |
-| `ErrorResponse.type`             | Typed exception/error classes per status code                                                           |
+| IR Field                         | What to Generate                                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Missing TypeRef kinds            | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                             |
+| `ApiSpec.auth`                   | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                |
+| `Operation.pagination`           | Auto-paging iterator/generator that handles cursor, offset, or link-header strategies                                           |
+| `Operation.requestBodyEncoding`  | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                     |
+| `Operation.requestBodyRequired`  | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out |
+| `Operation.injectIdempotencyKey` | Generate and attach `Idempotency-Key` header on applicable requests                                                             |
+| `UnionType.discriminator`        | Tagged union deserialization using the discriminator property and mapping                                                       |
+| `UnionType.compositionKind`      | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                         |
+| `PrimitiveType.format`           | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                         |
+| `ErrorResponse.type`             | Typed exception/error classes per status code                                                                                   |
 
 ### MEDIUM priority suggestions
 
