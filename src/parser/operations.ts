@@ -2091,6 +2091,21 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * The schema of a response's JSON body: `application/json` first, else a
+ * `+json` media type (`application/problem+json` is the usual shape of a
+ * `default` error). Media type parameters (`; charset=utf-8`) are ignored.
+ * Other media types type nothing, as they do for `errors`.
+ */
+function jsonResponseSchema(resp: ResponseObject): SchemaObject | undefined {
+  const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  const essence = (mediaType: string): string => mediaType.split(';')[0].trim().toLowerCase();
+  const match =
+    entries.find(([mediaType]) => essence(mediaType) === 'application/json') ??
+    entries.find(([mediaType]) => essence(mediaType).endsWith('+json'));
+  return match?.[1].schema;
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2183,8 +2198,8 @@ function extractResponses(
         ...(headers && { headers }),
       });
     } else if (code >= 400) {
-      const jsonContent = resp.content?.['application/json'];
-      const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
+      const errorSchema = jsonResponseSchema(resp);
+      const type = errorSchema ? schemaToTypeRef(errorSchema, `Error${code}`) : undefined;
       errors.push({ statusCode: code, type, ...(headers && { headers }) });
     }
   }
