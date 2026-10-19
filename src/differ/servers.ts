@@ -1,4 +1,5 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
+import { resolveServerUrl } from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
 /**
@@ -11,13 +12,17 @@ import type { Change, ServerVariableChange } from './types.js';
  *
  * Servers are matched on their `url` template exactly as written, independent
  * of position: a changed template is a `server-removed` plus a `server-added`.
- * A template the document declares more than once is matched as a multiset:
- * entries with identical variables pair up first, whatever their position, so
- * a reordered or duplicated list reports nothing; the rest pair in declaration
- * order and are diffed, and the surplus on either side is a `server-added` or
- * a `server-removed`. Within a matched pair, variables are matched by name and
- * every difference is collected on one `server-modified`. Descriptions are not
- * compared, as nowhere else in the differ.
+ * A template the document declares more than once is matched as a multiset.
+ * Its old and new entries pair up by the strongest signal available, each pass
+ * taking the first unmatched candidate in declaration order: identical
+ * variables first, so a reordered list, or one whose duplicates are unchanged,
+ * reports nothing; then the same variable defaults (the entry kept its
+ * identity and changed its enums); then the same resolved URL (it differs only
+ * in a variable the template does not use); then position. The surplus on
+ * either side is a `server-added` or a `server-removed`. Within a matched
+ * pair, variables are matched by name and every difference is collected on one
+ * `server-modified`. Descriptions are not compared, as nowhere else in the
+ * differ.
  */
 export function diffServers(
   oldSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
@@ -96,24 +101,52 @@ interface ServerPairing {
 }
 
 /**
- * Pair the old and new entries of one template. An old entry whose variables
- * equal some new entry's claims the first such one, whatever its position, so
- * only entries that actually differ are left to pair by position.
+ * Pair the old and new entries of one template, strongest signal first. Each
+ * pass walks the old entries still unmatched and gives each the first new
+ * entry still unmatched that passes; what neither pass claims pairs by
+ * position. Equal defaults imply an equal resolved URL, so that stricter pass
+ * has to run first or it would never select anything.
  */
 function pairServers(olds: ServerEntry[], news: ServerEntry[]): ServerPairing {
+  let unmatchedOld = [...olds];
   const unmatchedNew = [...news];
-  const unmatchedOld: ServerEntry[] = [];
-  for (const oldServer of olds) {
-    const twin = unmatchedNew.findIndex((newServer) => diffServerVariables(oldServer, newServer).length === 0);
-    if (twin === -1) unmatchedOld.push(oldServer);
-    else unmatchedNew.splice(twin, 1);
+  const pairs: Array<[ServerEntry, ServerEntry]> = [];
+
+  for (const same of [identicalVariables, sameDefaults, sameResolvedUrl]) {
+    const stillUnmatched: ServerEntry[] = [];
+    for (const oldServer of unmatchedOld) {
+      const twin = unmatchedNew.findIndex((newServer) => same(oldServer, newServer));
+      if (twin === -1) stillUnmatched.push(oldServer);
+      else pairs.push([oldServer, unmatchedNew.splice(twin, 1)[0]]);
+    }
+    unmatchedOld = stillUnmatched;
   }
 
   const paired = Math.min(unmatchedOld.length, unmatchedNew.length);
-  const pairs: Array<[ServerEntry, ServerEntry]> = [];
   for (let i = 0; i < paired; i++) pairs.push([unmatchedOld[i], unmatchedNew[i]]);
 
+  // Report in the new document's order, like every other change.
+  pairs.sort((a, b) => news.indexOf(a[1]) - news.indexOf(b[1]));
+
   return { pairs, surplusOld: unmatchedOld.length - paired, surplusNew: unmatchedNew.length - paired };
+}
+
+function identicalVariables(a: ServerEntry, b: ServerEntry): boolean {
+  return diffServerVariables(a, b).length === 0;
+}
+
+/** The same variable names with the same defaults; enums and descriptions aside. */
+function sameDefaults(a: ServerEntry, b: ServerEntry): boolean {
+  const aVars = Object.entries(a.variables ?? {});
+  const bVars = b.variables ?? {};
+  return (
+    aVars.length === Object.keys(bVars).length &&
+    aVars.every(([name, variable]) => Object.hasOwn(bVars, name) && bVars[name].default === variable.default)
+  );
+}
+
+function sameResolvedUrl(a: ServerEntry, b: ServerEntry): boolean {
+  return resolveServerUrl(a).url === resolveServerUrl(b).url;
 }
 
 function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): ServerVariableChange[] {

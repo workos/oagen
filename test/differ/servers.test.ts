@@ -387,6 +387,116 @@ describe('diffServers', () => {
         "default changed from 'ap' to 'sa'",
       ]);
     });
+
+    it("pairs same-template servers by their defaults when both changed and the list was reordered (the issue author's example)", () => {
+      const url = 'https://{region}.api.example.com';
+      const old = [
+        server(url, { region: { default: 'eu', enum: ['eu', 'us'] } }),
+        server(url, { region: { default: 'ap', enum: ['ap', 'us'] } }),
+      ];
+      const next = [
+        server(url, { region: { default: 'ap', enum: ['ap'] } }),
+        server(url, { region: { default: 'eu', enum: ['eu'] } }),
+      ];
+      // Pairing by position would describe this as two default swaps, each
+      // with enum values added and removed; each server in fact lost `us`.
+      const lostUs = {
+        kind: 'server-modified',
+        url,
+        variableChanges: [
+          { kind: 'variable-enum-value-removed', variableName: 'region', value: 'us', classification: 'breaking' },
+        ],
+        classification: 'breaking',
+      };
+      expect(diffServers(spec(old), spec(next))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://ap.api.example.com',
+          classification: 'breaking',
+        },
+        lostUs,
+        lostUs,
+      ]);
+    });
+
+    it('reports a default changed on both same-template servers, in place, as two default changes', () => {
+      const url = 'https://{region}.api.example.com';
+      const old = [
+        staging,
+        server(url, { region: { default: 'eu', enum: ['eu', 'us'] } }),
+        server(url, { region: { default: 'ap', enum: ['ap', 'us'] } }),
+      ];
+      const next = [
+        staging,
+        server(url, { region: { default: 'us', enum: ['eu', 'us'] } }),
+        server(url, { region: { default: 'sa', enum: ['ap', 'us'] } }),
+      ];
+      const changes = diffServers(spec(old), spec(next));
+      expect(changes).toHaveLength(2);
+      expect(changes.map((c) => (c.kind === 'server-modified' ? c.variableChanges : c.kind))).toEqual([
+        [
+          {
+            kind: 'variable-default-changed',
+            variableName: 'region',
+            classification: 'breaking',
+            oldDefault: 'eu',
+            newDefault: 'us',
+            details: "default changed from 'eu' to 'us'",
+          },
+        ],
+        [
+          {
+            kind: 'variable-default-changed',
+            variableName: 'region',
+            classification: 'breaking',
+            oldDefault: 'ap',
+            newDefault: 'sa',
+            details: "default changed from 'ap' to 'sa'",
+          },
+        ],
+      ]);
+    });
+
+    it('pairs same-template servers by their resolved URL when they differ only in a variable the template does not use', () => {
+      const url = 'https://{region}.api.example.com';
+      const old = [
+        staging,
+        server(url, { region: { default: 'eu' }, port: { default: '443' } }),
+        server(url, { region: { default: 'ap' }, port: { default: '443' } }),
+      ];
+      const next = [
+        staging,
+        server(url, { region: { default: 'ap' }, port: { default: '8443' } }),
+        server(url, { region: { default: 'eu' }, port: { default: '9443' } }),
+      ];
+      // No entry keeps all its defaults (port moved everywhere), so the resolved
+      // URL — eu or ap — pairs them; each reports its port, not a region swap,
+      // in the new document's order.
+      const changes = diffServers(spec(old), spec(next));
+      expect(changes.map((c) => (c.kind === 'server-modified' ? c.variableChanges : c.kind))).toEqual([
+        [
+          {
+            kind: 'variable-default-changed',
+            variableName: 'port',
+            classification: 'breaking',
+            oldDefault: '443',
+            newDefault: '8443',
+            details: "default changed from '443' to '8443'",
+          },
+        ],
+        [
+          {
+            kind: 'variable-default-changed',
+            variableName: 'port',
+            classification: 'breaking',
+            oldDefault: '443',
+            newDefault: '9443',
+            details: "default changed from '443' to '9443'",
+          },
+        ],
+      ]);
+    });
   });
 });
 
