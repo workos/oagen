@@ -448,12 +448,60 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       );
       expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
       expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
+      // Every paging field describes the primary 200, not the 202 read last.
       expect(op.pagination).toMatchObject({
         strategy: 'page',
         dataPath: 'pets',
         itemType: { kind: 'primitive', type: 'string' },
+        envelopeFields: [{ name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true }],
+        endOfIteration: { kind: 'totalPages', path: 'pagination.totalPages' },
       });
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    describe('with a secondary 2xx body', () => {
+      // `data` is the detected array; the override points into the `result`
+      // companion, whose item model must survive the 202 being read too.
+      const listBody = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          result: {
+            type: 'object',
+            properties: { items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } } },
+          },
+          total: { type: 'integer' },
+        },
+      };
+      const jobBody = { type: 'object', properties: { job_id: { type: 'string' } } };
+      const response = (schema: unknown, description = 'ok') => ({
+        description,
+        content: { 'application/json': { schema } },
+      });
+
+      it.each([
+        ['200 declared before 202', { '200': response(listBody), '202': response(jobBody, 'queued') }],
+        ['202 declared before 200', { '202': response(jobBody, 'queued'), '200': response(listBody) }],
+      ])("keeps the primary body's companion item model the override selects (%s)", async (_order, responses) => {
+        const ir = await parseJson(petsSpec({ responses, 'x-pagination': { dataPath: 'result.items' } }));
+        const op = onlyOperation(ir);
+        expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+        expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
+        expect(op.pagination).toMatchObject({
+          dataPath: 'result.items',
+          endOfIteration: { kind: 'totalCount', path: 'total' },
+        });
+        const itemType = op.pagination?.itemType;
+        expect(itemType?.kind).toBe('model');
+        const itemModel = itemType?.kind === 'model' ? ir.models.find((m) => m.name === itemType.name) : undefined;
+        expect(itemModel?.fields.map((f) => f.name)).toEqual(['id']);
+        // The 202's own model is kept as well, so `successResponses` never dangles.
+        const job = op.successResponses?.find((r) => r.statusCode === 202)?.type;
+        expect(job?.kind).toBe('model');
+        if (job?.kind === 'model') expect(ir.models.some((m) => m.name === job.name)).toBe(true);
+        // validateModelRefs would have warned about any dangling reference.
+        expect(warn).not.toHaveBeenCalled();
+      });
     });
 
     it('warns and falls back to detection when the path does not reach an array', async () => {

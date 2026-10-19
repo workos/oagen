@@ -36,7 +36,8 @@ import {
   applyPaginationOverride,
   resolveDataPathItemType,
 } from './pagination.js';
-import { classifyAndExtractResponse, resolveDataPathFromSchema, type ResponseExtractionResult } from './responses.js';
+import { classifyAndExtractResponse, resolveDataPathFromSchema } from './responses.js';
+import type { ResponseExtractionResult } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 
@@ -2158,28 +2159,23 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
-/** One 2xx body's classification, kept with the schema and name it came from. */
-interface ClassifiedBody {
-  result: ResponseExtractionResult;
-  schema: SchemaObject;
-  contextName: string;
-}
-
 /**
  * Element type of the array an overridden `dataPath` names in one response
  * body. The IR answers first — the detected data array itself, an envelope
  * companion's field (companion models included, so the parser's own item
  * model is reused and follows any later renaming), or the response model's
- * fields — and the document answers when the path crosses a model the parser
- * has not materialized, minting inline items under a path-derived name.
+ * fields — and the document (`schema`, classified under `contextName`)
+ * answers when the path crosses a model the parser has not materialized,
+ * minting inline items under a path-derived name.
  */
 function resolveOverrideItemType(
-  body: ClassifiedBody,
+  result: ResponseExtractionResult,
+  schema: SchemaObject,
+  contextName: string,
   dataPath: string,
   componentModels: Model[],
   componentSchemas?: Record<string, SchemaObject>,
 ): { itemType: TypeRef; inlineModels: Model[] } | undefined {
-  const { result } = body;
   if (dataPath === result.dataPath && result.itemType) return { itemType: result.itemType, inlineModels: [] };
 
   const pool = [
@@ -2199,7 +2195,7 @@ function resolveOverrideItemType(
   }
   if (fromIr) return { itemType: fromIr, inlineModels: [] };
 
-  return resolveDataPathFromSchema(body.schema, dataPath, body.contextName, componentSchemas);
+  return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas);
 }
 
 /** What the explicit pagination override asks of response extraction. */
@@ -2252,12 +2248,15 @@ function extractResponses(
 
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
-  // Kept apart from `inlineModels`, which the latest 2xx body replaces
-  // wholesale below; merged once every status code has been read.
+  // Every 2xx body's classification, by status code. The models of all of
+  // them are kept — `successResponses` references each — while the paging
+  // fields are read from the status chosen as primary once every status code
+  // has been read.
+  const bodyResults = new Map<number, ResponseExtractionResult>();
   const headerModels: Model[] = [];
-  // Each 2xx body's classification by status code, so the override's
-  // `dataPath` can be resolved against the primary response once that is known.
-  const bodyResults = new Map<number, ClassifiedBody>();
+  // Each classified body's schema, for resolving an overridden `dataPath`
+  // through the document when the IR cannot answer.
+  const bodySchemas = new Map<number, SchemaObject>();
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
@@ -2277,15 +2276,8 @@ function extractResponses(
           paginationDisabled: pagination.disabled,
         });
         extractedType = result.response;
-        bodyResults.set(code, { result, schema: jsonContent.schema, contextName });
-        // Keep track of inline models and pagination from the latest 2xx with a schema
-        inlineModels = result.inlineModels;
-        isPaginated = result.isPaginated;
-        dataPath = result.dataPath;
-        itemType = result.itemType;
-        envelopeFields = result.envelopeFields;
-        endOfIteration = result.endOfIteration;
-        envelopeCompanions = result.envelopeCompanions;
+        bodyResults.set(code, result);
+        bodySchemas.set(code, jsonContent.schema);
       } else if (resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
         if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
@@ -2324,28 +2316,67 @@ function extractResponses(
   }
 
   // Primary response = lowest 2xx with a body schema, falling back to first 2xx
+  let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
     const primary =
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    primaryStatus = primary.statusCode;
+  }
 
-    // An explicit `dataPath` names the array the iterator yields from, so its
-    // element type — not the wrapper — must become `itemType`. It is resolved
-    // against the primary response, the one `Operation.response` describes,
-    // never against whichever 2xx happened to be declared last.
-    const primaryBody = bodyResults.get(primary.statusCode);
-    if (primaryBody && pagination.dataPath !== undefined && !pagination.disabled) {
-      const resolved = resolveOverrideItemType(
-        primaryBody,
-        pagination.dataPath,
-        pagination.componentModels ?? [],
-        componentSchemas,
-      );
-      if (resolved) {
-        overrideItemType = resolved.itemType;
-        if (resolved.inlineModels.length > 0) inlineModels = [...inlineModels, ...resolved.inlineModels];
+  // The paging fields describe `response`, so they come from the primary's
+  // body — not from whichever 2xx body happened to be read last.
+  const primaryBody = primaryStatus === undefined ? undefined : bodyResults.get(primaryStatus);
+  if (primaryBody) {
+    isPaginated = primaryBody.isPaginated;
+    dataPath = primaryBody.dataPath;
+    itemType = primaryBody.itemType;
+    envelopeFields = primaryBody.envelopeFields;
+    endOfIteration = primaryBody.endOfIteration;
+    envelopeCompanions = primaryBody.envelopeCompanions;
+  }
+
+  // Keep the models of every 2xx body: `successResponses` references each of
+  // them, so keeping only one body's would leave the others dangling. Every
+  // status derives the same `<Op>Response` context name, so on a name clash
+  // the primary's definition — the one `response` points at — goes first and
+  // wins; the other bodies follow in status order, then the header models.
+  const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
+    if (a === primaryStatus) return -1;
+    if (b === primaryStatus) return 1;
+    return a - b;
+  });
+  const seenModelNames = new Set<string>();
+  for (const [, result] of bodiesByPrimacy) {
+    for (const model of result.inlineModels) {
+      if (seenModelNames.has(model.name)) continue;
+      seenModelNames.add(model.name);
+      inlineModels.push(model);
+    }
+  }
+
+  // An explicit `dataPath` names the array the iterator yields from, so its
+  // element type — not the wrapper — must become `itemType`. It is resolved
+  // against the primary body, whose models (companions included) are the
+  // ones retained above, so the item type it selects always has its model.
+  const primarySchema = primaryStatus === undefined ? undefined : bodySchemas.get(primaryStatus);
+  if (primaryBody && primarySchema && pagination.dataPath !== undefined && !pagination.disabled) {
+    const resolved = resolveOverrideItemType(
+      primaryBody,
+      primarySchema,
+      deriveResponseName(op, pathModelBaseName),
+      pagination.dataPath,
+      pagination.componentModels ?? [],
+      componentSchemas,
+    );
+    if (resolved) {
+      overrideItemType = resolved.itemType;
+      for (const model of resolved.inlineModels) {
+        if (seenModelNames.has(model.name)) continue;
+        seenModelNames.add(model.name);
+        inlineModels.push(model);
       }
     }
   }
