@@ -129,6 +129,14 @@ export interface Operation {
   cookieParams?: Parameter[];
   requestBody?: TypeRef;
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+  /**
+   * Whether a caller must send `requestBody`: the Request Body Object's
+   * `required`, read after a `components/requestBodies` `$ref` is resolved.
+   * OpenAPI defaults the flag to `false`, so a body the document does not
+   * mark required comes through as `false`. Present exactly when
+   * `requestBody` is; an operation without a body has no entry.
+   */
+  requestBodyRequired?: boolean;
   response: TypeRef;
   /**
    * Headers the primary success response declares (the one `response` is the

@@ -259,6 +259,7 @@ interface Operation {
   requestBody?: TypeRef;
   requestBodyEncoding?:
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
+  requestBodyRequired?: boolean; // Whether the caller must send the body; present exactly when requestBody is
   response: TypeRef; // Primary response (lowest 2xx with body)
   responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   responseDescription?: string; // The primary response's description (only when it has content)
@@ -348,6 +349,12 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 | `form-urlencoded` | `application/x-www-form-urlencoded` |
 | `binary`          | `application/octet-stream`          |
 | `text`            | `text/plain`                        |
+
+### Request Body Required
+
+`requestBodyRequired` carries the Request Body Object's `required` flag, so an emitter can make the body argument mandatory or optional to match the document. It is read after a `$ref` into `components/requestBodies` is resolved, so a referenced body's flag counts. OpenAPI defaults the flag to `false`, so a body the document does not mark required is `false` here — an explicit `required: false` and an omitted flag are the same thing, and only a literal `true` makes a body required. The field is present exactly when `requestBody` is, whatever the encoding or the body's shape (an inline object, a bare `$ref`, a `oneOf`, a schema-less binary or text body); an operation without a body, or whose declared body yields no `requestBody`, has no entry.
+
+The differ reports a flip as `requestBodyRequiredChanged` on an `operation-modified` change: optional → required is breaking (callers must now send a body), required → optional is additive. A body appearing or disappearing is reported as `requestBodyChanged` alone.
 
 ### Multiple 2xx Responses
 
