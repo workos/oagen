@@ -72,11 +72,17 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       // requestBodyRequired: false→true is breaking (callers must now send the body)
       // requestBodyRequired: true→false is additive (callers may now omit it)
       const requestBodyRequiredBreaking = requestBodyRequiredChanged && !!newOp.requestBodyRequired;
+      // requestBody: a body appearing as optional is additive — callers gain an
+      // argument they may leave out, like an optional `param-added`. A body
+      // appearing as required, a body disappearing, and a body changing type
+      // are breaking. An absent flag reads as optional, as it does in OpenAPI.
+      const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
+      const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
       const errorsBreaking = errorsDiff === 'breaking';
 
       const hasBreaking =
         responseChanged ||
-        requestBodyChanged ||
+        requestBodyBreaking ||
         requestBodyRequiredBreaking ||
         httpMethodChanged ||
         pathChanged ||

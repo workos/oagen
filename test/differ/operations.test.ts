@@ -204,6 +204,7 @@ describe('diffOperations', () => {
     const withBody: Operation = {
       ...getUser,
       requestBody: { kind: 'model', name: 'UpdateUser' },
+      requestBodyRequired: true,
     };
     const changes = diffOperations('Users', [getUser], [withBody]);
     expect(changes).toHaveLength(1);
