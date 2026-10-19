@@ -1,6 +1,6 @@
 import type { ErrorResponse, Operation } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
-import { classifyParamChange } from './classify.js';
+import { classifyParamChange, deprecationDetails, isDeprecated } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
 export function diffOperations(serviceName: string, oldOps: Operation[], newOps: Operation[]): Change[] {
@@ -50,6 +50,9 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
+    // Additive either way: the operation's signature is unchanged, but a
+    // changelog has to say it, so a flipped flag alone is a change.
+    const deprecatedChanged = isDeprecated(oldOp) !== isDeprecated(newOp);
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -60,7 +63,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       pathChanged ||
       paginatedChanged ||
       injectIdempotencyKeyChanged ||
-      errorsChanged;
+      errorsChanged ||
+      deprecatedChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -97,6 +101,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedChanged,
         injectIdempotencyKeyChanged,
         errorsChanged,
+        deprecatedChanged,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
@@ -201,6 +206,13 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
       change.newDefault = newDefault;
       change.paramLocation = newEntry.loc;
       change.details = `default ${oldDefault ?? '<unset>'} → ${newDefault ?? '<unset>'}`;
+      changes.push(change);
+    }
+
+    if (isDeprecated(oldEntry.p) !== isDeprecated(newEntry.p)) {
+      const change = classifyParamChange('param-deprecated-changed', name);
+      change.paramLocation = newEntry.loc;
+      change.details = deprecationDetails(isDeprecated(newEntry.p));
       changes.push(change);
     }
   }

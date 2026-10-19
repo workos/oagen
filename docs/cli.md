@@ -36,6 +36,8 @@ oagen diff --old v1.yml --new v2.yml
 
 **Exit codes:** 0 = no changes, 1 = additive or modified changes, 2 = breaking changes.
 
+**Deprecation.** A node becoming deprecated, or no longer being deprecated, is reported and is additive in either direction (nothing a caller compiles against changes): `deprecatedChanged: true` on an `operation-modified`, `model-modified` or `enum-modified` change, and a `param-deprecated-changed`, `field-deprecated-changed` or `value-deprecated-changed` entry — with `details` reading `live → deprecated` or `deprecated → live` — in that change's `paramChanges`, `fieldChanges` or `valueChanges`. A change whose only content is the flag is still reported (so the command exits 1), and a breaking change on the same node keeps the change breaking. Only `true` counts as deprecated: `false` and an absent key are the same thing. Each flip is also mirrored into `behaviorChanges` as a `deprecated-changed` entry naming the node (`operation`, `parameter`, `model`, `field`, `enum` or `enum-value`) and carrying `oldDeprecated`/`newDeprecated`, beside the `param-default-changed` entries that were already collected there.
+
 ## `oagen extract`
 
 Extract the public API surface from an existing SDK. Produces a JSON file used as input for compat overlay and verification.

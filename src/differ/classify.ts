@@ -1,6 +1,20 @@
 import type { ModelDirection } from './direction.js';
 import type { FieldChange, ParamChange } from './types.js';
 
+/**
+ * Whether an IR node is deprecated. The parser only ever writes `true` and
+ * leaves the key absent otherwise, so `undefined` and an explicit `false` are
+ * the same thing here: not deprecated.
+ */
+export function isDeprecated(node: { deprecated?: boolean }): boolean {
+  return node.deprecated === true;
+}
+
+/** The `details` of a `*-deprecated-changed` entry, read old → new. */
+export function deprecationDetails(nowDeprecated: boolean): string {
+  return nowDeprecated ? 'live → deprecated' : 'deprecated → live';
+}
+
 export function classifyFieldChange(
   kind: FieldChange['kind'],
   fieldName: string,
@@ -51,6 +65,11 @@ export function classifyFieldChange(
       };
     case 'field-access-changed':
       return { kind, fieldName, classification: 'breaking' };
+    case 'field-deprecated-changed':
+      // Deprecation changes no contract: the field is still there with the
+      // same type and requiredness, whichever way the flag went. The caller
+      // attaches `details` saying which way (see `deprecationDetails`).
+      return { kind, fieldName, classification: 'additive' };
   }
 }
 
@@ -82,5 +101,9 @@ export function classifyParamChange(kind: ParamChange['kind'], paramName: string
       // We treat this as breaking so it surfaces as a major bump rather than
       // sliding through as a silent regression.
       return { kind, paramName, classification: 'breaking' };
+    case 'param-deprecated-changed':
+      // See `field-deprecated-changed`: the parameter is still accepted with
+      // the same type and requiredness, so this is additive either way.
+      return { kind, paramName, classification: 'additive' };
   }
 }

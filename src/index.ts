@@ -127,6 +127,10 @@ export type {
   OperationRemoved,
   OperationModified,
   ParamChange,
+  BehaviorChange,
+  ParamDefaultChanged,
+  DeprecatedChanged,
+  DeprecatedNode,
 } from './differ/types.js';
 
 // Core parse + generate
