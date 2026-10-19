@@ -127,6 +127,11 @@ export type {
   OperationRemoved,
   OperationModified,
   ParamChange,
+  BaseUrlChanged,
+  ServerAdded,
+  ServerRemoved,
+  ServerModified,
+  ServerVariableChange,
 } from './differ/types.js';
 
 // Core parse + generate

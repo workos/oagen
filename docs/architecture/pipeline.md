@@ -107,4 +107,4 @@ export default {
 
 ## Diff Engine (`src/differ/`)
 
-Compares two parsed specs (old vs new) and produces a `DiffReport` classifying changes as additive, breaking, or mixed. Used by the `oagen diff` CLI command for review before regenerating.
+Compares two parsed specs (old vs new) and produces a `DiffReport` classifying changes as additive, breaking, or mixed. Used by the `oagen diff` CLI command for review before regenerating. It compares the document root (`baseUrl` and `servers`, with their variables), models, enums and services; every change kind and its classification is listed under [`oagen diff`](../cli.md#oagen-diff) in the CLI reference.

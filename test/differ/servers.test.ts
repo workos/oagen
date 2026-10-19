@@ -1,0 +1,417 @@
+import { describe, it, expect } from 'vitest';
+import { resolve } from 'node:path';
+import { diffServers } from '../../src/differ/servers.js';
+import { diffSpecs } from '../../src/differ/diff.js';
+import { parseSpec } from '../../src/parser/parse.js';
+import { resolveServerUrl } from '../../src/ir/server-url.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
+import type { ApiSpec, ServerEntry, ServerVariable } from '../../src/ir/types.js';
+
+const fixtures = resolve(import.meta.dirname, '../fixtures');
+
+/** A spec whose `baseUrl` is `servers[0]` resolved, the way the parser builds it. */
+function spec(servers?: ServerEntry[]): ApiSpec {
+  return {
+    name: 'Test API',
+    version: '1.0.0',
+    baseUrl: servers?.[0] ? resolveServerUrl(servers[0]).url : '',
+    servers,
+    models: [],
+    enums: [],
+    services: [],
+    sdk: defaultSdkBehavior(),
+  };
+}
+
+function server(url: string, variables?: Record<string, ServerVariable>, description?: string): ServerEntry {
+  return { url, ...(variables && { variables }), ...(description !== undefined && { description }) };
+}
+
+const regional = server('https://{region}.api.example.com', { region: { default: 'eu', enum: ['eu', 'us'] } });
+const staging = server('https://staging.api.example.com');
+
+describe('diffServers', () => {
+  it('reports nothing for identical servers', () => {
+    expect(diffServers(spec([regional, staging]), spec([regional, staging]))).toEqual([]);
+  });
+
+  it('reports nothing when neither spec declares a server', () => {
+    expect(diffServers(spec(), spec())).toEqual([]);
+    expect(diffServers(spec([]), spec())).toEqual([]);
+  });
+
+  describe('baseUrl', () => {
+    it('reports a changed servers[0] template as base-url-changed plus a removal and an addition, once each', () => {
+      const changes = diffServers(spec([regional]), spec([server('https://api.example.org')]));
+      expect(changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://api.example.org',
+          classification: 'breaking',
+        },
+        { kind: 'server-added', url: 'https://api.example.org', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://{region}.api.example.com', classification: 'breaking' },
+      ]);
+    });
+
+    it('reports a changed variable default on servers[0] as base-url-changed plus the server-modified that caused it', () => {
+      const moved = server('https://{region}.api.example.com', { region: { default: 'us', enum: ['eu', 'us'] } });
+      expect(diffServers(spec([regional]), spec([moved]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://us.api.example.com',
+          classification: 'breaking',
+        },
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'region',
+              classification: 'breaking',
+              oldDefault: 'eu',
+              newDefault: 'us',
+              details: "default changed from 'eu' to 'us'",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('reports a reordered list as base-url-changed only', () => {
+      const changes = diffServers(spec([regional, staging]), spec([staging, regional]));
+      expect(changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://staging.api.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('reports nothing when the list is reordered but servers[0] resolves to the same host', () => {
+      const same = server('https://eu.api.example.com');
+      expect(diffServers(spec([regional, same]), spec([same, regional]))).toEqual([]);
+    });
+
+    it('is additive when a spec with no server gains one, since callers had to name a host already', () => {
+      expect(diffServers(spec(), spec([staging]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '',
+          newBaseUrl: 'https://staging.api.example.com',
+          classification: 'additive',
+        },
+        { kind: 'server-added', url: 'https://staging.api.example.com', classification: 'additive' },
+      ]);
+    });
+
+    it('is breaking when every server disappears, since the client loses its default host', () => {
+      expect(diffServers(spec([staging]), spec())).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://staging.api.example.com',
+          newBaseUrl: '',
+          classification: 'breaking',
+        },
+        { kind: 'server-removed', url: 'https://staging.api.example.com', classification: 'breaking' },
+      ]);
+    });
+  });
+
+  describe('servers', () => {
+    it('reports a server added after the first as additive, without touching baseUrl', () => {
+      expect(diffServers(spec([regional]), spec([regional, staging]))).toEqual([
+        { kind: 'server-added', url: 'https://staging.api.example.com', classification: 'additive' },
+      ]);
+    });
+
+    it('reports a server removed after the first as breaking, without touching baseUrl', () => {
+      expect(diffServers(spec([regional, staging]), spec([regional]))).toEqual([
+        { kind: 'server-removed', url: 'https://staging.api.example.com', classification: 'breaking' },
+      ]);
+    });
+
+    it('matches servers on the template as written, so a template with the same resolved host is still a change', () => {
+      // Both resolve to https://eu.api.example.com; the client can no longer pick a region.
+      const fixed = server('https://eu.api.example.com');
+      expect(diffServers(spec([regional]), spec([fixed]))).toEqual([
+        { kind: 'server-added', url: 'https://eu.api.example.com', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://{region}.api.example.com', classification: 'breaking' },
+      ]);
+    });
+
+    it('ignores server and variable descriptions', () => {
+      const described = server(
+        'https://{region}.api.example.com',
+        { region: { default: 'eu', enum: ['eu', 'us'], description: 'Where the account lives' } },
+        'Regional API',
+      );
+      expect(diffServers(spec([regional]), spec([described]))).toEqual([]);
+    });
+  });
+
+  describe('server variables', () => {
+    const withPort = server('https://api.example.com:{port}', { port: { default: '443' } });
+
+    it('reports a variable added as additive', () => {
+      const gained = server('https://api.example.com:{port}', {
+        port: { default: '443' },
+        scheme: { default: 'https' },
+      });
+      expect(diffServers(spec([withPort]), spec([gained]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://api.example.com:{port}',
+          variableChanges: [{ kind: 'variable-added', variableName: 'scheme', classification: 'additive' }],
+          classification: 'additive',
+        },
+      ]);
+    });
+
+    it('reports a variable removed as breaking', () => {
+      const bare = server('https://api.example.com:{port}');
+      const changes = diffServers(spec([withPort]), spec([bare]));
+      // The placeholder stays in the URL once nothing fills it, so baseUrl moves too.
+      expect(changes[0]).toMatchObject({ kind: 'base-url-changed', classification: 'breaking' });
+      expect(changes[1]).toEqual({
+        kind: 'server-modified',
+        url: 'https://api.example.com:{port}',
+        variableChanges: [{ kind: 'variable-removed', variableName: 'port', classification: 'breaking' }],
+        classification: 'breaking',
+      });
+      expect(changes).toHaveLength(2);
+    });
+
+    it('reports a changed default on a server after the first as breaking, without touching baseUrl', () => {
+      const moved = server('https://{region}.api.example.com', { region: { default: 'us', enum: ['eu', 'us'] } });
+      expect(diffServers(spec([staging, regional]), spec([staging, moved]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'region',
+              classification: 'breaking',
+              oldDefault: 'eu',
+              newDefault: 'us',
+              details: "default changed from 'eu' to 'us'",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('reports an enum value added as additive, carrying the value', () => {
+      const wider = server('https://{region}.api.example.com', {
+        region: { default: 'eu', enum: ['eu', 'us', 'ap'] },
+      });
+      expect(diffServers(spec([regional]), spec([wider]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            { kind: 'variable-enum-value-added', variableName: 'region', value: 'ap', classification: 'additive' },
+          ],
+          classification: 'additive',
+        },
+      ]);
+    });
+
+    it('reports an enum value removed as breaking, carrying the value', () => {
+      const narrower = server('https://{region}.api.example.com', { region: { default: 'eu', enum: ['eu'] } });
+      expect(diffServers(spec([regional]), spec([narrower]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            { kind: 'variable-enum-value-removed', variableName: 'region', value: 'us', classification: 'breaking' },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('reports an enum appearing as breaking: any value was accepted, now only the listed ones', () => {
+      const open = server('https://{region}.api.example.com', { region: { default: 'eu' } });
+      expect(diffServers(spec([open]), spec([regional]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            {
+              kind: 'variable-enum-added',
+              variableName: 'region',
+              classification: 'breaking',
+              details: 'values restricted to eu, us',
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('reports an enum disappearing as additive: every value a caller picked still works', () => {
+      const open = server('https://{region}.api.example.com', { region: { default: 'eu' } });
+      expect(diffServers(spec([regional]), spec([open]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            {
+              kind: 'variable-enum-removed',
+              variableName: 'region',
+              classification: 'additive',
+              details: 'any value accepted; was eu, us',
+            },
+          ],
+          classification: 'additive',
+        },
+      ]);
+    });
+
+    it('collects every variable change of one server on one server-modified, breaking if any is', () => {
+      const old = server('https://{region}.api.example.com:{port}', {
+        region: { default: 'eu', enum: ['eu', 'us'] },
+        port: { default: '443' },
+      });
+      const next = server('https://{region}.api.example.com:{port}', {
+        region: { default: 'eu', enum: ['eu', 'us', 'ap'] },
+        scheme: { default: 'https' },
+      });
+      const changes = diffServers(spec([staging, old]), spec([staging, next]));
+      expect(changes).toHaveLength(1);
+      expect(changes[0]).toMatchObject({ kind: 'server-modified', classification: 'breaking' });
+      if (changes[0].kind === 'server-modified') {
+        expect(changes[0].variableChanges.map((vc) => [vc.kind, vc.variableName])).toEqual([
+          ['variable-added', 'scheme'],
+          ['variable-removed', 'port'],
+          ['variable-enum-value-added', 'region'],
+        ]);
+      }
+    });
+
+    it('compares a variable named like an Object.prototype member by its own value', () => {
+      const old = server('https://api.example.com/{constructor}', { constructor: { default: 'a' } });
+      const next = server('https://api.example.com/{constructor}', { constructor: { default: 'b' } });
+      const changes = diffServers(spec([staging, old]), spec([staging, next]));
+      expect(changes).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://api.example.com/{constructor}',
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'constructor',
+              classification: 'breaking',
+              oldDefault: 'a',
+              newDefault: 'b',
+              details: "default changed from 'a' to 'b'",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+  });
+});
+
+describe('diffSpecs — servers', () => {
+  it('lists server changes before model, enum and service changes', () => {
+    const old = spec([regional]);
+    const next: ApiSpec = {
+      ...spec([server('https://api.example.org')]),
+      models: [{ name: 'Pet', fields: [] }],
+    };
+    expect(diffSpecs(old, next).changes.map((c) => c.kind)).toEqual([
+      'base-url-changed',
+      'server-added',
+      'server-removed',
+      'model-added',
+    ]);
+  });
+
+  it('counts base-url-changed as modified so the summary covers every change', () => {
+    const diff = diffSpecs(spec([regional]), spec([server('https://api.example.org')]));
+    expect(diff.summary).toEqual({ added: 1, removed: 1, modified: 1, breaking: 2, additive: 1, behaviorChanges: 0 });
+    expect(diff.summary.added + diff.summary.removed + diff.summary.modified).toBe(diff.changes.length);
+  });
+
+  it('keeps an additive-only summary when a second server is added', () => {
+    const diff = diffSpecs(spec([regional]), spec([regional, staging]));
+    expect(diff.summary).toEqual({ added: 1, removed: 0, modified: 0, breaking: 0, additive: 1, behaviorChanges: 0 });
+  });
+
+  describe("the issue's documents (#252)", () => {
+    it('reports a changed variable default as a moved baseUrl', async () => {
+      const [before, after] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-before.json')),
+        parseSpec(resolve(fixtures, 'servers-after.json')),
+      ]);
+      expect(before.baseUrl).toBe('https://eu.api.example.com');
+      expect(after.baseUrl).toBe('https://us.api.example.com');
+
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://us.api.example.com',
+          classification: 'breaking',
+        },
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'region',
+              classification: 'breaking',
+              oldDefault: 'eu',
+              newDefault: 'us',
+              details: "default changed from 'eu' to 'us'",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+      expect(diff.summary.breaking).toBe(2);
+    });
+
+    it('reports a replaced server as a moved baseUrl plus a removal and an addition', async () => {
+      const [before, moved] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-before.json')),
+        parseSpec(resolve(fixtures, 'servers-moved.json')),
+      ]);
+      expect(moved.baseUrl).toBe('https://api.example.org');
+
+      const diff = diffSpecs(before, moved);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://api.example.org',
+          classification: 'breaking',
+        },
+        { kind: 'server-added', url: 'https://api.example.org', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://{region}.api.example.com', classification: 'breaking' },
+      ]);
+      expect(diff.summary).toEqual({ added: 1, removed: 1, modified: 1, breaking: 2, additive: 1, behaviorChanges: 0 });
+    });
+
+    it('reports nothing for the same document parsed twice', async () => {
+      const [a, b] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-before.json')),
+        parseSpec(resolve(fixtures, 'servers-before.json')),
+      ]);
+      expect(diffSpecs(a, b).changes).toEqual([]);
+    });
+  });
+});
