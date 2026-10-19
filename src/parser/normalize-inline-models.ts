@@ -110,14 +110,22 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
 
     if (hasDifference && model.fields.length > existing.fields.length) {
-      // The component's name is the type the SDK exposes, so the component's
-      // own `deprecated` — present or absent — stays with it, as a component's
-      // flag is never replaced anywhere else (see mergeFieldInlineModels): a
+      // The component's name is the type the SDK exposes, so what documents
+      // and flags that name stays the component's: its `description` and
+      // `externalDocs` where it has them (the response's fill in only where
+      // the component has none, as the Json fold fills the base's link), and
+      // its `deprecated` — present or absent — always, as a component's flag
+      // is never replaced anywhere else (see mergeFieldInlineModels): a
       // deprecated response that adds a field must not deprecate every
       // operation referencing the live component, and a live one must not
       // clear a deprecated component's flag. The response's own flag is not
       // read; the operation that declared it still carries its own.
-      const replacement: Model = { ...model, ...(existing.deprecated ? { deprecated: true } : {}) };
+      const replacement: Model = {
+        ...model,
+        ...(existing.description ? { description: existing.description } : {}),
+        ...(existing.externalDocs ? { externalDocs: existing.externalDocs } : {}),
+        ...(existing.deprecated ? { deprecated: true } : {}),
+      };
       if (!existing.deprecated) delete replacement.deprecated;
       const idx = mergedSchemaModels.indexOf(existing);
       if (idx !== -1) mergedSchemaModels[idx] = replacement;

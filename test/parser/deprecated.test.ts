@@ -541,6 +541,67 @@ describe('inline-model merges – deprecated', () => {
       warn.mockRestore();
     }
   });
+
+  it('keeps a component’s own description and link when a larger inline response replaces its fields', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const docs = (description: string | undefined, url?: string): Partial<Model> => ({
+        description,
+        ...(url ? { externalDocs: { url } } : {}),
+      });
+      const component = (d: Partial<Model>): Model => ({ ...widget(false, true), ...d });
+      /** The same `Widget`, as an inline response that adds a field. */
+      const response = (d: Partial<Model>): Model => ({
+        ...widget(false, true),
+        fields: [...widget(false, true).fields, { name: 'extra', type: str, required: false }],
+        ...d,
+      });
+      const merge = (c: Model, r: Model) =>
+        mergeInlineResponseModels([c], [r]).map((m) => ({
+          description: m.description,
+          externalDocs: m.externalDocs,
+          hasLink: 'externalDocs' in m,
+          fields: m.fields.map((f) => f.name),
+        }));
+      const legacy = docs('Legacy widget.', 'https://example.com/legacy');
+
+      // The component's documentation stays with its name; only the fields
+      // are the response's.
+      expect(merge(component(docs('A widget.', 'https://example.com/widget')), response(legacy))).toEqual([
+        {
+          description: 'A widget.',
+          externalDocs: { url: 'https://example.com/widget' },
+          hasLink: true,
+          fields: ['k', 'extra'],
+        },
+      ]);
+      // A component without them adopts the response's.
+      expect(merge(component(docs(undefined)), response(legacy))).toEqual([
+        {
+          description: 'Legacy widget.',
+          externalDocs: { url: 'https://example.com/legacy' },
+          hasLink: true,
+          fields: ['k', 'extra'],
+        },
+      ]);
+      // Each fills in on its own: a described component without a link takes
+      // the response's link and keeps its description.
+      expect(merge(component(docs('A widget.')), response(legacy))).toEqual([
+        {
+          description: 'A widget.',
+          externalDocs: { url: 'https://example.com/legacy' },
+          hasLink: true,
+          fields: ['k', 'extra'],
+        },
+      ]);
+      // Neither documented: the link key stays absent.
+      expect(merge(component(docs(undefined)), response(docs(undefined)))).toEqual([
+        { description: undefined, externalDocs: undefined, hasLink: false, fields: ['k', 'extra'] },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('parseSpec – deprecated', () => {
@@ -1231,6 +1292,64 @@ describe('parseSpec – deprecated', () => {
           results.push(flags(spec.models));
         }
         expect(results[0]).toEqual(results[1]);
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps a component’s own description and link under a larger inline response’s fields, in either document order', async () => {
+    const widget = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { object: { type: 'string', const: 'widget' }, k: { type: 'string' } },
+      ...extra,
+    });
+    const getOp = (operationId: string, schema: unknown) => ({
+      get: { operationId, responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } } },
+    });
+    const fromComponent = getOp('getWidget', { $ref: '#/components/schemas/Widget' });
+    const legacyDocs = { description: 'Legacy widget.', externalDocs: { url: 'https://example.com/legacy' } };
+    // An inline response pinned to the same `object` const, documented in its
+    // own words, with one field the component lacks.
+    const inline = getOp('getLegacyWidget', {
+      ...widget(legacyDocs),
+      properties: { ...widget().properties, extra: { type: 'string' } },
+    });
+    const widgetDocs = { description: 'A widget.', externalDocs: { url: 'https://example.com/widget' } };
+    const docsOf = (m: Model | undefined) =>
+      m && { description: m.description, externalDocs: m.externalDocs, fields: m.fields.map((f) => f.name) };
+    const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+      ['documented component keeps its own', widgetDocs, widgetDocs],
+      ['undocumented component adopts the response’s', {}, legacyDocs],
+    ];
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      for (const [label, componentDocs, expected] of cases) {
+        const results = [];
+        for (const [order, paths] of [
+          ['component-first', { '/widget': fromComponent, '/legacy-widget': inline }],
+          ['inline-first', { '/legacy-widget': inline, '/widget': fromComponent }],
+        ] as const) {
+          const where = `${label}, ${order}`;
+          warn.mockClear();
+          const file = await writeSpec(`${order}.json`, specDoc({ Widget: widget(componentDocs) }, paths));
+          const spec = await parseSpec(file);
+          const warnings = warn.mock.calls.map(([m]) => String(m));
+          expect(docsOf(spec.models.find((m) => m.name === 'Widget')), where).toEqual({
+            ...expected,
+            fields: ['object', 'k', 'extra'],
+          });
+          const ops = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+          expect(ops.getWidget?.response, where).toEqual({ kind: 'model', name: 'Widget' });
+          expect(ops.getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'Widget' });
+          expect(
+            warnings.filter((w) => w.includes('Unresolved model reference')),
+            where,
+          ).toEqual([]);
+          results.push(spec.models.map(docsOf));
+        }
+        expect(results[0], label).toEqual(results[1]);
       }
     } finally {
       warn.mockRestore();
