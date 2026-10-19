@@ -24,7 +24,7 @@ describe('CLI — operationHints.pagination reaches the parser', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  const spec = (version: string, pageParam = 'page') => ({
+  const spec = (version: string, extension?: Record<string, unknown>) => ({
     openapi: '3.1.0',
     info: { title: 'pets', version },
     paths: {
@@ -32,9 +32,10 @@ describe('CLI — operationHints.pagination reaches the parser', () => {
         get: {
           operationId: 'listPets',
           parameters: [
-            { name: pageParam, in: 'query', schema: { type: 'integer' } },
+            { name: 'page', in: 'query', schema: { type: 'integer' } },
             { name: 'limit', in: 'query', schema: { type: 'integer' } },
           ],
+          ...(extension && { 'x-pagination': extension }),
           responses: {
             '200': {
               description: 'ok',
@@ -62,30 +63,42 @@ describe('CLI — operationHints.pagination reaches the parser', () => {
     return file;
   }
 
+  const lastReport = <T>(): T => JSON.parse(log.mock.calls[log.mock.calls.length - 1][0] as string) as T;
+
   it('parse applies the hint over name-based detection', async () => {
     const file = await writeSpec('spec.json', spec('1'));
     await parseCommand({ spec: file });
-    const detected = JSON.parse(log.mock.calls[0][0] as string) as ApiSpec;
-    expect(detected.services[0].operations[0].pagination).toMatchObject({
+    expect(lastReport<ApiSpec>().services[0].operations[0].pagination).toMatchObject({
       strategy: 'page',
+      pageStart: 1,
       endOfIteration: { kind: 'hasMore', path: 'has_more' },
     });
 
-    log.mockClear();
     await parseCommand({ spec: file, operationHints: { 'GET /pets': { pagination: { strategy: 'none' } } } });
-    const hinted = JSON.parse(log.mock.calls[0][0] as string) as ApiSpec;
-    expect(hinted.services[0].operations[0].pagination).toBeUndefined();
+    expect(lastReport<ApiSpec>().services[0].operations[0].pagination).toBeUndefined();
   });
 
-  it('diff applies the hint to both specs, so a hinted strategy is not reported as a change', async () => {
-    const oldFile = await writeSpec('old.json', spec('1'));
+  it('diff forwards the hint to both parses', async () => {
+    // The old version pins `offset` through x-pagination; the new one is
+    // detected as `page`. Without the hint the two disagree.
+    const oldFile = await writeSpec('old.json', spec('1', { strategy: 'offset' }));
     const newFile = await writeSpec('new.json', spec('2'));
-    const hints = { 'GET /pets': { pagination: { strategy: 'offset' as const } } };
 
+    await expect(diffCommand({ old: oldFile, new: newFile })).rejects.toMatchObject({ exitCode: 2 });
+    const unhinted = lastReport<{ changes: unknown[] }>();
+    expect(unhinted.changes).toHaveLength(1);
+    expect(unhinted.changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      paginationStrategyChanged: true,
+      classification: 'breaking',
+    });
+
+    // The config hint beats x-pagination in the old parse and detection in
+    // the new one; if either parse lost the hint the strategies would differ.
+    const hints = { 'GET /pets': { pagination: { strategy: 'page' as const } } };
     await expect(diffCommand({ old: oldFile, new: newFile, operationHints: hints })).rejects.toMatchObject({
       exitCode: 0,
     });
-    const report = JSON.parse(log.mock.calls[0][0] as string);
-    expect(report.changes).toEqual([]);
+    expect(lastReport<{ changes: unknown[] }>().changes).toEqual([]);
   });
 });
