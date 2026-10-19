@@ -2091,6 +2091,36 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * Media types the fixed-order response pick types as a plain string without
+ * reading their schema, in the order it checks them.
+ */
+const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html', 'text/xml', 'application/xml'];
+
+/**
+ * The schema of a response's JSON body: `application/json` first, else a
+ * `+json` media type (`application/problem+json` is the usual shape of a
+ * `default` error). Media type parameters (`; charset=utf-8`) are ignored.
+ * Other media types type nothing, as they do for `errors`.
+ */
+function jsonResponseSchema(resp: ResponseObject): SchemaObject | undefined {
+  const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  const essence = (mediaType: string): string => mediaType.split(';')[0].trim().toLowerCase();
+  const match =
+    entries.find(([mediaType]) => essence(mediaType) === 'application/json') ??
+    entries.find(([mediaType]) => essence(mediaType).endsWith('+json'));
+  return match?.[1].schema;
+}
+
+/**
+ * A media type's essence — `type/subtype` without parameters, trimmed and
+ * lower-cased — which is what decides how its body is typed (RFC 9110
+ * §8.3.1). The content keys themselves stay as written.
+ */
+function mediaTypeEssence(contentType: string): string {
+  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2140,10 +2170,31 @@ function extractResponses(
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
-      const jsonContent = resp.content?.['application/json'];
-      if (jsonContent?.schema) {
+      // The body schema to classify: the JSON one when a JSON media type is
+      // declared (`application/json` by essence, then `+json`), else — past
+      // the binary and text media types typed below without a schema — the
+      // first other media type that declares one. Either way it goes through
+      // `classifyAndExtractResponse`, so its inline models are created and
+      // the response never references a model the parser did not emit.
+      let bodySchema = jsonResponseSchema(resp);
+      if (!bodySchema && resp.content) {
+        // Handle non-JSON response content types (text/plain, binary, XML, etc.)
+        // Media types are compared by essence: `application/pdf; foo=bar` is
+        // as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much
+        // a string as `text/plain`.
+        const mediaTypes = Object.keys(resp.content).map(mediaTypeEssence);
+        if (mediaTypes.includes('application/octet-stream') || mediaTypes.includes('application/pdf')) {
+          extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
+        } else if (mediaTypes.some((mediaType) => TEXT_RESPONSE_MEDIA_TYPES.includes(mediaType))) {
+          extractedType = { kind: 'primitive', type: 'string' };
+        } else {
+          // Try the first available content type's schema
+          bodySchema = Object.values(resp.content).find((media) => media?.schema)?.schema;
+        }
+      }
+      if (bodySchema) {
         const contextName = deriveResponseName(op, pathModelBaseName);
-        const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
+        const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
         extractedType = result.response;
         // Keep track of inline models and pagination from the latest 2xx with a schema
         inlineModels = result.inlineModels;
@@ -2152,27 +2203,6 @@ function extractResponses(
         itemType = result.itemType;
         envelopeFields = result.envelopeFields;
         envelopeCompanions = result.envelopeCompanions;
-      } else if (resp.content) {
-        // Handle non-JSON response content types (text/plain, binary, XML, etc.)
-        if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
-          extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
-        } else if (
-          resp.content['text/plain'] ||
-          resp.content['text/html'] ||
-          resp.content['text/xml'] ||
-          resp.content['application/xml']
-        ) {
-          extractedType = { kind: 'primitive', type: 'string' };
-        } else {
-          // Try the first available content type's schema
-          const firstKey = Object.keys(resp.content)[0];
-          if (firstKey) {
-            const firstContent = resp.content[firstKey];
-            if (firstContent?.schema) {
-              extractedType = schemaToTypeRef(firstContent.schema, deriveResponseName(op, pathModelBaseName));
-            }
-          }
-        }
       }
       allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
     } else if (code >= 300 && code < 400) {
