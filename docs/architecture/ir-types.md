@@ -164,24 +164,45 @@ All standard HTTP methods are supported. Emitters should handle `head`, `options
 ## PaginationMeta
 
 ```typescript
+type PaginationStrategy = "cursor" | "offset" | "page" | "link-header";
+
+interface PaginationEndOfIteration {
+  kind: "hasMore" | "totalPages" | "totalCount";
+  path: string; // Dotted path from the response root, like dataPath: "has_more", "pagination.totalPages"
+}
+
 interface PaginationMeta {
-  strategy: "cursor" | "offset" | "link-header";
-  param: string; // Query param name (e.g., "after" for cursor, "offset" for offset)
-  limitParam?: string; // Limit param name (offset strategy only, e.g., "limit")
+  strategy: PaginationStrategy;
+  param: string; // Query param that selects the page (e.g., "after" for cursor, "offset" for offset, "page" for page)
+  limitParam?: string; // Page-size param (offset and page strategies, e.g., "limit")
   dataPath?: string; // JSON path to the data array (e.g., "data", "results") — undefined means the response IS the data
   itemType: TypeRef; // Type of each item in the paginated list
   envelopeFields?: Field[]; // Every envelope property besides the data array, in document order
+  endOfIteration?: PaginationEndOfIteration; // Response field that ends the iteration, when one is recognized
 }
 ```
 
-Present on `Operation` when pagination is detected. The `strategy` discriminant tells emitters whether to generate cursor-based, offset-based, or link-header pagination helpers. The `dataPath` is dynamically detected from the response envelope — when `undefined`, emitters should treat the entire response as the data array or use their own default.
+Present on `Operation` when pagination is detected. The `strategy` discriminant tells emitters how an auto-paging iterator reaches the next page:
+
+| Strategy      | Detected from                                                  | Next page                                                                               |
+| ------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `cursor`      | a cursor-like query param (`cursor`, `after`, `page_token`, …) | send the cursor the previous response returned in `param`                               |
+| `offset`      | `offset` or `skip` plus a page-size param                      | add the number of items received to `param`; send the page size in `limitParam`         |
+| `page`        | `page`, `page_number` or `page_num` plus a page-size param     | start at the param's `default`, else its `minimum`, else 1; add exactly one per request |
+| `link-header` | never detected — set through an override                       | follow the RFC 5988 `Link: <…>; rel="next"` response header (e.g., GitHub API)          |
+
+A cursor param wins over an offset param, which wins over a page param, when an operation declares more than one; a page or offset param without a page-size param (`limit`, `page_size`, `per_page`, `size`, `count`) is not pagination.
+
+Every iterator stops on an empty page. `endOfIteration`, when present, lets it stop one request sooner: for `hasMore` the field is a boolean that is `false` on the last page; for `totalPages` an integer the current page number is compared against (`page >= totalPages`); for `totalCount` an integer the items received so far are compared against. It is detected from a recognized envelope — a boolean `has_more`/`hasMore`/`has_next`, an integer `total_pages`/`totalPages`/`page_count`, or an integer `total`/`total_count`/`total_items` — at the top level first, then one level down inside each companion object (inline, `$ref`, or `allOf`), and the path follows the `dataPath` convention. When several candidates exist, `hasMore` beats `totalPages`, which beats `totalCount`.
+
+The `dataPath` is dynamically detected from the response envelope — when `undefined`, emitters should treat the entire response as the data array or use their own default.
 
 When the parser recognizes an inline list envelope — one array property plus a companion that looks like pagination metadata — `Operation.response` becomes the bare array, and `envelopeFields` keeps everything else the envelope carries: the pagination companion (`list_metadata`, `pagination`, `has_more`, `total`, …) and any discriminant such as `object: "list"`. Each entry is an ordinary `Field` (wire name, type, `required`, description), so `dataPath` + `itemType` + `envelopeFields` together describe the full shape of what the endpoint returns, and an emitter can both type the response and read the page details it needs for the next request:
 
 ```typescript
-// GET /customers → { customers: Customer[], pagination: Pagination }
+// GET /customers?page=&limit= → { customers: Customer[], pagination: { page, totalPages } }
 op.pagination = {
-  strategy: "offset",
+  strategy: "page",
   param: "page",
   limitParam: "limit",
   dataPath: "customers",
@@ -193,6 +214,7 @@ op.pagination = {
       required: true,
     },
   ],
+  endOfIteration: { kind: "totalPages", path: "pagination.totalPages" },
 };
 ```
 
@@ -200,7 +222,33 @@ A companion that is an inline object is lifted to a model. The same envelope rec
 
 `envelopeFields` is absent when the response is a bare array, when the response is a `$ref` to a component schema (the wrapper model itself carries the companions), or when pagination was inferred from query parameters alone.
 
-The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagination (e.g., GitHub API).
+### Overriding detection
+
+An `x-pagination` extension on the Operation Object, or the `pagination` entry of the operation's `operationHints["METHOD /path"]` in `oagen.config.ts`, states the pagination explicitly when the name-based guess is wrong. Both take the same object (`PaginationHint`), and precedence is per field — config hint, then `x-pagination`, then detection — so `{ strategy: "page" }` alone corrects the strategy and keeps the detected parameters, envelope and end-of-iteration field.
+
+```yaml
+# In the spec, for authors who can annotate it
+paths:
+  /pets:
+    get:
+      x-pagination:
+        strategy: page # cursor | offset | page | link-header | none
+        param: page # must be a query parameter of the operation
+        limitParam: limit
+        dataPath: pets
+        endOfIteration: { kind: totalPages, path: pagination.totalPages }
+```
+
+```ts
+// In oagen.config.ts, when the spec cannot be changed
+export default {
+  operationHints: {
+    "GET /pets": { pagination: { strategy: "page" } },
+  },
+};
+```
+
+`strategy: "none"` turns pagination off for the operation. An override that cannot be applied — an unknown strategy, a strategy with no `param` from any source, a `param` or `limitParam` the operation does not declare as a query parameter, a malformed field — is reported as an `[oagen] Warning:` and ignored, leaving the detected metadata in place; an unknown key is skipped with a warning. `itemType` and `envelopeFields` always come from the response.
 
 ## Service & Operation
 
@@ -474,6 +522,7 @@ interface OperationHint {
   split?: SplitHint[]; // Split union body into N typed wrappers
   defaults?: Record<string, string | number | boolean>;
   inferFromClient?: string[];
+  pagination?: PaginationHint; // Explicit pagination, applied by the parser — see "Overriding detection" under PaginationMeta
 }
 ```
 

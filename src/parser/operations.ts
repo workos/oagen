@@ -11,7 +11,9 @@ import type {
   Model,
   Field,
   PaginationMeta,
+  PaginationEndOfIteration,
 } from '../ir/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 import { createHash } from 'node:crypto';
 import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -27,7 +29,7 @@ import {
   constraintsEntry,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
-import { detectPagination } from './pagination.js';
+import { detectPagination, applyPaginationOverrides } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
@@ -61,6 +63,8 @@ interface OperationObject {
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
+  /** Explicit pagination override; validated by `applyPaginationOverrides`. */
+  'x-pagination'?: unknown;
   security?: RawSecurityRequirements;
   'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
@@ -296,6 +300,7 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  operationHints?: Record<string, OperationHint>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -349,6 +354,8 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        // Same "METHOD /path" key the operation resolver uses for the rest of the hint.
+        operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -846,6 +853,7 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  paginationHint?: unknown,
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -936,6 +944,7 @@ function buildOperation(
     dataPath: responseDataPath,
     itemType: responseItemType,
     envelopeFields,
+    endOfIteration: responseEndOfIteration,
     envelopeCompanions,
   } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
     componentHeaders,
@@ -946,22 +955,32 @@ function buildOperation(
   });
   inlineModels.push(...reqBodyModels);
 
-  // Build structured pagination metadata from response classification and query param detection
+  // Build structured pagination metadata from response classification and
+  // query param detection, then let an explicit override — the config hint
+  // over `x-pagination` over detection — correct or disable it.
   const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
-  let pagination: PaginationMeta | undefined;
+  let detectedPagination: PaginationMeta | undefined;
   if (isPaginated) {
     const itemType = responseItemType ?? (response.kind === 'array' ? response.items : response);
-    pagination = {
+    detectedPagination = {
       strategy: paginationFromParams?.strategy ?? 'cursor',
       param: paginationFromParams?.param ?? 'after',
       limitParam: paginationFromParams?.limitParam,
       dataPath: responseDataPath ?? paginationFromParams?.dataPath,
       itemType,
       envelopeFields,
+      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
     };
   } else if (paginationFromParams) {
-    pagination = paginationFromParams;
+    detectedPagination = paginationFromParams;
   }
+  const pagination = applyPaginationOverrides(
+    detectedPagination,
+    { extension: op['x-pagination'], hint: paginationHint },
+    queryParams,
+    response,
+    opLabel,
+  );
 
   // Per-operation security requirements; undefined means "inherit ApiSpec.security"
   const security = extractSecurityRequirements(op.security, opLabel);
@@ -2109,6 +2128,7 @@ function extractResponses(
   dataPath?: string;
   itemType?: TypeRef;
   envelopeFields?: Field[];
+  endOfIteration?: PaginationEndOfIteration;
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
@@ -2119,6 +2139,7 @@ function extractResponses(
   let dataPath: string | undefined;
   let itemType: TypeRef | undefined;
   let envelopeFields: Field[] | undefined;
+  let endOfIteration: PaginationEndOfIteration | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
 
   if (!responses) return { response, errors, inlineModels, isPaginated };
@@ -2151,6 +2172,7 @@ function extractResponses(
         dataPath = result.dataPath;
         itemType = result.itemType;
         envelopeFields = result.envelopeFields;
+        endOfIteration = result.endOfIteration;
         envelopeCompanions = result.envelopeCompanions;
       } else if (resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
@@ -2211,6 +2233,7 @@ function extractResponses(
     dataPath,
     itemType,
     envelopeFields,
+    endOfIteration,
     envelopeCompanions,
   };
 }

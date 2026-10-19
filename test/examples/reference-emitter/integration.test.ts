@@ -86,7 +86,7 @@ describe('reference emitter integration', () => {
     expect(listLabels).toBeDefined();
     expect(listLabels!.pagination).toBeDefined();
     expect(listLabels!.pagination!.dataPath).toBe('items');
-    expect(listLabels!.pagination!.strategy).toBe('offset');
+    expect(listLabels!.pagination!.strategy).toBe('page');
     expect(listLabels!.pagination!.param).toBe('page');
     expect(listLabels!.pagination!.limitParam).toBe('per_page');
   });

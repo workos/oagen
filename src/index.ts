@@ -10,6 +10,8 @@ export type {
   SuccessResponse,
   ResponseHeader,
   PaginationMeta,
+  PaginationStrategy,
+  PaginationEndOfIteration,
   HttpMethod,
   Parameter,
   ParameterGroup,
@@ -48,6 +50,7 @@ export {
 // Operation resolution
 export type {
   OperationHint,
+  PaginationHint,
   SplitHint,
   ResolvedOperation,
   ResolvedWrapper,

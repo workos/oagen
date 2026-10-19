@@ -1,5 +1,6 @@
-import type { TypeRef, Model, Field } from '../ir/types.js';
+import type { TypeRef, Model, Field, PaginationEndOfIteration } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
+import { detectEndOfIteration } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -27,6 +28,12 @@ export interface ResponseExtractionResult {
    * `PaginationMeta.envelopeFields`). Set only for a list envelope.
    */
   envelopeFields?: Field[];
+  /**
+   * The envelope field that ends an iteration, when the envelope declares an
+   * obvious one (see `PaginationMeta.endOfIteration`). Set only for a list
+   * envelope.
+   */
+  endOfIteration?: PaginationEndOfIteration;
   /**
    * Models lifted from inline companion objects, still under their
    * operation-qualified names. They are deliberately not in `inlineModels`:
@@ -173,6 +180,10 @@ function extractListResponse(
     componentSchemas,
   );
 
+  // The field that says the list is exhausted — `has_more`, `total_pages`,
+  // `pagination.totalPages` — so an iterator can stop without a wasted request.
+  const endOfIteration = detectEndOfIteration(properties, dataPath, componentSchemas);
+
   return {
     response: { kind: 'array', items: itemTypeRef },
     inlineModels,
@@ -180,6 +191,7 @@ function extractListResponse(
     dataPath,
     itemType: itemTypeRef,
     envelopeFields,
+    endOfIteration,
     envelopeCompanions: envelopeCompanions.length > 0 ? envelopeCompanions : undefined,
   };
 }

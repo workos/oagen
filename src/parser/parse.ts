@@ -19,6 +19,7 @@ import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import type { SchemaNameTransform } from './schemas.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 
 /**
  * A bundled OpenAPI document, post-`$ref` resolution but pre-IR extraction.
@@ -46,6 +47,13 @@ export interface ParseOptions {
    * wire key. Language-agnostic — honored by any emitter that reads `domainName`.
    */
   fieldHints?: Record<string, Record<string, string>>;
+  /**
+   * Per-operation overrides keyed by "METHOD /path" — the same map
+   * `resolveOperations` reads. The parser applies only each hint's
+   * `pagination`, which wins over the operation's `x-pagination` extension
+   * and over name-based detection (see `PaginationHint`).
+   */
+  operationHints?: Record<string, OperationHint>;
   /**
    * Pre-IR overlay applied to the bundled OpenAPI document before any IR
    * extraction runs. Use this when the upstream spec can't be changed but you
@@ -108,6 +116,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.tags,
     spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
+    options?.operationHints,
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);

@@ -191,10 +191,46 @@ export interface ParameterGroupVariant {
   optionalParameters?: string[];
 }
 
+/**
+ * How an operation's list is paged — what an auto-paging iterator sends to
+ * reach the next page:
+ *
+ * - `cursor` — `param` carries an opaque cursor taken from the previous
+ *   response; iteration ends when the response yields no next cursor.
+ * - `offset` — `param` is the number of items to skip; advance it by the
+ *   number of items received, with `limitParam` as the page size.
+ * - `page` — `param` is a page *number*; start at the parameter's `default`,
+ *   else its `minimum`, else 1, and advance it by exactly one per request,
+ *   with `limitParam` as the page size.
+ * - `link-header` — follow the RFC 5988 `Link: <…>; rel="next"` response
+ *   header instead of building the next request from `param`.
+ *
+ * Under every strategy an empty page ends the iteration; `endOfIteration`
+ * names a response field that ends it earlier.
+ */
+export type PaginationStrategy = 'cursor' | 'offset' | 'page' | 'link-header';
+
+/**
+ * The response field that tells an iterator the last page has been reached.
+ * `path` is a dotted property path from the response root, in the convention
+ * `dataPath` uses: `has_more` at the top level, `pagination.totalPages` one
+ * level down inside the pagination companion.
+ *
+ * - `hasMore` — a boolean; stop when it is `false`.
+ * - `totalPages` — an integer; stop once the page just fetched is `>=` it.
+ * - `totalCount` — an integer; stop once the items received so far reach it.
+ */
+export interface PaginationEndOfIteration {
+  kind: 'hasMore' | 'totalPages' | 'totalCount';
+  path: string;
+}
+
 /** Structured pagination metadata for auto-paging iterator generation */
 export interface PaginationMeta {
-  strategy: 'cursor' | 'offset' | 'link-header';
+  strategy: PaginationStrategy;
+  /** Query parameter that selects the page: the cursor, the offset, or the page number. */
   param: string;
+  /** Query parameter that sets the page size (`offset` and `page` strategies). */
   limitParam?: string;
   dataPath?: string;
   itemType: TypeRef;
@@ -217,6 +253,19 @@ export interface PaginationMeta {
    * from query parameters alone and no envelope was detected.
    */
   envelopeFields?: Field[];
+  /**
+   * Where the response says the iteration is over (see
+   * `PaginationEndOfIteration`). Detected from a recognized list envelope
+   * when it carries an obvious field — a boolean `has_more`/`hasMore`, an
+   * integer `total_pages`/`totalPages`, or an integer `total`/`total_count` —
+   * at the top level or one level down inside a companion object
+   * (`pagination.totalPages`); a `hasMore` field is preferred over a
+   * `totalPages` one, which is preferred over a count. The operation's
+   * `x-pagination` extension or its `operationHints` entry can set it
+   * explicitly. Absent when nothing recognizable is declared; an emitter then
+   * stops on an empty page (and, for `cursor`, on a missing next cursor).
+   */
+  endOfIteration?: PaginationEndOfIteration;
 }
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace';
