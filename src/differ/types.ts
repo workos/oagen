@@ -46,8 +46,9 @@ export interface ParamDefaultChanged {
  * there with the same shape, so nothing a caller compiles against changes and
  * the event is additive; it is surfaced here, beside the `deprecatedChanged`
  * flag or `*-deprecated-changed` entry on the owning change, so a changelog
- * can say it. `undefined` and `false` both read as not deprecated, as the
- * parser only ever writes `true`.
+ * can say it. `oldDeprecated`/`newDeprecated` are copied from that change,
+ * which carries them beside its flag. `undefined` and `false` both read as
+ * not deprecated, as the parser only ever writes `true`.
  */
 export type DeprecatedChanged = {
   kind: 'deprecated-changed';
@@ -108,6 +109,9 @@ export interface ModelModified {
    * reported, with an empty `fieldChanges`.
    */
   deprecatedChanged: boolean;
+  /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
   classification: 'additive' | 'breaking';
 }
 
@@ -122,6 +126,9 @@ export interface FieldChange {
     | 'field-deprecated-changed';
   fieldName: string;
   classification: 'additive' | 'breaking';
+  /** For `field-deprecated-changed`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
   /** For `field-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
   details?: string;
 }
@@ -148,6 +155,9 @@ export interface EnumModified {
    * an empty `valueChanges`.
    */
   deprecatedChanged: boolean;
+  /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
   classification: 'additive' | 'breaking';
 }
 
@@ -155,6 +165,9 @@ export interface EnumValueChange {
   kind: 'value-added' | 'value-removed' | 'value-changed' | 'value-deprecated-changed';
   valueName: string;
   classification: 'additive' | 'breaking';
+  /** For `value-deprecated-changed`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
   /** For `value-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
   details?: string;
 }
@@ -208,9 +221,17 @@ export interface OperationModified {
    * `param-deprecated-changed` entry in `paramChanges` instead.
    */
   deprecatedChanged: boolean;
+  /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * A change to one parameter of an operation. Parameters are matched by
+ * location and name — OpenAPI allows a path `id` beside a query `id` on one
+ * operation — so every entry carries `paramLocation` to say which one it is.
+ */
 export interface ParamChange {
   kind:
     | 'param-added'
@@ -226,7 +247,10 @@ export interface ParamChange {
   oldDefault?: string | null;
   /** For `param-default-changed`: serialized new default value, or `null` if now unset. */
   newDefault?: string | null;
-  /** For `param-default-changed` and `param-deprecated-changed`: 'query' | 'header' | 'path' — where the parameter lives. */
+  /** For `param-deprecated-changed`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
+  /** 'path' | 'query' | 'header' — where the parameter lives. Set on every entry `diffOperations` produces. */
   paramLocation?: 'path' | 'query' | 'header';
   /** For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
   details?: string;

@@ -1,7 +1,7 @@
 import type { Model, TypeRef } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
 import type { Change, FieldChange } from './types.js';
-import { classifyFieldChange, deprecationDetails, isDeprecated } from './classify.js';
+import { classifyFieldChange, deprecationDetails, deprecationFlip } from './classify.js';
 import type { DirectionIndex, ModelDirection } from './direction.js';
 import { directionOf } from './direction.js';
 
@@ -34,14 +34,15 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
     const fieldChanges = diffFields(oldModel, newModel, directionOf(directions, name));
     // A flipped flag alone is a change: nothing the model's callers compile
     // against moves, but a changelog has to say it.
-    const deprecatedChanged = isDeprecated(oldModel) !== isDeprecated(newModel);
-    if (fieldChanges.length > 0 || deprecatedChanged) {
+    const deprecation = deprecationFlip(oldModel, newModel);
+    if (fieldChanges.length > 0 || deprecation) {
       const hasBreaking = fieldChanges.some((fc) => fc.classification === 'breaking');
       changes.push({
         kind: 'model-modified',
         name,
         fieldChanges,
-        deprecatedChanged,
+        deprecatedChanged: deprecation !== undefined,
+        ...deprecation,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
@@ -99,10 +100,12 @@ function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection 
       changes.push(classifyFieldChange('field-access-changed', name));
     }
 
-    if (isDeprecated(oldField) !== isDeprecated(newField)) {
+    const deprecation = deprecationFlip(oldField, newField);
+    if (deprecation) {
       changes.push({
         ...classifyFieldChange('field-deprecated-changed', name),
-        details: deprecationDetails(isDeprecated(newField)),
+        ...deprecation,
+        details: deprecationDetails(deprecation.newDeprecated),
       });
     }
   }

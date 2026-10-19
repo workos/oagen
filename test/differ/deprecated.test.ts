@@ -4,9 +4,10 @@
  * Operation, parameter, model, field, enum and enum value each carry the flag.
  * A flip is reported on the owning `-modified` change (a flat `deprecatedChanged`
  * on the operation, model or enum; a `*-deprecated-changed` entry for a
- * parameter, field or enum value), is additive in either direction, is still
- * reported when it is the only change, and is mirrored into `behaviorChanges`.
- * Only `true` is deprecated: `false` and an absent key are the same thing.
+ * parameter, field or enum value), carries `oldDeprecated`/`newDeprecated`
+ * beside it, is additive in either direction, is still reported when it is the
+ * only change, and is mirrored into `behaviorChanges`. Only `true` is
+ * deprecated: `false` and an absent key are the same thing.
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import * as fs from 'node:fs/promises';
@@ -79,24 +80,50 @@ function withSoldFlag(deprecated: boolean | undefined): Enum {
 
 const deprecatedOp: Operation = { ...getPet, deprecated: true };
 
+/** The two sides of a flip, as every change that reports one carries them. */
+const became = { oldDeprecated: false, newDeprecated: true };
+const ceased = { oldDeprecated: true, newDeprecated: false };
+
 describe('diffModels – deprecated (issue #256)', () => {
-  it('reports a model becoming deprecated as its only change, additive', () => {
+  it('reports a model becoming deprecated as its only change, additive, with both sides of the flip', () => {
     const changes = diffModels([pet], [{ ...pet, deprecated: true }]);
     expect(changes).toEqual([
-      { kind: 'model-modified', name: 'Pet', fieldChanges: [], deprecatedChanged: true, classification: 'additive' },
+      {
+        kind: 'model-modified',
+        name: 'Pet',
+        fieldChanges: [],
+        deprecatedChanged: true,
+        ...became,
+        classification: 'additive',
+      },
     ]);
   });
 
   it('reports a model no longer being deprecated, additive', () => {
     const changes = diffModels([{ ...pet, deprecated: true }], [pet]);
     expect(changes).toEqual([
-      { kind: 'model-modified', name: 'Pet', fieldChanges: [], deprecatedChanged: true, classification: 'additive' },
+      {
+        kind: 'model-modified',
+        name: 'Pet',
+        fieldChanges: [],
+        deprecatedChanged: true,
+        ...ceased,
+        classification: 'additive',
+      },
     ]);
+  });
+
+  it('carries no oldDeprecated/newDeprecated on a model change whose flag did not flip', () => {
+    const changes = diffModels([pet], [{ ...pet, fields: pet.fields.slice(0, 1) }]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'model-modified', deprecatedChanged: false });
+    expect(changes[0]).not.toHaveProperty('oldDeprecated');
+    expect(changes[0]).not.toHaveProperty('newDeprecated');
   });
 
   it('treats an explicit false and an absent key as the same: false → true is a change, undefined → false is not', () => {
     expect(diffModels([{ ...pet, deprecated: false }], [{ ...pet, deprecated: true }])).toMatchObject([
-      { kind: 'model-modified', deprecatedChanged: true },
+      { kind: 'model-modified', deprecatedChanged: true, ...became },
     ]);
     expect(diffModels([pet], [{ ...pet, deprecated: false }])).toHaveLength(0);
     expect(diffModels([{ ...pet, deprecated: false }], [pet])).toHaveLength(0);
@@ -114,6 +141,7 @@ describe('diffModels – deprecated (issue #256)', () => {
             kind: 'field-deprecated-changed',
             fieldName: 'status',
             classification: 'additive',
+            ...became,
             details: 'live → deprecated',
           },
         ],
@@ -132,6 +160,7 @@ describe('diffModels – deprecated (issue #256)', () => {
           kind: 'field-deprecated-changed',
           fieldName: 'status',
           classification: 'additive',
+          ...ceased,
           details: 'deprecated → live',
         },
       ]);
@@ -152,7 +181,8 @@ describe('diffModels – deprecated (issue #256)', () => {
     expect(changes[0]).toMatchObject({
       kind: 'model-modified',
       deprecatedChanged: true,
-      fieldChanges: [{ kind: 'field-deprecated-changed', fieldName: 'status' }],
+      ...became,
+      fieldChanges: [{ kind: 'field-deprecated-changed', fieldName: 'status', ...became }],
       classification: 'additive',
     });
   });
@@ -196,6 +226,7 @@ describe('diffSpecs – enum deprecated (issue #256)', () => {
         name: 'PetStatus',
         valueChanges: [],
         deprecatedChanged: true,
+        ...became,
         classification: 'additive',
       },
     ]);
@@ -205,17 +236,10 @@ describe('diffSpecs – enum deprecated (issue #256)', () => {
   it('reports an enum no longer being deprecated, additive', () => {
     const diff = diffSpecs(enumsOnly([{ ...petStatus, deprecated: true }]), enumsOnly([petStatus]));
     expect(diff.changes).toMatchObject([
-      { kind: 'enum-modified', deprecatedChanged: true, classification: 'additive' },
+      { kind: 'enum-modified', deprecatedChanged: true, ...ceased, classification: 'additive' },
     ]);
     expect(diff.behaviorChanges).toEqual([
-      {
-        kind: 'deprecated-changed',
-        node: 'enum',
-        enumName: 'PetStatus',
-        oldDeprecated: true,
-        newDeprecated: false,
-        classification: 'additive',
-      },
+      { kind: 'deprecated-changed', node: 'enum', enumName: 'PetStatus', ...ceased, classification: 'additive' },
     ]);
   });
 
@@ -239,6 +263,7 @@ describe('diffSpecs – enum deprecated (issue #256)', () => {
             kind: 'value-deprecated-changed',
             valueName: 'SOLD',
             classification: 'additive',
+            ...became,
             details: 'live → deprecated',
           },
         ],
@@ -252,8 +277,7 @@ describe('diffSpecs – enum deprecated (issue #256)', () => {
         node: 'enum-value',
         enumName: 'PetStatus',
         valueName: 'SOLD',
-        oldDeprecated: false,
-        newDeprecated: true,
+        ...became,
         classification: 'additive',
       },
     ]);
@@ -262,9 +286,12 @@ describe('diffSpecs – enum deprecated (issue #256)', () => {
   it('reports an enum value no longer being deprecated with the direction in details', () => {
     const diff = diffSpecs(enumsOnly([withSoldFlag(true)]), enumsOnly([petStatus]));
     expect(diff.changes).toMatchObject([
-      { kind: 'enum-modified', valueChanges: [{ kind: 'value-deprecated-changed', details: 'deprecated → live' }] },
+      {
+        kind: 'enum-modified',
+        valueChanges: [{ kind: 'value-deprecated-changed', ...ceased, details: 'deprecated → live' }],
+      },
     ]);
-    expect(diff.behaviorChanges).toMatchObject([{ node: 'enum-value', oldDeprecated: true, newDeprecated: false }]);
+    expect(diff.behaviorChanges).toMatchObject([{ node: 'enum-value', ...ceased }]);
   });
 
   it('treats an enum value flag of false as not deprecated', () => {
@@ -291,7 +318,7 @@ describe('diffSpecs – enum deprecated (issue #256)', () => {
 });
 
 describe('diffOperations – deprecated (issue #256)', () => {
-  it('reports an operation becoming deprecated as its only change, additive', () => {
+  it('reports an operation becoming deprecated as its only change, additive, with both sides of the flip', () => {
     const changes = diffOperations('Pets', [getPet], [deprecatedOp]);
     expect(changes).toEqual([
       {
@@ -308,6 +335,7 @@ describe('diffOperations – deprecated (issue #256)', () => {
         injectIdempotencyKeyChanged: false,
         errorsChanged: false,
         deprecatedChanged: true,
+        ...became,
         classification: 'additive',
       },
     ]);
@@ -315,8 +343,16 @@ describe('diffOperations – deprecated (issue #256)', () => {
 
   it('reports an operation no longer being deprecated, additive', () => {
     expect(diffOperations('Pets', [deprecatedOp], [getPet])).toMatchObject([
-      { kind: 'operation-modified', deprecatedChanged: true, classification: 'additive' },
+      { kind: 'operation-modified', deprecatedChanged: true, ...ceased, classification: 'additive' },
     ]);
+  });
+
+  it('carries no oldDeprecated/newDeprecated on an operation change whose flag did not flip', () => {
+    const changes = diffOperations('Pets', [getPet], [{ ...getPet, response: { kind: 'primitive', type: 'string' } }]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', deprecatedChanged: false });
+    expect(changes[0]).not.toHaveProperty('oldDeprecated');
+    expect(changes[0]).not.toHaveProperty('newDeprecated');
   });
 
   it('treats an explicit false on an operation as not deprecated', () => {
@@ -344,6 +380,7 @@ describe('diffOperations – deprecated (issue #256)', () => {
           paramName: 'verbose',
           classification: 'additive',
           paramLocation: 'query',
+          ...became,
           details: 'live → deprecated',
         },
       ]);
@@ -370,7 +407,11 @@ describe('diffOperations – deprecated (issue #256)', () => {
     const was: Operation = { ...getPet, queryParams: [{ ...verbose, deprecated: true }] };
     const changes = diffOperations('Pets', [was], [getPet]);
     expect(changes).toMatchObject([
-      { paramChanges: [{ kind: 'param-deprecated-changed', paramName: 'verbose', details: 'deprecated → live' }] },
+      {
+        paramChanges: [
+          { kind: 'param-deprecated-changed', paramName: 'verbose', ...ceased, details: 'deprecated → live' },
+        ],
+      },
     ]);
   });
 
@@ -404,7 +445,7 @@ describe('diffOperations – deprecated (issue #256)', () => {
     expect(changes[0]).toMatchObject({ classification: 'breaking', deprecatedChanged: false });
     if (changes[0].kind === 'operation-modified') {
       expect(changes[0].paramChanges).toMatchObject([
-        { kind: 'param-added', paramName: 'tenant', classification: 'breaking' },
+        { kind: 'param-added', paramName: 'tenant', paramLocation: 'query', classification: 'breaking' },
         { kind: 'param-deprecated-changed', paramName: 'verbose', classification: 'additive' },
       ]);
     }
@@ -424,38 +465,22 @@ describe('diffSpecs – deprecated behaviorChanges and summary (issue #256)', ()
     const diff = diffSpecs(v1, allDeprecated);
     expect(diff.changes.map((c) => c.kind)).toEqual(['model-modified', 'enum-modified', 'operation-modified']);
     expect(diff.behaviorChanges).toEqual([
-      {
-        kind: 'deprecated-changed',
-        node: 'model',
-        modelName: 'Pet',
-        oldDeprecated: false,
-        newDeprecated: true,
-        classification: 'additive',
-      },
+      { kind: 'deprecated-changed', node: 'model', modelName: 'Pet', ...became, classification: 'additive' },
       {
         kind: 'deprecated-changed',
         node: 'field',
         modelName: 'Pet',
         fieldName: 'status',
-        oldDeprecated: false,
-        newDeprecated: true,
+        ...became,
         classification: 'additive',
       },
-      {
-        kind: 'deprecated-changed',
-        node: 'enum',
-        enumName: 'PetStatus',
-        oldDeprecated: false,
-        newDeprecated: true,
-        classification: 'additive',
-      },
+      { kind: 'deprecated-changed', node: 'enum', enumName: 'PetStatus', ...became, classification: 'additive' },
       {
         kind: 'deprecated-changed',
         node: 'enum-value',
         enumName: 'PetStatus',
         valueName: 'SOLD',
-        oldDeprecated: false,
-        newDeprecated: true,
+        ...became,
         classification: 'additive',
       },
       {
@@ -463,8 +488,7 @@ describe('diffSpecs – deprecated behaviorChanges and summary (issue #256)', ()
         node: 'operation',
         serviceName: 'Pets',
         operationName: 'getPet',
-        oldDeprecated: false,
-        newDeprecated: true,
+        ...became,
         classification: 'additive',
       },
       {
@@ -474,8 +498,7 @@ describe('diffSpecs – deprecated behaviorChanges and summary (issue #256)', ()
         operationName: 'getPet',
         paramName: 'verbose',
         paramLocation: 'query',
-        oldDeprecated: false,
-        newDeprecated: true,
+        ...became,
         classification: 'additive',
       },
     ]);
@@ -488,7 +511,7 @@ describe('diffSpecs – deprecated behaviorChanges and summary (issue #256)', ()
     expect(diff.behaviorChanges).toHaveLength(6);
     expect(diff.behaviorChanges.every((b) => b.kind === 'deprecated-changed')).toBe(true);
     for (const b of diff.behaviorChanges) {
-      expect(b).toMatchObject({ oldDeprecated: true, newDeprecated: false, classification: 'additive' });
+      expect(b).toMatchObject({ ...ceased, classification: 'additive' });
     }
     expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 3, breaking: 0, additive: 3, behaviorChanges: 6 });
   });
@@ -569,10 +592,12 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
             kind: 'field-deprecated-changed',
             fieldName: 'status',
             classification: 'additive',
+            ...became,
             details: 'live → deprecated',
           },
         ],
         deprecatedChanged: true,
+        ...became,
         classification: 'additive',
       },
       {
@@ -580,6 +605,7 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
         name: 'PetStatus',
         valueChanges: [],
         deprecatedChanged: true,
+        ...became,
         classification: 'additive',
       },
       {
@@ -596,6 +622,7 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
         injectIdempotencyKeyChanged: false,
         errorsChanged: false,
         deprecatedChanged: true,
+        ...became,
         classification: 'additive',
       },
     ]);
@@ -619,7 +646,7 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
     expect(diff.changes.every((c) => c.classification === 'additive')).toBe(true);
     expect(diff.behaviorChanges).toHaveLength(4);
     for (const b of diff.behaviorChanges) {
-      expect(b).toMatchObject({ kind: 'deprecated-changed', oldDeprecated: true, newDeprecated: false });
+      expect(b).toMatchObject({ kind: 'deprecated-changed', ...ceased });
     }
     expect(diff.summary.breaking).toBe(0);
   });
@@ -649,6 +676,7 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
             paramName: 'id',
             paramLocation: 'path',
             classification: 'additive',
+            ...became,
             details: 'live → deprecated',
           },
         ],
@@ -663,8 +691,7 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
         operationName: 'getPet',
         paramName: 'id',
         paramLocation: 'path',
-        oldDeprecated: false,
-        newDeprecated: true,
+        ...became,
         classification: 'additive',
       },
     ]);

@@ -15,6 +15,27 @@ export function deprecationDetails(nowDeprecated: boolean): string {
   return nowDeprecated ? 'live → deprecated' : 'deprecated → live';
 }
 
+/** The two sides of a `deprecated` flip, carried on the change that reports it. */
+export interface DeprecationFlip {
+  oldDeprecated: boolean;
+  newDeprecated: boolean;
+}
+
+/**
+ * `{ oldDeprecated, newDeprecated }` when the flag differs between the two
+ * nodes, `undefined` when it does not. The differ spreads it onto the owning
+ * change, so the direction travels with the change and the `behaviorChanges`
+ * mirror never has to look the node up again.
+ */
+export function deprecationFlip(
+  oldNode: { deprecated?: boolean },
+  newNode: { deprecated?: boolean },
+): DeprecationFlip | undefined {
+  const oldDeprecated = isDeprecated(oldNode);
+  const newDeprecated = isDeprecated(newNode);
+  return oldDeprecated === newDeprecated ? undefined : { oldDeprecated, newDeprecated };
+}
+
 export function classifyFieldChange(
   kind: FieldChange['kind'],
   fieldName: string,
