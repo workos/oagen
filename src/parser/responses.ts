@@ -154,12 +154,26 @@ function extractListResponse(
   const dataProp = properties[dataPath];
   if (dataProp && isArraySchema(dataProp) && dataProp.items) {
     const items = dataProp.items;
+    const itemName = contextName.replace(/Response$/, '') + 'Item';
     if (items.$ref) {
       itemTypeRef = schemaToTypeRef(items, contextName);
     } else if (items.type === 'object' && items.properties) {
-      const itemName = contextName.replace(/Response$/, '') + 'Item';
       itemTypeRef = { kind: 'model', name: itemName };
       inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
+    } else {
+      // Every other item shape — a primitive, an inline enum, a `oneOf`, a
+      // nullable or untyped object, a nested array — is typed by
+      // `schemaToTypeRef` as a field named `<Operation>Item` under no parent,
+      // and whatever models it references are materialized by the field
+      // extractor under that same name, so the two agree by construction
+      // (the direct array path in `extractDirectResource` does the same).
+      itemTypeRef = schemaToTypeRef(items, itemName);
+      extractInlineModelsFromProperties(
+        { properties: { [itemName]: items } },
+        inlineModels,
+        undefined,
+        componentSchemas,
+      );
     }
   }
 
@@ -516,11 +530,13 @@ function extractDirectResource(
   // else the items may reference — the inline object variants of an
   // `items.oneOf`, the objects of a nested array or map — is materialized by
   // the field extractor, under the names the fall-through `schemaToTypeRef`
-  // gives them, exactly as the `oneOf` branch above does; `$ref` items name a
-  // component and the extractor leaves them alone.
+  // gives them, exactly as the `oneOf` branch above does. `$ref` items name a
+  // component, even with sibling `properties` beside the `$ref`: they take
+  // the fall-through, which keeps the reference as `schemaToTypeRef` does,
+  // and the extractor leaves them alone.
   if (isArraySchema(schema) && schema.items) {
     const items = schema.items;
-    if (items.properties && (items.type === 'object' || !items.type)) {
+    if (!items.$ref && items.properties && (items.type === 'object' || !items.type)) {
       const itemName = contextName.replace(/Response$/, '') + 'Item';
       inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
       return {

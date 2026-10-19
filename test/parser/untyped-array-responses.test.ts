@@ -78,6 +78,26 @@ describe('classifyAndExtractResponse — array response without type', () => {
     });
   });
 
+  it('keeps a $ref item reference even when sibling properties sit beside the $ref', () => {
+    // The reference wins, as in `schemaToTypeRef`: no `<Operation>Item` model
+    // is built from the siblings alone, so the referenced fields are not lost.
+    const refWithSiblings = { $ref: '#/components/schemas/Pet', properties: { label: { type: 'string' } } };
+    const expected = {
+      response: { kind: 'array', items: { kind: 'model', name: 'Pet' } } as TypeRef,
+      inlineModels: [],
+      isPaginated: false,
+    };
+
+    expect(classifyAndExtractResponse({ items: refWithSiblings }, 'ListPetsResponse')).toEqual(expected);
+    expect(classifyAndExtractResponse({ type: 'array', items: refWithSiblings }, 'ListPetsResponse')).toEqual(expected);
+    expect(classifyAndExtractResponse({ type: ['array', 'null'], items: refWithSiblings }, 'ListPetsResponse')).toEqual(
+      {
+        ...expected,
+        response: { kind: 'nullable', inner: expected.response },
+      },
+    );
+  });
+
   it('keeps the nullable wrapper of `type: [array, null]` around the extracted item model', () => {
     const result = classifyAndExtractResponse({ type: ['array', 'null'], items: petItems }, 'ListPetsResponse');
 
@@ -204,6 +224,73 @@ describe('classifyAndExtractResponse — list envelope whose data array has no t
     expect(result.isPaginated).toBe(true);
     expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'User' } });
     expect(result.itemType).toEqual({ kind: 'model', name: 'User' });
+  });
+
+  it('types primitive data items instead of defaulting to string, typed or not', () => {
+    const untyped = classifyAndExtractResponse(envelope({ items: { type: 'integer' } }), 'ListCountsResponse');
+    const typed = classifyAndExtractResponse(
+      envelope({ type: 'array', items: { type: 'integer' } }),
+      'ListCountsResponse',
+    );
+
+    expect(untyped.isPaginated).toBe(true);
+    expect(untyped.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'integer' } });
+    expect(untyped.itemType).toEqual({ kind: 'primitive', type: 'integer' });
+    expect(untyped.inlineModels).toEqual([]);
+    expect(untyped).toEqual(typed);
+  });
+
+  it('types enum, oneOf, nested-array, nullable-object and untyped-object data items under `<Operation>Item`', () => {
+    const cases: Array<{ label: string; items: Record<string, unknown>; itemType: TypeRef; models: string[] }> = [
+      {
+        label: 'inline enum',
+        items: { type: 'string', enum: ['a', 'b'] },
+        itemType: { kind: 'enum', name: 'ListEventsItem', values: ['a', 'b'] },
+        models: [],
+      },
+      {
+        label: 'oneOf of inline objects',
+        items: shapeVariants,
+        itemType: {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'ListEventsItem' },
+            { kind: 'model', name: 'ListEventsItemWithSide' },
+          ],
+          compositionKind: 'oneOf',
+        },
+        models: ['ListEventsItem', 'ListEventsItemWithSide'],
+      },
+      {
+        label: 'nested array of objects',
+        items: { type: 'array', items: eventItems },
+        itemType: { kind: 'array', items: { kind: 'model', name: 'ListEventsItem' } },
+        models: ['ListEventsItem'],
+      },
+      {
+        label: 'nullable object',
+        items: { type: ['object', 'null'], properties: { id: { type: 'string' } } },
+        itemType: { kind: 'nullable', inner: { kind: 'model', name: 'ListEventsItem' } },
+        models: ['ListEventsItem'],
+      },
+      {
+        label: 'object without type',
+        items: { properties: { id: { type: 'string' } } },
+        itemType: { kind: 'model', name: 'ListEventsItem' },
+        models: ['ListEventsItem'],
+      },
+    ];
+
+    for (const { label, items, itemType, models } of cases) {
+      const result = classifyAndExtractResponse(envelope({ items }), 'ListEventsResponse');
+      expect(result.isPaginated, label).toBe(true);
+      expect(result.itemType, label).toEqual(itemType);
+      expect(result.response, label).toEqual({ kind: 'array', items: itemType });
+      expect(
+        result.inlineModels.map((m) => m.name),
+        label,
+      ).toEqual(models);
+    }
   });
 });
 
@@ -428,6 +515,64 @@ describe('parseSpec — arrays without type', () => {
     expect(danglingRefs(ir)).toEqual([]);
   });
 
+  const cursorParams = [
+    { name: 'after', in: 'query', schema: { type: 'string' } },
+    { name: 'limit', in: 'query', schema: { type: 'integer' } },
+  ];
+
+  /** A cursor-paginated list operation whose untyped data array holds `items`. */
+  const listOp = (operationId: string, items: unknown) => ({
+    get: {
+      operationId,
+      parameters: cursorParams,
+      responses: jsonResponse({
+        type: 'object',
+        properties: { data: { items }, list_metadata: { type: 'object', properties: { after: { type: 'string' } } } },
+      }),
+    },
+  });
+
+  it('reports the same item type on the response and on pagination for every envelope item shape', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'envelopes', version: '1' },
+      paths: {
+        '/counts': listOp('listCounts', { type: 'integer' }),
+        '/levels': listOp('listLevels', { type: 'string', enum: ['low', 'high'] }),
+        '/marks': listOp('listMarks', shapeVariants),
+        '/grids': listOp('listGrids', {
+          type: 'array',
+          items: { type: 'object', properties: { x: { type: 'number' } } },
+        }),
+      },
+    });
+
+    const expected: Record<string, TypeRef> = {
+      listCounts: { kind: 'primitive', type: 'integer' },
+      listLevels: { kind: 'enum', name: 'ListLevelsItem', values: ['low', 'high'] },
+      listMarks: {
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'ListMarksItem' },
+          { kind: 'model', name: 'ListMarksItemWithSide' },
+        ],
+        compositionKind: 'oneOf',
+      },
+      listGrids: { kind: 'array', items: { kind: 'model', name: 'ListGridsItem' } },
+    };
+    for (const [name, itemType] of Object.entries(expected)) {
+      const op = operation(ir, name);
+      expect(op.response, name).toEqual({ kind: 'array', items: itemType });
+      expect(op.pagination?.itemType, name).toEqual(itemType);
+      expect(op.pagination?.dataPath, name).toBe('data');
+    }
+    expect(model(ir, 'ListGridsItem').fields.map((f) => f.name)).toEqual(['x']);
+    expect(model(ir, 'ListMarksItem').fields.map((f) => f.name)).toEqual(['radius']);
+    expect(model(ir, 'ListMarksItemWithSide').fields.map((f) => f.name)).toEqual(['side']);
+    expect(warnings()).toEqual([]);
+    expect(danglingRefs(ir)).toEqual([]);
+  });
+
   /** The same document with `type: 'array'` spelled out beside every bare `items`. */
   function withArrayTypes<T>(doc: T): T {
     const walk = (node: unknown): unknown => {
@@ -508,6 +653,16 @@ describe('parseSpec — arrays without type', () => {
         '/event': {
           get: { operationId: 'getEvent', responses: jsonResponse({ $ref: '#/components/schemas/EventSchema' }) },
         },
+        '/counts': listOp('listCounts', { type: 'integer' }),
+        '/marks': listOp('listMarks', shapeVariants),
+        '/pet-refs': {
+          get: {
+            operationId: 'listPetRefs',
+            responses: jsonResponse({
+              items: { $ref: '#/components/schemas/Pet', properties: { label: { type: 'string' } } },
+            }),
+          },
+        },
       },
       components: {
         schemas: {
@@ -549,6 +704,8 @@ describe('parseSpec — arrays without type', () => {
         'ListShapesResponseWithSide',
         'ListNullableItemsResponse',
         'ListEventsItem',
+        'ListMarksItem',
+        'ListMarksItemWithSide',
         'ListMetadata',
         'GetProfileResponse',
         'GetProfileResponseTags',
