@@ -777,8 +777,9 @@ function extractNestedSchema(
     return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }];
   }
 
-  // Handle array with inline items
-  if (schema.type === 'array' && schema.items?.properties) {
+  // Handle array with inline items — typed, nullable, or `items` with no
+  // `type`, the same test `schemaToTypeRef` applied when it named the ref.
+  if (isArraySchema(schema) && schema.items?.properties) {
     const requiredSet = new Set(schema.items.required ?? []);
     const siblings = collectProperties(schema.items);
     const fields: Field[] = [];
@@ -1895,8 +1896,9 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
 
     // Array items and map values are named like the field — or `<Field>Item` /
     // `<Field>Value` when a sibling takes the singular name — exactly as
-    // `schemaToTypeRef` references them (`elementContextName`).
-    if (fieldSchema.type === 'array' && fieldSchema.items?.properties) {
+    // `schemaToTypeRef` references them (`elementContextName`). An array is
+    // whatever `isArraySchema` says, so `items` with no `type` counts too.
+    if (isArraySchema(fieldSchema) && fieldSchema.items?.properties) {
       const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
       nestedModels.push(
         ...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items, schemas),

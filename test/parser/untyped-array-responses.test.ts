@@ -324,6 +324,110 @@ describe('parseSpec — arrays without type', () => {
     expect(danglingRefs(ir)).toEqual([]);
   });
 
+  // A discriminated `oneOf` component: its variants' fields are typed under
+  // the component, and a missing item model is recovered by the component
+  // repair pass (`extractNestedSchema`).
+  const shapeComponent = {
+    oneOf: [
+      {
+        title: 'Circle',
+        type: 'object',
+        properties: {
+          kind: { type: 'string', const: 'circle' },
+          rings: { items: { type: 'object', properties: { r: { type: 'number' } } } },
+        },
+        required: ['kind'],
+      },
+      {
+        title: 'Square',
+        type: 'object',
+        properties: { kind: { type: 'string', const: 'square' }, side: { type: 'number' } },
+        required: ['kind'],
+      },
+    ],
+    discriminator: { propertyName: 'kind' },
+  };
+
+  // An `allOf` base with a `oneOf` of const-discriminated variants: each
+  // variant becomes its own model through `extractInlineModelDeep`.
+  const eventComponent = {
+    allOf: [
+      { type: 'object', required: ['id', 'event'], properties: { id: { type: 'string' }, event: { type: 'string' } } },
+      {
+        oneOf: [
+          {
+            type: 'object',
+            required: ['id', 'event'],
+            properties: {
+              id: { type: 'string' },
+              event: { type: 'string', const: 'session.created' },
+              tags: { items: { type: 'object', properties: { label: { type: 'string' } } } },
+            },
+          },
+          {
+            type: 'object',
+            required: ['id', 'event'],
+            properties: {
+              id: { type: 'string' },
+              event: { type: 'string', const: 'session.revoked' },
+              reason: { type: 'string' },
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  function model(ir: ApiSpec, name: string) {
+    const found = ir.models.find((m) => m.name === name);
+    if (!found) throw new Error(`model ${name} not found in ${ir.models.map((m) => m.name).join(', ')}`);
+    return found;
+  }
+
+  it('creates the item model of an untyped array field inside a discriminated oneOf component', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'shapes', version: '1' },
+      paths: {
+        '/shape': { get: { operationId: 'getShape', responses: jsonResponse({ $ref: '#/components/schemas/Shape' }) } },
+      },
+      components: { schemas: { Shape: shapeComponent } },
+    });
+
+    expect(model(ir, 'Shape').fields.find((f) => f.name === 'rings')?.type).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'ShapeRing' },
+    });
+    expect(model(ir, 'ShapeRing').fields).toEqual([
+      { name: 'r', type: { kind: 'primitive', type: 'number' }, required: false },
+    ]);
+    expect(warnings()).toEqual([]);
+    expect(danglingRefs(ir)).toEqual([]);
+  });
+
+  it('creates the item model of an untyped array field inside a discriminated allOf variant', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'events', version: '1' },
+      paths: {
+        '/event': {
+          get: { operationId: 'getEvent', responses: jsonResponse({ $ref: '#/components/schemas/EventSchema' }) },
+        },
+      },
+      components: { schemas: { EventSchema: eventComponent } },
+    });
+
+    expect(model(ir, 'SessionCreated').fields.find((f) => f.name === 'tags')?.type).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'SessionCreatedTags' },
+    });
+    expect(model(ir, 'SessionCreatedTags').fields).toEqual([
+      { name: 'label', type: { kind: 'primitive', type: 'string' }, required: false },
+    ]);
+    expect(warnings()).toEqual([]);
+    expect(danglingRefs(ir)).toEqual([]);
+  });
+
   /** The same document with `type: 'array'` spelled out beside every bare `items`. */
   function withArrayTypes<T>(doc: T): T {
     const walk = (node: unknown): unknown => {
@@ -339,8 +443,6 @@ describe('parseSpec — arrays without type', () => {
     };
     return walk(doc) as T;
   }
-
-  const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name);
 
   it('parses every untyped array exactly as if `type: array` were spelled out', async () => {
     const doc = {
@@ -400,6 +502,12 @@ describe('parseSpec — arrays without type', () => {
             responses: { '204': { description: 'ok' } },
           },
         },
+        '/shape': {
+          get: { operationId: 'getShape', responses: jsonResponse({ $ref: '#/components/schemas/Shape' }) },
+        },
+        '/event': {
+          get: { operationId: 'getEvent', responses: jsonResponse({ $ref: '#/components/schemas/EventSchema' }) },
+        },
       },
       components: {
         schemas: {
@@ -408,6 +516,8 @@ describe('parseSpec — arrays without type', () => {
             type: 'object',
             properties: { pets: { items: { type: 'object', properties: { nick: { type: 'string' } } } } },
           },
+          Shape: shapeComponent,
+          EventSchema: eventComponent,
         },
       },
     };
@@ -417,16 +527,22 @@ describe('parseSpec — arrays without type', () => {
 
     expect(warnings()).toEqual([]);
     expect(danglingRefs(untyped)).toEqual([]);
+    // Whole IR, models in document order included: the same passes create
+    // the same models in the same places whether or not `type` is spelled out.
     expect(untyped.services).toEqual(typed.services);
     expect(untyped.enums).toEqual(typed.enums);
-    // Sorted: a component field's item model is created by a different pass
-    // when the array is typed, which places it earlier in the list.
-    expect([...untyped.models].sort(byName)).toEqual([...typed.models].sort(byName));
+    expect(untyped.models).toEqual(typed.models);
     expect(untyped.models.map((m) => m.name).sort()).toEqual(
       [
         'Pet',
         'Owner',
         'OwnerPets',
+        'Shape',
+        'ShapeRing',
+        'EventSchema',
+        'SessionCreated',
+        'SessionCreatedTags',
+        'SessionRevoked',
         'ListPetsItem',
         'ListNullableItem',
         'ListShapesResponse',
