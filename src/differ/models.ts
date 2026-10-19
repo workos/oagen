@@ -1,6 +1,6 @@
 import type { Model, TypeRef } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
-import type { Change, FieldChange } from './types.js';
+import type { Change, FieldChange, VariantChange } from './types.js';
 import { classifyFieldChange } from './classify.js';
 import type { DirectionIndex, ModelDirection } from './direction.js';
 import { directionOf } from './direction.js';
@@ -32,18 +32,102 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
     if (!oldModel) continue;
 
     const fieldChanges = diffFields(oldModel, newModel, directionOf(directions, name));
-    if (fieldChanges.length > 0) {
-      const hasBreaking = fieldChanges.some((fc) => fc.classification === 'breaking');
+    const variantChanges = diffVariants(oldModel, newModel);
+    if (fieldChanges.length > 0 || variantChanges.length > 0) {
+      const hasBreaking = [...fieldChanges, ...variantChanges].some((c) => c.classification === 'breaking');
       changes.push({
         kind: 'model-modified',
         name,
         fieldChanges,
+        ...(variantChanges.length > 0 ? { variantChanges } : {}),
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
   }
 
   return changes;
+}
+
+/**
+ * Changes to a named union's `variants` and `discriminator`. A variant is
+ * matched by type equality (`typeRefsEqual`), not by position, so reordering
+ * reports nothing. An added variant is additive, like a new enum value — a
+ * value the API may now produce or accept; a removed variant is breaking,
+ * since callers may construct or match it. Any discriminator change (the
+ * property, or an entry of its mapping) is breaking: it changes how a
+ * payload is dispatched to a variant. A model that gains or loses `variants`
+ * altogether reports each variant added or removed.
+ */
+function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
+  const changes: VariantChange[] = [];
+  const oldVariants = oldModel.variants ?? [];
+  const newVariants = newModel.variants ?? [];
+
+  for (const variant of newVariants) {
+    if (!oldVariants.some((v) => typeRefsEqual(v, variant))) {
+      changes.push({ kind: 'variant-added', variant: variantLabel(variant), classification: 'additive' });
+    }
+  }
+  for (const variant of oldVariants) {
+    if (!newVariants.some((v) => typeRefsEqual(v, variant))) {
+      changes.push({ kind: 'variant-removed', variant: variantLabel(variant), classification: 'breaking' });
+    }
+  }
+
+  const oldDisc = oldModel.discriminator;
+  const newDisc = newModel.discriminator;
+  if (oldDisc || newDisc) {
+    if (!oldDisc || !newDisc) {
+      changes.push({
+        kind: 'discriminator-changed',
+        variant: (newDisc ?? oldDisc)!.property,
+        classification: 'breaking',
+        details: newDisc ? 'discriminator added' : 'discriminator removed',
+      });
+    } else if (oldDisc.property !== newDisc.property) {
+      changes.push({
+        kind: 'discriminator-changed',
+        variant: newDisc.property,
+        classification: 'breaking',
+        details: `property changed from '${oldDisc.property}' to '${newDisc.property}'`,
+      });
+    } else {
+      const keys = new Set([...Object.keys(oldDisc.mapping), ...Object.keys(newDisc.mapping)]);
+      const differing = [...keys].filter((k) => oldDisc.mapping[k] !== newDisc.mapping[k]).sort();
+      if (differing.length > 0) {
+        changes.push({
+          kind: 'discriminator-changed',
+          variant: newDisc.property,
+          classification: 'breaking',
+          details: `mapping changed for ${differing.map((k) => `'${k}'`).join(', ')}`,
+        });
+      }
+    }
+  }
+
+  return changes;
+}
+
+/** A short, human-readable label for a union variant in a change report. */
+function variantLabel(ref: TypeRef): string {
+  switch (ref.kind) {
+    case 'model':
+    case 'enum':
+      return ref.name;
+    case 'primitive':
+      return ref.format ? `${ref.type}:${ref.format}` : ref.type;
+    case 'literal':
+      return `literal:${String(ref.value)}`;
+    case 'nullable':
+      return `nullable<${variantLabel(ref.inner)}>`;
+    case 'array':
+      return `array<${variantLabel(ref.items)}>`;
+    case 'map':
+      return `map<${variantLabel(ref.valueType)}>`;
+    case 'union':
+      return `union<${ref.variants.map(variantLabel).join('|')}>`;
+  }
+  return assertNever(ref);
 }
 
 function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection = 'unknown'): FieldChange[] {

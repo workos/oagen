@@ -186,6 +186,13 @@ function admits(
       if (expected.required && !field.required) return false;
       if (!typeAdmits(expected.type, targetMap, field.type, copyMap, visiting)) return false;
     }
+    // A named union is its variants: the same ones, in the same order.
+    const targetVariants = target.variants ?? [];
+    const copyVariants = copy.variants ?? [];
+    if (targetVariants.length !== copyVariants.length) return false;
+    for (let i = 0; i < copyVariants.length; i++) {
+      if (!typeAdmits(targetVariants[i]!, targetMap, copyVariants[i]!, copyMap, visiting)) return false;
+    }
     return true;
   } finally {
     visiting.delete(key);
@@ -244,8 +251,10 @@ function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set
   const fields = [...model.fields]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((f) => `${f.name}${f.required ? '!' : '?'}:${fingerprintType(f.type, local, visiting)}`);
+  // A named union's variants are part of its shape, in document order.
+  const variants = (model.variants ?? []).map((v) => fingerprintType(v, local, visiting));
   visiting.delete(model.name);
-  return `{${fields.join(',')}}`;
+  return `{${fields.join(',')}}${variants.length > 0 ? `|${model.compositionKind ?? ''}<${variants.join(',')}>` : ''}`;
 }
 
 function fingerprintType(ref: TypeRef, local: Map<string, Model>, visiting: Set<string>): string {

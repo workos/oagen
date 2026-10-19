@@ -1,5 +1,5 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs } from '../ir/types.js';
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
@@ -26,12 +26,17 @@ function keepLargestByName(models: Model[]): Model[] {
 }
 
 /**
- * Same field names with the same types, in any order. Types are compared by
- * their JSON serialization: the parser builds a given shape's TypeRef with the
- * same key order every time, so equal shapes serialize identically.
+ * Same field names with the same types, in any order, and the same
+ * named-union variants. Types are compared by their JSON serialization: the
+ * parser builds a given shape's TypeRef with the same key order every time,
+ * so equal shapes serialize identically.
  */
 function haveSameFields(a: Model, b: Model): boolean {
-  const signatures = (m: Model) => new Set(m.fields.map((f) => `${f.name}:${JSON.stringify(f.type)}`));
+  const signatures = (m: Model) =>
+    new Set([
+      ...m.fields.map((f) => `${f.name}:${JSON.stringify(f.type)}`),
+      ...(m.variants ?? []).map((v, i) => `variant${i}:${JSON.stringify(v)}`),
+    ]);
   const aSignatures = signatures(a);
   const bSignatures = signatures(b);
   return aSignatures.size === bSignatures.size && [...aSignatures].every((s) => bSignatures.has(s));
@@ -47,8 +52,8 @@ function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
 
 function rewriteModelRefs(models: Model[], services: Service[], oldName: string, newName: string): void {
   for (const model of models) {
-    for (const field of model.fields) {
-      rewriteModelRef(field.type, oldName, newName);
+    for (const ref of collectModelTypeRefs(model)) {
+      rewriteModelRef(ref, oldName, newName);
     }
   }
   for (const service of services) {
@@ -153,9 +158,9 @@ function hasModelConstDiscriminant(model: Model): boolean {
 function isModelReferencedByOthers(name: string, models: Model[], excludeNames: Set<string>): boolean {
   for (const model of models) {
     if (excludeNames.has(model.name)) continue;
-    for (const field of model.fields) {
+    for (const ref of collectModelTypeRefs(model)) {
       let found = false;
-      walkTypeRef(field.type, {
+      walkTypeRef(ref, {
         model: (r) => {
           if (r.name === name) found = true;
         },

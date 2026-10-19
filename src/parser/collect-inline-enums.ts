@@ -1,12 +1,13 @@
 import type { Enum, Model, Operation, ResponseHeader, Service } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
+/** Promote the inline enums a model's fields and named-union variants reference to top-level enums. */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
   for (const model of models) {
-    for (const field of model.fields) {
-      collectInlineEnumFromRef(field.type, enums, enumNames);
+    for (const ref of collectModelTypeRefs(model)) {
+      collectInlineEnumFromRef(ref, enums, enumNames);
     }
   }
 }

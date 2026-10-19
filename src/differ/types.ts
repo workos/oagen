@@ -65,7 +65,23 @@ export interface ModelModified {
   kind: 'model-modified';
   name: string;
   fieldChanges: FieldChange[];
+  /**
+   * Changes to a named union's `variants` and `discriminator`
+   * (`Model.variants`). Present only when there is at least one.
+   */
+  variantChanges?: VariantChange[];
   classification: 'additive' | 'breaking';
+}
+
+export interface VariantChange {
+  kind: 'variant-added' | 'variant-removed' | 'discriminator-changed';
+  /**
+   * The variant, as a short type label (`Cat`, `string`, `nullable<Cat>`,
+   * `array<Cat>`), or the discriminator property for `discriminator-changed`.
+   */
+  variant: string;
+  classification: 'additive' | 'breaking';
+  details?: string;
 }
 
 export interface FieldChange {

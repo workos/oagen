@@ -20,6 +20,9 @@ export function validateModelRefs(spec: ApiSpec): void {
     for (const field of model.fields) {
       walkRef(field.type, `${model.name}.${field.name}`);
     }
+    for (const variant of model.variants ?? []) {
+      walkRef(variant, `${model.name}.variants`);
+    }
   }
 
   for (const service of spec.services) {

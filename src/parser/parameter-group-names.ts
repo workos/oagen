@@ -373,7 +373,10 @@ function fingerprintType(
       const fields = [...m.fields]
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((f) => `${f.name}${f.required ? '!' : '?'}:${fingerprintType(f.type, modelMap, enumMap, next)}`);
-      return `M<${fields.join(',')}>`;
+      // A named union's variants are its shape too; sorted like a union
+      // TypeRef's, since order does not change what it accepts.
+      const variants = (m.variants ?? []).map((v) => fingerprintType(v, modelMap, enumMap, next)).sort();
+      return `M<${fields.join(',')}>${variants.length > 0 ? `u<${variants.join(',')}>` : ''}`;
     }
     default:
       return 'unknown';

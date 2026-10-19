@@ -345,6 +345,9 @@ interface Model {
   description?: string;
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
+  variants?: TypeRef[]; // A named union's members, one per non-null oneOf/anyOf variant (see Named unions)
+  compositionKind?: "oneOf" | "anyOf"; // Which keyword produced `variants`; present exactly when `variants` is
+  discriminator?: { property: string; mapping: Record<string, string> }; // Dispatch property and value → IR model name
   constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
 }
 
@@ -362,6 +365,20 @@ interface Field {
   constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
 }
 ```
+
+### Named unions
+
+A component schema that is itself a `oneOf`/`anyOf` — no `allOf`, no `properties` of its own — is a named union. It still becomes a `Model` (every component does, and a `$ref` to it stays `{ kind: "model" }`), but the model carries the union: `variants` holds one `TypeRef` per non-null variant in document order, `compositionKind` says which keyword produced them, and `discriminator` is set when the union is discriminated. `fields` keeps what it always held — the inline variants' properties merged as optional fields (`UpdateOrganizationMembership`'s `role_slug` / `role_slugs`) — so an emitter that reads only `fields` sees the model it did before, while one that reads `variants` can emit a proper union type.
+
+The variants are built exactly as the same union written inline is (`UnionType`): a `$ref` variant is a model or enum ref; an inline object variant is referenced by a model extracted for it; a nullable (`type: ['object', 'null']`) or multi-type (`['object', 'string']`) inline variant keeps its wrapper around that model; a primitive stays a primitive; a `type: 'null'` variant is dropped — an inline union lifts it into a `nullable` wrapper, and a `Model` has no wrapper to carry it, so a named union's own nullability is not represented, as a nullable object component's is not. Anything inline under a non-object variant (an array's inline items, an inline enum) is typed and extracted under the union's name with the member key a multi-type variant would use (`<Model>Item`, `<Model>Value`).
+
+Inline object variants are named by the inline-variant rules with the union's model name as the base, except that the base itself is taken by the union's own model, so variant 0 steps off it like every later variant: a const-discriminator prefix (`CatPet` for `kind: cat`), its title as a prefix (`CircleShape`), the first property no other variant declares (`UpdateAuditLogsRetentionDtoWithRetentionPeriod` beside `…WithRetentionPeriodInDays`), else the position counter (`Pet1`, `Pet2`). Every other component schema's name is reserved too, so a variant can never shadow a component (a variant titled `Cat` beside a component `Cat` takes `CatPet`). Each extracted variant model is a complete model of its own, so the union's merged fields and the variant's fields are typed independently (an inline `config` object appears as both `PetConfig` and `CatPetConfig`).
+
+`discriminator` is resolved from the same sources, in the same order, as an inline union's, with a `$ref` variant's const read from the component it points at: an explicit `discriminator:` with a `mapping:` is the spec's own, each target reduced to the IR model name it refers to (the last `$ref` segment through `schemaNameTransform`, so `#/components/schemas/Cat` → `Cat`) — an entry pointing outside the variant list is kept as written; an explicit `discriminator:` without `mapping:` pairs each variant's const on the property with its model name (`{ cat: "Cat", dog: "Dog" }`), and is `{}` when any variant pins none, as it is inline; a `oneOf` with no keyword whose every variant is nameable (a `$ref`, a titled or inline object) and pins the same property to a distinct const is discriminated on that property implicitly. An `anyOf` is never discriminated implicitly, and the OpenAPI default of "the discriminator value is the schema name" is not synthesized. As for an allOf+oneOf model, a set `discriminator` means emitters should dispatch on it, and its mapping values are IR model names.
+
+Two shapes are deliberately not unions: a `oneOf` written beside `properties` keeps today's object model (the properties are its fields; the branches are not read), and a component that is only a nullable wrapper around one inline object (`oneOf: [{ type: object, … }, { type: 'null' }]`) stays the object its merged fields describe, as an inline wrapper collapses to `nullable<model>` rather than a union. A wrapper around one `$ref` or one primitive is a union of one.
+
+Every pass that walks a model's type refs — reachability for emission, service assignment, ref rewriting and validation, dependency collection for imports, inline-enum promotion, the differ's direction index and model comparison, compat scoping, and the companion and parameter-group fingerprints — reads fields and variants alike through `collectModelTypeRefs`, so a model reached only as a variant is emitted, placed, and compared like one reached through a field. The differ reports a variant added (additive, like a new enum value), removed (breaking), and any discriminator change (breaking) under `ModelModified.variantChanges`.
 
 ### Inline model naming
 
