@@ -255,6 +255,9 @@ describe('fallback operation names (issue #210)', () => {
 
     expect(explicit.name).toBe('getPet');
     expect(fallback.name).not.toBe('getPet');
+    // Nothing in `/store/pets/{id}` tells it from `/store/featured/{id}`, so
+    // the fallback keeps the plural it had before singularisation.
+    expect(fallback.name).toBe('getPets');
     expect(new Set(ops.map((op) => op.name)).size).toBe(ops.length);
   });
 
@@ -270,7 +273,13 @@ describe('fallback operation names (issue #210)', () => {
 
       expect(new Set(ops.map((op) => op.name)).size).toBe(3);
       expect(ops.find((op) => op.path === '/store/pets/{id}')!.name).not.toBe('getPet');
-      // The reused operationId is numbered with a warning (#227).
+      // The reused operationId is numbered with a warning (#227); the fallback
+      // takes its plural rather than a third number.
+      expect(Object.fromEntries(ops.map((op) => [op.path, op.name]))).toEqual({
+        '/store/featured/{id}': 'getPet',
+        '/store/rescues/{id}': 'getPet2',
+        '/store/pets/{id}': 'getPets',
+      });
       expect(warn).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();
@@ -290,6 +299,14 @@ describe('fallback operation names (issue #210)', () => {
 
       expect(new Set(ops.map((op) => op.name)).size).toBe(4);
       for (const op of ops.filter((o) => o.path.endsWith('pets/{id}'))) expect(op.name).not.toBe('getPet');
+      // The deeper path context separates `/store/shelter/pets/{id}` on its
+      // own; only the fallback with nothing to add takes the plural.
+      expect(Object.fromEntries(ops.map((op) => [op.path, op.name]))).toEqual({
+        '/store/featured/{id}': 'getPet',
+        '/store/rescues/{id}': 'getPet2',
+        '/store/pets/{id}': 'getPets',
+        '/store/shelter/pets/{id}': 'getPetShelter',
+      });
       expect(warn).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();
@@ -312,6 +329,80 @@ describe('fallback operation names (issue #210)', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('prefers the plural a fallback had before singularisation over a numeric suffix, whatever the order', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const explicitFirst = {
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/pets/{id}': { get: item('id') },
+      };
+      const fallbackFirst = {
+        '/store/pets/{id}': { get: item('id') },
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+      };
+      const expected = [
+        'getPet                       GET    /store/featured/{id}',
+        'getPets                      GET    /store/pets/{id}',
+      ];
+      expect(names(explicitFirst)).toEqual(expected);
+      expect(names(fallbackFirst)).toEqual(expected);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('shares the plural between PUT and PATCH on one path', () => {
+    expect(
+      names({
+        '/store/featured/{id}': { put: { ...item('id'), operationId: 'updatePet' } },
+        '/store/pets/{id}': { put: item('id'), patch: item('id') },
+      }),
+    ).toEqual([
+      'updatePet                    PUT    /store/featured/{id}',
+      'updatePets                   PATCH  /store/pets/{id}',
+      'updatePets                   PUT    /store/pets/{id}',
+    ]);
+  });
+
+  it('never needs the plural for two fallbacks: their paths tell them apart', () => {
+    expect(
+      names({
+        '/store/pets/{id}': { get: item('id') },
+        '/store/cats/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getCat                       GET    /store/cats/{id}',
+      'getPet                       GET    /store/pets/{id}',
+    ]);
+  });
+
+  it('falls back to a numeric suffix when the plural is taken as well', () => {
+    expect(
+      names({
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/all/{id}': { get: { ...item('id'), operationId: 'getPets' } },
+        '/store/pets/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPets                      GET    /store/all/{id}',
+      'getPet                       GET    /store/featured/{id}',
+      'getPet2                      GET    /store/pets/{id}',
+    ]);
+  });
+
+  it('numbers an action next to an operationId of the same name: a verb has no plural', () => {
+    expect(
+      names({
+        '/store/featured/{id}': { post: { ...item('id'), operationId: 'adoptPet' } },
+        '/store/pets/{id}/adopt': { post: item('id') },
+      }),
+    ).toEqual([
+      'adoptPet                     POST   /store/featured/{id}',
+      'adoptPet2                    POST   /store/pets/{id}/adopt',
+    ]);
   });
 
   it('qualifies two colliding actions by what sets their paths apart, never by repeating the verb', () => {

@@ -741,6 +741,23 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
 }
 
 /**
+ * The name fallbackOperationName gave an item operation before its resource
+ * was singularised: the resource as the path spells it, `getPets` for
+ * `GET /store/pets/{id}`. `null` for a POST action, whose name is a verb with
+ * no plural, and for an operation whose resource is not singularised — a
+ * collection, a path with no resource, a segment that does not look plural —
+ * so a non-null result always differs from the singular name.
+ * disambiguateOperationNames falls back to it before a numeric suffix when
+ * the singular name is an operationId's.
+ */
+function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
+  if (method === 'post' && inferPostAction(path, apiRootLength)) return null;
+  const resource = inferResourceFromPath(path, apiRootLength, false);
+  if (resource === null || resource === inferResourceFromPath(path, apiRootLength)) return null;
+  return toCamelCase(`${inferVerb(method, path)}_${resource}`);
+}
+
+/**
  * Infer the CRUD verb from HTTP method and path shape. A POST is `create`
  * unless `inferPostAction` recognised it as an action first.
  */
@@ -785,8 +802,10 @@ function inferVerb(method: HttpMethod, path: string): string {
  *
  * `apiRootLength` is the document's API root the path sits under (see
  * documentApiRoot); the service segment is the first literal one after it.
+ * `singularItem` false keeps an item's noun as the path spells it (`Users`
+ * for `/accounts/users/{id}`), for pluralFallbackName.
  */
-function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
+function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = true): string | null {
   const segments = path.split('/').filter(Boolean);
   if (segments.length <= 1) return null;
 
@@ -807,7 +826,7 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
   // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
   if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
 
-  return toPascalCase(isItem ? singularizePathSegment(resourceSegment) : resourceSegment);
+  return toPascalCase(isItem && singularItem ? singularizePathSegment(resourceSegment) : resourceSegment);
 }
 
 /**
@@ -884,7 +903,17 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      while `GET /v1/{teamId}/notes` becomes `listByTeamId`, and with no
  *      root `GET /users/teams` keeps `listTeams` while `GET /users/{id}/teams`
  *      becomes `listTeamsById`;
- *   4. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
+ *   4. for a path-named item operation whose singular name none of those
+ *      could tell from an operationId — `GET /store/pets/{id}` is `getPet`,
+ *      and so is `operationId: getPet` on `/store/featured/{id}` — the plural
+ *      name it had before item resources were singularised, `getPets`
+ *      (pluralFallbackName), when no operation in the service has it. The
+ *      plural still says which collection is read, and it is the name every
+ *      SDK generated from such a document already exposes, where a number
+ *      says nothing. Two path-named operations never need it: their paths
+ *      differ, so a qualifier above tells them apart. A name a qualifier has
+ *      already extended, and an action, go straight to the suffix;
+ *   5. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
  *      operation keeps the plain name over a path-named one; otherwise the
  *      lexically first path keeps it, whatever the document order. The suffix
@@ -901,6 +930,7 @@ function disambiguateOperationNames(
   const rename = (op: Operation, name: string) => {
     (op as { name: string }).name = name;
   };
+  const byPath = (a: Operation, b: Operation) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
@@ -935,8 +965,32 @@ function disambiguateOperationNames(
     for (const group of collidingGroups(operations)) qualify(group);
   }
 
-  // Groups come in name order and members are sorted below, so suffixes are
-  // allocated from the shared pool in an order that depends only on the data.
+  // The plural pass and the numeric pass below both draw names from one pool
+  // per service. Groups come in name order and members are sorted by path,
+  // so the names are allocated in an order that depends only on the data.
+  const inUse = new Set(operations.map((op) => op.name));
+  for (const group of collidingGroups(operations)) {
+    // Only next to an operationId: two path-named operations have different
+    // paths, and the qualifiers above are what tell those apart.
+    if (group.every((op) => pathNamed.has(op))) continue;
+    const pluralByPath = new Map<string, string>();
+    for (const op of group.filter((member) => pathNamed.has(member)).sort(byPath)) {
+      let plural = pluralByPath.get(op.path);
+      if (plural === undefined) {
+        const root = apiRootLengthOf(op);
+        const candidate = pluralFallbackName(op.httpMethod, op.path, root);
+        // The name must still be the one the operation was built with — no
+        // qualifier above has extended it — and the plural must be free.
+        const untouched = op.name === fallbackOperationName(op.httpMethod, op.path, root);
+        if (candidate === null || !untouched || inUse.has(candidate)) continue;
+        plural = candidate;
+        inUse.add(plural);
+        pluralByPath.set(op.path, plural);
+      }
+      rename(op, plural);
+    }
+  }
+
   const taken = new Set(operations.map((op) => op.name));
   for (const group of collidingGroups(operations)) {
     const name = group[0].name;
