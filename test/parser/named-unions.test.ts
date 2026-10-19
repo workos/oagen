@@ -974,4 +974,276 @@ components:
       warn.mockRestore();
     }
   });
+
+  it('refuses to fold a Json-suffixed model onto a base whose union rules it does not preserve', async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    // An allOf+oneOf dispatcher: no fields of its own, but a mapping.
+    const dispatcher: Model = {
+      name: 'Foo',
+      fields: [],
+      discriminator: { property: 'type', mapping: { a: 'FooA', b: 'FooB' } },
+    };
+    const plainJson: Model = {
+      name: 'FooJson',
+      fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }],
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kept = collapseJsonSuffixModels([dispatcher, plainJson], []);
+      expect(kept.map((m) => m.name)).toEqual(['Foo', 'FooJson']);
+      expect(kept[0]?.discriminator).toEqual({ property: 'type', mapping: { a: 'FooA', b: 'FooB' } });
+      expect(kept[0]?.fields).toEqual([]);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Json-suffix model "FooJson" does not preserve the union rules of "Foo" — keeping both',
+      ]);
+
+      // Different rules on a Json union are refused the same way.
+      warn.mockClear();
+      const otherRules: Model = {
+        ...plainJson,
+        variants: [modelRef('FooA')],
+        compositionKind: 'oneOf',
+        discriminator: { property: 'kind', mapping: { a: 'FooA' } },
+      };
+      expect(collapseJsonSuffixModels([dispatcher, otherRules], []).map((m) => m.name)).toEqual(['Foo', 'FooJson']);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still folds a Json-suffixed union onto a base union with identical rules, carrying the shape', async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    const rules = { property: 'kind', mapping: { a: 'A', b: 'B' } };
+    const base: Model = {
+      name: 'Foo',
+      fields: [{ name: 'a', type: { kind: 'primitive', type: 'string' }, required: false }],
+      variants: [modelRef('A'), modelRef('B')],
+      compositionKind: 'oneOf',
+      discriminator: rules,
+    };
+    const json: Model = {
+      name: 'FooJson',
+      fields: [
+        { name: 'a', type: { kind: 'primitive', type: 'string' }, required: false },
+        { name: 'b', type: { kind: 'primitive', type: 'string' }, required: false },
+      ],
+      variants: [modelRef('A'), modelRef('B')],
+      compositionKind: 'oneOf',
+      discriminator: { ...rules },
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const folded = collapseJsonSuffixModels([base, json], []);
+      expect(folded.map((m) => m.name)).toEqual(['Foo']);
+      expect(folded[0]?.fields.map((f) => f.name)).toEqual(['a', 'b']);
+      expect(folded[0]?.variants).toEqual([modelRef('A'), modelRef('B')]);
+      expect(folded[0]?.discriminator).toEqual(rules);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps an allOf+oneOf dispatcher with no fields when a plain Json-suffixed component appears beside it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseInline(`
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /foos:
+    post:
+      operationId: createFoo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FooJson' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Foo' }
+components:
+  schemas:
+    Foo:
+      allOf:
+        - oneOf:
+            - type: object
+              properties:
+                type: { const: a }
+                a: { type: string }
+            - type: object
+              properties:
+                type: { const: b }
+                b: { type: string }
+    FooJson:
+      type: object
+      properties:
+        id: { type: string }
+`);
+      const foo = model(ir, 'Foo');
+      expect(foo.fields).toEqual([]);
+      expect(foo.discriminator).toEqual({ property: 'type', mapping: { a: 'FooA', b: 'FooB' } });
+      expect(model(ir, 'FooJson').fields.map((f) => f.name)).toEqual(['id']);
+      expect(ir.services[0]?.operations[0]?.requestBody).toEqual(modelRef('FooJson'));
+      expect(ir.services[0]?.operations[0]?.response).toEqual(modelRef('Foo'));
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Json-suffix model "FooJson" does not preserve the union rules of "Foo" — keeping both',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('named unions: variant contexts step around claimed names', () => {
+  const union = (first: string) => `${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+${first}
+        - $ref: '#/components/schemas/Cat'
+${animals}`;
+
+  it('steps an array variant off a component that already owns its item name, keeping the component intact', async () => {
+    const ir = await parseInline(`${union(`
+        - type: array
+          items:
+            type: object
+            properties:
+              a: { type: string }`)}
+    PetVariant1:
+      type: object
+      properties:
+        a: { type: string }
+        b: { type: string }
+        c: { type: string }
+`);
+
+    expect(model(ir, 'Pet').variants).toEqual([{ kind: 'array', items: modelRef('PetVariant1Item') }, modelRef('Cat')]);
+    expect(model(ir, 'PetVariant1Item').fields.map((f) => f.name)).toEqual(['a']);
+    expect(model(ir, 'PetVariant1').fields.map((f) => f.name)).toEqual(['a', 'b', 'c']);
+    expect(unresolvedRefs(ir)).toEqual([]);
+  });
+
+  it('shares a component of the identical shape instead of stepping', async () => {
+    const ir = await parseInline(`${union(`
+        - type: array
+          items:
+            type: object
+            properties:
+              a: { type: string }`)}
+    PetVariant1:
+      type: object
+      description: The same shape, documented.
+      properties:
+        a: { type: string }
+`);
+
+    expect(model(ir, 'Pet').variants).toEqual([{ kind: 'array', items: modelRef('PetVariant1') }, modelRef('Cat')]);
+    expect(ir.models.filter((m) => m.name === 'PetVariant1')).toHaveLength(1);
+    expect(model(ir, 'PetVariant1').fields.map((f) => f.name)).toEqual(['a']);
+    expect(ir.models.some((m) => m.name === 'PetVariant1Item')).toBe(false);
+  });
+
+  it('moves every name nested under a stepped variant with it', async () => {
+    const ir = await parseInline(`${union(`
+        - type: array
+          items:
+            type: object
+            properties:
+              a: { type: string }
+              child:
+                properties:
+                  x: { type: string }
+              tags:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    t: { type: string }`)}
+    PetVariant1:
+      type: string
+`);
+
+    expect(model(ir, 'Pet').variants).toEqual([{ kind: 'array', items: modelRef('PetVariant1Item') }, modelRef('Cat')]);
+    const item = model(ir, 'PetVariant1Item');
+    // Nested names derive from the chosen context (`PetVariant1Item…`), not
+    // from the base it stepped off (`PetVariant1…`).
+    expect(item.fields.map((f) => [f.name, f.type])).toEqual([
+      ['a', { kind: 'primitive', type: 'string' }],
+      ['child', modelRef('PetVariant1ItemChild')],
+      ['tags', { kind: 'array', items: modelRef('PetVariant1ItemTags') }],
+    ]);
+    expect(model(ir, 'PetVariant1ItemChild').fields.map((f) => f.name)).toEqual(['x']);
+    expect(model(ir, 'PetVariant1ItemTags').fields.map((f) => f.name)).toEqual(['t']);
+    // Nothing lands under the base the variant stepped off; only the component owns it.
+    const underBase = ir.models.filter(
+      (m) => m.name.startsWith('PetVariant1') && !m.name.startsWith('PetVariant1Item'),
+    );
+    expect(underBase.map((m) => m.name)).toEqual(['PetVariant1']);
+    expect(unresolvedRefs(ir)).toEqual([]);
+  });
+
+  it("steps an inline enum variant off a component enum with other values, and off another union's variant", async () => {
+    const ir = await parseInline(`${union(`
+        - type: string
+          enum: [happy, sad]`)}
+    PetVariant1:
+      type: string
+      enum: [hot, cold]
+    Other:
+      oneOf:
+        - title: PetVariant2
+          type: object
+          properties:
+            kind: { const: x }
+            v: { type: string }
+        - title: Spare
+          type: object
+          properties:
+            kind: { const: y }
+            w: { type: string }
+`);
+
+    expect(model(ir, 'Pet').variants).toEqual([
+      { kind: 'enum', name: 'PetVariant1Value', values: ['happy', 'sad'] },
+      modelRef('Cat'),
+    ]);
+    const values = (name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+    expect(values('PetVariant1')).toEqual(['hot', 'cold']);
+    expect(values('PetVariant1Value')).toEqual(['happy', 'sad']);
+
+    // A second union's titled variant `PetVariant2` claims that name too.
+    const stepped = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/Cat'
+        - type: string
+          enum: [happy, sad]
+    Other:
+      oneOf:
+        - title: PetVariant2
+          type: object
+          properties:
+            kind: { const: x }
+            v: { type: string }
+        - title: Spare
+          type: object
+          properties:
+            kind: { const: y }
+            w: { type: string }
+${animals}`);
+    expect(model(stepped, 'Pet').variants).toEqual([
+      modelRef('Cat'),
+      { kind: 'enum', name: 'PetVariant2Value', values: ['happy', 'sad'] },
+    ]);
+    expect(model(stepped, 'Other').variants).toEqual([modelRef('PetVariant2'), modelRef('Spare')]);
+    expect(unresolvedRefs(stepped)).toEqual([]);
+  });
 });

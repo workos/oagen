@@ -1579,9 +1579,10 @@ function planNamedUnion(
   const members = namedUnionMembers(schema, inlineNames, schemas);
   const memberProperties = new Map<string, SchemaObject>();
   const memberContexts = new Map<SchemaObject, string>();
+  const claimed = namedUnionClaimedShapes(name, schema, schemas);
   members.forEach(({ raw }, index) => {
     if (raw.$ref || inlineNames.has(raw)) return;
-    const key = `variant_${index + 1}`;
+    const key = memberContext(`variant_${index + 1}`, raw, name, claimed);
     memberProperties.set(key, raw);
     memberContexts.set(raw, key);
   });
@@ -1706,15 +1707,109 @@ function namedUnionReservedNames(
   for (const [variant, entry] of nameInlineVariantEntries(schema, name, componentNames, true)) {
     if (entry.contextFree) ownShapes.set(entry.name, schemaShapeKey(variant));
   }
+  for (const { variant, entry } of otherNamedUnionVariantEntries(name, schema, schemas, componentNames)) {
+    if (entry.contextFree && ownShapes.get(entry.name) !== schemaShapeKey(variant)) reserved.add(entry.name);
+  }
+  return reserved;
+}
+
+/**
+ * The inline object variants of every other named union component, each
+ * with the name it would keep, read in isolation against the component names
+ * alone (no cross-union reservations), so every union sees the others the
+ * same way and no two can chase each other's names.
+ */
+function otherNamedUnionVariantEntries(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  componentNames: ReadonlySet<string>,
+): Array<{ variant: SchemaObject; entry: InlineVariantName }> {
+  const entries: Array<{ variant: SchemaObject; entry: InlineVariantName }> = [];
   for (const [key, other] of Object.entries(schemas)) {
     if (other === schema || !isNamedUnionSchema(other)) continue;
     const otherName = resolveSchemaName(key);
     if (otherName === name) continue;
     for (const [variant, entry] of nameInlineVariantEntries(other, otherName, componentNames, true)) {
-      if (entry.contextFree && ownShapes.get(entry.name) !== schemaShapeKey(variant)) reserved.add(entry.name);
+      entries.push({ variant, entry });
     }
   }
-  return reserved;
+  return entries;
+}
+
+/**
+ * Every model or enum name already spoken for when a named union's
+ * `variant_<n>` members mint theirs, with the shape of each claimant: every
+ * component schema (its own shape), and every inline object variant of every
+ * other named union (`otherNamedUnionVariantEntries`). A claimant whose
+ * shape is unknown (no component map) is recorded as `null`, which never
+ * counts as identical.
+ */
+function namedUnionClaimedShapes(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): Map<string, Array<string | null>> {
+  const claimed = new Map<string, Array<string | null>>();
+  const claim = (claimant: string, shape: string | null): void => {
+    if (claimant === name) return;
+    claimed.set(claimant, [...(claimed.get(claimant) ?? []), shape]);
+  };
+  if (!schemas) {
+    for (const claimant of componentModelNames()) claim(claimant, null);
+    return claimed;
+  }
+  for (const [key, other] of Object.entries(schemas)) claim(resolveSchemaName(key), schemaShapeKey(other));
+  for (const { variant, entry } of otherNamedUnionVariantEntries(name, schema, schemas, componentModelNames())) {
+    claim(entry.name, schemaShapeKey(variant));
+  }
+  return claimed;
+}
+
+/**
+ * The synthetic property name a non-object variant of a named union is typed
+ * and extracted under: `base` (`variant_<n>`) unless a name it would mint
+ * under it (`mintedInlineNameEntries`: `PetVariant1` for an inline enum, an
+ * array's inline items or a map's inline values, a nested union's variants)
+ * is already claimed by a component or by another union's variant of a
+ * different shape (`claimed`). An identical shape is shared, as array items
+ * share a same-shaped sibling's model; otherwise the context steps exactly as
+ * an array's or map's does beside a claiming sibling
+ * (`firstFreeElementContext`): `variant_1_item` / `variant_1_value`
+ * (`PetVariant1Item`, `PetVariant1Value`), then `variant_1_array_item` /
+ * `variant_1_member_value`, then numbered — stopping as soon as a candidate
+ * mints the same names as the one before it (a context-free name no context
+ * can escape) and at the attempt cap. Both sides read the chosen context
+ * from the plan, so every name nested under a stepped variant moves with it.
+ */
+function memberContext(
+  base: string,
+  variant: SchemaObject,
+  unionName: string,
+  claimed: ReadonlyMap<string, ReadonlyArray<string | null>>,
+): string {
+  const mint = (candidate: string): string[] =>
+    mintedInlineNameEntries(candidate, variant, unionName)
+      .filter((entry) => !entry.contextFree)
+      .map((entry) => entry.name);
+  const own = mint(base);
+  if (own.length === 0) return base;
+  const rivals = own.flatMap((minted) => claimed.get(minted) ?? []);
+  if (rivals.length === 0) return base;
+  const shape = schemaShapeKey(mintingSchema(variant));
+  if (rivals.every((rival) => rival === shape)) return base;
+  const kind = variant.type === 'array' ? 'item' : 'value';
+  return firstFreeElementContext(base, kind, new Set(claimed.keys()), mint, own).context;
+}
+
+/** The schema whose shape a non-object variant's minted name stands for: an array's items, a map's values, else the variant itself. */
+function mintingSchema(variant: SchemaObject): SchemaObject {
+  if (variant.items && (variant.type === 'array' || !variant.type)) return mintingSchema(variant.items);
+  if (variant.type === 'object' && !variant.properties) {
+    const value = mapValueSchema(variant);
+    if (value) return mintingSchema(value);
+  }
+  return variant;
 }
 
 /**
@@ -2738,7 +2833,9 @@ import {
   collectProperties,
   elementContextName,
   extractInlineModelsFromProperties,
+  firstFreeElementContext,
   mapValueSchema,
+  mintedInlineNameEntries,
   qualifyInlineModelName,
   reservedInlineNames,
   schemaShapeKey,
