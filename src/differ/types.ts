@@ -140,6 +140,11 @@ export interface OperationModified {
   paramChanges: ParamChange[];
   responseChanged: boolean;
   requestBodyChanged: boolean;
+  /**
+   * The body stayed but its `requestBodyRequired` flipped. Optional → required
+   * is breaking (callers must now send a body); required → optional is additive.
+   */
+  requestBodyRequiredChanged: boolean;
   httpMethodChanged: boolean;
   pathChanged: boolean;
   paginatedChanged: boolean;

@@ -2582,15 +2582,37 @@ describe('fallback operation names stay unique within a service (issue #208)', (
           '/v1/{teamId}/notes/all': { delete: withParam('teamId') },
         }),
       ).toEqual({
-        'GET /v1/notes': 'listNotes',
-        'GET /v1/{teamId}/notes': 'listNotesByTeamId',
-        'DELETE /v1/notes/all': 'deleteAllNotes',
-        'DELETE /v1/{teamId}/notes/all': 'deleteAllNotesByTeamId',
+        // All four sit in one `Notes` service under the `/v1` root (#224), so
+        // the service word is not echoed, and the parameter does the rest.
+        'GET /v1/notes': 'list',
+        'GET /v1/{teamId}/notes': 'listByTeamId',
+        'DELETE /v1/notes/all': 'deleteAll',
+        'DELETE /v1/{teamId}/notes/all': 'deleteAllByTeamId',
       });
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('never echoes the API root or the service segment into a qualifier', () => {
+    // Review examples on #224: `DELETE /api/v1/notes/all` must not become
+    // `deleteAllV1Notes`, and the deeper context of `/api/stats/stats/stores`
+    // must not repeat the `Stats` its service was named from.
+    expect(
+      names({
+        '/api/v1/notes/all': { delete: ok },
+        '/api/v1/{teamId}/notes/all': { delete: withParam('teamId') },
+      }),
+    ).toEqual({
+      'DELETE /api/v1/notes/all': 'deleteAll',
+      'DELETE /api/v1/{teamId}/notes/all': 'deleteAllByTeamId',
+    });
+    const { services } = extractOperations({ '/api/stores': { get: ok }, '/api/stats/stats/stores': { get: ok } });
+    expect(services.map((s) => [s.name, s.operations.map((o) => o.name)])).toEqual([
+      ['Stores', ['list']],
+      ['Stats', ['listStores']],
+    ]);
   });
 
   it('qualifies each HTTP method separately, so sibling methods get parallel names', () => {
@@ -2600,10 +2622,10 @@ describe('fallback operation names stay unique within a service (issue #208)', (
         '/v1/{teamId}/notes': { get: withParam('teamId'), post: withParam('teamId') },
       }),
     ).toEqual({
-      'GET /v1/notes': 'listNotes',
-      'POST /v1/notes': 'createNotes',
-      'GET /v1/{teamId}/notes': 'listNotesByTeamId',
-      'POST /v1/{teamId}/notes': 'createNotesByTeamId',
+      'GET /v1/notes': 'list',
+      'POST /v1/notes': 'create',
+      'GET /v1/{teamId}/notes': 'listByTeamId',
+      'POST /v1/{teamId}/notes': 'createByTeamId',
     });
   });
 
@@ -2624,32 +2646,32 @@ describe('fallback operation names stay unique within a service (issue #208)', (
   it('does not repeat a deeper path context the name already ends with', () => {
     expect(
       names({
-        '/v1/notes/{id}/notes': { get: withParam('id') },
-        '/v1/{x}/notes/{id}/notes': { get: withParam('x') },
+        '/orgs/notes/{id}/notes': { get: withParam('id') },
+        '/orgs/{x}/notes/{id}/notes': { get: withParam('x') },
       }),
     ).toEqual({
-      'GET /v1/notes/{id}/notes': 'listNotesById',
-      'GET /v1/{x}/notes/{id}/notes': 'listNotesByXById',
+      'GET /orgs/notes/{id}/notes': 'listNotesById',
+      'GET /orgs/{x}/notes/{id}/notes': 'listNotesByXById',
     });
   });
 
   it('collapses a word the deeper path context repeats, in a row or against the end of the name', () => {
     expect(
       names({
-        '/api/teams': { get: ok },
-        '/api/analytics/analytics/teams': { get: ok },
-        '/api/companies': { get: ok },
-        '/api/analytics/analytics/analytics/companies': { get: ok },
-        '/api/users': { get: ok },
-        '/api/users/analytics/users': { get: ok },
+        '/org/teams': { get: ok },
+        '/org/analytics/analytics/teams': { get: ok },
+        '/org/companies': { get: ok },
+        '/org/analytics/analytics/analytics/companies': { get: ok },
+        '/org/users': { get: ok },
+        '/org/users/analytics/users': { get: ok },
       }),
     ).toEqual({
-      'GET /api/teams': 'listTeams',
-      'GET /api/analytics/analytics/teams': 'listTeamsAnalytics',
-      'GET /api/companies': 'listCompanies',
-      'GET /api/analytics/analytics/analytics/companies': 'listCompaniesAnalytics',
-      'GET /api/users': 'listUsers',
-      'GET /api/users/analytics/users': 'listUsersAnalytics',
+      'GET /org/teams': 'listTeams',
+      'GET /org/analytics/analytics/teams': 'listTeamsAnalytics',
+      'GET /org/companies': 'listCompanies',
+      'GET /org/analytics/analytics/analytics/companies': 'listCompaniesAnalytics',
+      'GET /org/users': 'listUsers',
+      'GET /org/users/analytics/users': 'listUsersAnalytics',
     });
   });
 
@@ -2661,9 +2683,9 @@ describe('fallback operation names stay unique within a service (issue #208)', (
         '/v1/{orgId}/notes': { get: withParam('orgId') },
       }),
     ).toEqual({
-      'GET /v1/notes': 'listNotes',
-      'GET /v1/{teamId}/notes': 'listNotesByTeamId',
-      'GET /v1/{orgId}/notes': 'listNotesByOrgId',
+      'GET /v1/notes': 'list',
+      'GET /v1/{teamId}/notes': 'listByTeamId',
+      'GET /v1/{orgId}/notes': 'listByOrgId',
     });
   });
 
@@ -2671,8 +2693,8 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const expected = {
-        'GET /v1/{userId}/notes': 'listNotes',
-        'GET /v1/{user_id}/notes': 'listNotes2',
+        'GET /v1/{userId}/notes': 'list',
+        'GET /v1/{user_id}/notes': 'list2',
       };
       expect(
         names({
@@ -2698,20 +2720,20 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     // also `listNotes12`. The `listNotes` group is served first by name, so the
     // second `listNotes1` path gets `listNotes13` however the document is ordered.
     const twelve = [
-      '/v1/notes',
-      '/v1/Notes',
-      '/v1/NOTES',
-      '/v1/notes_',
-      '/v1/notes-',
-      '/v1/notes.',
-      '/v1/_notes',
-      '/v1/-notes',
-      '/v1/.notes',
-      '/v1/notes__',
-      '/v1/notes--',
-      '/v1/notes..',
+      '/x/notes',
+      '/x/Notes',
+      '/x/NOTES',
+      '/x/notes_',
+      '/x/notes-',
+      '/x/notes.',
+      '/x/_notes',
+      '/x/-notes',
+      '/x/.notes',
+      '/x/notes__',
+      '/x/notes--',
+      '/x/notes..',
     ];
-    const two = ['/v1/notes1', '/v1/notes_1'];
+    const two = ['/x/notes1', '/x/notes_1'];
     const entries = (paths: string[]) => paths.map((path) => [path, { get: ok }] as const);
     const orders = [
       [...entries(twelve), ...entries(two)],
@@ -2723,9 +2745,9 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     expect(results[1]).toEqual(results[0]);
     expect(results[2]).toEqual(results[0]);
     expect(new Set(Object.values(results[0])).size).toBe(14);
-    expect(results[0]['GET /v1/-notes']).toBe('listNotes');
-    expect(results[0]['GET /v1/notes1']).toBe('listNotes1');
-    expect(results[0]['GET /v1/notes_1']).toBe('listNotes13');
+    expect(results[0]['GET /x/-notes']).toBe('listNotes');
+    expect(results[0]['GET /x/notes1']).toBe('listNotes1');
+    expect(results[0]['GET /x/notes_1']).toBe('listNotes13');
   });
 
   it('keeps same-path PUT and PATCH on one name while a third path gets the suffix', () => {
@@ -2744,14 +2766,14 @@ describe('fallback operation names stay unique within a service (issue #208)', (
   it('skips a numeric suffix another operation already uses', () => {
     expect(
       names({
-        '/v1/{userId}/notes': { get: withParam('userId') },
-        '/v1/{user_id}/notes': { get: withParam('user_id') },
-        '/v1/other': { get: { operationId: 'listNotes2', ...ok } },
+        '/x/{userId}/notes': { get: withParam('userId') },
+        '/x/{user_id}/notes': { get: withParam('user_id') },
+        '/x/other': { get: { operationId: 'listNotes2', ...ok } },
       }),
     ).toEqual({
-      'GET /v1/{userId}/notes': 'listNotes',
-      'GET /v1/{user_id}/notes': 'listNotes3',
-      'GET /v1/other': 'listNotes2',
+      'GET /x/{userId}/notes': 'listNotes',
+      'GET /x/{user_id}/notes': 'listNotes3',
+      'GET /x/other': 'listNotes2',
     });
   });
 
@@ -2807,5 +2829,229 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('extractOperations – path-named services skip the API root (issue #209)', () => {
+  type Paths = NonNullable<Parameters<typeof extractOperations>[0]>;
+  const responses = { '200': { description: 'ok' } };
+  const get = { get: { responses } };
+  const getById = {
+    get: { parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }], responses },
+  };
+
+  /** `Service METHOD /path` for every operation, sorted. */
+  function grouped(paths: Paths): string[] {
+    return extractOperations(paths)
+      .services.flatMap((s) => s.operations.map((op) => `${s.name} ${op.httpMethod.toUpperCase()} ${op.path}`))
+      .sort();
+  }
+
+  /** `Service.operation METHOD /path` for every operation, sorted. */
+  function layout(paths: Paths): string[] {
+    return extractOperations(paths)
+      .services.flatMap((s) =>
+        s.operations.map((op) => `${s.name}.${op.name} ${op.httpMethod.toUpperCase()} ${op.path}`),
+      )
+      .sort();
+  }
+
+  it('names each service from the segment after a shared /api root (the issue repro)', () => {
+    // The fallback operation name skips the root too, so /api/notes reads
+    // exactly as /notes does without one: Notes.list, not Notes.listNotes.
+    expect(layout({ '/api/notes': get, '/api/tags': get, '/api/users': get })).toEqual([
+      'Notes.list GET /api/notes',
+      'Tags.list GET /api/tags',
+      'Users.list GET /api/users',
+    ]);
+  });
+
+  it('skips a two-segment root such as /api/v1', () => {
+    expect(grouped({ '/api/v1/notes': get, '/api/v1/notes/{id}': getById, '/api/v1/tags': get })).toEqual([
+      'Notes GET /api/v1/notes',
+      'Notes GET /api/v1/notes/{id}',
+      'Tags GET /api/v1/tags',
+    ]);
+  });
+
+  it.each(['api', 'API', 'rest', 'v1', 'v2beta1', '1.0', '2010-04-01'])('treats /%s as an API marker', (root) => {
+    expect(grouped({ [`/${root}/notes`]: get, [`/${root}/tags`]: get })).toEqual([
+      `Notes GET /${root}/notes`,
+      `Tags GET /${root}/tags`,
+    ]);
+  });
+
+  it('skips the shared prefix through its last marker', () => {
+    expect(grouped({ '/wiki/rest/api/content': get, '/wiki/rest/api/space': get })).toEqual([
+      'Content GET /wiki/rest/api/content',
+      'Space GET /wiki/rest/api/space',
+    ]);
+  });
+
+  it('keeps a shared prefix that carries no marker: it is the service, not noise', () => {
+    expect(grouped({ '/user_management/users': get, '/user_management/invitations': get })).toEqual([
+      'UserManagement GET /user_management/invitations',
+      'UserManagement GET /user_management/users',
+    ]);
+  });
+
+  it('keeps the module that follows the marker', () => {
+    expect(grouped({ '/api/user_management/users': get, '/api/user_management/invitations': get })).toEqual([
+      'UserManagement GET /api/user_management/invitations',
+      'UserManagement GET /api/user_management/users',
+    ]);
+  });
+
+  it('leaves a path that is the root itself under the root-named service', () => {
+    expect(grouped({ '/api': get, '/api/notes': get, '/api/tags': get })).toEqual([
+      'Api GET /api',
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('leaves a path whose root is followed by a parameter under the root-named service', () => {
+    expect(grouped({ '/api/{id}': getById, '/api/notes': get })).toEqual(['Api GET /api/{id}', 'Notes GET /api/notes']);
+  });
+
+  it('names the service from the first literal segment past a parameter that follows the root', () => {
+    // A tenant or team parameter right after the root is a common shape;
+    // /v1/notes and /v1/{teamId}/notes must meet in one Notes service, with
+    // the parameter telling the two list operations apart.
+    expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes.list GET /v1/notes',
+      'Notes.listByTeamId GET /v1/{teamId}/notes',
+    ]);
+    expect(grouped({ '/api/{tenant}/notes': get, '/api/{tenant}/tags': get })).toEqual([
+      'Notes GET /api/{tenant}/notes',
+      'Tags GET /api/{tenant}/tags',
+    ]);
+  });
+
+  it('qualifies parameter-only collisions by their parameters, under a root and without one alike', () => {
+    // Fallback names are unique within every service (#208): the root-less
+    // pair that once stayed a duplicate `listTeamsTeams` is told apart by its
+    // parameter just as the rooted pair is.
+    expect(layout({ '/users/teams': get, '/users/{id}/teams': get })).toEqual([
+      'Users.listTeams GET /users/teams',
+      'Users.listTeamsById GET /users/{id}/teams',
+    ]);
+    expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes.list GET /v1/notes',
+      'Notes.listByTeamId GET /v1/{teamId}/notes',
+    ]);
+  });
+
+  it('names a root-less document exactly as before, leading parameter or not', () => {
+    // No API root means no new rule: a leading parameter still yields Default
+    // and the fallback name still skips only the first segment, for untagged
+    // and tagged operations alike.
+    const tagged = { get: { tags: ['tenants'], responses } };
+    expect(layout({ '/{tenant}/users': get })).toEqual(['Default.listUsers GET /{tenant}/users']);
+    expect(layout({ '/{tenant}/users': tagged })).toEqual(['Tenants.listUsers GET /{tenant}/users']);
+    // A path outside the root is root-less in the same way.
+    expect(layout({ '/api/notes': get, '/api/tags': get, '/{tenant}/users': get })).toEqual([
+      'Default.listUsers GET /{tenant}/users',
+      'Notes.list GET /api/notes',
+      'Tags.list GET /api/tags',
+    ]);
+  });
+
+  it('keeps a marker-less path outside the root without switching the root off', () => {
+    // A /health or /metrics next to an otherwise /api/… document is common.
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': get, '/metrics': get })).toEqual([
+      'Health GET /health',
+      'Metrics GET /metrics',
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('computes the root over untagged operations only', () => {
+    // A tagged /health, or a tagged path under another root, never switches
+    // the root off: only path-named services use it.
+    const ops = { get: { tags: ['ops'], responses } };
+    const legacy = { get: { tags: ['legacy'], responses } };
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': ops, '/v2/legacy': legacy })).toEqual([
+      'Legacy GET /v2/legacy',
+      'Notes GET /api/notes',
+      'Ops GET /health',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('has no root when the untagged rooted paths disagree on it, so API versions stay apart', () => {
+    expect(grouped({ '/v1/users': get, '/v2/users': get })).toEqual(['V1 GET /v1/users', 'V2 GET /v2/users']);
+    expect(grouped({ '/api/v1/users': get, '/api/v2/users': get })).toEqual([
+      'V1 GET /api/v1/users',
+      'V2 GET /api/v2/users',
+    ]);
+    expect(grouped({ '/api/v1/notes': get, '/v1/legacy': get })).toEqual([
+      'Api GET /api/v1/notes',
+      'V1 GET /v1/legacy',
+    ]);
+  });
+
+  it('never echoes the root or the service segment into a fallback operation name', () => {
+    const del = { delete: { responses } };
+    const rooted: Paths = {
+      '/api/v1/core/auth/permissions': get,
+      '/api/v1/core/global/permissions': get,
+      '/api/v1/admin/support/companies/{id}/document_types': get,
+      '/api/v1/admin/billing/companies/{id}/document_types': get,
+      '/api/v1/documents': get,
+      '/api/v1/documents/{id}': del,
+    };
+    const bare = Object.fromEntries(Object.entries(rooted).map(([path, item]) => [path.replace('/api/v1', ''), item]));
+    // Every name is exactly what the document produces without the root.
+    expect(layout(rooted).map((line) => line.replace(' /api/v1/', ' /'))).toEqual(layout(bare));
+    expect(layout(rooted)).toMatchInlineSnapshot(`
+      [
+        "Admin.listDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
+        "Admin.listDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
+        "Core.listPermissionsAuth GET /api/v1/core/auth/permissions",
+        "Core.listPermissionsGlobal GET /api/v1/core/global/permissions",
+        "Documents.delete DELETE /api/v1/documents/{id}",
+        "Documents.list GET /api/v1/documents",
+      ]
+    `);
+    // A path with nothing literal after the root names its operation from the verb alone.
+    expect(layout({ '/api/v1/{id}': del, '/api/v1/notes': get })).toEqual([
+      'Api.delete DELETE /api/v1/{id}',
+      'Notes.list GET /api/v1/notes',
+    ]);
+  });
+
+  it('compares shared segments verbatim', () => {
+    expect(grouped({ '/API/notes': get, '/api/tags': get })).toEqual(['Api GET /API/notes', 'Api GET /api/tags']);
+  });
+
+  it('does not consult path items that declare no operation', () => {
+    expect(grouped({ '/health': {}, '/status': { parameters: [] }, '/api/notes': get, '/api/tags': get })).toEqual([
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('names a single-path document from the segment after the root', () => {
+    expect(grouped({ '/api/notes': get })).toEqual(['Notes GET /api/notes']);
+    expect(grouped({ '/api': get })).toEqual(['Api GET /api']);
+    expect(grouped({ '/{id}': getById })).toEqual(['Default GET /{id}']);
+  });
+
+  it('leaves tagged operations exactly as they were', () => {
+    const tagged = { get: { tags: ['labels'], responses } };
+    const alone = extractOperations({ '/api/tags': tagged }).services;
+    const { services } = extractOperations({ '/api/notes': get, '/api/tags': tagged });
+    expect(services.map((s) => s.name)).toEqual(['Notes', 'Labels']);
+    expect(services[1]).toEqual(alone[0]);
+  });
+
+  it('still groups a tag by raw first segment when deciding whether to split it', () => {
+    const tagged = { get: { tags: ['notes'], responses } };
+    expect(grouped({ '/api/notes': tagged, '/api/note_templates': tagged })).toEqual([
+      'Notes GET /api/note_templates',
+      'Notes GET /api/notes',
+    ]);
   });
 });
