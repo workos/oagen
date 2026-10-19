@@ -1,4 +1,5 @@
 import type { ErrorResponse, Operation } from '../ir/types.js';
+import { serverListsEqual } from '../ir/server-url.js';
 import type { Change, ParamChange } from './types.js';
 import { classifyParamChange } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
@@ -50,6 +51,9 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
+    // `servers` is set only when the operation's effective servers differ from
+    // the document's, so absent on both sides is "inherits" twice.
+    const serversChanged = !operationServersEqual(oldOp.servers, newOp.servers);
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -60,7 +64,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       pathChanged ||
       paginatedChanged ||
       injectIdempotencyKeyChanged ||
-      errorsChanged;
+      errorsChanged ||
+      serversChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -74,6 +79,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       const requestBodyRequiredBreaking = requestBodyRequiredChanged && !!newOp.requestBodyRequired;
       const errorsBreaking = errorsDiff === 'breaking';
 
+      // servers: any change is breaking (the operation's requests go elsewhere)
       const hasBreaking =
         responseChanged ||
         requestBodyChanged ||
@@ -83,6 +89,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedBreaking ||
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
+        serversChanged ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
         kind: 'operation-modified',
@@ -97,12 +104,19 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedChanged,
         injectIdempotencyKeyChanged,
         errorsChanged,
+        serversChanged,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
   }
 
   return changes;
+}
+
+function operationServersEqual(a: Operation['servers'], b: Operation['servers']): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return serverListsEqual(a, b);
 }
 
 function requestBodiesEqual(a: Operation['requestBody'], b: Operation['requestBody']): boolean {

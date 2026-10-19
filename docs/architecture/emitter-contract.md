@@ -111,6 +111,7 @@ Emitters should handle these additional variants introduced for open-source read
 - **HTTP methods:** `head`, `options`, `trace` — HEAD returns no body, OPTIONS/TRACE are informational
 - **Cookie params:** Optional `cookieParams` array on operations that use cookie parameters
 - **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`. Each entry keeps its URL template and, when declared, its `variables` (`default`, `enum`, `description`); `baseUrl` already has the defaults filled in, and `resolveServerUrl` from `@workos/oagen` does the same for any other entry
+- **Operation servers:** Optional `servers: ServerEntry[]` on `Operation` (same shape), present only when the operation's own `servers`, else its Path Item's, differ from the document's; an operation without the key inherits `ApiSpec.servers`, so the servers a request goes to are `op.servers ?? spec.servers`
 - **Multiple responses:** Optional `successResponses: SuccessResponse[]` on `Operation` when more than one 2xx exists
 - **Response headers:** Optional `responseHeaders: ResponseHeader[]` on `Operation` (the primary response's headers) and `headers: ResponseHeader[]` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares at least one
 - **Response descriptions:** Optional `responseDescription: string` on `Operation` (the primary response's description, e.g. for a `@returns` tag) and `description: string` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares one with non-whitespace content

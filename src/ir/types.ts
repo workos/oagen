@@ -133,6 +133,17 @@ export interface Operation {
   externalDocs?: ExternalDocs;
   httpMethod: HttpMethod;
   path: string;
+  /**
+   * The servers this operation is served from, when they differ from the
+   * document's: the operation's own `servers`, else its Path Item's (OpenAPI
+   * precedence). Absent when the operation inherits `ApiSpec.servers` — it
+   * declares none at either level, or what it declares is the document's list
+   * again (same URLs, descriptions and variables, in the same order). Same
+   * shape as `ApiSpec.servers`, variables included, so `resolveServerUrl`
+   * from `ir/server-url.ts` fills a template's defaults the way `baseUrl` was
+   * produced. To find where a request goes, take `op.servers ?? spec.servers`.
+   */
+  servers?: ServerEntry[];
   pathParams: Parameter[];
   queryParams: Parameter[];
   /**

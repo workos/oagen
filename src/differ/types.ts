@@ -150,6 +150,15 @@ export interface OperationModified {
   paginatedChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
+  /**
+   * The operation's `servers` changed, so its requests go elsewhere. Always
+   * breaking. The field is set only when an operation's effective servers
+   * differ from the document's, so absent on both sides is unchanged (the
+   * operation inherits twice); absent on one side and set on the other, or
+   * two lists that differ by `serverListsEqual` (URL, description or
+   * variables), is a change.
+   */
+  serversChanged: boolean;
   classification: 'additive' | 'breaking';
 }
 

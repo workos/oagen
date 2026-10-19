@@ -101,6 +101,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     { schemaNameTransform: options?.schemaNameTransform },
   );
 
+  // Before the operations: an operation carries its own `servers` only when
+  // they differ from the document's, so the document's list is needed first.
+  const { servers, baseUrl } = extractServers(spec.servers);
+
   const { services, inlineModels } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
@@ -111,6 +115,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.tags,
     spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
+    servers,
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
@@ -136,8 +141,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   collectInlineEnumsFromOperations(services, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
-
-  const { servers, baseUrl } = extractServers(spec.servers);
 
   const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',

@@ -104,6 +104,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
 - `cookieParams` — Cookie parameter handling
+- `servers` — Operation-level servers (own, else the Path Item's), present only when they differ from `ApiSpec.servers`; a request goes to `op.servers ?? spec.servers`
 
 #### Parameter
 
@@ -240,6 +241,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
+| `Operation.servers`          | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                 |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
 | `Parameter.default`          | Document default value                                                                                                                          |

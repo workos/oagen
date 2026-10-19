@@ -12,7 +12,9 @@ import type {
   Field,
   PaginationMeta,
   ExternalDocs,
+  ServerEntry,
 } from '../ir/types.js';
+import { serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import { toPascalCase, toCamelCase, splitWords, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -33,6 +35,7 @@ import { collectProperties, extractInlineModelsFromProperties } from './inline-m
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
+import { extractServerList } from './servers.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 
@@ -46,6 +49,8 @@ interface PathItem {
   options?: OperationObject;
   trace?: OperationObject;
   parameters?: RawParameterObject[];
+  /** The Path Item's own `servers`, narrowed entry by entry by `extractServerList`. */
+  servers?: unknown;
 }
 
 interface ParameterGroupExtension {
@@ -67,6 +72,8 @@ interface OperationObject {
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
   security?: RawSecurityRequirements;
+  /** The operation's own `servers`, narrowed entry by entry by `extractServerList`. */
+  servers?: unknown;
   'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
 }
@@ -302,6 +309,7 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  documentServers?: ServerEntry[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -337,6 +345,10 @@ export function extractOperations(
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
+    // Read once per Path Item so a problem in its `servers` is reported once,
+    // not once per operation. The operations that inherit it share the array,
+    // the way `responseHeaders` shares its list with `successResponses`.
+    const pathLevelServers = extractServerList(pathItem.servers, `path item ${path}`);
 
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
@@ -346,6 +358,11 @@ export function extractOperations(
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
+      const servers = operationServers(
+        extractServerList(op.servers, `operation ${operationLabel(op, path, method)}`),
+        pathLevelServers,
+        documentServers,
+      );
 
       const {
         operation,
@@ -366,6 +383,7 @@ export function extractOperations(
         componentHeaders,
         headerModelRegistry,
         apiRootLength,
+        servers,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -1150,6 +1168,7 @@ function buildOperation(
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
   apiRootLength = 0,
+  servers?: ServerEntry[],
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
@@ -1305,6 +1324,9 @@ function buildOperation(
       ...externalDocsEntry(op.externalDocs),
       httpMethod: method,
       path,
+      // Present only when the operation's effective servers differ from the
+      // document's (see operationServers); absent, not undefined, otherwise.
+      ...(servers && { servers }),
       pathParams,
       queryParams,
       bodyOwnedQueryParams: bodyOwnedQueryParams.length > 0 ? bodyOwnedQueryParams : undefined,
@@ -1950,6 +1972,29 @@ function deriveOneOfVariantName(
 /** Human-readable label for an operation in diagnostics: its operationId, else `METHOD /path`. */
 function operationLabel(op: OperationObject | undefined, path: string, method: HttpMethod): string {
   return op?.operationId ?? `${method.toUpperCase()} ${path}`;
+}
+
+/**
+ * The servers an operation carries as `Operation.servers`: its own `servers`,
+ * else its Path Item's (OpenAPI precedence: the operation overrides the Path
+ * Item, which overrides the document), and only when that list differs from
+ * the document's by `serverListsEqual`. `undefined` means the operation
+ * inherits `ApiSpec.servers` — nothing usable is declared at either level
+ * (`servers: []` and all-unusable entries included, since `extractServerList`
+ * already reads both as undeclared), or the winning list restates the
+ * document's. Precedence is applied before the comparison, so an operation
+ * that restates the document's servers under a Path Item that diverges
+ * inherits, not the Path Item's. A document without `servers` compares as an
+ * empty list, so any usable list at either level is kept.
+ */
+function operationServers(
+  own: ServerEntry[] | undefined,
+  pathLevel: ServerEntry[] | undefined,
+  documentServers: ServerEntry[] | undefined,
+): ServerEntry[] | undefined {
+  const effective = own ?? pathLevel;
+  if (!effective) return undefined;
+  return serverListsEqual(effective, documentServers ?? []) ? undefined : effective;
 }
 
 /**

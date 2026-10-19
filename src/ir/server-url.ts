@@ -1,4 +1,4 @@
-import type { ServerEntry } from './types.js';
+import type { ServerEntry, ServerVariable } from './types.js';
 
 /** Outcome of filling a server URL template with its variables' defaults. */
 export interface ResolvedServerUrl {
@@ -66,4 +66,43 @@ export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>)
 
   url += template.slice(cursor);
   return { url, unresolved };
+}
+
+/**
+ * Whether two server lists are the same, entry for entry.
+ *
+ * Structural: the same length, and at each position the same `url` and
+ * `description` and the same `variables` — the same names, each with the same
+ * `default`, the same `enum` (same values in the same order) and the same
+ * `description`. Position matters because `servers[0]` is the one a client
+ * defaults to. A key that is absent and one set to `undefined` compare equal.
+ * Variables are compared by own key only, so one named `__proto__` or
+ * `constructor` is compared like any other and never read off
+ * `Object.prototype`.
+ *
+ * The parser uses this to decide whether an operation's effective servers
+ * differ from the document's (`Operation.servers` is set only when they do),
+ * and the differ to report `serversChanged`.
+ */
+export function serverListsEqual(a: readonly ServerEntry[], b: readonly ServerEntry[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((entry, i) => serverEntriesEqual(entry, b[i]));
+}
+
+function serverEntriesEqual(a: ServerEntry, b: ServerEntry): boolean {
+  if (a.url !== b.url || a.description !== b.description) return false;
+  const aVariables = a.variables ?? {};
+  const bVariables = b.variables ?? {};
+  const names = Object.keys(aVariables);
+  if (names.length !== Object.keys(bVariables).length) return false;
+  return names.every(
+    (name) => Object.hasOwn(bVariables, name) && serverVariablesEqual(aVariables[name], bVariables[name]),
+  );
+}
+
+function serverVariablesEqual(a: ServerVariable, b: ServerVariable): boolean {
+  if (a.default !== b.default || a.description !== b.description) return false;
+  const aEnum = a.enum ?? [];
+  const bEnum = b.enum ?? [];
+  return aEnum.length === bEnum.length && aEnum.every((value, i) => value === bEnum[i]);
 }
