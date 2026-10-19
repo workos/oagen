@@ -246,6 +246,10 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     if (jsonModel.constraints || baseModel.constraints) {
       baseModel.constraints = { ...baseModel.constraints, ...jsonModel.constraints };
     }
+    // The base keeps its own documentation, link included, as it keeps its
+    // description; the Json model's link only fills in where the base has none,
+    // so folding the shape never drops the one link the document gave it.
+    if (!baseModel.externalDocs && jsonModel.externalDocs) baseModel.externalDocs = jsonModel.externalDocs;
     // `deprecated` is deliberately not carried over: it names the type the SDK
     // exposes, and that is `baseModel.name`, which keeps its own flag. A
     // deprecated `<Name>Json` folded into a live `<Name>` leaves `<Name>` live.

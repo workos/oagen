@@ -8,6 +8,7 @@ import {
   stripListItemMarkers,
   splitWords,
 } from '../utils/naming.js';
+import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -128,6 +129,8 @@ export interface SchemaObject {
   example?: unknown;
   /** JSON Schema `examples` list; OAS 3.1 deprecates `example` in its favour. */
   examples?: unknown[];
+  /** An External Documentation Object as written; `readExternalDocs` decides what reaches the IR. */
+  externalDocs?: RawExternalDocs;
   // JSON Schema validation vocabulary. An exclusive bound is the bound itself
   // in OAS 3.1 and, in OAS 3.0, a boolean that makes `minimum` / `maximum`
   // exclusive; extractConstraints() normalizes both to the 3.1 shape.
@@ -303,14 +306,15 @@ function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
 
 /**
  * `unwrapNullableSchema` for a schema a model is built from, carrying the
- * wrapper's limits and `deprecated` onto the branch it unwraps to. The
- * type-array and `nullable: true` forms unwrap by spreading, so every keyword
- * survives; the union form swaps in the bare branch, which would drop a
- * `minProperties` or `deprecated: true` written beside
+ * wrapper's limits, `deprecated` and `externalDocs` onto the branch it
+ * unwraps to. The type-array and `nullable: true` forms unwrap by spreading,
+ * so every keyword survives; the union form swaps in the bare branch, which
+ * would drop a `minProperties` or `deprecated: true` written beside
  * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
  * conjoins that wrapper's own keywords with its branch's as the field's
  * limits, and `Field.deprecated` is the wrapper's, so the model built from the
- * branch must carry the same ones or it would disagree with its field. Every
+ * branch must carry the same ones or it would disagree with its field; the
+ * wrapper's link rides along the same way (`withWrapperExternalDocs`). Every
  * extractor that builds a model from a nullable wrapper's branch — the field
  * extractor, `extractNestedSchema`, `extractInlineModelDeep`, the request-body
  * and wrapped-response paths — goes through this one function, so the
@@ -324,7 +328,7 @@ function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
 export function unwrapNullableField(schema: SchemaObject): SchemaObject {
   const inner = unwrapNullableSchema(schema);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
+  return withWrapperExternalDocs(withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema), schema);
 }
 
 /**
@@ -858,10 +862,11 @@ function extractNestedSchema(
     const models: Model[] = [];
     const variantNames = nameInlineVariants(schema, name, reserved);
     // A nullable wrapper (one non-null branch beside `null`) is the field's
-    // schema: the model built from its branch takes the wrapper's `deprecated`
-    // and limits (`collapsedNullableBranch`), exactly as the field extractor
-    // builds the same model, so the two copies agree. A multi-variant union,
-    // nullable or not, is not collapsed: every variant is built as written.
+    // schema: the model built from its branch takes the wrapper's `deprecated`,
+    // limits and link (`collapsedNullableBranch`), exactly as the field
+    // extractor builds the same model, so the two copies agree. A multi-variant
+    // union, nullable or not, is not collapsed: every variant is built as
+    // written.
     const branch = collapsedNullableBranch(schema);
 
     for (const variant of schema.oneOf) {
@@ -882,6 +887,7 @@ function extractNestedSchema(
       models.push({
         name: variantName,
         description: source.description,
+        ...externalDocsEntry(source.externalDocs),
         fields,
         ...deprecatedEntry(source),
         ...constraintsEntry(source),
@@ -899,7 +905,16 @@ function extractNestedSchema(
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) }];
+    return [
+      {
+        name,
+        description: schema.description,
+        ...externalDocsEntry(schema.externalDocs),
+        fields,
+        ...deprecatedEntry(schema),
+        ...constraintsEntry(schema),
+      },
+    ];
   }
 
   // Handle array with inline items
@@ -915,6 +930,7 @@ function extractNestedSchema(
       {
         name,
         description: schema.items.description,
+        ...externalDocsEntry(schema.items.externalDocs),
         fields,
         ...deprecatedEntry(schema.items),
         ...constraintsEntry(schema.items),
@@ -1538,7 +1554,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
       ? (rawDefault as string | number)
       : undefined;
 
-  return { name, values, default: def, ...deprecatedEntry(schema) };
+  return { name, values, default: def, ...externalDocsEntry(schema.externalDocs), ...deprecatedEntry(schema) };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   if (schema.allOf) {
@@ -1590,7 +1606,14 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     }
   }
 
-  return { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) };
+  return {
+    name,
+    description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
+    fields,
+    ...deprecatedEntry(schema),
+    ...constraintsEntry(schema),
+  };
 }
 
 function extractAllOfModel(
@@ -1681,6 +1704,7 @@ function extractAllOfModel(
   return {
     name,
     description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
     // Deprecation is the wrapper's own: a member's flag is not read — a `$ref`
@@ -1850,6 +1874,9 @@ function extractDiscriminatedAllOfVariantModels(
         // dispatcher model, not the variants it dispatches to.
         ...deprecatedEntry(variant),
         ...combineConstraints(baseConstraints, extractConstraints(variant)),
+        // The variant's own link rides along like its keywords, so the model
+        // built from the rebuilt schema carries it.
+        ...externalDocsEntry(variant.externalDocs),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -2047,6 +2074,9 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
               required: mergedRequired,
               ...deprecatedEntry(fieldSchema),
               ...extractConstraints(fieldSchema),
+              // The wrapper's own link, as for every `allOf` merge; a member's
+              // stays on that member.
+              ...externalDocsEntry(fieldSchema.externalDocs),
             },
             schemas,
           ),
@@ -2083,7 +2113,14 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
   }
 
   return [
-    { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) },
+    {
+      name,
+      description: schema.description,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...deprecatedEntry(schema),
+      ...constraintsEntry(schema),
+    },
     ...nestedModels,
   ];
 }

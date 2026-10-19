@@ -1,4 +1,4 @@
-import type { Constraints, Model, Field } from '../ir/types.js';
+import type { Constraints, ExternalDocs, Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -16,6 +16,7 @@ import {
   resolveSchemaName,
   variantMemberSchemas,
 } from './schemas.js';
+import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -614,11 +615,15 @@ export function extractInlineModelsFromProperties(
         // The wrapper's own keywords, conjoined with the member's, are the
         // field's limits (see extractConstraints), so they ride along with the
         // unwrapped member and its model carries the same constraints. Its
-        // `deprecated` is the wrapper's alone, as `Field.deprecated` reads it.
+        // `deprecated` is the wrapper's alone, as `Field.deprecated` reads it,
+        // and its link is the wrapper's too, when the wrapper has one.
         extractInlineModelsFromProperties(
           {
             properties: {
-              [fieldName]: withWrapperDeprecation({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
+              [fieldName]: withWrapperExternalDocs(
+                withWrapperDeprecation({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
+                fieldSchema,
+              ),
             },
           },
           results,
@@ -685,6 +690,8 @@ interface MergedAllOf {
   properties: MergedProperty[];
   required: string[];
   description: string | undefined;
+  /** The wrapper's own link, read like its description. */
+  externalDocs: ExternalDocs | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
   /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
@@ -740,6 +747,7 @@ function mergeAugmentation(
     properties,
     required,
     description: schema.description,
+    externalDocs: readExternalDocs(schema.externalDocs),
     constraints: extractConstraints(schema),
     deprecated: schema.deprecated || undefined,
   };
@@ -770,6 +778,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
   return {
     name,
     description: merged.description,
+    ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
     fields,
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
@@ -802,5 +811,12 @@ function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?:
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
-  return { name, description: schema.description, fields, ...deprecatedEntry(schema), ...constraintsEntry(schema) };
+  return {
+    name,
+    description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
+    fields,
+    ...deprecatedEntry(schema),
+    ...constraintsEntry(schema),
+  };
 }
