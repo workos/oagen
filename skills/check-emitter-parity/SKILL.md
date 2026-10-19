@@ -88,7 +88,7 @@ A missing kind means an entire category of types won't generate correctly.
 #### ApiSpec
 
 - `description` — API-level description for the root client class doc comment
-- `servers` — Server entries (url, description)
+- `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults)
 
 #### Service
 
