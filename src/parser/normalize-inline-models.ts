@@ -110,12 +110,26 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
 
     if (hasDifference && model.fields.length > existing.fields.length) {
+      // The component's name is the type the SDK exposes, so the component's
+      // own `deprecated` — present or absent — stays with it, as a component's
+      // flag is never replaced anywhere else (see mergeFieldInlineModels): a
+      // deprecated response that adds a field must not deprecate every
+      // operation referencing the live component, and a live one must not
+      // clear a deprecated component's flag. The response's own flag is not
+      // read; the operation that declared it still carries its own.
+      const replacement: Model = { ...model, ...(existing.deprecated ? { deprecated: true } : {}) };
+      if (!existing.deprecated) delete replacement.deprecated;
       const idx = mergedSchemaModels.indexOf(existing);
-      if (idx !== -1) mergedSchemaModels[idx] = model;
-      schemaModelsByName.set(model.name, model);
+      if (idx !== -1) mergedSchemaModels[idx] = replacement;
+      schemaModelsByName.set(model.name, replacement);
       console.warn(
         `[oagen] Warning: Inline model "${model.name}" has more fields than component schema (${model.fields.length} vs ${existing.fields.length}) — using inline response model`,
       );
+      if (!!existing.deprecated !== !!model.deprecated) {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" is ${model.deprecated ? 'deprecated' : 'live'} but component schema "${model.name}" is ${existing.deprecated ? 'deprecated' : 'live'} — keeping the component's flag`,
+        );
+      }
     } else if (hasDifference) {
       console.warn(
         `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,

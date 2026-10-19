@@ -498,6 +498,49 @@ describe('inline-model merges – deprecated', () => {
       warn.mockRestore();
     }
   });
+
+  it('keeps a component’s own flag when a larger inline response replaces its fields', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const component = (deprecated: boolean): Model => widget(deprecated, true);
+      /** The same `Widget`, as an inline response that adds a field. */
+      const response = (deprecated: boolean): Model => ({
+        ...widget(deprecated, true),
+        fields: [...widget(deprecated, true).fields, { name: 'extra', type: str, required: false }],
+      });
+      const merge = (c: Model, r: Model) =>
+        mergeInlineResponseModels([c], [r]).map((m) => ({
+          name: m.name,
+          deprecated: m.deprecated,
+          hasKey: 'deprecated' in m,
+          fields: m.fields.map((f) => f.name),
+        }));
+
+      // A live component takes the response's fields but stays live, the key
+      // absent; a deprecated one keeps its flag under a live response's fields.
+      expect(merge(component(false), response(true))).toEqual([
+        { name: 'Widget', deprecated: undefined, hasKey: false, fields: ['k', 'extra'] },
+      ]);
+      expect(merge(component(true), response(false))).toEqual([
+        { name: 'Widget', deprecated: true, hasKey: true, fields: ['k', 'extra'] },
+      ]);
+      // Agreeing flags fold exactly as before.
+      expect(merge(component(true), response(true))).toEqual([
+        { name: 'Widget', deprecated: true, hasKey: true, fields: ['k', 'extra'] },
+      ]);
+      expect(merge(component(false), response(false))).toEqual([
+        { name: 'Widget', deprecated: undefined, hasKey: false, fields: ['k', 'extra'] },
+      ]);
+      // Only the two disagreeing merges say so.
+      const flagWarnings = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("component's flag"));
+      expect(flagWarnings).toEqual([
+        '[oagen] Warning: Inline model "Widget" is deprecated but component schema "Widget" is live — keeping the component\'s flag',
+        '[oagen] Warning: Inline model "Widget" is live but component schema "Widget" is deprecated — keeping the component\'s flag',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('parseSpec – deprecated', () => {
@@ -1135,6 +1178,63 @@ describe('parseSpec – deprecated', () => {
         "User": undefined,
       }
     `);
+  });
+
+  it('never lets a larger inline response change a component’s flag, in either document order', async () => {
+    const Widget = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { object: { type: 'string', const: 'widget' }, k: { type: 'string' } },
+      ...extra,
+    });
+    const getOp = (operationId: string, schema: unknown) => ({
+      get: { operationId, responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } } },
+    });
+    const fromComponent = getOp('getWidget', { $ref: '#/components/schemas/Widget' });
+    // An inline response pinned to the same `object` const, so it is named
+    // `Widget` too, with one field the component lacks.
+    const largerInline = (extra: Record<string, unknown>) =>
+      getOp('getLegacyWidget', { ...Widget(extra), properties: { ...Widget().properties, extra: { type: 'string' } } });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      for (const [componentFlag, responseFlag] of [
+        [false, true],
+        [true, false],
+      ] as const) {
+        const component = Widget(componentFlag ? { deprecated: true } : {});
+        const inline = largerInline(responseFlag ? { deprecated: true } : {});
+        const results = [];
+        for (const [order, paths] of [
+          ['component-first', { '/widget': fromComponent, '/legacy-widget': inline }],
+          ['inline-first', { '/legacy-widget': inline, '/widget': fromComponent }],
+        ] as const) {
+          const label = `component ${componentFlag ? 'deprecated' : 'live'}, ${order}`;
+          warn.mockClear();
+          const spec = await parseSpec(await writeSpec(`${order}.json`, specDoc({ Widget: component }, paths)));
+          const warnings = warn.mock.calls.map(([m]) => String(m));
+          // The component keeps its own flag under the response's fields, and
+          // both operations still resolve to it — nothing dangles.
+          expect(shapes(spec.models), label).toEqual({
+            Widget: { deprecated: componentFlag ? true : undefined, fields: ['object', 'k', 'extra'] },
+          });
+          const ops = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+          expect(ops.getWidget?.response, label).toEqual({ kind: 'model', name: 'Widget' });
+          expect(ops.getLegacyWidget?.response, label).toEqual({ kind: 'model', name: 'Widget' });
+          expect(
+            warnings.filter((w) => w.includes('Unresolved model reference')),
+            label,
+          ).toEqual([]);
+          expect(
+            warnings.filter((w) => w.includes("keeping the component's flag")),
+            label,
+          ).toHaveLength(1);
+          results.push(flags(spec.models));
+        }
+        expect(results[0]).toEqual(results[1]);
+      }
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('never lets a deprecated header model share a live header model’s name, in either document order', async () => {
