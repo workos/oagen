@@ -454,6 +454,16 @@ export interface Model {
   description?: string;
   /** The schema's `externalDocs`, when it declares a usable one. */
   externalDocs?: ExternalDocs;
+  /**
+   * Present, and `true`, when the schema this model was built from says
+   * `deprecated: true` — a component, a discriminated-union variant, or an
+   * inline request body, response or field object. Only that schema's own
+   * top-level keyword counts, read as `Field.deprecated` is: an `allOf`
+   * member's or a nullable branch's flag is not read (a `$ref` member's stays
+   * on the referenced model), and a folded `<Name>Json` model's flag does not
+   * deprecate the `<Name>` it collapses into. Absent otherwise.
+   */
+  deprecated?: boolean;
   fields: Field[];
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
@@ -527,6 +537,8 @@ export interface Enum {
    * one. An enum lifted from an inline field schema carries none.
    */
   externalDocs?: ExternalDocs;
+  /** Present, and `true`, when the component enum schema says `deprecated: true`; absent otherwise. */
+  deprecated?: boolean;
 }
 
 export interface EnumValue {
