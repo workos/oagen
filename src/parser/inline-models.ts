@@ -5,6 +5,7 @@ import {
   buildFieldFromSchema,
   constraintsEntry,
   extractConstraints,
+  isArraySchema,
   isInlineObjectSchema,
   nameInlineVariantEntries,
   nameInlineVariants,
@@ -537,8 +538,10 @@ export function extractInlineModelsFromProperties(
     // Re-enter with a synthetic property named by `elementContextName` — the
     // field itself, or `<field>_item` when a sibling would take the singular
     // name — so the branches in this function do the extraction with
-    // byte-for-byte identical naming.
-    if (fieldSchema.type === 'array' && fieldSchema.items) {
+    // byte-for-byte identical naming. `isArraySchema` is the test
+    // `schemaToTypeRef` applies, so a field with `items` but no `type` is an
+    // array here as well and its item model is extracted.
+    if (isArraySchema(fieldSchema) && fieldSchema.items) {
       const itemContext = elementContextName(fieldName, 'item', siblings, parentName, fieldSchema.items);
       extractInlineModelsFromProperties(
         { properties: { [itemContext]: fieldSchema.items } },

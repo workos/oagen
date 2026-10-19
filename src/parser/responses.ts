@@ -6,6 +6,7 @@ import {
   buildFieldFromSchema,
   constraintsEntry,
   extractConstraints,
+  isArraySchema,
   isInlineObjectSchema,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
@@ -101,13 +102,14 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
     Object.assign(mergedProps, source);
   }
 
-  // Find array-typed properties and non-array companion properties
+  // Find array properties (typed, nullable, or `items` with no `type` —
+  // `isArraySchema`) and non-array companion properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (propSchema.type === 'array') {
+    if (isArraySchema(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -150,7 +152,7 @@ function extractListResponse(
   const { properties, required } = collectEnvelopeProperties(schema, componentSchemas);
 
   const dataProp = properties[dataPath];
-  if (dataProp?.type === 'array' && dataProp.items) {
+  if (dataProp && isArraySchema(dataProp) && dataProp.items) {
     const items = dataProp.items;
     if (items.$ref) {
       itemTypeRef = schemaToTypeRef(items, contextName);
@@ -241,7 +243,7 @@ function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): 
       required: [...(earlier.required ?? []), ...(later.required ?? [])],
     };
   }
-  if (earlier.type === 'array' && later.type === 'array') {
+  if (isArraySchema(earlier) && isArraySchema(later)) {
     return { ...earlier, ...later, items: later.items ?? earlier.items };
   }
   return later;
@@ -505,33 +507,55 @@ function extractDirectResource(
     );
   }
 
-  // Array with inline object items — extract the item model
-  if (schema.type === 'array' && schema.items) {
+  // Array — `type: 'array'`, a nullable array (`type: ['array', 'null']`,
+  // OAS 3.0 `nullable: true`) or, since JSON Schema does not require `type`
+  // beside `items`, bare `items`: the one test `schemaToTypeRef` applies
+  // (`isArraySchema`), so the item model is extracted whenever the response
+  // is typed as an array. Inline object items become `<Operation>Item`, with
+  // the nullable wrapper `schemaToTypeRef` would give the array. Anything
+  // else the items may reference — the inline object variants of an
+  // `items.oneOf`, the objects of a nested array or map — is materialized by
+  // the field extractor, under the names the fall-through `schemaToTypeRef`
+  // gives them, exactly as the `oneOf` branch above does; `$ref` items name a
+  // component and the extractor leaves them alone.
+  if (isArraySchema(schema) && schema.items) {
     const items = schema.items;
-    if (items.$ref) {
-      return {
-        response: { kind: 'array', items: schemaToTypeRef(items, contextName) },
-        inlineModels,
-        isPaginated: false,
-      };
-    }
     if (items.properties && (items.type === 'object' || !items.type)) {
       const itemName = contextName.replace(/Response$/, '') + 'Item';
       inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
       return {
-        response: { kind: 'array', items: { kind: 'model', name: itemName } },
+        response: nullableIf(schema, { kind: 'array', items: { kind: 'model', name: itemName } }),
         inlineModels,
         isPaginated: false,
       };
     }
+    extractInlineModelsFromProperties(
+      { properties: { [contextName]: schema } },
+      inlineModels,
+      undefined,
+      componentSchemas,
+    );
   }
 
-  // Non-object schema (primitive, union, etc.) — delegate to schemaToTypeRef
+  // Non-object schema (primitive, array, union, etc.) — delegate to schemaToTypeRef
   return {
     response: schemaToTypeRef(schema, contextName),
     inlineModels,
     isPaginated: false,
   };
+}
+
+/**
+ * Wrap `ref` in `nullable` when `schemaToTypeRef` would wrap the schema's
+ * own type: an OAS 3.1 type list naming `null` (`type: ['array', 'null']`)
+ * or an OAS 3.0 `nullable: true` beside a `type`. For the one place the
+ * response path builds an array TypeRef itself instead of delegating.
+ */
+function nullableIf(schema: SchemaObject, ref: TypeRef): TypeRef {
+  const nullable =
+    (Array.isArray(schema.type) && schema.type.includes('null')) ||
+    (schema.nullable === true && schema.type !== undefined);
+  return nullable ? { kind: 'nullable', inner: ref } : ref;
 }
 
 function deriveModelName(schema: SchemaObject, fallback: string): string {

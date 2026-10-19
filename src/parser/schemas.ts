@@ -1083,6 +1083,27 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
 }
 
+/**
+ * True for a schema that `schemaToTypeRef` types as an array: `type: 'array'`,
+ * an OAS 3.1 type list whose only non-null member is `array` (`['array',
+ * 'null']`, which it unwraps to a nullable array), or — since JSON Schema does
+ * not require `type` beside `items` — `items` with no `type` at all. Every
+ * site that decides whether to materialize an array's item model must ask
+ * this same question, or the items reference a model nobody creates. A
+ * `$ref` is a reference whatever else it carries, and a type list naming
+ * another type beside `array` is a union, so neither counts. `items` is not
+ * required: a site that needs them checks for them, as `schemaToTypeRef`
+ * does. A plain boolean rather than a type guard, because a guard on a
+ * `SchemaObject` narrows the variable to `never` in the other branch.
+ */
+export function isArraySchema(schema: SchemaObject | undefined): boolean {
+  if (!schema || schema.$ref) return false;
+  const { type } = schema;
+  if (type === undefined) return schema.items !== undefined;
+  if (Array.isArray(type)) return type.includes('array') && type.every((t) => t === 'array' || t === 'null');
+  return type === 'array';
+}
+
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable; never a variant to name. */
 function isNullVariantSchema(schema: SchemaObject): boolean {
   return (
