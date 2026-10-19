@@ -969,6 +969,7 @@ function buildOperation(
   const {
     response,
     responseHeaders,
+    responseDescription,
     successResponses,
     errors,
     inlineModels,
@@ -1045,6 +1046,8 @@ function buildOperation(
       response,
       // Added only when present so operations without headers keep their shape.
       ...(responseHeaders && { responseHeaders }),
+      // Likewise only when the primary response declares a description.
+      ...(responseDescription && { responseDescription }),
       successResponses,
       errors,
       pagination,
@@ -2156,6 +2159,7 @@ function extractResponses(
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
+  responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   inlineModels: Model[];
@@ -2169,6 +2173,7 @@ function extractResponses(
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
   let responseHeaders: ResponseHeader[] | undefined;
+  let responseDescription: string | undefined;
   let inlineModels: Model[] = [];
   let isPaginated = false;
   let dataPath: string | undefined;
@@ -2193,6 +2198,12 @@ function extractResponses(
     // materializing models for.
     const headers =
       code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, headerContext, headerModels) : undefined;
+    // The response's own `description`, success or error alike. Blank text
+    // counts as absent, the way an operation's summary is read, and the key is
+    // only added when there is something to keep. A `$ref` into
+    // `components/responses` is not resolved here, so for one only a sibling
+    // `description` written next to the `$ref` (OAS 3.1) is visible.
+    const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
@@ -2231,18 +2242,24 @@ function extractResponses(
           }
         }
       }
-      allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
+      allSuccessResponses.push({
+        statusCode: code,
+        type: extractedType,
+        ...(headers && { headers }),
+        ...(description && { description }),
+      });
     } else if (code >= 300 && code < 400) {
       // 3xx redirects — include so emitter can detect redirect endpoints
       allSuccessResponses.push({
         statusCode: code,
         type: { kind: 'primitive', type: 'unknown' },
         ...(headers && { headers }),
+        ...(description && { description }),
       });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
       const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
-      errors.push({ statusCode: code, type, ...(headers && { headers }) });
+      errors.push({ statusCode: code, type, ...(headers && { headers }), ...(description && { description }) });
     }
   }
 
@@ -2253,6 +2270,9 @@ function extractResponses(
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    // The operation-level description is the primary response's — the same
+    // entry `response` and `responseHeaders` come from.
+    responseDescription = primary.description;
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
@@ -2261,6 +2281,7 @@ function extractResponses(
   return {
     response,
     responseHeaders,
+    responseDescription,
     successResponses,
     errors,
     inlineModels,

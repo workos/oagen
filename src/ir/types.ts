@@ -138,6 +138,17 @@ export interface Operation {
    * need a home of their own.
    */
   responseHeaders?: ResponseHeader[];
+  /**
+   * The `description` of the primary success response (the one `response` is
+   * the body of), e.g. "The pet, with its owner." — often the clearest
+   * statement of what an operation gives back, so an emitter can print it as
+   * a `@returns` tag. Present only when that response declares one with
+   * non-whitespace content; the text is kept verbatim. Each entry of
+   * `successResponses` carries its own `description`, but that list only
+   * exists when an operation has more than one 2xx, so the primary response's
+   * description needs a home of its own.
+   */
+  responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -845,6 +856,11 @@ export interface ErrorResponse {
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * The response's `description` as written in the document (e.g. "Not
+   * found"). Present only when it has non-whitespace content; kept verbatim.
+   */
+  description?: string;
 }
 
 /** A successful response entry from a 2xx status code */
@@ -853,4 +869,10 @@ export interface SuccessResponse {
   type: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * The response's `description` as written in the document (e.g. "The pet,
+   * with its owner."). Present only when it has non-whitespace content; kept
+   * verbatim.
+   */
+  description?: string;
 }

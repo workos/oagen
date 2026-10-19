@@ -261,6 +261,7 @@ interface Operation {
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   response: TypeRef; // Primary response (lowest 2xx with body)
   responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
+  responseDescription?: string; // The primary response's description (only when it has content)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -296,6 +297,7 @@ interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
   headers?: ResponseHeader[]; // Only when the spec declares at least one
+  description?: string; // The response's description; only when it has non-whitespace content
 }
 
 interface ResponseHeader {
@@ -350,6 +352,10 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 ### Multiple 2xx Responses
 
 When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
+
+### Response Descriptions
+
+A response's `description` — often the clearest statement of what an operation gives back ("The pet, with its owner.", "Not found") — is kept with the status code it belongs to as `description` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's description (the one `response` is the body of) is also exposed directly as `Operation.responseDescription`, where an emitter can print it as a `@returns` tag. All three fields follow the rule `Operation.summary` uses: present only when the document declares a description with non-whitespace content, kept verbatim when it does, and omitted otherwise — a description is never borrowed from another status code. A `$ref` into `components/responses` is not resolved, so for one only a `description` written next to the `$ref` (an OAS 3.1 sibling override) is seen. When a doc URL base is configured, relative links are expanded in response descriptions exactly as in `description`. The differ does not report a changed response description, the same as a changed operation description.
 
 ### Response Headers
 
@@ -471,6 +477,7 @@ interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
   headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
+  description?: string; // e.g. "Not found"; only when it has non-whitespace content
 }
 ```
 

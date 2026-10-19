@@ -213,6 +213,68 @@ describe('expandDocUrls operation summaries', () => {
   });
 });
 
+describe('expandDocUrls response descriptions', () => {
+  const operation: ApiSpec['services'][number]['operations'][number] = {
+    name: 'getUser',
+    httpMethod: 'get',
+    path: '/users/{id}',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: { kind: 'model', name: 'User' },
+    errors: [],
+    injectIdempotencyKey: false,
+  };
+
+  it('expands relative links in the operation, success, and error response descriptions', () => {
+    const spec = minimalSpec({
+      services: [
+        {
+          name: 'Users',
+          operations: [
+            {
+              ...operation,
+              responseDescription: 'The [User](/reference/authkit/user).',
+              successResponses: [
+                {
+                  statusCode: 200,
+                  type: { kind: 'model', name: 'User' },
+                  description: 'The [User](/reference/authkit/user).',
+                },
+                { statusCode: 204, type: { kind: 'primitive', type: 'unknown' } },
+              ],
+              errors: [
+                { statusCode: 404, description: 'No [User](/reference/authkit/user) has that id.' },
+                { statusCode: 429 },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const op = expandDocUrls(spec, 'https://workos.com/docs').services[0].operations[0];
+    expect(op.responseDescription).toBe('The [User](https://workos.com/docs/reference/authkit/user).');
+    expect(op.successResponses?.[0].description).toBe('The [User](https://workos.com/docs/reference/authkit/user).');
+    expect(op.errors[0].description).toBe('No [User](https://workos.com/docs/reference/authkit/user) has that id.');
+    // Entries without a description keep their shape.
+    expect(op.successResponses?.[1]).not.toHaveProperty('description');
+    expect(op.errors[1]).not.toHaveProperty('description');
+  });
+
+  it('leaves the keys absent on an operation whose responses have no descriptions', () => {
+    const spec = minimalSpec({
+      services: [{ name: 'Users', operations: [{ ...operation, errors: [{ statusCode: 404 }] }] }],
+    });
+
+    const op = expandDocUrls(spec, 'https://workos.com/docs').services[0].operations[0];
+    expect(op).not.toHaveProperty('responseDescription');
+    expect(op).not.toHaveProperty('successResponses');
+    expect(op.errors).toEqual([{ statusCode: 404 }]);
+    expect(op.errors[0]).not.toHaveProperty('description');
+  });
+});
+
 describe('expandDocUrls – externalDocs (issue #217)', () => {
   const link = { url: '/reference/pets', description: 'See [pets](/reference/pets).' };
   const expanded = {
