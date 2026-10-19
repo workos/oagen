@@ -23,11 +23,27 @@ export interface ServerEntry {
   description?: string;
 }
 
+/**
+ * A link to documentation outside the OpenAPI document (an External
+ * Documentation Object). Present on a node only when the document declares
+ * one with a non-blank `url`; an emitter can surface it in a doc comment (a
+ * JSDoc `@see`, say). `url` is exactly as written — OpenAPI allows a value
+ * relative to the document's own location, which the parser does not know, so
+ * it neither resolves nor rewrites it. `description` is present only when it
+ * has non-whitespace content.
+ */
+export interface ExternalDocs {
+  url: string;
+  description?: string;
+}
+
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
   name: string;
   version: string;
   description?: string;
+  /** The document's top-level `externalDocs`, when it declares a usable one. */
+  externalDocs?: ExternalDocs;
   baseUrl: string;
   servers?: ServerEntry[];
   services: Service[];
@@ -48,6 +64,14 @@ export interface ApiSpec {
 export interface Service {
   name: string;
   description?: string;
+  /**
+   * A document tag's `externalDocs`, resolved by the same rule as
+   * `description`: a service named after a declared tag takes that tag's; a
+   * split-off service inherits it from the first linked tag its operations
+   * carry, chosen independently of the tag its description comes from.
+   * Absent when no tag gives one.
+   */
+  externalDocs?: ExternalDocs;
   operations: Operation[];
 }
 
@@ -87,6 +111,8 @@ export interface Operation {
    * `summary` for that.
    */
   description?: string;
+  /** The operation's own `externalDocs`, when it declares a usable one. */
+  externalDocs?: ExternalDocs;
   httpMethod: HttpMethod;
   path: string;
   pathParams: Parameter[];
@@ -120,6 +146,17 @@ export interface Operation {
    * need a home of their own.
    */
   responseHeaders?: ResponseHeader[];
+  /**
+   * The `description` of the primary success response (the one `response` is
+   * the body of), e.g. "The pet, with its owner." — often the clearest
+   * statement of what an operation gives back, so an emitter can print it as
+   * a `@returns` tag. Present only when that response declares one with
+   * non-whitespace content; the text is kept verbatim. Each entry of
+   * `successResponses` carries its own `description`, but that list only
+   * exists when an operation has more than one 2xx, so the primary response's
+   * description needs a home of its own.
+   */
+  responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -205,6 +242,16 @@ export interface PaginationMeta {
   param: string;
   limitParam?: string;
   dataPath?: string;
+  /**
+   * The description the document gives the data array property itself — the
+   * one `dataPath` names — so an emitter that documents what a list method
+   * returns can read it here instead of from the document. Like a `Field`'s
+   * `description` it is the property's own text, never the item schema's.
+   *
+   * Present only when the property declares one; absent whenever `dataPath`
+   * is, since there is no property to take it from.
+   */
+  dataDescription?: string;
   itemType: TypeRef;
   /**
    * Every property the list envelope carries besides the data array, in
@@ -387,6 +434,8 @@ export interface TypeParam {
 export interface Model {
   name: string;
   description?: string;
+  /** The schema's `externalDocs`, when it declares a usable one. */
+  externalDocs?: ExternalDocs;
   fields: Field[];
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
@@ -455,6 +504,11 @@ export interface Enum {
   values: EnumValue[];
   /** Spec-level default value (the value of `default:` on the schema). Optional. */
   default?: string | number;
+  /**
+   * The component enum schema's `externalDocs`, when it declares a usable
+   * one. An enum lifted from an inline field schema carries none.
+   */
+  externalDocs?: ExternalDocs;
 }
 
 export interface EnumValue {
@@ -810,6 +864,11 @@ export interface ErrorResponse {
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * The response's `description` as written in the document (e.g. "Not
+   * found"). Present only when it has non-whitespace content; kept verbatim.
+   */
+  description?: string;
 }
 
 /** A successful response entry from a 2xx status code */
@@ -818,4 +877,10 @@ export interface SuccessResponse {
   type: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * The response's `description` as written in the document (e.g. "The pet,
+   * with its owner."). Present only when it has non-whitespace content; kept
+   * verbatim.
+   */
+  description?: string;
 }

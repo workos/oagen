@@ -8,6 +8,7 @@ import {
   stripListItemMarkers,
   splitWords,
 } from '../utils/naming.js';
+import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -128,6 +129,8 @@ export interface SchemaObject {
   example?: unknown;
   /** JSON Schema `examples` list; OAS 3.1 deprecates `example` in its favour. */
   examples?: unknown[];
+  /** An External Documentation Object as written; `readExternalDocs` decides what reaches the IR. */
+  externalDocs?: RawExternalDocs;
   // JSON Schema validation vocabulary. An exclusive bound is the bound itself
   // in OAS 3.1 and, in OAS 3.0, a boolean that makes `minimum` / `maximum`
   // exclusive; extractConstraints() normalizes both to the 3.1 shape.
@@ -745,10 +748,17 @@ function extractNestedSchema(
   if (schema.oneOf) {
     const models: Model[] = [];
     const variantNames = nameInlineVariants(schema, name, reserved);
+    // A nullable wrapper — one real variant beside `{ type: 'null' }` — is the
+    // field's schema, which `schemaToTypeRef` collapses to `nullable<T>`, so
+    // its own link documents the model built from that variant, exactly as
+    // the field extractor's unwrap carries it (`withWrapperExternalDocs`).
+    const wrapsOneVariant =
+      schema.oneOf.some(isNullSchema) && schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
-    for (const variant of schema.oneOf) {
-      const variantName = variantNames.get(variant);
+    for (const rawVariant of schema.oneOf) {
+      const variantName = variantNames.get(rawVariant);
       if (variantName === undefined) continue;
+      const variant = wrapsOneVariant ? withWrapperExternalDocs(rawVariant, schema) : rawVariant;
       // Build the variant's fields under its own name: an inline object
       // nested under variant N is then referenced as `<VariantN>Child`
       // (`ThingShapeWithSideCenter`), which is the name the field extractor
@@ -760,7 +770,13 @@ function extractNestedSchema(
         if (!fs) continue;
         fields.push(buildFieldFromSchema(fn, fs, variantName, requiredSet, schemas, siblings));
       }
-      models.push({ name: variantName, description: variant.description, fields, ...constraintsEntry(variant) });
+      models.push({
+        name: variantName,
+        description: variant.description,
+        ...externalDocsEntry(variant.externalDocs),
+        fields,
+        ...constraintsEntry(variant),
+      });
     }
     return models;
   }
@@ -774,7 +790,15 @@ function extractNestedSchema(
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }];
+    return [
+      {
+        name,
+        description: schema.description,
+        ...externalDocsEntry(schema.externalDocs),
+        fields,
+        ...constraintsEntry(schema),
+      },
+    ];
   }
 
   // Handle array with inline items
@@ -786,7 +810,15 @@ function extractNestedSchema(
       if (!fs) continue;
       fields.push(buildFieldFromSchema(fn, fs, name, requiredSet, schemas, siblings));
     }
-    return [{ name, description: schema.items.description, fields, ...constraintsEntry(schema.items) }];
+    return [
+      {
+        name,
+        description: schema.items.description,
+        ...externalDocsEntry(schema.items.externalDocs),
+        fields,
+        ...constraintsEntry(schema.items),
+      },
+    ];
   }
 
   return [];
@@ -1405,7 +1437,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
       ? (rawDefault as string | number)
       : undefined;
 
-  return { name, values, default: def };
+  return { name, values, default: def, ...externalDocsEntry(schema.externalDocs) };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   if (schema.allOf) {
@@ -1457,7 +1489,13 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     }
   }
 
-  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
+  return {
+    name,
+    description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
+    fields,
+    ...constraintsEntry(schema),
+  };
 }
 
 function extractAllOfModel(
@@ -1548,6 +1586,7 @@ function extractAllOfModel(
   return {
     name,
     description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
     fields,
     ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
@@ -1710,6 +1749,9 @@ function extractDiscriminatedAllOfVariantModels(
         properties: mergedProperties,
         required: [...mergedRequired],
         ...combineConstraints(baseConstraints, extractConstraints(variant)),
+        // The variant's own link rides along like its keywords, so the model
+        // built from the rebuilt schema carries it.
+        ...externalDocsEntry(variant.externalDocs),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -1906,6 +1948,9 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
               properties: mergedProperties,
               required: mergedRequired,
               ...extractConstraints(fieldSchema),
+              // The wrapper's own link, as for every `allOf` merge; a member's
+              // stays on that member.
+              ...externalDocsEntry(fieldSchema.externalDocs),
             },
             schemas,
           ),
@@ -1937,7 +1982,16 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     }
   }
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    {
+      name,
+      description: schema.description,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...constraintsEntry(schema),
+    },
+    ...nestedModels,
+  ];
 }
 
 function qualifyNestedInlineName(parentName: string, fieldName: string): string {

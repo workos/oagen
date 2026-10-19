@@ -1,4 +1,4 @@
-import type { Constraints, Model, Field } from '../ir/types.js';
+import type { Constraints, ExternalDocs, Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -11,6 +11,7 @@ import {
   resolveSchemaName,
   variantMemberSchemas,
 } from './schemas.js';
+import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -608,9 +609,14 @@ export function extractInlineModelsFromProperties(
       } else if (only) {
         // The wrapper's own keywords, conjoined with the member's, are the
         // field's limits (see extractConstraints), so they ride along with the
-        // unwrapped member and its model carries the same constraints.
+        // unwrapped member and its model carries the same constraints. Its
+        // link is the wrapper's too, when the wrapper has one.
         extractInlineModelsFromProperties(
-          { properties: { [fieldName]: { ...only, ...extractConstraints(fieldSchema) } } },
+          {
+            properties: {
+              [fieldName]: withWrapperExternalDocs({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
+            },
+          },
           results,
           parentName,
           componentSchemas,
@@ -675,6 +681,8 @@ interface MergedAllOf {
   properties: MergedProperty[];
   required: string[];
   description: string | undefined;
+  /** The wrapper's own link, read like its description. */
+  externalDocs: ExternalDocs | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
 }
@@ -724,7 +732,13 @@ function mergeAugmentation(
   visit(schema, null);
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
-  return { properties, required, description: schema.description, constraints: extractConstraints(schema) };
+  return {
+    properties,
+    required,
+    description: schema.description,
+    externalDocs: readExternalDocs(schema.externalDocs),
+    constraints: extractConstraints(schema),
+  };
 }
 
 /**
@@ -752,6 +766,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
   return {
     name,
     description: merged.description,
+    ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
     fields,
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
   };
@@ -797,12 +812,13 @@ function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
  * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
  * conjoins that wrapper's own keywords with its branch's as the field's
  * limits, so the model built from the branch must carry the same ones or
- * `Model.constraints` would omit what the field declares.
+ * `Model.constraints` would omit what the field declares. The wrapper's
+ * `externalDocs` rides along the same way (see `withWrapperExternalDocs`).
  */
 function unwrapNullableField(schema: SchemaObject): SchemaObject {
   const inner = unwrapNullableSchema(schema);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return { ...inner, ...extractConstraints(schema) };
+  return withWrapperExternalDocs({ ...inner, ...extractConstraints(schema) }, schema);
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */
@@ -838,5 +854,11 @@ function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?:
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
-  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
+  return {
+    name,
+    description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
+    fields,
+    ...constraintsEntry(schema),
+  };
 }
