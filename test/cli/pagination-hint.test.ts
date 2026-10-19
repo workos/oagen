@@ -79,10 +79,12 @@ describe('CLI — operationHints.pagination reaches the parser', () => {
   });
 
   it('diff forwards the hint to both parses', async () => {
-    // The old version pins `offset` through x-pagination; the new one is
-    // detected as `page`. Without the hint the two disagree.
+    // Each version pins a different strategy through x-pagination, so the
+    // two agree only when the config hint overrides BOTH parses: dropping it
+    // from the old parse leaves offset vs page, from the new parse page vs
+    // link-header, and either way the diff reports a strategy change.
     const oldFile = await writeSpec('old.json', spec('1', { strategy: 'offset' }));
-    const newFile = await writeSpec('new.json', spec('2'));
+    const newFile = await writeSpec('new.json', spec('2', { strategy: 'link-header' }));
 
     await expect(diffCommand({ old: oldFile, new: newFile })).rejects.toMatchObject({ exitCode: 2 });
     const unhinted = lastReport<{ changes: unknown[] }>();
@@ -93,8 +95,6 @@ describe('CLI — operationHints.pagination reaches the parser', () => {
       classification: 'breaking',
     });
 
-    // The config hint beats x-pagination in the old parse and detection in
-    // the new one; if either parse lost the hint the strategies would differ.
     const hints = { 'GET /pets': { pagination: { strategy: 'page' as const } } };
     await expect(diffCommand({ old: oldFile, new: newFile, operationHints: hints })).rejects.toMatchObject({
       exitCode: 0,
