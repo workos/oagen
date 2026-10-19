@@ -36,6 +36,12 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
     return { externalDocs: description === undefined ? docs : { ...docs, description } };
   }
 
+  // A parameter or field: its `description` is always a key (possibly
+  // `undefined`), its `externalDocs` only when it has one.
+  function expandDocumented<T extends { description?: string; externalDocs?: ExternalDocs }>(node: T): T {
+    return { ...node, description: expand(node.description), ...expandExternalDocs(node) };
+  }
+
   return {
     ...spec,
     description: expand(spec.description),
@@ -56,17 +62,19 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
         ...(op.responseDescription ? { responseDescription: expand(op.responseDescription) } : {}),
         ...(op.successResponses ? { successResponses: op.successResponses.map(expandResponse) } : {}),
         errors: op.errors.map(expandResponse),
-        pathParams: op.pathParams.map((p) => ({ ...p, description: expand(p.description) })),
-        queryParams: op.queryParams.map((p) => ({ ...p, description: expand(p.description) })),
-        bodyOwnedQueryParams: op.bodyOwnedQueryParams?.map((p) => ({ ...p, description: expand(p.description) })),
-        headerParams: op.headerParams.map((p) => ({ ...p, description: expand(p.description) })),
+        // A parameter's or field's link is expanded beside its description,
+        // the way every other node's is.
+        pathParams: op.pathParams.map(expandDocumented),
+        queryParams: op.queryParams.map(expandDocumented),
+        bodyOwnedQueryParams: op.bodyOwnedQueryParams?.map(expandDocumented),
+        headerParams: op.headerParams.map(expandDocumented),
       })),
     })),
     models: spec.models.map((model) => ({
       ...model,
       description: expand(model.description),
       ...expandExternalDocs(model),
-      fields: model.fields.map((f) => ({ ...f, description: expand(f.description) })),
+      fields: model.fields.map(expandDocumented),
     })),
     enums: spec.enums.map((e) => ({
       ...e,

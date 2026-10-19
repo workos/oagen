@@ -88,19 +88,22 @@ A missing kind means an entire category of types won't generate correctly.
 #### ApiSpec
 
 - `description` — API-level description for the root client class doc comment
+- `externalDocs` — The document's link to fuller documentation (`url`, optional `description`), for a `@see`-style doc tag
 - `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults)
 
 #### Service
 
 - `description` — Service-level description for resource class doc comment
+- `externalDocs` — The tag's link, for the resource class doc comment
 
 #### Operation
 
 - `description` — Method-level description
+- `externalDocs` — The operation's link, for the method doc comment
 - `deprecated` — Deprecation marker on methods
 - `async` — Async operation marker
 - `successResponses` — Multiple 2xx response types
-- `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits)
+- `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits); each carries `description`, `deprecated` and `externalDocs`
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
 - `cookieParams` — Cookie parameter handling
@@ -108,6 +111,7 @@ A missing kind means an entire category of types won't generate correctly.
 #### Parameter
 
 - `description` — Parameter description content
+- `externalDocs` — The parameter schema's link (falls back to its `$ref` target), for the param doc tag
 - `deprecated` — Deprecated marker on params
 - `default` — Default value annotation
 - `example` — Example value annotation
@@ -117,12 +121,14 @@ A missing kind means an entire category of types won't generate correctly.
 #### Model
 
 - `description` — Model-level doc comment
+- `externalDocs` — The schema's link, for the model doc comment (an `Enum` carries one the same way, component or lifted inline)
 - `typeParams` — Generic type parameters
 - `constraints` — Object-level limits (`minProperties`, `maxProperties`, `dependentRequired`)
 
 #### Field
 
 - `description` — Field-level doc comment
+- `externalDocs` — The field schema's own link (a `$ref` sibling's included), for the field doc comment
 - `readOnly` — Read-only annotation (language-appropriate: `readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, etc.)
 - `writeOnly` — Write-only annotation
 - `deprecated` — Deprecation marker on fields
@@ -152,7 +158,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -241,6 +247,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
+| `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Service` and `ApiSpec` carry the same |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
 | `Parameter.default`          | Document default value                                                                                                                          |
 | `Parameter.example`          | Document example value                                                                                                                          |

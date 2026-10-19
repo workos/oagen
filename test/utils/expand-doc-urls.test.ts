@@ -332,4 +332,60 @@ describe('expandDocUrls – externalDocs (issue #217)', () => {
     expect('externalDocs' in result.models[0]).toBe(false);
     expect('externalDocs' in result.enums[0]).toBe(false);
   });
+
+  it('expands a field or parameter link beside its description and leaves the key absent otherwise (issue #247)', () => {
+    const type = { kind: 'primitive', type: 'string' } as const;
+    const spec = minimalSpec({
+      services: [
+        {
+          name: 'Pets',
+          operations: [
+            {
+              name: 'listPets',
+              httpMethod: 'get',
+              path: '/pets',
+              pathParams: [{ name: 'id', type, required: true, externalDocs: link }],
+              queryParams: [{ name: 'q', type, required: false, description: 'See [q](/reference/q).' }],
+              bodyOwnedQueryParams: [{ name: 'b', type, required: false, externalDocs: link }],
+              headerParams: [{ name: 'X-H', type, required: false, externalDocs: link }],
+              response: type,
+              errors: [],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      models: [
+        {
+          name: 'Pet',
+          fields: [
+            { name: 'a', type, required: false, externalDocs: link, description: 'See [a](/reference/a).' },
+            { name: 'b', type, required: false },
+          ],
+        },
+      ],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    const [op] = result.services[0].operations;
+    expect(op.pathParams[0].externalDocs).toEqual(expanded);
+    expect(op.bodyOwnedQueryParams![0].externalDocs).toEqual(expanded);
+    expect(op.headerParams[0].externalDocs).toEqual(expanded);
+    expect(op.queryParams[0]).toEqual({
+      name: 'q',
+      type,
+      required: false,
+      description: 'See [q](https://workos.com/docs/reference/q).',
+    });
+    expect('externalDocs' in op.queryParams[0]).toBe(false);
+    const [a, b] = result.models[0].fields;
+    expect(a).toEqual({
+      name: 'a',
+      type,
+      required: false,
+      externalDocs: expanded,
+      description: 'See [a](https://workos.com/docs/reference/a).',
+    });
+    expect('externalDocs' in b).toBe(false);
+  });
 });

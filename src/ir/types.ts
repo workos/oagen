@@ -358,6 +358,13 @@ export interface Parameter {
   required: boolean;
   description?: string;
   deprecated?: boolean;
+  /**
+   * The parameter schema's `externalDocs`, when it declares a usable one;
+   * a schema that is a `$ref` falls back to the component it points at,
+   * the way `description` and `deprecated` do. A Parameter Object has no
+   * `externalDocs` of its own. Absent when neither level gives one.
+   */
+  externalDocs?: ExternalDocs;
   default?: unknown;
   /**
    * A single illustrative value, resolved level by level: the parameter's own
@@ -499,6 +506,14 @@ export interface Field {
   type: TypeRef;
   required: boolean;
   description?: string;
+  /**
+   * The field schema's own `externalDocs`, when it declares a usable one —
+   * read like `description`: for a `$ref` with an `externalDocs` sibling
+   * (legal in OAS 3.1), the sibling's link, while the referenced model keeps
+   * its own; a bare `$ref` yields none. Absent otherwise. Documentation, not
+   * shape: two fields that differ only here are one shape.
+   */
+  externalDocs?: ExternalDocs;
   readOnly?: boolean;
   writeOnly?: boolean;
   deprecated?: boolean;
@@ -533,8 +548,12 @@ export interface Enum {
   /** Spec-level default value (the value of `default:` on the schema). Optional. */
   default?: string | number;
   /**
-   * The component enum schema's `externalDocs`, when it declares a usable
-   * one. An enum lifted from an inline field schema carries none.
+   * The enum schema's `externalDocs`, when it declares a usable one: a
+   * component enum's own, or — for an enum lifted from an inline schema on a
+   * property, parameter or response header — that schema's. A nullable
+   * wrapper the parser collapses carries its link onto the enum, as it does
+   * onto a model; when several inline schemas lift to one name, the first
+   * lifted gives the link, as it gives the values.
    */
   externalDocs?: ExternalDocs;
   /** Present, and `true`, when the component enum schema says `deprecated: true`; absent otherwise. */
@@ -887,6 +906,13 @@ export interface ResponseHeader {
   required: boolean;
   description?: string;
   deprecated?: boolean;
+  /**
+   * The header schema's `externalDocs`, when it declares a usable one — the
+   * `schema` of the Header Object (resolved through `components/headers`), or
+   * the schema of its single `content` entry. A Header Object has no
+   * `externalDocs` of its own. Absent otherwise.
+   */
+  externalDocs?: ExternalDocs;
 }
 
 export interface ErrorResponse {
