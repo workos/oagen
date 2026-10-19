@@ -54,6 +54,8 @@ If an `operationId` is present, it takes precedence. Names are inferred from HTT
 
 The collection vs. instance distinction is determined by whether the path ends with a `{param}` segment. The resource is the last literal segment, dropped when it is the first segment (the service already carries it), and singularised for an instance operation (`pets` → `Pet`, `api_keys` → `ApiKey`, `addresses` → `Address`; `status` and other words that do not look plural are kept). A POST whose last segment is a literal that follows a `{param}` and does not end in `s` is an action: the segment is the verb and the singular parent resource is appended (`adoptPet`), even when the parent is the first segment, so two actions with the same name on different resources do not collide — unless the verb already ends with the parent's words (`POST /companies/verification/{id}/restart-id-verification` → `restartIdVerification`). API root and version segments (`api`, `rest`, `v1`, `2.0`) are never the parent, so `POST /api/v1/{companyId}/sendDocument` is the bare `sendDocument`. A plural literal after a `{param}` (`/users/{id}/photos`) is a nested collection and stays a `create`. A singleton noun after a `{param}` (`/users/{id}/avatar`) is misread as a verb; give it an `operationId`.
 
+Fallback names are unique within a service. An `operationId` is never renamed; a colliding fallback is qualified by its path (resource, deeper segments, `By<Param>`) and numbered as a last resort. Two colliding actions are qualified by the path of their parent, never by repeating the verb (`adoptPet` and `adoptPetRescue`, not `adoptPetAdopt`).
+
 ## Stage 2: Emit (`src/engine/`)
 
 Entry point: `orchestrator.ts` → `generate(spec, emitter, options)`

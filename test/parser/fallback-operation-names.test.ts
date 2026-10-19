@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { extractOperations } from '../../src/parser/operations.js';
 
 /**
@@ -199,6 +199,8 @@ describe('fallback operation names (issue #210)', () => {
   });
 
   it('skips API root and version markers when picking the parent of an action', () => {
+    // No shared root here (`/api/v1` beside `/v2` and `/store`), so the
+    // marker check alone keeps `V1` out of the names.
     const result = names({
       '/api/v1/{companyId}/sendDocument': { post: item('companyId') },
       '/api/v1/{teamId}/subscription': { post: item('teamId') },
@@ -212,6 +214,20 @@ describe('fallback operation names (issue #210)', () => {
       'subscription                 POST   /api/v1/{teamId}/subscription',
       'adoptPet                     POST   /store/pets/{petId}/adopt',
       'adoptPet                     POST   /v2/pets/{petId}/adopt',
+    ]);
+    // A tagged operation has no API root and relies on the marker check too.
+    expect(names({ '/api/v1/{orgId}/sendInvite': { post: { ...item('orgId'), tags: ['invites'] } } })).toEqual([
+      'sendInvite                   POST   /api/v1/{orgId}/sendInvite',
+    ]);
+    // A document root that carries a non-marker word (#224) is skipped whole.
+    expect(
+      names({
+        '/wiki/rest/api/content': { get: ok },
+        '/wiki/rest/api/{id}/publish': { post: item('id') },
+      }),
+    ).toEqual([
+      'list                         GET    /wiki/rest/api/content',
+      'publish                      POST   /wiki/rest/api/{id}/publish',
     ]);
   });
 
@@ -243,37 +259,93 @@ describe('fallback operation names (issue #210)', () => {
   });
 
   it('still tells two colliding operationIds apart when a fallback joins their group', () => {
-    const { services } = extractOperations({
-      '/store/featured/{id}': { get: { ...item('id'), operationId: 'get_pet' } },
-      '/store/rescues/{id}': { get: { ...item('id'), operationId: 'getPet' } },
-      '/store/pets/{id}': { get: item('id') },
-    } as Parameters<typeof extractOperations>[0]);
-    const ops = services.flatMap((s) => s.operations);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { services } = extractOperations({
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'get_pet' } },
+        '/store/rescues/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/pets/{id}': { get: item('id') },
+      } as Parameters<typeof extractOperations>[0]);
+      const ops = services.flatMap((s) => s.operations);
 
-    expect(new Set(ops.map((op) => op.name)).size).toBe(3);
-    expect(ops.find((op) => op.path === '/store/pets/{id}')!.name).not.toBe('getPet');
+      expect(new Set(ops.map((op) => op.name)).size).toBe(3);
+      expect(ops.find((op) => op.path === '/store/pets/{id}')!.name).not.toBe('getPet');
+      // The reused operationId is numbered with a warning (#227).
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('keeps every name unique with two operationIds and two fallbacks in one group', () => {
-    const { services } = extractOperations({
-      '/store/featured/{id}': { get: { ...item('id'), operationId: 'get_pet' } },
-      '/store/rescues/{id}': { get: { ...item('id'), operationId: 'getPet' } },
-      '/store/pets/{id}': { get: item('id') },
-      '/store/shelter/pets/{id}': { get: item('id') },
-    } as Parameters<typeof extractOperations>[0]);
-    const ops = services.flatMap((s) => s.operations);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { services } = extractOperations({
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'get_pet' } },
+        '/store/rescues/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/pets/{id}': { get: item('id') },
+        '/store/shelter/pets/{id}': { get: item('id') },
+      } as Parameters<typeof extractOperations>[0]);
+      const ops = services.flatMap((s) => s.operations);
 
-    expect(new Set(ops.map((op) => op.name)).size).toBe(4);
-    for (const op of ops.filter((o) => o.path.endsWith('pets/{id}'))) expect(op.name).not.toBe('getPet');
+      expect(new Set(ops.map((op) => op.name)).size).toBe(4);
+      for (const op of ops.filter((o) => o.path.endsWith('pets/{id}'))) expect(op.name).not.toBe('getPet');
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
-  it('still qualifies every operation when two operationIds collide with each other', () => {
+  it('numbers the second of two colliding operationIds with a warning, as #227 does', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { services } = extractOperations({
+        '/store/pets/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+      } as Parameters<typeof extractOperations>[0]);
+      const opNames = services.flatMap((s) => s.operations).map((op) => op.name);
+      expect(new Set(opNames).size).toBe(2);
+      // The lexically first path keeps the name, whatever the document order.
+      expect(opNames.sort()).toEqual(['getPet', 'getPet2']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(/both take the name "getPet" from their operationId/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('qualifies two colliding actions by what sets their paths apart, never by repeating the verb', () => {
+    // The deeper path context of the parent, not of the action segment.
+    expect(
+      names({
+        '/shop/pets/{id}/adopt': { post: item('id') },
+        '/shop/rescue/pets/{id}/adopt': { post: item('id') },
+      }),
+    ).toEqual([
+      'adoptPet                     POST   /shop/pets/{id}/adopt',
+      'adoptPetRescue               POST   /shop/rescue/pets/{id}/adopt',
+    ]);
+    // Under an API root (#224) the parameters tell the paths apart (#227).
+    expect(
+      names({
+        '/api/v1/pets/{petId}/adopt': { post: item('petId') },
+        '/api/v1/{orgId}/pets/{petId}/adopt': { post: item('petId') },
+      }),
+    ).toEqual([
+      'adoptPetByPetId              POST   /api/v1/pets/{petId}/adopt',
+      'adoptPetByOrgIdByPetId       POST   /api/v1/{orgId}/pets/{petId}/adopt',
+    ]);
+  });
+
+  it('meets a tenant-scoped item in one service under an API root, with no repeated word and no version', () => {
     const { services } = extractOperations({
-      '/store/pets/{id}': { get: { ...item('id'), operationId: 'getPet' } },
-      '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+      '/api/v1/pets/{petId}': { get: item('petId') },
+      '/api/v1/{orgId}/pets/{petId}': { get: item('petId') },
     } as Parameters<typeof extractOperations>[0]);
-    const opNames = services.flatMap((s) => s.operations).map((op) => op.name);
-    expect(new Set(opNames).size).toBe(2);
+    expect(services.flatMap((s) => s.operations.map((op) => `${s.name}.${op.name} ${op.path}`)).sort()).toEqual([
+      'Pets.getByOrgIdByPetId /api/v1/{orgId}/pets/{petId}',
+      'Pets.getByPetId /api/v1/pets/{petId}',
+    ]);
   });
 
   it('keeps an all-caps resource one word when singularised', () => {
