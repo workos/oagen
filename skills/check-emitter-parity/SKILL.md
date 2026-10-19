@@ -99,7 +99,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `description` — Method-level description
 - `deprecated` — Deprecation marker on methods
 - `async` — Async operation marker
-- `successResponses` — Multiple 2xx response types
+- `successResponses` — Every declared 2xx and 3xx response, set when there is more than one; a 3xx entry's `type` is `unknown`
 - `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits)
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
@@ -237,7 +237,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `ApiSpec.description`        | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                     |
 | `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
 | `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
-| `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
+| `Operation.successResponses` | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                        |
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |

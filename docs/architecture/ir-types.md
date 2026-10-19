@@ -273,16 +273,17 @@ interface Operation {
   requestBodyEncoding?:
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
   requestBodyRequired?: boolean; // Whether the caller must send the body; present exactly when requestBody is
-  response: TypeRef; // Primary response (lowest 2xx with body)
+  response: TypeRef; // Primary response: the lowest 2xx with a body, else the lowest declared 2xx/3xx
   responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
   responseDescription?: string; // The primary response's description (only when it has content)
-  successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
+  successResponses?: SuccessResponse[]; // Every declared 2xx and 3xx response; only when more than one is declared
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean; // true when spec declares Idempotency-Key header
   deprecated?: boolean;
   async?: boolean;
   security?: SecurityRequirementSet[]; // Per-operation requirements; undefined inherits ApiSpec.security
+  parameterGroups?: ParameterGroup[]; // Mutually-exclusive parameter groups from x-mutually-exclusive-parameter-groups; see ParameterGroup in src/ir/types.ts
 }
 
 interface SecurityRequirement {
@@ -308,8 +309,8 @@ To resolve what an operation accepts, take `op.security ?? spec.security`; a res
 
 ```typescript
 interface SuccessResponse {
-  statusCode: number;
-  type: TypeRef;
+  statusCode: number; // A declared 2xx or 3xx code
+  type: TypeRef; // The body type; always `unknown` for a 3xx entry
   headers?: ResponseHeader[]; // Only when the spec declares at least one
   description?: string; // The response's description; only when it has non-whitespace content
 }
@@ -369,17 +370,47 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 
 The differ reports a flip as `requestBodyRequiredChanged` on an `operation-modified` change: optional → required is breaking (callers must now send a body), required → optional is additive. A body appearing or disappearing is reported as `requestBodyChanged` alone.
 
-### Multiple 2xx Responses
+### Multiple Success Responses
 
-When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
+`successResponses` holds every 2xx and 3xx response the operation declares, one `SuccessResponse` per status code with its own `type`, `headers` and `description`. A 2xx entry's `type` is its body — the `application/json` schema when there is one, a binary string for `application/octet-stream` / `application/pdf`, a string for `text/*` and XML, otherwise the first media type's schema — and `unknown` when it declares no content. A 3xx entry's `type` is always `unknown`; the entry is kept so an emitter can recognize a redirect endpoint rather than try to deserialize a body. The list is set only when more than one such response is declared, counting 2xx and 3xx together: `200` + `201`, `200` + `302` and `301` + `302` all set it, while a lone `200` (or a lone `302`) leaves it `undefined`. 4xx and 5xx responses go to `errors`; `default` and 1xx responses are not carried.
+
+`response` always points at the primary response: the lowest declared status code whose type is not `unknown` — in practice the lowest 2xx with a body — falling back to the lowest declared code (a bodiless 2xx, or a 3xx when the operation declares no 2xx). `responseHeaders` and `responseDescription` come from that same entry, whether or not `successResponses` is set. An emitter that handles status codes differently (200 vs 204, or a 302 beside a 200) reads `successResponses`; one that only needs the return type reads `response`.
+
+```yaml
+responses:
+  "200":
+    description: The pet
+    content:
+      application/json:
+        schema: { type: string }
+  "302":
+    description: Moved
+```
+
+```typescript
+op.response = { kind: "primitive", type: "string" };
+op.responseDescription = "The pet";
+op.successResponses = [
+  {
+    statusCode: 200,
+    type: { kind: "primitive", type: "string" },
+    description: "The pet",
+  },
+  {
+    statusCode: 302,
+    type: { kind: "primitive", type: "unknown" },
+    description: "Moved",
+  },
+];
+```
 
 ### Response Descriptions
 
-A response's `description` — often the clearest statement of what an operation gives back ("The pet, with its owner.", "Not found") — is kept with the status code it belongs to as `description` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's description (the one `response` is the body of) is also exposed directly as `Operation.responseDescription`, where an emitter can print it as a `@returns` tag. All three fields follow the rule `Operation.summary` uses: present only when the document declares a description with non-whitespace content, kept verbatim when it does, and omitted otherwise — a description is never borrowed from another status code. A `$ref` into `components/responses` is not resolved, so for one only a `description` written next to the `$ref` (an OAS 3.1 sibling override) is seen. When a doc URL base is configured, relative links are expanded in response descriptions exactly as in `description`. The differ does not report a changed response description, the same as a changed operation description.
+A response's `description` — often the clearest statement of what an operation gives back ("The pet, with its owner.", "Not found") — is kept with the status code it belongs to as `description` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx or 3xx response is declared, the primary response's description (the one `response` is the body of) is also exposed directly as `Operation.responseDescription`, where an emitter can print it as a `@returns` tag. All three fields follow the rule `Operation.summary` uses: present only when the document declares a description with non-whitespace content, kept verbatim when it does, and omitted otherwise — a description is never borrowed from another status code. A `$ref` into `components/responses` is not resolved, so for one only a `description` written next to the `$ref` (an OAS 3.1 sibling override) is seen. When a doc URL base is configured, relative links are expanded in response descriptions exactly as in `description`. The differ does not report a changed response description, the same as a changed operation description.
 
 ### Response Headers
 
-Headers a response declares (`Content-Disposition` on a download, `Location` after a create, `ETag`, rate-limit headers) are kept with the status code they belong to as `headers: ResponseHeader[]` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's headers are also exposed directly as `Operation.responseHeaders`.
+Headers a response declares (`Content-Disposition` on a download, `Location` after a create, `ETag`, rate-limit headers) are kept with the status code they belong to as `headers: ResponseHeader[]` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx or 3xx response is declared, the primary response's headers are also exposed directly as `Operation.responseHeaders`.
 
 Each header is typed like a parameter via its `schema` (or the first media type of its `content` map); a header with neither is a `string`. `$ref`s into `components/headers` are resolved, and a `description` written next to the `$ref` overrides the component's (OpenAPI 3.1); a ref that cannot be resolved is warned about and dropped rather than failing the parse. A header named `Content-Type` is ignored, as OpenAPI requires. All three fields are present only when at least one header survives, so operations without headers keep their shape.
 

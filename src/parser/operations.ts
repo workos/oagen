@@ -2568,7 +2568,9 @@ function extractResponses(
     }
   }
 
-  // Primary response = lowest 2xx with a body schema, falling back to first 2xx
+  // Primary response = lowest status code whose type is not `unknown` (the
+  // lowest 2xx with a body; a 3xx entry is always `unknown`), falling back to
+  // the lowest declared code (a bodiless 2xx, or a 3xx when there is no 2xx).
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
     const primary =

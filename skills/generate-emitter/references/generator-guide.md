@@ -83,8 +83,23 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
 
 ## Models
 
-- Input: `Model[]` (each has `name`, `description?`, `fields[]`)
-- Each `Field` has `name`, `type: TypeRef`, `required: boolean`, `description?`
+- Input: `Model[]`. Each `Model` has:
+  - `name` — PascalCase model name
+  - `description?` — doc text for the model
+  - `externalDocs?` — the schema's `externalDocs` link, when usable
+  - `deprecated?` — present and `true` when the schema says `deprecated: true`
+  - `fields` — `Field[]`
+  - `typeParams?` — generic type parameters (`name`, `default?: TypeRef`)
+  - `discriminator?` — `{ property, mapping }` when the model is a discriminated union; generate a dispatcher instead of a data class
+  - `constraints?` — the object schema's own `minProperties` / `maxProperties` / `dependentRequired`
+- Each `Field` has:
+  - `name` — wire key, as spelled in the spec
+  - `domainName?` — domain-facing name override from `fieldHints`; derive the identifier from it, serialize with `name`
+  - `type` — `TypeRef`
+  - `required` — `boolean`
+  - `description?`, `readOnly?`, `writeOnly?`, `deprecated?` — doc text and modifier flags
+  - `default?`, `example?`, `examples?` — spec-declared values (`example` is the schema's `example`, else `examples[0]`)
+  - `constraints?` — validation keywords on the field's schema (`Constraints`)
 - Output: One file per model, using the exact model pattern from the design doc
 - Use `type-map.ts` to convert field types
 
@@ -94,16 +109,51 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
 
 ## Enums
 
-- Input: `Enum[]` (each has `name`, `values[]`)
-- Each `EnumValue` has `name`, `value` (string), `description?`
+- Input: `Enum[]`. Each `Enum` has:
+  - `name` — PascalCase enum name
+  - `values` — `EnumValue[]`
+  - `default?` — the schema's `default:` value (`string | number`)
+  - `externalDocs?` — the component enum schema's link, when usable; inline enums carry none
+  - `deprecated?` — present and `true` when the component enum schema says `deprecated: true`
+- Each `EnumValue` has:
+  - `name` — UPPER_SNAKE_CASE display name
+  - `value` — the spec's value, `string | number` (numeric enums keep numbers)
+  - `description?`, `deprecated?`
 - Output: One file per enum, using the exact enum pattern from the design doc
 
 ---
 
 ## Resources
 
-- Input: `Service[]` (each has `name`, `operations[]`)
-- Each `Operation` has: `name`, `httpMethod`, `path`, `pathParams`, `queryParams`, `requestBody?`, `response`, `paginated`, `injectIdempotencyKey`
+- Input: `Service[]`. Each `Service` has:
+  - `name` — PascalCase service name (becomes the resource class)
+  - `description?` — from the matching document tag
+  - `externalDocs?` — the tag's link, when usable
+  - `operations` — `Operation[]`
+- Each `Operation` has (the authoritative list is `Operation` in `src/ir/types.ts`):
+  - `name` — method name, e.g. `listUsers`
+  - `summary?` — the document's `summary` alone
+  - `description?` — combined doc text: `summary + "\n\n" + description`, or whichever one has content
+  - `externalDocs?` — the operation's own link, when usable
+  - `httpMethod` — `get` | `post` | `put` | `patch` | `delete` | `head` | `options` | `trace`
+  - `path` — e.g. `/organizations/{id}`
+  - `pathParams`, `queryParams`, `headerParams` — `Parameter[]` per location; always present, possibly empty
+  - `bodyOwnedQueryParams?` — query declarations the request body also owns; never serialize these to the URL
+  - `cookieParams?` — `Parameter[]`, present only when the operation declares cookie parameters
+  - `requestBody?` — `TypeRef` of the request body
+  - `requestBodyEncoding?` — `json` | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization
+  - `requestBodyRequired?` — whether the caller must send the body; present exactly when `requestBody` is
+  - `response` — `TypeRef` of the primary response: the lowest 2xx with a body, else the lowest declared 2xx/3xx
+  - `responseHeaders?` — `ResponseHeader[]` the primary response declares
+  - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag
+  - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
+  - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`)
+  - `pagination?` — `PaginationMeta` when the operation is paginated: `strategy` (`cursor` | `offset` | `link-header`), `param`, `limitParam?`, `dataPath?`, `dataDescription?`, `itemType`, `envelopeFields?`
+  - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header
+  - `deprecated?`, `async?` — method markers
+  - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
+  - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
+- Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `default?`, `example?`, `examples?`, `style?`, `explode?`, `constraints?`
 - Output: One file per service/resource
 - Handle:
   - Path parameter interpolation (e.g., `/orgs/{id}` to target language's format string mechanism)

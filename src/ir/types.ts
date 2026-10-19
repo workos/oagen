@@ -155,13 +155,20 @@ export interface Operation {
    * `requestBody` is; an operation without a body has no entry.
    */
   requestBodyRequired?: boolean;
+  /**
+   * The primary success response's body type: the lowest declared status code
+   * from 200 to 399 whose type is not `unknown` — in practice the lowest 2xx
+   * with a body, since a 3xx entry is always `unknown` — falling back to the
+   * lowest declared code (a bodiless 2xx, or a 3xx when no 2xx is declared).
+   * `responseHeaders` and `responseDescription` come from the same entry.
+   */
   response: TypeRef;
   /**
    * Headers the primary success response declares (the one `response` is the
    * body of). Present only when the spec declares at least one. Each entry of
-   * `successResponses` carries its own `headers`, but that list only exists
-   * when an operation has more than one 2xx, so the primary response's headers
-   * need a home of their own.
+   * `successResponses` carries its own `headers`, but that list is only set
+   * when an operation declares more than one 2xx or 3xx response (counted
+   * together), so the primary response's headers need a home of their own.
    */
   responseHeaders?: ResponseHeader[];
   /**
@@ -170,11 +177,23 @@ export interface Operation {
    * statement of what an operation gives back, so an emitter can print it as
    * a `@returns` tag. Present only when that response declares one with
    * non-whitespace content; the text is kept verbatim. Each entry of
-   * `successResponses` carries its own `description`, but that list only
-   * exists when an operation has more than one 2xx, so the primary response's
-   * description needs a home of its own.
+   * `successResponses` carries its own `description`, but that list is only
+   * set when an operation declares more than one 2xx or 3xx response (counted
+   * together), so the primary response's description needs a home of its own.
    */
   responseDescription?: string;
+  /**
+   * Every declared 2xx and 3xx response, one `SuccessResponse` per status
+   * code, each with its own `type`, `headers` and `description`. A 2xx entry's
+   * `type` is its body (`unknown` when it declares no content); a 3xx entry's
+   * `type` is always `unknown`, and the entry is kept so an emitter can
+   * recognize a redirect endpoint. Set only when more than one such response
+   * is declared, counting 2xx and 3xx together: `200` + `201`, `200` + `302`
+   * and `301` + `302` all set it, while a lone `200` (or a lone `302`) leaves
+   * it `undefined` and `response` / `responseHeaders` / `responseDescription`
+   * describe that single response alone. 4xx and 5xx responses go to
+   * `errors`; `default` and 1xx responses are not carried.
+   */
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -901,7 +920,10 @@ export interface ErrorResponse {
   description?: string;
 }
 
-/** A successful response entry from a 2xx status code */
+/**
+ * One entry of `Operation.successResponses`: a declared 2xx or 3xx response.
+ * A 3xx entry's `type` is always `unknown`.
+ */
 export interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
