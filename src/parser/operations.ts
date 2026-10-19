@@ -33,6 +33,7 @@ import {
   collectProperties,
   extractInlineModelsFromProperties,
   extractInlineModelsFromSchemas,
+  qualifyInlineModelName,
 } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -1714,6 +1715,186 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? 'undefined';
 }
 
+/** Hard cap on the candidates a name-stepping loop tries; the no-progress guard stops it long before in practice. */
+const MAX_NAME_STEP_ATTEMPTS = 32;
+
+/** A minted name the registries already own with another shape or other members. */
+interface NameCollision {
+  name: string;
+  /** The model registry's entry, when the clash is on a model (absent for an enum). */
+  owner?: { fingerprint: string; operation?: string };
+}
+
+interface MintAttempt {
+  models: Model[];
+  type: TypeRef;
+  /** Every model and inline enum name the attempt minted, after any qualification. */
+  names: string[];
+  collisions: NameCollision[];
+}
+
+/** Every model name the trial minted plus every inline enum named under them. */
+function mintedNames(trial: Model[]): string[] {
+  return [...trial.map((m) => m.name), ...trial.flatMap((m) => nestedEnumRefs(m).map((r) => r.name))];
+}
+
+function collidingNames(trial: Model[], ctx: HeaderExtractionContext, checkEnums: boolean): NameCollision[] {
+  const collisions: NameCollision[] = [];
+  for (const model of trial) {
+    const owner = ctx.registry.get(model.name);
+    if (owner !== undefined && owner.fingerprint !== modelFingerprint(model)) {
+      collisions.push({ name: model.name, owner });
+    }
+  }
+  if (checkEnums) {
+    for (const model of trial) {
+      for (const ref of nestedEnumRefs(model)) {
+        const members = ctx.enums?.get(ref.name);
+        if (members !== undefined && members !== enumMembersKey(ref.values)) collisions.push({ name: ref.name });
+      }
+    }
+  }
+  return collisions;
+}
+
+/** Rewrite every model and enum name in `ref` (union discriminator mappings included) through `renames`. */
+function renameTypeNames(ref: TypeRef, renames: ReadonlyMap<string, string>): void {
+  switch (ref.kind) {
+    case 'model':
+    case 'enum': {
+      const renamed = renames.get(ref.name);
+      if (renamed !== undefined) (ref as { name: string }).name = renamed;
+      return;
+    }
+    case 'array':
+      renameTypeNames(ref.items, renames);
+      return;
+    case 'nullable':
+      renameTypeNames(ref.inner, renames);
+      return;
+    case 'map':
+      if (ref.keyType) renameTypeNames(ref.keyType, renames);
+      renameTypeNames(ref.valueType, renames);
+      return;
+    case 'union':
+      for (const variant of ref.variants) renameTypeNames(variant, renames);
+      for (const [value, target] of Object.entries(ref.discriminator?.mapping ?? {})) {
+        const renamed = renames.get(target);
+        if (renamed !== undefined) ref.discriminator!.mapping[value] = renamed;
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Mint `schema` as the one property `propertyName` (under `parentName`) and
+ * type it from the same property, then check every minted model against the
+ * model registry and — for error bodies — every inline enum under them
+ * against the enum registry.
+ *
+ * A name the candidate does not reach cannot be stepped by trying another
+ * candidate: a `oneOf` variant named by its bare title (`Circle`, when every
+ * variant is titled and pins a const) and whatever is named under it
+ * (`CircleState`) come out the same under `GetPetError400`,
+ * `GetPetError400Body`, `GetPetError400Body2`, ... — so a clash on one of
+ * them would recur forever. Such a name is qualified with the candidate's
+ * stem instead (`GetPetError400Circle`, `GetPetError400CircleState`), as
+ * `nameInlineVariants` qualifies a variant whose bare title is taken, and
+ * every reference in the minted models and in the type — field types, union
+ * variants, discriminator mappings — is rewritten with it; a sibling that did
+ * not clash (`Square`) keeps its name. A name the candidate does reach is
+ * left to the next candidate.
+ */
+function mintUnderName(
+  schema: SchemaObject,
+  propertyName: string,
+  parentName: string | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  ctx: HeaderExtractionContext,
+  checkEnums: boolean,
+): MintAttempt {
+  const trial: Model[] = [];
+  extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, parentName, componentSchemas);
+  const type = schemaToTypeRef(schema, propertyName, parentName);
+  const stem = toPascalCase(propertyName);
+
+  let collisions = collidingNames(trial, ctx, checkEnums);
+  const unreached = collisions.filter((c) => !c.name.includes(stem)).map((c) => c.name);
+  if (unreached.length > 0) {
+    const prefix = qualifyInlineModelName(stem, parentName);
+    const renames = new Map<string, string>();
+    for (const minted of mintedNames(trial)) {
+      if (!minted.includes(stem) && unreached.some((u) => minted === u || minted.startsWith(u))) {
+        renames.set(minted, `${prefix}${minted}`);
+      }
+    }
+    for (const model of trial) {
+      model.name = renames.get(model.name) ?? model.name;
+      for (const field of model.fields) renameTypeNames(field.type, renames);
+    }
+    renameTypeNames(type, renames);
+    collisions = collidingNames(trial, ctx, checkEnums);
+  }
+  return { models: trial, type, names: mintedNames(trial), collisions };
+}
+
+/**
+ * Try `candidate(0)`, `candidate(1)`, ... until `mintUnderName` reports no
+ * collision; register what that attempt minted (a name the registry already
+ * holds is shared, not re-added) and return its type.
+ *
+ * Two guards keep the loop finite whatever the schema: an attempt whose
+ * minted names equal the previous attempt's has made no progress — nothing
+ * left is named from the candidate — and `MAX_NAME_STEP_ATTEMPTS` caps the
+ * rest. Either way the last attempt is kept, deterministically, with a
+ * warning naming what still clashes; the later merge then reports the
+ * duplicate definition as it does today. `onCollision` lets a caller reorder
+ * its candidates after an attempt.
+ */
+function mintUnderFreeName(
+  schema: SchemaObject,
+  candidate: (attempt: number) => string,
+  parentName: string | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+  checkEnums: boolean,
+  label: string,
+  onCollision?: (attempt: number, collisions: NameCollision[]) => void,
+): TypeRef {
+  let previous: string | undefined;
+  for (let attempt = 0; ; attempt++) {
+    const result = mintUnderName(schema, candidate(attempt), parentName, componentSchemas, ctx, checkEnums);
+    const names = [...result.names].sort().join('\0');
+    const settled = result.collisions.length === 0;
+    if (settled || names === previous || attempt + 1 >= MAX_NAME_STEP_ATTEMPTS) {
+      if (!settled) {
+        const taken = result.collisions.map((c) => `"${c.name}"`).join(', ');
+        console.warn(
+          `[oagen] Warning: No free name for ${label}: ${taken} already taken with a different shape — keeping "${candidate(attempt)}"`,
+        );
+      }
+      for (const model of result.models) {
+        if (ctx.registry.has(model.name)) continue;
+        ctx.registry.set(model.name, { fingerprint: modelFingerprint(model), operation: ctx.operationQualifier });
+        models.push(model);
+      }
+      if (checkEnums) {
+        for (const model of result.models) {
+          for (const ref of nestedEnumRefs(model)) {
+            if (!ctx.enums?.has(ref.name)) ctx.enums?.set(ref.name, enumMembersKey(ref.values));
+          }
+        }
+      }
+      return result.type;
+    }
+    onCollision?.(attempt, result.collisions);
+    previous = names;
+  }
+}
+
 /**
  * Type a header's schema and materialize the inline models it names, under a
  * property name that does not collide with a different shape anywhere in the
@@ -1751,7 +1932,9 @@ function stableStringify(value: unknown): string {
  * Treating the header as a one-property object reuses the field-level
  * extractor, whose names come from the same `qualifyInlineModelName(name,
  * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
- * path uses.
+ * path uses. A name no candidate reaches (a variant named by its bare title)
+ * is qualified in place, and the search is bounded; see `mintUnderName` and
+ * `mintUnderFreeName`.
  */
 function typeHeaderSchema(
   schema: SchemaObject,
@@ -1766,39 +1949,24 @@ function typeHeaderSchema(
   const byBoth = `${ctx.operationQualifier}${name}${statusCode}`;
   let candidates = [name, byStatus, byOperation, byBoth];
 
-  for (let attempt = 0; ; attempt++) {
-    const propertyName =
-      attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`;
-    const trial: Model[] = [];
-    extractInlineModelsFromProperties(
-      { properties: { [propertyName]: schema } },
-      trial,
-      parentName,
-      ctx.componentSchemas,
-    );
-
-    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
-    const collisions = fingerprints.flatMap(([model, fingerprint]) => {
-      const registered = ctx.registry.get(model.name);
-      return registered !== undefined && registered.fingerprint !== fingerprint ? [registered] : [];
-    });
-    if (collisions.length > 0) {
+  return mintUnderFreeName(
+    schema,
+    (attempt) => (attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`),
+    parentName,
+    ctx.componentSchemas,
+    ctx,
+    models,
+    false,
+    `header "${name}" of ${ctx.operationQualifier || 'an operation'} (${statusCode})`,
+    (attempt, collisions) => {
       // Decide the preference between candidates 2 and 3 from the bare name's
       // owner: a clash within this operation reads best by status code, one
       // with a component or another operation by operation name.
-      if (attempt === 0 && !collisions.every((c) => c.operation === ctx.operationQualifier)) {
+      if (attempt === 0 && !collisions.every((c) => c.owner?.operation === ctx.operationQualifier)) {
         candidates = [name, byOperation, byStatus, byBoth];
       }
-      continue;
-    }
-
-    for (const [model, fingerprint] of fingerprints) {
-      if (ctx.registry.has(model.name)) continue;
-      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
-      models.push(model);
-    }
-    return schemaToTypeRef(schema, propertyName, parentName);
-  }
+    },
+  );
 }
 
 /**
@@ -1834,6 +2002,12 @@ function typeHeaderSchema(
  * reference and the promoted enum agree by construction, as for a nested
  * model; identical members share the existing enum. The nested enums are
  * registered with the models.
+ *
+ * A clash on a name the body's own name does not reach — a variant named by
+ * its bare title (`Circle`) or an enum under it (`CircleState`) — cannot be
+ * stepped this way and is qualified in place instead
+ * (`GetPetError400Circle`, `GetPetError400CircleState`); the search is
+ * bounded either way. See `mintUnderName` and `mintUnderFreeName`.
  */
 function typeErrorSchema(
   schema: SchemaObject,
@@ -1842,34 +2016,16 @@ function typeErrorSchema(
   ctx: HeaderExtractionContext,
   models: Model[],
 ): TypeRef {
-  for (let attempt = 0; ; attempt++) {
-    const propertyName = attempt === 0 ? name : attempt === 1 ? `${name}Body` : `${name}Body${attempt}`;
-    const trial: Model[] = [];
-    extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, undefined, componentSchemas);
-
-    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
-    const nestedEnums = trial.flatMap(nestedEnumRefs);
-    const collides =
-      fingerprints.some(([model, fingerprint]) => {
-        const registered = ctx.registry.get(model.name);
-        return registered !== undefined && registered.fingerprint !== fingerprint;
-      }) ||
-      nestedEnums.some((ref) => {
-        const registered = ctx.enums?.get(ref.name);
-        return registered !== undefined && registered !== enumMembersKey(ref.values);
-      });
-    if (collides) continue;
-
-    for (const [model, fingerprint] of fingerprints) {
-      if (ctx.registry.has(model.name)) continue;
-      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
-      models.push(model);
-    }
-    for (const ref of nestedEnums) {
-      if (!ctx.enums?.has(ref.name)) ctx.enums?.set(ref.name, enumMembersKey(ref.values));
-    }
-    return schemaToTypeRef(schema, propertyName);
-  }
+  return mintUnderFreeName(
+    schema,
+    (attempt) => (attempt === 0 ? name : attempt === 1 ? `${name}Body` : `${name}Body${attempt}`),
+    undefined,
+    componentSchemas,
+    ctx,
+    models,
+    true,
+    `error body "${name}"`,
+  );
 }
 
 /**
