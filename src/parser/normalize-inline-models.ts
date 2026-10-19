@@ -1,7 +1,13 @@
-import type { Model, Service, TypeRef } from '../ir/types.js';
+import type { Enum, Model, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
-import type { FieldInlineModelGroup, InlineModelBundle } from './inline-models.js';
+import { isComponentModelRef } from './schemas.js';
+import {
+  inheritedModelRefsOf,
+  isInheritedModelRef,
+  type FieldInlineModelGroup,
+  type InlineModelBundle,
+} from './inline-models.js';
 
 /**
  * What the merge passes need to keep a deprecated and a live definition of
@@ -18,20 +24,91 @@ export interface InlineModelNaming {
 }
 
 /**
- * Bundle the models each component field produced with that field's type,
- * looked up in `models` as they stand when the field pass runs — an inline
- * response may have replaced a component's fields by then — so a renamed
- * child is repointed from the one field that references it and nowhere
- * else. A field the model no longer has falls back to every field of its
- * component.
+ * Bundle the models each component field produced with the references that
+ * field owns: its own type, looked up in `models` as they stand when the
+ * field pass runs — an inline response may have replaced a component's
+ * fields by then — and every reference an `allOf` merge copied from it
+ * (`inheritedModelRefsOf`), so a renamed child is repointed from the field
+ * that produced it and from each copy of that field, and from nowhere else.
+ * A field the model no longer has falls back to every field of its component.
  */
 export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
-    const roots = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
-    return { qualifier: parentName, roots, models: fieldModels };
+    const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
+    return {
+      qualifier: parentName,
+      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
+      models: fieldModels,
+    };
+  });
+}
+
+/**
+ * Every type name the document will have minted by the time the IR is
+ * finished, so a merge pass that must rename an inline model takes a name
+ * nothing else has: the component models and enums, every inline model of
+ * either pass (header models, list-envelope companions and union variants
+ * included), and every inline enum — named on its `EnumRef` when the field,
+ * parameter or header was typed, and only lifted into `spec.enums` after the
+ * merges have run — found in any model's fields or anywhere on an operation.
+ */
+export function reservedTypeNames(
+  models: Model[],
+  enums: Enum[],
+  inlineModels: Model[],
+  fieldInlineModels: Model[],
+  services: Service[],
+): Set<string> {
+  const reserved = new Set<string>();
+  const visit = (ref: TypeRef): void => {
+    walkTypeRef(ref, { enum: (r) => reserved.add(r.name) });
+  };
+  for (const model of [...models, ...inlineModels, ...fieldInlineModels]) {
+    reserved.add(model.name);
+    for (const field of model.fields) visit(field.type);
+  }
+  for (const e of enums) reserved.add(e.name);
+  for (const service of services) {
+    for (const op of service.operations) {
+      for (const param of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
+        visit(param.type);
+      }
+      if (op.requestBody) visit(op.requestBody);
+      visit(op.response);
+      for (const r of op.successResponses ?? []) visit(r.type);
+      for (const e of op.errors) if (e.type) visit(e.type);
+      for (const field of op.pagination?.envelopeFields ?? []) visit(field.type);
+      if (op.pagination) visit(op.pagination.itemType);
+      for (const header of collectResponseHeaders(op)) visit(header.type);
+    }
+  }
+  return reserved;
+}
+
+/**
+ * Repoint every reference to the inline model `oldName` within `ref` to
+ * `newName`, by the reference's identity rather than its name alone: an
+ * explicit `$ref` to a same-named component (`isComponentModelRef`) is never
+ * touched, and a reference an `allOf` merge copied from another component's
+ * field (`isInheritedModelRef`) belongs to that field's site and is left to
+ * it, unless the caller is that site (`includeInherited`).
+ */
+function repointInlineModelRefs(ref: TypeRef, oldName: string, newName: string, includeInherited: boolean): void {
+  walkTypeRef(ref, {
+    model: (r) => {
+      if (r.name !== oldName || isComponentModelRef(r)) return;
+      if (!includeInherited && isInheritedModelRef(r)) return;
+      (r as { name: string }).name = newName;
+    },
   });
 }
 
@@ -84,12 +161,22 @@ function keepLargestByName(models: Model[]): Model[] {
  *   qualifier prefixed — `GetLegacyWidgetWidget` for a response of
  *   `getLegacyWidget`, `CreateNoteRequest2` for a body already named from its
  *   operation, `PetOwner2` for a field of `Pet` — minted against every name
- *   in play, and its site's references repointed: the operation's response
- *   or body, the component field, and the fields of the models minted beside
- *   it (`InlineModelBundle`). An owner is never renamed and never takes a
- *   contender's flag, in either direction: a live inline copy never folds
- *   onto a deprecated component, and a deprecated one never onto a live
+ *   in play, and the references minted for it repointed, by identity
+ *   (`repointInlineModelRefs`): the references its site owns — the
+ *   operation's response or body, the component field and every `allOf` copy
+ *   of that field — and those in the fields of the models minted beside it
+ *   (`InlineModelBundle`); never an explicit `$ref` to a same-named
+ *   component, in the same response map or anywhere else, and never a
+ *   reference another site's field lent. An owner is never renamed and never
+ *   takes a contender's flag, in either direction: a live inline copy never
+ *   folds onto a deprecated component, and a deprecated one never onto a live
  *   component, whatever their shapes.
+ *
+ * Names are decided bottom-up — a name after every name its contenders'
+ * fields reference, as the list-envelope pass decides nested companions —
+ * so when a parent is compared its children are already named: a deprecated
+ * parent whose child was just renamed no longer looks identical to the live
+ * parent and keeps its own model, referencing the renamed child.
  *
  * A contender without a site — none the parser produces; a direct caller's —
  * cannot be renamed and is left to the pass's usual choice, with a warning.
@@ -117,7 +204,8 @@ function separateDeprecatedCopies(
   const flag = (m: Model): string => (m.deprecated ? 'deprecated' : 'live');
 
   const folded = new Map<Model, Model>();
-  for (const [name, group] of byName) {
+  for (const name of bottomUp(byName)) {
+    const group = byName.get(name)!;
     const owner = owners.get(name);
     let nameDeprecated: boolean;
     let liveWinner: Model | undefined;
@@ -149,9 +237,12 @@ function separateDeprecatedCopies(
       const renamed = mintQualifiedName(name, bundle.qualifier, naming.reserved);
       naming.reserved.add(renamed);
       copy.name = renamed;
-      for (const root of bundle.roots) rewriteModelRef(root, name, renamed);
+      // The site's own references, copies of its field included; then the
+      // references in the models minted beside it, which never include what
+      // another site's field lent them.
+      for (const root of bundle.roots) repointInlineModelRefs(root, name, renamed, true);
       for (const model of bundle.models) {
-        for (const field of model.fields) rewriteModelRef(field.type, name, renamed);
+        for (const field of model.fields) repointInlineModelRefs(field.type, name, renamed, false);
       }
       console.warn(
         `[oagen] Renamed inline model "${name}" → "${renamed}": it is ${flag(copy)} while "${name}" is ${nameDeprecated ? 'deprecated' : 'live'}`,
@@ -160,6 +251,34 @@ function separateDeprecatedCopies(
   }
 
   return { kept: contenders.filter((m) => !folded.has(m)), folded };
+}
+
+/**
+ * The names in `groups`, each after every name the models under it reference
+ * (through their fields, at any depth of array, map, union or nullable
+ * wrapper) — a post-order walk, so a cycle is cut where it closes and every
+ * name appears once. Insertion order breaks ties, so the result is as stable
+ * as the document.
+ */
+function bottomUp(groups: ReadonlyMap<string, Model[]>): string[] {
+  const order: string[] = [];
+  const visited = new Set<string>();
+  const visit = (name: string): void => {
+    if (visited.has(name)) return;
+    visited.add(name);
+    for (const model of groups.get(name) ?? []) {
+      for (const field of model.fields) {
+        walkTypeRef(field.type, {
+          model: (ref) => {
+            if (groups.has(ref.name)) visit(ref.name);
+          },
+        });
+      }
+    }
+    order.push(name);
+  };
+  for (const name of groups.keys()) visit(name);
+  return order;
 }
 
 /** The definition `keepLargestByName` keeps of a name: the one with the most fields, the first declared on a tie. */

@@ -1,4 +1,4 @@
-import type { Model, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
+import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import {
   toPascalCase,
@@ -538,6 +538,9 @@ export function extractSchemas(
   // below (including the collision probe) can tell a real component key from
   // a name oagen synthesised.
   activeComponentSchemaKeys = new Set(Object.keys(schemas));
+  // A new document: the references an `allOf` merge inherits from a
+  // component's property (`inheritedModelRefsOf`) are recorded per document.
+  resetInheritedModelRefs();
 
   // Build collision-safe transform if provided. The transform is probed with
   // the same (cleaned, raw) pair resolveSchemaName() will hand it, so a
@@ -2156,6 +2159,22 @@ function elementContext(
     : elementContextName(contextName, kind, siblingProperties, parentModelName, elementSchema);
 }
 
+/**
+ * Every `ModelRef` built from a `$ref` — an explicit reference to a component
+ * schema, as opposed to one minted for an inline object. The two kinds carry
+ * the same `{ kind: 'model', name }` shape, so the identity is kept here: a
+ * pass that renames an inline model repoints the references minted for it and
+ * must leave an explicit reference to a same-named component as written
+ * (`isComponentModelRef`). The set is keyed by object identity and every
+ * pass between building and emitting mutates refs in place, so it holds.
+ */
+const componentModelRefs = new WeakSet<ModelRef>();
+
+/** Whether `ref` was built from a `$ref` to a component schema rather than minted for an inline object. */
+export function isComponentModelRef(ref: ModelRef): boolean {
+  return componentModelRefs.has(ref);
+}
+
 export function schemaToTypeRef(
   schema: SchemaObject,
   contextName?: string,
@@ -2183,7 +2202,9 @@ export function schemaToTypeRef(
       // `oneOf: [{ $ref }, { type: 'null' }]` form.
       return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
-    return { kind: 'model', name: resolved };
+    const modelRef: ModelRef = { kind: 'model', name: resolved };
+    componentModelRefs.add(modelRef);
+    return modelRef;
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
@@ -2565,6 +2586,7 @@ import {
   mapValueSchema,
   qualifyInlineModelName,
   reservedInlineNames,
+  resetInheritedModelRefs,
 } from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';

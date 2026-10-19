@@ -329,6 +329,8 @@ export function extractOperations(
   const inlineModels: Model[] = [];
   const inlineModelBundles: InlineModelBundle[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
+  /** The PascalCase operation name each companion was lifted under, to qualify it should a merge pass rename it. */
+  const companionQualifiers = new Map<EnvelopeCompanion, string>();
   // Service name each tagged operation was grouped under, keyed by operation
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
@@ -380,7 +382,10 @@ export function extractOperations(
       );
       inlineModels.push(...opModels);
       inlineModelBundles.push(...opBundles);
-      if (opCompanions) envelopeCompanions.push(...opCompanions);
+      if (opCompanions) {
+        envelopeCompanions.push(...opCompanions);
+        for (const companion of opCompanions) companionQualifiers.set(companion, toPascalCase(operation.name));
+      }
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
@@ -393,7 +398,22 @@ export function extractOperations(
 
   // Companion models of list envelopes are named once every list operation is
   // known, so copies of one envelope shape can share a model.
-  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels);
+  inlineModels.push(...companionModels);
+  // Each companion that kept its own models is a site of its own: its
+  // envelope field owns the reference, so a merge pass that must rename one
+  // of its models (a deprecated companion named like a live component field's
+  // model, say) repoints that field and nothing else.
+  const survivingCompanionModels = new Set(companionModels);
+  for (const companion of envelopeCompanions) {
+    const first = companion.models[0];
+    if (!first || !survivingCompanionModels.has(first)) continue;
+    inlineModelBundles.push({
+      qualifier: companionQualifiers.get(companion) ?? '',
+      roots: [companion.field.type],
+      models: companion.models,
+    });
+  }
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"

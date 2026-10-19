@@ -144,10 +144,12 @@ function orphanedModels(spec: ApiSpec, componentNames: string[]): string[] {
     .sort();
 }
 
-/** The invariants every case below holds: nothing dangles, nothing is orphaned, and no undeclared reference reaches a deprecated model. */
+/** The invariants every case below holds: nothing dangles, nothing is orphaned, no model is named like an enum, and no undeclared reference reaches a deprecated model. */
 function expectSound(spec: ApiSpec, componentNames: string[], declaredDeprecated: string[] = []): void {
   expect(unresolvedReferences(spec)).toEqual([]);
   expect(orphanedModels(spec, componentNames)).toEqual([]);
+  const enumNames = new Set(spec.enums.map((e) => e.name));
+  expect(spec.models.map((m) => m.name).filter((name) => enumNames.has(name))).toEqual([]);
   expect(deprecatedReferences(spec)).toEqual([...declaredDeprecated].sort());
 }
 
@@ -627,6 +629,245 @@ describe('`<Name>Json` folding (issue #260)', () => {
       ]);
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+describe('a rename repoints references by identity, never by name (review round 1)', () => {
+  const str = { type: 'string' };
+  const refName = (ref: TypeRef | undefined): string => {
+    const names = ref ? collectModelRefs(ref) : [];
+    expect(names).toHaveLength(1);
+    return names[0]!;
+  };
+
+  it('leaves an explicit `$ref` to the component in one response alone while renaming the inline copy in another', async () => {
+    const widget = { type: 'object', properties: { object: { type: 'string', const: 'widget' }, k: str } };
+    const larger = { ...widget, properties: { ...widget.properties, extra: str } };
+    for (const [label, componentFlag, inlineFlag] of [
+      ['component live, inline deprecated', false, true],
+      ['component deprecated, inline live', true, false],
+    ] as const) {
+      for (const order of ['200 first', '201 first'] as const) {
+        const ok = {
+          description: 'OK',
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/Widget' } } },
+        };
+        const created = {
+          description: 'Created',
+          content: { 'application/json': { schema: { ...larger, ...(inlineFlag ? { deprecated: true } : {}) } } },
+        };
+        const responses = order === '200 first' ? { '200': ok, '201': created } : { '201': created, '200': ok };
+        const schemas = { Widget: { ...widget, ...(componentFlag ? { deprecated: true } : {}) } };
+        const paths = { '/widgets': { post: { operationId: 'createWidget', responses } } };
+        const where = `${label}, ${order}`;
+        const spec = await parseSpec(
+          await writeSpec(`two-codes-${order.replace(' ', '-')}.json`, specDoc(schemas, paths)),
+        );
+        const op = opsOf(spec).createWidget!;
+        const byCode = Object.fromEntries((op.successResponses ?? []).map((r) => [r.statusCode, r.type]));
+        // The 200 keeps the component as written; the 201's inline copy is
+        // renamed, and the component's fields are untouched.
+        expect(byCode[200], where).toEqual({ kind: 'model', name: 'Widget' });
+        expect(byCode[201], where).toEqual({ kind: 'model', name: 'CreateWidgetWidget' });
+        expect(op.response, where).toEqual({ kind: 'model', name: 'Widget' });
+        const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+        expect(
+          byName.Widget?.fields.map((f) => f.name),
+          where,
+        ).toEqual(['object', 'k']);
+        expect(byName.Widget?.deprecated, where).toBe(componentFlag ? true : undefined);
+        expect(
+          byName.CreateWidgetWidget?.fields.map((f) => f.name),
+          where,
+        ).toEqual(['object', 'k', 'extra']);
+        expect(byName.CreateWidgetWidget?.deprecated, where).toBe(inlineFlag ? true : undefined);
+        expectSound(
+          spec,
+          ['Widget'],
+          componentFlag
+            ? ['createWidget.response → Widget', 'createWidget.200 → Widget']
+            : ['createWidget.201 → CreateWidgetWidget'],
+        );
+      }
+    }
+  });
+
+  it('names a deprecated child before its parent, so identical-looking parents stop folding and nothing is orphaned', async () => {
+    const widget = (items: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      ...extra,
+      properties: { object: { type: 'string', const: 'widget' }, owners: { type: 'array', items } },
+    });
+    const legacy = getOp(
+      'getLegacyWidget',
+      widget({ type: 'object', deprecated: true, properties: { name: str, legacy_id: str } }, { deprecated: true }),
+    );
+    const live = getOp('getWidget', widget({ type: 'object', properties: { name: str } }));
+    for (const { order, spec } of await parseBothOrders('nested-child', {}, [
+      ['/legacy-widgets/{id}', legacy],
+      ['/widgets/{id}', live],
+    ])) {
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      const ops = opsOf(spec);
+      expect(ops.getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(ops.getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+      const liveItem = refName(byName.Widget?.fields.find((f) => f.name === 'owners')?.type);
+      const legacyItem = refName(byName.GetLegacyWidgetWidget?.fields.find((f) => f.name === 'owners')?.type);
+      expect(legacyItem, order).toBe(`GetLegacyWidget${liveItem}`);
+      expect(byName[liveItem]?.deprecated, order).toBeUndefined();
+      expect(
+        byName[liveItem]?.fields.map((f) => f.name),
+        order,
+      ).toEqual(['name']);
+      expect(byName[legacyItem]?.deprecated, order).toBe(true);
+      expect(
+        byName[legacyItem]?.fields.map((f) => f.name),
+        order,
+      ).toEqual(['name', 'legacy_id']);
+      expect(Object.keys(byName).sort(), order).toEqual(
+        ['GetLegacyWidgetWidget', legacyItem, 'Widget', liveItem].sort(),
+      );
+      expectSound(spec, [], ['getLegacyWidget.response → GetLegacyWidgetWidget']);
+    }
+  });
+
+  it('carries a rename to the copies of a field an `allOf` merge inherited, and not to an explicit `$ref`', async () => {
+    const schemas = {
+      Base: { type: 'object', properties: { meta: { type: 'object', properties: { k: str } } } },
+      BaseMeta: { type: 'object', deprecated: true, properties: { k: str } },
+      Holder: {
+        type: 'object',
+        properties: {
+          ext: {
+            allOf: [{ $ref: '#/components/schemas/Base' }, { type: 'object', properties: { extra: str } }],
+          },
+        },
+      },
+      Other: { type: 'object', properties: { legacy: { $ref: '#/components/schemas/BaseMeta' } } },
+    };
+    for (const order of ['as-written', 'reversed'] as const) {
+      const entries = Object.entries(schemas);
+      const ordered = Object.fromEntries(order === 'as-written' ? entries : [...entries].reverse());
+      const spec = await parseSpec(await writeSpec(`inherited-${order}.json`, specDoc(ordered)));
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      const fieldRef = (model: string, field: string) => byName[model]?.fields.find((f) => f.name === field)?.type;
+      expect(fieldRef('Base', 'meta'), order).toEqual({ kind: 'model', name: 'BaseMeta2' });
+      expect(fieldRef('HolderExt', 'meta'), order).toEqual({ kind: 'model', name: 'BaseMeta2' });
+      expect(fieldRef('Other', 'legacy'), order).toEqual({ kind: 'model', name: 'BaseMeta' });
+      expect(byName.BaseMeta?.deprecated, order).toBe(true);
+      expect(byName.BaseMeta2?.deprecated, order).toBeUndefined();
+      expectSound(spec, Object.keys(schemas), ['Other.legacy → BaseMeta']);
+    }
+  });
+
+  it('never mints a model name an inline enum will take', async () => {
+    const legacy = getOp('getLegacyWidget', {
+      type: 'object',
+      deprecated: true,
+      properties: { object: { type: 'string', const: 'widget' }, a: str },
+    });
+    const live = getOp('getWidget', {
+      type: 'object',
+      required: ['a'],
+      properties: { object: { type: 'string', const: 'widget' }, a: str },
+    });
+    // A service tagged `GetLegacyWidget` with a `widget` query enum lifts the
+    // enum `GetLegacyWidgetWidget` — the very name the deprecated response
+    // would otherwise take.
+    const search = {
+      get: {
+        operationId: 'searchWidgets',
+        tags: ['GetLegacyWidget'],
+        parameters: [{ name: 'widget', in: 'query', schema: { type: 'string', enum: ['round', 'square'] } }],
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: { type: 'string' } } } } },
+      },
+    };
+    for (const { order, spec } of await parseBothOrders('enum-name', {}, [
+      ['/legacy-widgets/{id}', legacy],
+      ['/widgets/{id}', live],
+      ['/search', search],
+    ])) {
+      expect(
+        spec.enums.map((e) => e.name),
+        order,
+      ).toEqual(['GetLegacyWidgetWidget']);
+      expect(opsOf(spec).getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget2' });
+      expect(opsOf(spec).getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expectSound(spec, [], ['getLegacyWidget.response → GetLegacyWidgetWidget2']);
+    }
+  });
+
+  it('qualifies two deprecated copies under different operations each by its own', async () => {
+    const widget = (extra: Record<string, unknown>, props: Record<string, unknown> = {}) => ({
+      type: 'object',
+      ...extra,
+      properties: { object: { type: 'string', const: 'widget' }, a: str, ...props },
+    });
+    for (const { order, spec } of await parseBothOrders('two-deprecated', {}, [
+      ['/legacy-widgets/{id}', getOp('getLegacyWidget', widget({ deprecated: true }))],
+      ['/old-widgets/{id}', getOp('getOldWidget', widget({ deprecated: true }, { b: str }))],
+      ['/widgets/{id}', getOp('getWidget', widget({ required: ['a'] }))],
+    ])) {
+      const ops = opsOf(spec);
+      expect(ops.getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(ops.getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+      expect(ops.getOldWidget?.response, order).toEqual({ kind: 'model', name: 'GetOldWidgetWidget' });
+      expect(spec.models.map((m) => [m.name, m.deprecated]).sort(), order).toEqual([
+        ['GetLegacyWidgetWidget', true],
+        ['GetOldWidgetWidget', true],
+        ['Widget', undefined],
+      ]);
+      expectSound(
+        spec,
+        [],
+        ['getLegacyWidget.response → GetLegacyWidgetWidget', 'getOldWidget.response → GetOldWidgetWidget'],
+      );
+    }
+  });
+
+  it('renames a deprecated list-envelope companion that would share a live component field’s model name', async () => {
+    const listMetadata = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } },
+      ...extra,
+    });
+    const envelope = {
+      allOf: [
+        {
+          type: 'object',
+          properties: { object: { type: 'string', const: 'list' }, list_metadata: listMetadata({ deprecated: true }) },
+        },
+        { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/User' } } } },
+      ],
+    };
+    const listOp = {
+      get: {
+        operationId: 'listLegacyUsers',
+        parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+        responses: { '200': { description: 'ok', content: { 'application/json': { schema: envelope } } } },
+      },
+    };
+    // The only list operation deprecates its companion, so the companion
+    // takes the bare name `ListMetadata` — which `List.metadata` also mints,
+    // live.
+    const schemas = {
+      User: { type: 'object', properties: { id: str } },
+      List: { type: 'object', properties: { metadata: listMetadata() } },
+    };
+    for (const { order, spec } of await parseBothOrders('companion', schemas, [
+      ['/legacy-users', listOp],
+      ['/users/{id}', getOp('getUser', { $ref: '#/components/schemas/User' })],
+    ])) {
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      const op = opsOf(spec).listLegacyUsers!;
+      const metaField = op.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+      expect(metaField?.type, order).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+      expect(metaField?.deprecated, order).toBe(true);
+      expect(byName.List?.fields[0]?.type, order).toEqual({ kind: 'model', name: 'ListMetadata' });
+      expect(byName.ListMetadata?.deprecated, order).toBeUndefined();
+      expect(byName.ListLegacyUsersListMetadata?.deprecated, order).toBe(true);
+      expectSound(spec, Object.keys(schemas));
     }
   });
 });

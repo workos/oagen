@@ -1,4 +1,5 @@
-import type { Constraints, ExternalDocs, Model, Field, TypeRef } from '../ir/types.js';
+import type { Constraints, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -6,6 +7,7 @@ import {
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
+  isComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
   unwrapNullableField,
@@ -538,6 +540,50 @@ export interface FieldInlineModelGroup {
 }
 
 /**
+ * Every `ModelRef` an `allOf` merge copied from a referenced component's own
+ * property (`buildMergedModel`): `Holder.ext: allOf: [{ $ref: Base }, …]`
+ * types the merged model's `meta` exactly as `Base.meta` is typed, so its
+ * reference names the inline model `Base.meta` produced. Such a reference
+ * belongs to that component field's site, not to the site of the model it
+ * sits in: when the merge passes rename the model `Base.meta` produced, the
+ * references recorded under `Base.meta` are repointed with the field's own
+ * (`fieldInlineModelBundles`), and no other site's rename touches them
+ * (`isInheritedModelRef`). An explicit `$ref` among the copied references is
+ * a component reference and is not recorded. Reset per document by
+ * `extractSchemas`.
+ */
+const inheritedModelRefs = new WeakSet<ModelRef>();
+const inheritedModelRefsByField = new Map<string, ModelRef[]>();
+
+/** Whether `ref` was copied from a component's property by an `allOf` merge (see `inheritedModelRefsOf`). */
+export function isInheritedModelRef(ref: ModelRef): boolean {
+  return inheritedModelRefs.has(ref);
+}
+
+/** The references `allOf` merges copied from `fieldName` of the component resolved to `parentName`. */
+export function inheritedModelRefsOf(parentName: string, fieldName: string): ModelRef[] {
+  return inheritedModelRefsByField.get(`${parentName}.${fieldName}`) ?? [];
+}
+
+/** Forget every inherited reference recorded so far: a new document is being read. */
+export function resetInheritedModelRefs(): void {
+  inheritedModelRefsByField.clear();
+}
+
+function recordInheritedModelRefs(type: TypeRef, parentName: string, fieldName: string): void {
+  const key = `${parentName}.${fieldName}`;
+  walkTypeRef(type, {
+    model: (ref) => {
+      if (isComponentModelRef(ref)) return;
+      inheritedModelRefs.add(ref);
+      const refs = inheritedModelRefsByField.get(key) ?? [];
+      refs.push(ref);
+      inheritedModelRefsByField.set(key, refs);
+    },
+  });
+}
+
+/**
  * Walk a schema's properties and materialise every inline object as a model.
  * `componentSchemas` is optional and only feeds `buildFieldFromSchema`, so a
  * field that `$ref`s a component can take its `example`/`examples` from it;
@@ -836,7 +882,12 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
       siblings = collectProperties(p.origin.schema, componentSchemas);
       componentSiblings.set(p.origin.name, siblings);
     }
-    return buildFieldFromSchema(p.name, p.schema, p.origin.name, requiredSet, componentSchemas, siblings);
+    const field = buildFieldFromSchema(p.name, p.schema, p.origin.name, requiredSet, componentSchemas, siblings);
+    // The field is a copy of the component's own: whatever inline model its
+    // references name is the one the component's field references, so they
+    // are recorded under that field and follow its model wherever it goes.
+    recordInheritedModelRefs(field.type, p.origin.name, p.name);
+    return field;
   });
   return {
     name,

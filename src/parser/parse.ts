@@ -15,6 +15,7 @@ import {
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
   fieldInlineModelBundles,
+  reservedTypeNames,
   type InlineModelNaming,
 } from './normalize-inline-models.js';
 import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
@@ -135,11 +136,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   clearSchemaNameTransform();
 
   // Every name in play — component models and enums, every inline model of
-  // either pass — so a copy a merge pass must rename (a deprecated response
-  // named like a live one) takes a name nothing else has, in either pass.
+  // either pass, and every inline enum the collectors below will lift — so a
+  // copy a merge pass must rename (a deprecated response named like a live
+  // one) takes a name nothing else has or will have, in either pass.
   const naming: InlineModelNaming = {
     bundles: [...inlineModelBundles],
-    reserved: new Set([...models, ...enums, ...inlineModels, ...fieldInlineModels].map((named) => named.name)),
+    reserved: reservedTypeNames(models, enums, inlineModels, fieldInlineModels, services),
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels, naming);
   // The field models' sites, resolved now that the response merge may have
