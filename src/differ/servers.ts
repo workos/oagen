@@ -11,9 +11,13 @@ import type { Change, ServerVariableChange } from './types.js';
  *
  * Servers are matched on their `url` template exactly as written, independent
  * of position: a changed template is a `server-removed` plus a `server-added`.
- * Within a matched server, variables are matched by name and every difference
- * is collected on one `server-modified`. Descriptions are not compared, as
- * nowhere else in the differ.
+ * A template the document declares more than once is matched as a multiset:
+ * entries with identical variables pair up first, whatever their position, so
+ * a reordered or duplicated list reports nothing; the rest pair in declaration
+ * order and are diffed, and the surplus on either side is a `server-added` or
+ * a `server-removed`. Within a matched pair, variables are matched by name and
+ * every difference is collected on one `server-modified`. Descriptions are not
+ * compared, as nowhere else in the differ.
  */
 export function diffServers(
   oldSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
@@ -33,38 +37,83 @@ export function diffServers(
     });
   }
 
-  const oldByUrl = new Map((oldSpec.servers ?? []).map((s) => [s.url, s]));
-  const newByUrl = new Map((newSpec.servers ?? []).map((s) => [s.url, s]));
+  const oldByUrl = groupByUrl(oldSpec.servers ?? []);
+  const newByUrl = groupByUrl(newSpec.servers ?? []);
 
-  for (const [url] of newByUrl) {
-    if (!oldByUrl.has(url)) {
+  const pairings = new Map<string, ServerPairing>();
+  for (const url of new Set([...oldByUrl.keys(), ...newByUrl.keys()])) {
+    pairings.set(url, pairServers(oldByUrl.get(url) ?? [], newByUrl.get(url) ?? []));
+  }
+
+  for (const url of newByUrl.keys()) {
+    for (let i = 0; i < pairings.get(url)!.surplusNew; i++) {
       changes.push({ kind: 'server-added', url, classification: 'additive' });
     }
   }
 
-  for (const [url] of oldByUrl) {
-    if (!newByUrl.has(url)) {
+  for (const url of oldByUrl.keys()) {
+    for (let i = 0; i < pairings.get(url)!.surplusOld; i++) {
       changes.push({ kind: 'server-removed', url, classification: 'breaking' });
     }
   }
 
-  for (const [url, newServer] of newByUrl) {
-    const oldServer = oldByUrl.get(url);
-    if (!oldServer) continue;
-
-    const variableChanges = diffServerVariables(oldServer, newServer);
-    if (variableChanges.length > 0) {
-      const hasBreaking = variableChanges.some((vc) => vc.classification === 'breaking');
-      changes.push({
-        kind: 'server-modified',
-        url,
-        variableChanges,
-        classification: hasBreaking ? 'breaking' : 'additive',
-      });
+  for (const url of newByUrl.keys()) {
+    for (const [oldServer, newServer] of pairings.get(url)!.pairs) {
+      const variableChanges = diffServerVariables(oldServer, newServer);
+      if (variableChanges.length > 0) {
+        const hasBreaking = variableChanges.some((vc) => vc.classification === 'breaking');
+        changes.push({
+          kind: 'server-modified',
+          url,
+          variableChanges,
+          classification: hasBreaking ? 'breaking' : 'additive',
+        });
+      }
     }
   }
 
   return changes;
+}
+
+/** Every entry with each `url` template, keyed in declaration order of the first one. */
+function groupByUrl(servers: ServerEntry[]): Map<string, ServerEntry[]> {
+  const groups = new Map<string, ServerEntry[]>();
+  for (const server of servers) {
+    const group = groups.get(server.url);
+    if (group) group.push(server);
+    else groups.set(server.url, [server]);
+  }
+  return groups;
+}
+
+interface ServerPairing {
+  /** Old and new entries that differ, paired in declaration order. */
+  pairs: Array<[ServerEntry, ServerEntry]>;
+  /** Old entries with no counterpart: removed. */
+  surplusOld: number;
+  /** New entries with no counterpart: added. */
+  surplusNew: number;
+}
+
+/**
+ * Pair the old and new entries of one template. An old entry whose variables
+ * equal some new entry's claims the first such one, whatever its position, so
+ * only entries that actually differ are left to pair by position.
+ */
+function pairServers(olds: ServerEntry[], news: ServerEntry[]): ServerPairing {
+  const unmatchedNew = [...news];
+  const unmatchedOld: ServerEntry[] = [];
+  for (const oldServer of olds) {
+    const twin = unmatchedNew.findIndex((newServer) => diffServerVariables(oldServer, newServer).length === 0);
+    if (twin === -1) unmatchedOld.push(oldServer);
+    else unmatchedNew.splice(twin, 1);
+  }
+
+  const paired = Math.min(unmatchedOld.length, unmatchedNew.length);
+  const pairs: Array<[ServerEntry, ServerEntry]> = [];
+  for (let i = 0; i < paired; i++) pairs.push([unmatchedOld[i], unmatchedNew[i]]);
+
+  return { pairs, surplusOld: unmatchedOld.length - paired, surplusNew: unmatchedNew.length - paired };
 }
 
 function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): ServerVariableChange[] {

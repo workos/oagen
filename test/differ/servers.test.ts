@@ -321,6 +321,73 @@ describe('diffServers', () => {
       ]);
     });
   });
+
+  describe('a template declared more than once', () => {
+    const eu = server('https://{region}.api.example.com', { region: { default: 'eu', enum: ['eu', 'us', 'ap'] } });
+    const ap = server('https://{region}.api.example.com', { region: { default: 'ap', enum: ['eu', 'us', 'ap'] } });
+
+    it('reports the first of two same-template servers losing an enum value as breaking', () => {
+      // A last-wins map would compare only the unchanged second entry and,
+      // with the first default still `eu`, report nothing at all.
+      const narrower = server('https://{region}.api.example.com', { region: { default: 'eu', enum: ['eu', 'ap'] } });
+      expect(diffServers(spec([eu, ap]), spec([narrower, ap]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.api.example.com',
+          variableChanges: [
+            { kind: 'variable-enum-value-removed', variableName: 'region', value: 'us', classification: 'breaking' },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+      expect(diffSpecs(spec([eu, ap]), spec([narrower, ap])).summary.breaking).toBe(1);
+    });
+
+    it('reports a removed duplicate once', () => {
+      expect(diffServers(spec([eu, eu]), spec([eu]))).toEqual([
+        { kind: 'server-removed', url: 'https://{region}.api.example.com', classification: 'breaking' },
+      ]);
+    });
+
+    it('reports a removed same-template server with its own variables as removed, not modified', () => {
+      expect(diffServers(spec([eu, ap]), spec([eu]))).toEqual([
+        { kind: 'server-removed', url: 'https://{region}.api.example.com', classification: 'breaking' },
+      ]);
+    });
+
+    it('reports an added duplicate once', () => {
+      expect(diffServers(spec([eu]), spec([eu, eu]))).toEqual([
+        { kind: 'server-added', url: 'https://{region}.api.example.com', classification: 'additive' },
+      ]);
+    });
+
+    it('reports nothing for identical duplicates', () => {
+      expect(diffServers(spec([eu, eu]), spec([eu, eu]))).toEqual([]);
+      expect(diffServers(spec([eu, ap]), spec([eu, ap]))).toEqual([]);
+    });
+
+    it('reports a reordered pair of same-template servers as base-url-changed only', () => {
+      expect(diffServers(spec([eu, ap]), spec([ap, eu]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'https://ap.api.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('pairs entries that all differ in declaration order', () => {
+      const us = server('https://{region}.api.example.com', { region: { default: 'us', enum: ['eu', 'us', 'ap'] } });
+      const sa = server('https://{region}.api.example.com', { region: { default: 'sa', enum: ['eu', 'us', 'ap'] } });
+      const changes = diffServers(spec([staging, eu, ap]), spec([staging, us, sa]));
+      expect(changes).toHaveLength(2);
+      expect(changes.map((c) => (c.kind === 'server-modified' ? c.variableChanges[0].details : c.kind))).toEqual([
+        "default changed from 'eu' to 'us'",
+        "default changed from 'ap' to 'sa'",
+      ]);
+    });
+  });
 });
 
 describe('diffSpecs — servers', () => {

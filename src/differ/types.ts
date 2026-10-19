@@ -214,8 +214,9 @@ export interface ServerRemoved {
 
 /**
  * A server present in both documents — matched on its `url` template,
- * position-independent — whose variables changed. A changed template is a
- * `server-removed` plus a `server-added` instead.
+ * position-independent; a template declared more than once is matched as a
+ * multiset, see `diffServers` — whose variables changed. A changed template is
+ * a `server-removed` plus a `server-added` instead.
  */
 export interface ServerModified {
   kind: 'server-modified';
