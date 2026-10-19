@@ -34,6 +34,7 @@ export function detectPagination(
   response: TypeRef,
   queryParams: Parameter[],
   dataPath?: string,
+  options: { pageStartOf?: PageStartResolver } = {},
 ): PaginationMeta | null {
   // Try cursor-based first (preferred). Scan in CURSOR_PARAMS priority order
   // rather than queryParams order so that an endpoint exposing both `before`
@@ -76,7 +77,7 @@ export function detectPagination(
       strategy: 'page',
       param: pageParam.name,
       limitParam: limitParam.name,
-      pageStart: derivePageStart(pageParam),
+      pageStart: (options.pageStartOf ?? derivePageStart)(pageParam),
       dataPath: dataPath,
       itemType,
     };
@@ -85,16 +86,67 @@ export function detectPagination(
   return null;
 }
 
+/** Decides the first page number for a page parameter; see `derivePageStart`. */
+export type PageStartResolver = (param: Parameter | undefined) => number;
+
 /**
  * The first page number an API expects: the page parameter's `default`, else
  * its `minimum`, else 1. Only a non-negative integer counts — a `default` of
  * `"1"` or `1.5` is not a page number, so the next source is tried.
+ *
+ * `schema` is the parameter's schema as written. The IR parameter carries a
+ * `default`/`minimum` declared inline or on a bare `$ref` target, but not one
+ * behind `allOf: [{ $ref }]` or a nullable wrapper; those are read from the
+ * schema through `resolveSchemaKeyword`, so a component declaring `default:
+ * 0` still starts the iterator at page 0.
  */
-export function derivePageStart(param: Parameter | undefined): number {
-  for (const candidate of [param?.default, param?.constraints?.minimum]) {
+export function derivePageStart(
+  param: Parameter | undefined,
+  schema?: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): number {
+  const candidates = [
+    param?.default,
+    schema && resolveSchemaKeyword(schema, 'default', componentSchemas),
+    param?.constraints?.minimum,
+    schema && resolveSchemaKeyword(schema, 'minimum', componentSchemas),
+  ];
+  for (const candidate of candidates) {
     if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate >= 0) return candidate;
   }
   return 1;
+}
+
+/**
+ * A keyword's value on a schema or on what it is composed of: the schema's
+ * own value, else the component its `$ref` names, else its `allOf` members in
+ * declaration order (the first that declares it wins), else the single
+ * non-null variant of a nullable `oneOf`/`anyOf`. `undefined` when no level
+ * declares it.
+ */
+export function resolveSchemaKeyword(
+  schema: SchemaObject,
+  keyword: 'default' | 'minimum',
+  componentSchemas?: Record<string, SchemaObject>,
+  seen: Set<string> = new Set(),
+): unknown {
+  if (schema[keyword] !== undefined) return schema[keyword];
+  if (schema.$ref) {
+    if (seen.has(schema.$ref)) return undefined;
+    seen.add(schema.$ref);
+    const resolved = resolveComponentSchemaRef(schema, componentSchemas);
+    return resolved ? resolveSchemaKeyword(resolved, keyword, componentSchemas, seen) : undefined;
+  }
+  for (const member of schema.allOf ?? []) {
+    const value = resolveSchemaKeyword(member, keyword, componentSchemas, seen);
+    if (value !== undefined) return value;
+  }
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (variants) {
+    const nonNull = variants.filter((variant) => !isNullSchema(variant));
+    if (nonNull.length === 1) return resolveSchemaKeyword(nonNull[0], keyword, componentSchemas, seen);
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,12 +311,14 @@ export function resolveSchemaPath(
  * from the response type through model fields, unwrapping nullables, and
  * return the element type of the array the path lands on. `models` is where
  * each model along the way is looked up by name, so the item type is exactly
- * the one the parser already assigned. `undefined` when a segment is missing,
- * a model is unknown, or the path does not end on an array.
+ * the one the parser already assigned — the very `TypeRef` object the field
+ * holds, which later renaming passes repoint in place. An empty `dataPath`
+ * means `root` itself is the array. `undefined` when a segment is missing, a
+ * model is unknown, or the path does not end on an array.
  */
-export function resolveDataPathItemType(response: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
-  let current: TypeRef = response;
-  for (const segment of dataPath.split('.')) {
+export function resolveDataPathItemType(root: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
+  let current: TypeRef = root;
+  for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
     const container = current.kind === 'nullable' ? current.inner : current;
     if (container.kind !== 'model') return undefined;
     const field = models.find((m) => m.name === container.name)?.fields.find((f) => f.name === segment);
@@ -321,9 +375,10 @@ export function resolvePaginationOverride(
  * Layer the resolved override onto the detected pagination. A field the
  * override does not set keeps the detected value, so `{ strategy: 'page' }`
  * alone re-labels a detected offset iterator without restating its
- * parameters. `overrideItemType` is the element type an explicit `dataPath`
- * resolved to; without it the detected item type (or the response itself)
- * stands.
+ * parameters. `extras.overrideItemType` is the element type an explicit
+ * `dataPath` resolved to; without it the detected item type (or the response
+ * itself) stands. `extras.pageStartOf` decides the first page for the page
+ * parameter in use (default: `derivePageStart` on the IR parameter alone).
  *
  * Returns `detected` unchanged when there is no override or it is unusable —
  * no strategy or no `param` from any source, a `param`/`limitParam` the
@@ -336,7 +391,7 @@ export function applyPaginationOverride(
   queryParams: Parameter[],
   response: TypeRef,
   opLabel: string,
-  overrideItemType?: TypeRef,
+  extras: { overrideItemType?: TypeRef; pageStartOf?: PageStartResolver } = {},
 ): PaginationMeta | undefined {
   if (!override) return detected;
   const merged = override.hint;
@@ -370,15 +425,16 @@ export function applyPaginationOverride(
   // The page base belongs to the page parameter actually in use, which the
   // override may have swapped, so it is derived from that parameter rather
   // than carried over from detection.
+  const pageStartOf = extras.pageStartOf ?? derivePageStart;
   const pageStart =
-    strategy === 'page' ? (merged.pageStart ?? derivePageStart(queryParams.find((p) => p.name === param))) : undefined;
+    strategy === 'page' ? (merged.pageStart ?? pageStartOf(queryParams.find((p) => p.name === param))) : undefined;
   return {
     strategy,
     param,
     ...(limitParam !== undefined && { limitParam }),
     ...(pageStart !== undefined && { pageStart }),
     ...(dataPath !== undefined && { dataPath }),
-    itemType: overrideItemType ?? detected?.itemType ?? (response.kind === 'array' ? response.items : response),
+    itemType: extras.overrideItemType ?? detected?.itemType ?? (response.kind === 'array' ? response.items : response),
     ...(detected?.envelopeFields && { envelopeFields: detected.envelopeFields }),
     ...(endOfIteration && { endOfIteration }),
   };

@@ -8,6 +8,7 @@ import {
   resolvePaginationOverride,
   applyPaginationOverride,
   validatePaginationHint,
+  resolveSchemaKeyword,
   END_OF_ITERATION_FIELDS,
 } from '../../src/parser/pagination.js';
 import type { PaginationOverrides } from '../../src/parser/pagination.js';
@@ -97,6 +98,55 @@ describe('derivePageStart', () => {
     expect(derivePageStart(param('page', { default: 1.5, constraints: { minimum: 0 } }))).toBe(0);
     expect(derivePageStart(param('page', { default: -1 }))).toBe(1);
     expect(derivePageStart(undefined)).toBe(1);
+  });
+
+  const components: Record<string, SchemaObject> = {
+    PageNumber: { type: 'integer', default: 0, minimum: 0 },
+    MinOnly: { type: 'integer', minimum: 0 },
+  };
+
+  it('reads a default the IR parameter does not carry from the schema as written', () => {
+    const bare = param('page');
+    expect(derivePageStart(bare, { allOf: [{ $ref: '#/components/schemas/PageNumber' }] }, components)).toBe(0);
+    expect(derivePageStart(bare, { $ref: '#/components/schemas/PageNumber' }, components)).toBe(0);
+    expect(
+      derivePageStart(bare, { oneOf: [{ $ref: '#/components/schemas/PageNumber' }, { type: 'null' }] }, components),
+    ).toBe(0);
+    expect(derivePageStart(bare, { allOf: [{ $ref: '#/components/schemas/MinOnly' }] }, components)).toBe(0);
+  });
+
+  it("prefers any default over any minimum, and the parameter's own value over the schema's", () => {
+    expect(derivePageStart(param('page', { constraints: { minimum: 0 } }), { default: 3 })).toBe(3);
+    expect(
+      derivePageStart(param('page', { default: 2 }), { $ref: '#/components/schemas/PageNumber' }, components),
+    ).toBe(2);
+  });
+});
+
+describe('resolveSchemaKeyword', () => {
+  const components: Record<string, SchemaObject> = {
+    Base: { type: 'integer', default: 0, minimum: 0 },
+    Loop: { allOf: [{ $ref: '#/components/schemas/Loop' }] },
+  };
+
+  it("takes the schema's own keyword over anything it is composed of", () => {
+    expect(
+      resolveSchemaKeyword({ default: 5, allOf: [{ $ref: '#/components/schemas/Base' }] }, 'default', components),
+    ).toBe(5);
+  });
+
+  it('follows a $ref, then allOf members in declaration order, then a nullable wrapper', () => {
+    expect(resolveSchemaKeyword({ $ref: '#/components/schemas/Base' }, 'minimum', components)).toBe(0);
+    expect(
+      resolveSchemaKeyword({ allOf: [{ type: 'integer' }, { default: 7 }, { default: 9 }] }, 'default', components),
+    ).toBe(7);
+    expect(resolveSchemaKeyword({ anyOf: [{ type: 'null' }, { default: 4 }] }, 'default')).toBe(4);
+  });
+
+  it('returns undefined when no level declares the keyword, and survives a self-referencing $ref', () => {
+    expect(resolveSchemaKeyword({ type: 'integer' }, 'default')).toBeUndefined();
+    expect(resolveSchemaKeyword({ oneOf: [{ default: 1 }, { default: 2 }] }, 'default')).toBeUndefined();
+    expect(resolveSchemaKeyword({ $ref: '#/components/schemas/Loop' }, 'default', components)).toBeUndefined();
   });
 });
 
@@ -270,6 +320,17 @@ describe('resolveDataPathItemType', () => {
     expect(resolveDataPathItemType(wrapper, 'pets', models)).toEqual(pet);
   });
 
+  it('returns the very TypeRef the field holds, so later renames reach it', () => {
+    const items = resolveDataPathItemType(wrapper, 'pets', models);
+    expect(items).toBe((models[0].fields[0].type as { items: TypeRef }).items);
+  });
+
+  it('treats an empty path as the root itself', () => {
+    expect(resolveDataPathItemType(pets, '', models)).toEqual(pet);
+    expect(resolveDataPathItemType({ kind: 'nullable', inner: pets }, '', models)).toEqual(pet);
+    expect(resolveDataPathItemType(wrapper, '', models)).toBeUndefined();
+  });
+
   it('unwraps nullables along the way and at the end', () => {
     expect(resolveDataPathItemType({ kind: 'nullable', inner: wrapper }, 'meta.ids', models)).toEqual({
       kind: 'primitive',
@@ -310,10 +371,10 @@ describe('resolveDataPathFromSchema — the document fallback', () => {
     });
   });
 
-  it('materializes inline object items as <Op>Item, like a recognized envelope does', () => {
+  it('materializes inline object items under a path-derived name, never the bare <Op>Item', () => {
     const resolved = resolveDataPathFromSchema(root, 'result.items', 'ListPetsResponse', components);
-    expect(resolved?.itemType).toEqual({ kind: 'model', name: 'ListPetsItem' });
-    expect(resolved?.inlineModels.map((m) => m.name)).toEqual(['ListPetsItem']);
+    expect(resolved?.itemType).toEqual({ kind: 'model', name: 'ListPetsResultItem' });
+    expect(resolved?.inlineModels.map((m) => m.name)).toEqual(['ListPetsResultItem']);
     expect(resolved?.inlineModels[0].fields.map((f) => f.name)).toEqual(['id']);
   });
 
@@ -343,14 +404,9 @@ describe('resolvePaginationOverride + applyPaginationOverride', () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
   const apply = (base: PaginationMeta | undefined, sources: PaginationOverrides, overrideItemType?: TypeRef) =>
-    applyPaginationOverride(
-      base,
-      resolvePaginationOverride(sources, 'listPets'),
-      params,
-      pets,
-      'listPets',
+    applyPaginationOverride(base, resolvePaginationOverride(sources, 'listPets'), params, pets, 'listPets', {
       overrideItemType,
-    );
+    });
 
   afterEach(() => {
     warn.mockClear();
@@ -438,6 +494,19 @@ describe('resolvePaginationOverride + applyPaginationOverride', () => {
       'x',
     );
     expect(zeroBased?.pageStart).toBe(0);
+  });
+
+  it('asks the caller-supplied resolver for the first page of the parameter in use', () => {
+    const pageStartOf = (p: Parameter | undefined) => (p?.name === 'page' ? 42 : 1);
+    const result = applyPaginationOverride(
+      detected,
+      resolvePaginationOverride({ extension: { strategy: 'page' } }, 'x'),
+      params,
+      pets,
+      'x',
+      { pageStartOf },
+    );
+    expect(result?.pageStart).toBe(42);
   });
 
   it('drops pageStart when the resulting strategy is not page', () => {

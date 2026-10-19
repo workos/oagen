@@ -161,6 +161,43 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(offset?.strategy).toBe('offset');
       expect(offset).not.toHaveProperty('pageStart');
     });
+
+    it('reads a default hidden behind allOf, a bare $ref, a nullable wrapper or a parameter $ref', async () => {
+      const components = {
+        schemas: { PageNumber: { type: 'integer', default: 0, minimum: 0 } },
+        parameters: {
+          Page: { name: 'page', in: 'query', schema: { allOf: [{ $ref: '#/components/schemas/PageNumber' }] } },
+        },
+      };
+      const start = async (parameter: unknown) =>
+        onlyOperation(await parseJson(petsSpec({ parameters: [parameter, query('limit')] }, components))).pagination
+          ?.pageStart;
+      expect(await start(query('page', { allOf: [{ $ref: '#/components/schemas/PageNumber' }] }))).toBe(0);
+      expect(await start(query('page', { $ref: '#/components/schemas/PageNumber' }))).toBe(0);
+      expect(
+        await start(query('page', { oneOf: [{ $ref: '#/components/schemas/PageNumber' }, { type: 'null' }] })),
+      ).toBe(0);
+      expect(await start({ $ref: '#/components/parameters/Page' })).toBe(0);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("lets the parameter's own default win over the component's", async () => {
+      const components = { schemas: { PageNumber: { type: 'integer', default: 0, minimum: 0 } } };
+      const op = onlyOperation(
+        await parseJson(
+          petsSpec(
+            {
+              parameters: [
+                query('page', { allOf: [{ $ref: '#/components/schemas/PageNumber' }], default: 2 }),
+                query('limit'),
+              ],
+            },
+            components,
+          ),
+        ),
+      );
+      expect(op.pagination?.pageStart).toBe(2);
+    });
   });
 
   describe('x-pagination on the Operation Object', () => {
@@ -355,6 +392,67 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     it('reuses the detected item type when the override restates the detected path', async () => {
       const op = onlyOperation(await parseJson(petsSpec({ 'x-pagination': { dataPath: 'pets' } })));
       expect(op.pagination).toMatchObject({ dataPath: 'pets', itemType: { kind: 'primitive', type: 'string' } });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("keeps the data array's item model apart from an overridden nested array's", async () => {
+      // The envelope's own `data` items own `<Op>Item`; the companion's nested
+      // items must get their own model, never overwrite that one.
+      const body = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+          result: {
+            type: 'object',
+            properties: {
+              items: {
+                type: 'array',
+                items: { type: 'object', properties: { name: { type: 'string' }, age: { type: 'integer' } } },
+              },
+            },
+          },
+          total: { type: 'integer' },
+        },
+      };
+      const ir = await parseJson(
+        petsSpec({ responses: jsonResponse(body), 'x-pagination': { dataPath: 'result.items' } }),
+      );
+      const op = onlyOperation(ir);
+      expect(ir.models.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name)).toEqual(['id']);
+      expect(op.pagination?.dataPath).toBe('result.items');
+      const itemType = op.pagination?.itemType;
+      expect(itemType?.kind).toBe('model');
+      const itemModel = itemType?.kind === 'model' ? ir.models.find((m) => m.name === itemType.name) : undefined;
+      expect(itemModel?.name).not.toBe('ListPetsItem');
+      expect(itemModel?.fields.map((f) => f.name)).toEqual(['name', 'age']);
+      expect(ir.models.filter((m) => m.fields.map((f) => f.name).join() === 'name,age')).toHaveLength(1);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('resolves the override against the primary response, not the last 2xx declared', async () => {
+      const op = onlyOperation(
+        await parseJson(
+          petsSpec({
+            responses: {
+              ...jsonResponse(totalPagesEnvelope),
+              '202': {
+                description: 'queued',
+                content: {
+                  'application/json': { schema: { type: 'object', properties: { job_id: { type: 'string' } } } },
+                },
+              },
+            },
+            'x-pagination': { dataPath: 'pets' },
+          }),
+        ),
+      );
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
+      expect(op.pagination).toMatchObject({
+        strategy: 'page',
+        dataPath: 'pets',
+        itemType: { kind: 'primitive', type: 'string' },
+      });
       expect(warn).not.toHaveBeenCalled();
     });
 

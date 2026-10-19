@@ -241,10 +241,12 @@ export interface PaginationMeta {
   limitParam?: string;
   /**
    * First page number the API expects; set for the `page` strategy only. The
-   * page parameter's integer `default`, else its `minimum`, else 1 — or the
-   * value an override sets. An iterator sends `pageStart` first and
-   * `pageStart + n` after `n` pages; `PaginationEndOfIteration` shows how the
-   * base enters the `totalPages` stop rule, so emitters never re-derive it.
+   * page parameter's integer `default`, else its `minimum`, else 1 — read
+   * from the parameter's schema as written, through a `$ref`, `allOf`
+   * members and nullable wrappers — or the value an override sets. An
+   * iterator sends `pageStart` first and `pageStart + n` after `n` pages;
+   * `PaginationEndOfIteration` shows how the base enters the `totalPages`
+   * stop rule, so emitters never re-derive it.
    */
   pageStart?: number;
   dataPath?: string;

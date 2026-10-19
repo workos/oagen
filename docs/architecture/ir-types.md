@@ -194,7 +194,7 @@ Present on `Operation` when pagination is detected. The `strategy` discriminant 
 
 A cursor param wins over an offset param, which wins over a page param, when an operation declares more than one; a page or offset param without a page-size param (`limit`, `page_size`, `per_page`, `size`, `count`) is not pagination.
 
-`pageStart` is set for the `page` strategy only: the page parameter's integer `default`, else its `minimum`, else 1 (`?page=0` APIs declare `default: 0` or `minimum: 0`), or whatever an override sets. Emitters read it instead of re-deriving the base.
+`pageStart` is set for the `page` strategy only: the page parameter's integer `default`, else its `minimum`, else 1 (`?page=0` APIs declare `default: 0` or `minimum: 0`), or whatever an override sets. The keywords are read from the parameter's schema as written — the schema's own value, then the component a `$ref` names, then `allOf` members in declaration order, then the non-null variant of a nullable wrapper — so a `default: 0` behind `allOf: [{ $ref }]` or a `$ref` into `components.parameters` still counts. Emitters read `pageStart` instead of re-deriving the base.
 
 Every iterator stops on an empty page. `endOfIteration`, when present, lets it stop one request sooner:
 
@@ -260,7 +260,7 @@ export default {
 
 `strategy: "none"` turns pagination off for the operation. The decision is made before the response is classified, so a list envelope is not unwrapped: the body becomes one plain response model carrying every field (`pets`, `pagination`, …), exactly as a non-list body does, and nothing about the wire shape is lost.
 
-An explicit `dataPath` is resolved against the response — through a root `$ref` wrapper, `allOf` members and nullable wrappers — and the element type of the array it lands on becomes `itemType`, so a wrapper with `pets: Pet[]` iterates `Pet` rather than the wrapper. An inline item object found only this way is materialized as `<Op>Item`, like a recognized envelope's items.
+An explicit `dataPath` is resolved against the primary response (the lowest 2xx with a body, the one `Operation.response` describes — not whichever 2xx is declared last) and the element type of the array it lands on becomes `itemType`, so a wrapper with `pets: Pet[]` iterates `Pet` rather than the wrapper. The IR is consulted first — the detected data array, an envelope companion's fields, or the response model's fields — so the item model the parser already created is reused; the document (through a root `$ref` wrapper, `allOf` members and nullable wrappers) is read only when the path crosses a model not yet materialized, and an inline item object found that way is named from the path (`result.items` → `<Op>ResultItem`), never the bare `<Op>Item` the envelope's own data array owns.
 
 An override that cannot be applied — an unknown strategy, a strategy with no `param` from any source, a `param` or `limitParam` the operation does not declare as a query parameter, a `dataPath` that does not reach an array in the response, a malformed field — is reported as an `[oagen] Warning:` and ignored, leaving the detected metadata in place; an unknown key is skipped with a warning. `envelopeFields` always comes from the response.
 

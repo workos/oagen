@@ -1,5 +1,5 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration } from '../ir/types.js';
-import { toPascalCase } from '../utils/naming.js';
+import { toPascalCase, singularize } from '../utils/naming.js';
 import { detectEndOfIteration, END_OF_ITERATION_FIELDS, resolveSchemaPath } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -220,10 +220,11 @@ function extractListResponse(
  * Element type of the array an explicit `dataPath` points at, read from the
  * response document when the IR cannot answer — a `$ref` wrapper whose path
  * runs through an inline object the parser has not materialized yet, or an
- * envelope the parser did not recognize. Items are typed the way
- * `extractListResponse` types them: a `$ref` by name, an inline object as
- * `<Op>Item` (materialized here), anything else through `schemaToTypeRef`.
- * `undefined` when the path does not land on an array.
+ * envelope the parser did not recognize. A `$ref` item is typed by name and
+ * anything non-object through `schemaToTypeRef`; an inline object is
+ * materialized under a name derived from the path (see
+ * `inlineItemNameForPath`). `undefined` when the path does not land on an
+ * array.
  */
 export function resolveDataPathFromSchema(
   schema: SchemaObject,
@@ -239,13 +240,31 @@ export function resolveDataPathFromSchema(
   const items = target.items;
   if (items.$ref) return { itemType: schemaToTypeRef(items, contextName), inlineModels: [] };
   if (items.properties && (items.type === 'object' || !items.type)) {
-    const itemName = contextName.replace(/Response$/, '') + 'Item';
+    const itemName = inlineItemNameForPath(contextName, dataPath);
     return {
       itemType: { kind: 'model', name: itemName },
       inlineModels: extractInlineModel(itemName, items, componentSchemas),
     };
   }
   return { itemType: schemaToTypeRef(items, contextName), inlineModels: [] };
+}
+
+/**
+ * Name for inline items reached through an overridden `dataPath`, built from
+ * the path the way the inline extractor names a nested field's items: the
+ * operation, the enclosing properties, then the singular of the array's own
+ * name (`result.items` → `ListPetsResultItem`). It therefore coincides with a
+ * model the parser may already have minted for that field, and never takes
+ * the bare `<Op>Item` that a recognized envelope's data array owns.
+ */
+function inlineItemNameForPath(contextName: string, dataPath: string): string {
+  const segments = dataPath.split('.');
+  const parents = segments
+    .slice(0, -1)
+    .map((segment) => toPascalCase(segment))
+    .join('');
+  const own = singularize(toPascalCase(segments[segments.length - 1]));
+  return contextName.replace(/Response$/, '') + parents + own;
 }
 
 /**
