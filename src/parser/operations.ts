@@ -14,7 +14,7 @@ import type {
   ExternalDocs,
 } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import { toPascalCase, toCamelCase, splitWords, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -308,6 +308,11 @@ export function extractOperations(
   // schema — can produce the same name, so the prefix for every such
   // operation is decided up front (see resolvePathModelBaseNames).
   const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+  // An API root the untagged paths sit under (`/api`, `/v1`) tells the
+  // services apart no better than nothing, so untagged operations skip it
+  // when their service and fallback name are taken from the path (see
+  // documentApiRoot). Tagged operations are named exactly as before.
+  const apiRoot = documentApiRoot(paths);
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -316,6 +321,9 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
+  // Operations named from the method and path rather than an operationId;
+  // only their names are qualified further when they collide.
+  const pathNamed = new Set<Operation>();
   // One registry for the whole spec, seeded with the component models: a
   // header model's name must not collide with a differently shaped component
   // (a request body may already use `DocumentsXMeta`) or with another
@@ -332,7 +340,8 @@ export function extractOperations(
       if (!op) continue;
 
       const tag = op.tags?.[0];
-      const serviceName = inferServiceName(path, tag);
+      const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
+      const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
 
       const {
@@ -353,12 +362,14 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        apiRootLength,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
+      if (!op.operationId) pathNamed.add(operation);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -400,7 +411,9 @@ export function extractOperations(
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
   for (const [, operations] of serviceMap) {
-    disambiguateOperationNames(operations);
+    disambiguateOperationNames(operations, pathNamed, (op) =>
+      tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot),
+    );
   }
 
   const declaredTags = indexDocumentTags(documentTags);
@@ -509,15 +522,130 @@ function resolveServiceDocs(
   return docs;
 }
 
-function inferServiceName(path: string, tag?: string): string {
+/**
+ * Words that mark where an API is mounted rather than naming a resource.
+ * Deliberately tiny: `mountRules` regroup whatever this does not cover.
+ */
+const API_MARKER_SEGMENTS: ReadonlySet<string> = new Set(['api', 'rest']);
+
+/**
+ * Whether a path segment marks the API root rather than naming a resource:
+ * one of API_MARKER_SEGMENTS in any case, or a version such as `v1`,
+ * `v2beta`, `1.0` or `2010-04-01`.
+ */
+function isApiMarkerSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return API_MARKER_SEGMENTS.has(lower) || /^v\d/.test(lower) || /^\d+([.-]\d+)*$/.test(lower);
+}
+
+/** Leading literal segments of a path through its last API marker; `0` without one. */
+function pathRootLength(segments: readonly string[]): number {
+  let length = 0;
+  for (let i = 0; i < segments.length && !segments[i].startsWith('{'); i++) {
+    if (isApiMarkerSegment(segments[i])) length = i + 1;
+  }
+  return length;
+}
+
+/**
+ * The API root the document's untagged operations sit under, as path
+ * segments: `['api', 'v1']` for a document whose untagged paths all start
+ * with `/api/v1/`, `[]` when there is none. Untagged operations skip it when
+ * their service and fallback name are taken from the path.
+ *
+ * Each untagged operation's path contributes its own root — its leading
+ * literal segments through the last API marker (see isApiMarkerSegment), so
+ * `/api/v1/notes` contributes `api/v1`, `/wiki/rest/api/content` contributes
+ * `wiki/rest/api`, `/api/user_management/users` contributes `api` alone and
+ * `/api/{tenant}/notes` contributes `api`, a parameter ending the run. The
+ * document root is the longest marker-terminated prefix every contribution
+ * shares, compared verbatim: `/api/v1/…` beside `/api/v2/…` gives `api`, and
+ * `/v1/…` beside `/v2/…` gives nothing, so the two versions stay apart
+ * instead of merging into one service per resource.
+ *
+ * A path with no marker at all (`/health`, `/openapi.json`) contributes
+ * nothing: it sits outside any root and keeps its own first segment, and it
+ * does not switch the root off for the rest of the document (see
+ * apiRootLengthOf). A shared prefix without a marker is therefore kept whole
+ * — `/user_management/users` and `/user_management/invitations` stay one
+ * `UserManagement` service — because a module prefix every path shares is
+ * the service, not noise, and nothing but the word tells it from `/api`.
+ * Tagged operations never take part, since only path-named services use the
+ * root; nor do path items that declare no operation.
+ */
+function documentApiRoot(paths: Record<string, PathItem>): string[] {
+  let root: string[] | undefined;
+  for (const [path, pathItem] of Object.entries(paths)) {
+    // Same truthiness check as inferServiceName: a first tag names the service.
+    const hasUntaggedOperation = HTTP_METHODS.some((method) => {
+      const op = pathItem[method];
+      return Boolean(op) && !op?.tags?.[0];
+    });
+    if (!hasUntaggedOperation) continue;
+    const segments = path.split('/').filter(Boolean);
+    const own = segments.slice(0, pathRootLength(segments));
+    if (own.length === 0) continue;
+    if (root === undefined) {
+      root = own;
+      continue;
+    }
+    let shared = 0;
+    while (shared < root.length && shared < own.length && root[shared] === own[shared]) shared++;
+    root = root.slice(0, shared);
+  }
+  if (root === undefined) return [];
+  return root.slice(0, pathRootLength(root));
+}
+
+/**
+ * How many leading segments of a path are the document's API root: the root's
+ * length when the path starts with it, compared verbatim, else `0` for a path
+ * outside the root, which is named as if the document had none.
+ */
+function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
+  const segments = path.split('/').filter(Boolean);
+  return apiRoot.length > 0 && apiRoot.every((segment, i) => segments[i] === segment) ? apiRoot.length : 0;
+}
+
+/**
+ * Index of the segment a path-named service takes its name from. Under an
+ * API root it is the first literal segment after the root, so `/v1/notes` and
+ * `/v1/{teamId}/notes` both name `Notes`; when nothing literal follows the
+ * root, the first segment, so `/api` and `/api/{id}` name `Api` as they
+ * always did rather than `Default`. The fallback operation name skips the
+ * same segment (see inferResourceFromPath), so it is never echoed as
+ * `Api.getApi`.
+ *
+ * Without a root (`apiRootLength` of 0: a root-less document, a path outside
+ * the root, or a tagged operation) it is always the first segment, parameter
+ * or not, so every such operation is named exactly as before this rule
+ * existed: an untagged `/{tenant}/users` stays `Default.listUsers`.
+ */
+function serviceSegmentIndex(segments: readonly string[], apiRootLength: number): number {
+  if (apiRootLength === 0) return 0;
+  const index = segments.findIndex((segment, i) => i >= apiRootLength && !segment.startsWith('{'));
+  return index === -1 ? 0 : index;
+}
+
+/**
+ * The service an operation belongs to: its first tag, else a path segment.
+ *
+ * The path fallback takes the first literal segment after the API root the
+ * document sits under (`apiRootLength`, see documentApiRoot): `/widgets/{id}/sub`
+ * is `Widgets`, and so are `/api/widgets` and `/api/{tenant}/widgets` when the
+ * root is `/api`, instead of the whole API collapsing into one `Api` service.
+ * When nothing literal follows the root — the path is the root itself, or
+ * only parameters come next — the first segment names the service as it
+ * always did, so `/api` and `/api/{id}` land in `Api` rather than in `Default`.
+ */
+function inferServiceName(path: string, tag: string | undefined, apiRootLength: number): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
   // (e.g., "multi-factor-auth" for /auth/factors/* endpoints).
   if (tag) {
     return toPascalCase(tag);
   }
-  // Fallback: extract first meaningful path segment: /widgets/{id}/sub → "Widgets"
   const segments = path.split('/').filter(Boolean);
-  const first = segments[0] ?? 'Default';
+  const first = segments[serviceSegmentIndex(segments, apiRootLength)] ?? 'Default';
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
@@ -561,6 +689,7 @@ function inferOperationName(
   path: string,
   operationId?: string,
   operationIdTransform?: (id: string) => string,
+  apiRootLength = 0,
 ): string {
   if (operationId) {
     const normalized = normalizeOperationIdForNaming(operationId);
@@ -573,7 +702,7 @@ function inferOperationName(
   // Fallback when no operationId is available — use method + path to build
   // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor"
   const verb = inferVerb(method, path);
-  const resource = inferResourceFromPath(path);
+  const resource = inferResourceFromPath(path, apiRootLength);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
 }
 
@@ -615,14 +744,18 @@ function inferVerb(method: HttpMethod, path: string): string {
  *   /accounts/users/{id}/auth_factors → "AuthFactors"
  *   /organizations/{id}/api_keys → "ApiKeys"
  *   /auth/authorize → "Authorize" (action endpoint)
+ *
+ * `apiRootLength` is the document's API root the path sits under (see
+ * documentApiRoot); the service segment is the first literal one after it.
  */
-function inferResourceFromPath(path: string): string | null {
+function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
   const segments = path.split('/').filter(Boolean);
   if (segments.length <= 1) return null;
 
-  // Find the last meaningful (non-param) segment
+  // Find the last meaningful (non-param) segment past the API root, so a
+  // root word is never the resource: /api/v1/{id} is Api.delete, not deleteV1.
   let resourceSegment: string | null = null;
-  for (let i = segments.length - 1; i >= 0; i--) {
+  for (let i = segments.length - 1; i >= apiRootLength; i--) {
     if (!segments[i].startsWith('{')) {
       resourceSegment = segments[i];
       break;
@@ -630,8 +763,9 @@ function inferResourceFromPath(path: string): string | null {
   }
 
   if (!resourceSegment) return null;
-  // Skip the service name (first segment) — it would be redundant
-  if (resourceSegment === segments[0]) return null;
+  // Skip the service name (the segment the service was named from) — it
+  // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
+  if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
 
   return toPascalCase(resourceSegment);
 }
@@ -644,8 +778,21 @@ function inferResourceFromPath(path: string): string | null {
  * from the path. Only renames operations on DIFFERENT paths — same-name
  * operations on the same path (e.g., PUT + PATCH both "update") are left as-is
  * since they represent the same logical resource.
+ *
+ * `apiRootLengthOf` gives the API root each operation's path sits under (see
+ * documentApiRoot), so neither the resource nor the deeper context echoes the
+ * root or the service segment into the name. Names that still collide after
+ * both, and whose paths differ only by their parameters, are told apart by
+ * `By<Param>` — but only for operations in `pathNamed` that sit under a root,
+ * the population the root rule regroups; a name taken from an operationId is
+ * never rewritten there, and nothing without a root is named any differently
+ * than before the rule existed.
  */
-function disambiguateOperationNames(operations: Operation[]): void {
+function disambiguateOperationNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  apiRootLengthOf: (op: Operation) => number,
+): void {
   // Group by name
   const byName = new Map<string, Operation[]>();
   for (const op of operations) {
@@ -663,7 +810,7 @@ function disambiguateOperationNames(operations: Operation[]): void {
     if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
 
     for (const op of group) {
-      const resource = inferResourceFromPath(op.path);
+      const resource = inferResourceFromPath(op.path, apiRootLengthOf(op));
       if (resource) {
         const newName = toCamelCase(`${name}_${resource}`);
         (op as { name: string }).name = newName;
@@ -683,13 +830,77 @@ function disambiguateOperationNames(operations: Operation[]): void {
       // Still colliding — different paths map to same resource name.
       // Use deeper path context to disambiguate.
       for (const op of rGroup) {
-        const deeper = inferDeeperContext(op.path);
+        const deeper = inferDeeperContext(op.path, apiRootLengthOf(op));
         if (deeper) {
           (op as { name: string }).name = toCamelCase(`${op.name}_${deeper}`);
         }
       }
     }
   }
+
+  // Path-named operations under an API root that still collide differ only
+  // by their parameters: once the root and the service segment are skipped,
+  // `GET /v1/notes` and `GET /v1/{teamId}/notes` both reach `list` in Notes
+  // with no resource or deeper context to tell them apart. `By<Param>` does,
+  // but only when the parameters differ between the colliding paths:
+  // `/v1/{id}/notes` and `/v1/{id}/Notes` would both gain `ById` and still
+  // collide, further from the plain name. Operations with no root — a
+  // root-less document, a path outside the root, a tagged operation — are
+  // left exactly as they were, duplicates included: `/users/teams` and
+  // `/users/{id}/teams` both stay `listTeamsTeams`, as before this rule.
+  const stillColliding = new Map<string, Operation[]>();
+  for (const op of operations) {
+    const group = stillColliding.get(op.name) ?? [];
+    group.push(op);
+    stillColliding.set(op.name, group);
+  }
+  for (const [, group] of stillColliding) {
+    if (new Set(group.map((op) => op.path)).size <= 1) continue;
+    const suffixes = group.map((op) => inferByParamsSuffix(op.path));
+    if (new Set(suffixes).size <= 1) continue;
+    group.forEach((op, i) => {
+      if (pathNamed.has(op) && apiRootLengthOf(op) > 0) {
+        (op as { name: string }).name = appendQualifier(op.name, suffixes[i]);
+      }
+    });
+  }
+}
+
+/**
+ * Append a qualifier to an operation name without repeating what the name
+ * already says. A qualifier never contributes the same word twice in a row:
+ * the deeper context of `/api/analytics/analytics/teams` is
+ * `AnalyticsAnalytics`, which joins as `listTeamsAnalytics`. The words that
+ * remain are then joined where they overlap the end of the name: `listNotes`
+ * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
+ * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
+ * case-insensitively on the camelCase boundary, so `listNotes` + `Note` does
+ * not overlap and is appended whole. The name's own words are never touched.
+ */
+function appendQualifier(name: string, qualifier: string | null): string {
+  if (!qualifier) return name;
+  const have = splitWords(name).map((w) => w.toLowerCase());
+  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || w.toLowerCase() !== all[i - 1].toLowerCase());
+  const want = words.map((w) => w.toLowerCase());
+  // The longest run of words that both ends the name and starts the qualifier.
+  let overlap = Math.min(have.length, want.length);
+  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
+  const rest = words.slice(overlap);
+  return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
+}
+
+/**
+ * `By<Param>` for each path parameter, in path order, as one qualifier:
+ * `/v1/{teamId}/notes` → `ByTeamId`, `/a/{x}/b/{y}/c` → `ByXByY`. Empty for a
+ * path without parameters. Mirrors derivePathModelBaseName's `By` + PascalCase
+ * spelling of a parameter segment, so `{team_id}` and `{teamId}` read alike.
+ */
+function inferByParamsSuffix(path: string): string {
+  return path
+    .split('/')
+    .filter((segment) => segment.startsWith('{'))
+    .map((segment) => 'By' + toPascalCase(segment.replace(/[{}]/g, '')))
+    .join('');
 }
 
 /**
@@ -698,10 +909,14 @@ function disambiguateOperationNames(operations: Operation[]): void {
  *
  * /users/{id}/auth_factors → already captured as "AuthFactors"
  * /users/external_id/{external_id} → "ExternalId" (special path, not a sub-resource)
+ *
+ * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
+ * left out along with the service segment that follows it, so
+ * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
  */
-function inferDeeperContext(path: string): string | null {
+function inferDeeperContext(path: string, apiRootLength = 0): string | null {
   const segments = path.split('/').filter(Boolean);
-  const nonParams = segments.filter((s) => !s.startsWith('{'));
+  const nonParams = segments.slice(apiRootLength).filter((s) => !s.startsWith('{'));
   // Skip first (service) and last (already used) — use the middle ones
   if (nonParams.length >= 3) {
     return toPascalCase(nonParams.slice(1, -1).join('_'));
@@ -886,9 +1101,10 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  apiRootLength = 0,
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
-  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
+  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);

@@ -2556,3 +2556,226 @@ describe('operation summary and description with empty or whitespace-only text',
     expect(op.description).toBe('List pets\n\nLists pets.\n');
   });
 });
+
+describe('extractOperations – path-named services skip the API root (issue #209)', () => {
+  type Paths = NonNullable<Parameters<typeof extractOperations>[0]>;
+  const responses = { '200': { description: 'ok' } };
+  const get = { get: { responses } };
+  const getById = {
+    get: { parameters: [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }], responses },
+  };
+
+  /** `Service METHOD /path` for every operation, sorted. */
+  function grouped(paths: Paths): string[] {
+    return extractOperations(paths)
+      .services.flatMap((s) => s.operations.map((op) => `${s.name} ${op.httpMethod.toUpperCase()} ${op.path}`))
+      .sort();
+  }
+
+  /** `Service.operation METHOD /path` for every operation, sorted. */
+  function layout(paths: Paths): string[] {
+    return extractOperations(paths)
+      .services.flatMap((s) =>
+        s.operations.map((op) => `${s.name}.${op.name} ${op.httpMethod.toUpperCase()} ${op.path}`),
+      )
+      .sort();
+  }
+
+  it('names each service from the segment after a shared /api root (the issue repro)', () => {
+    // The fallback operation name skips the root too, so /api/notes reads
+    // exactly as /notes does without one: Notes.list, not Notes.listNotes.
+    expect(layout({ '/api/notes': get, '/api/tags': get, '/api/users': get })).toEqual([
+      'Notes.list GET /api/notes',
+      'Tags.list GET /api/tags',
+      'Users.list GET /api/users',
+    ]);
+  });
+
+  it('skips a two-segment root such as /api/v1', () => {
+    expect(grouped({ '/api/v1/notes': get, '/api/v1/notes/{id}': getById, '/api/v1/tags': get })).toEqual([
+      'Notes GET /api/v1/notes',
+      'Notes GET /api/v1/notes/{id}',
+      'Tags GET /api/v1/tags',
+    ]);
+  });
+
+  it.each(['api', 'API', 'rest', 'v1', 'v2beta1', '1.0', '2010-04-01'])('treats /%s as an API marker', (root) => {
+    expect(grouped({ [`/${root}/notes`]: get, [`/${root}/tags`]: get })).toEqual([
+      `Notes GET /${root}/notes`,
+      `Tags GET /${root}/tags`,
+    ]);
+  });
+
+  it('skips the shared prefix through its last marker', () => {
+    expect(grouped({ '/wiki/rest/api/content': get, '/wiki/rest/api/space': get })).toEqual([
+      'Content GET /wiki/rest/api/content',
+      'Space GET /wiki/rest/api/space',
+    ]);
+  });
+
+  it('keeps a shared prefix that carries no marker: it is the service, not noise', () => {
+    expect(grouped({ '/user_management/users': get, '/user_management/invitations': get })).toEqual([
+      'UserManagement GET /user_management/invitations',
+      'UserManagement GET /user_management/users',
+    ]);
+  });
+
+  it('keeps the module that follows the marker', () => {
+    expect(grouped({ '/api/user_management/users': get, '/api/user_management/invitations': get })).toEqual([
+      'UserManagement GET /api/user_management/invitations',
+      'UserManagement GET /api/user_management/users',
+    ]);
+  });
+
+  it('leaves a path that is the root itself under the root-named service', () => {
+    expect(grouped({ '/api': get, '/api/notes': get, '/api/tags': get })).toEqual([
+      'Api GET /api',
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('leaves a path whose root is followed by a parameter under the root-named service', () => {
+    expect(grouped({ '/api/{id}': getById, '/api/notes': get })).toEqual(['Api GET /api/{id}', 'Notes GET /api/notes']);
+  });
+
+  it('names the service from the first literal segment past a parameter that follows the root', () => {
+    // A tenant or team parameter right after the root is a common shape;
+    // /v1/notes and /v1/{teamId}/notes must meet in one Notes service, with
+    // the parameter telling the two list operations apart.
+    expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes.list GET /v1/notes',
+      'Notes.listByTeamId GET /v1/{teamId}/notes',
+    ]);
+    expect(grouped({ '/api/{tenant}/notes': get, '/api/{tenant}/tags': get })).toEqual([
+      'Notes GET /api/{tenant}/notes',
+      'Tags GET /api/{tenant}/tags',
+    ]);
+  });
+
+  it('qualifies parameter-only collisions under a root only, leaving root-less names as they were', () => {
+    // Without a root the By<Param> pass does not run, so a pair main left as
+    // duplicates stays exactly as main leaves it; the rooted pair is told apart.
+    expect(layout({ '/users/teams': get, '/users/{id}/teams': get })).toEqual([
+      'Users.listTeamsTeams GET /users/teams',
+      'Users.listTeamsTeams GET /users/{id}/teams',
+    ]);
+    expect(layout({ '/v1/notes': get, '/v1/{teamId}/notes': get })).toEqual([
+      'Notes.list GET /v1/notes',
+      'Notes.listByTeamId GET /v1/{teamId}/notes',
+    ]);
+  });
+
+  it('names a root-less document exactly as before, leading parameter or not', () => {
+    // No API root means no new rule: a leading parameter still yields Default
+    // and the fallback name still skips only the first segment, for untagged
+    // and tagged operations alike.
+    const tagged = { get: { tags: ['tenants'], responses } };
+    expect(layout({ '/{tenant}/users': get })).toEqual(['Default.listUsers GET /{tenant}/users']);
+    expect(layout({ '/{tenant}/users': tagged })).toEqual(['Tenants.listUsers GET /{tenant}/users']);
+    // A path outside the root is root-less in the same way.
+    expect(layout({ '/api/notes': get, '/api/tags': get, '/{tenant}/users': get })).toEqual([
+      'Default.listUsers GET /{tenant}/users',
+      'Notes.list GET /api/notes',
+      'Tags.list GET /api/tags',
+    ]);
+  });
+
+  it('keeps a marker-less path outside the root without switching the root off', () => {
+    // A /health or /metrics next to an otherwise /api/… document is common.
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': get, '/metrics': get })).toEqual([
+      'Health GET /health',
+      'Metrics GET /metrics',
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('computes the root over untagged operations only', () => {
+    // A tagged /health, or a tagged path under another root, never switches
+    // the root off: only path-named services use it.
+    const ops = { get: { tags: ['ops'], responses } };
+    const legacy = { get: { tags: ['legacy'], responses } };
+    expect(grouped({ '/api/notes': get, '/api/tags': get, '/health': ops, '/v2/legacy': legacy })).toEqual([
+      'Legacy GET /v2/legacy',
+      'Notes GET /api/notes',
+      'Ops GET /health',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('has no root when the untagged rooted paths disagree on it, so API versions stay apart', () => {
+    expect(grouped({ '/v1/users': get, '/v2/users': get })).toEqual(['V1 GET /v1/users', 'V2 GET /v2/users']);
+    expect(grouped({ '/api/v1/users': get, '/api/v2/users': get })).toEqual([
+      'V1 GET /api/v1/users',
+      'V2 GET /api/v2/users',
+    ]);
+    expect(grouped({ '/api/v1/notes': get, '/v1/legacy': get })).toEqual([
+      'Api GET /api/v1/notes',
+      'V1 GET /v1/legacy',
+    ]);
+  });
+
+  it('never echoes the root or the service segment into a fallback operation name', () => {
+    const del = { delete: { responses } };
+    const rooted: Paths = {
+      '/api/v1/core/auth/permissions': get,
+      '/api/v1/core/global/permissions': get,
+      '/api/v1/admin/support/companies/{id}/document_types': get,
+      '/api/v1/admin/billing/companies/{id}/document_types': get,
+      '/api/v1/documents': get,
+      '/api/v1/documents/{id}': del,
+    };
+    const bare = Object.fromEntries(Object.entries(rooted).map(([path, item]) => [path.replace('/api/v1', ''), item]));
+    // Every name is exactly what the document produces without the root.
+    expect(layout(rooted).map((line) => line.replace(' /api/v1/', ' /'))).toEqual(layout(bare));
+    expect(layout(rooted)).toMatchInlineSnapshot(`
+      [
+        "Admin.listDocumentTypesDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
+        "Admin.listDocumentTypesDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
+        "Core.listPermissionsPermissionsAuth GET /api/v1/core/auth/permissions",
+        "Core.listPermissionsPermissionsGlobal GET /api/v1/core/global/permissions",
+        "Documents.delete DELETE /api/v1/documents/{id}",
+        "Documents.list GET /api/v1/documents",
+      ]
+    `);
+    // A path with nothing literal after the root names its operation from the verb alone.
+    expect(layout({ '/api/v1/{id}': del, '/api/v1/notes': get })).toEqual([
+      'Api.delete DELETE /api/v1/{id}',
+      'Notes.list GET /api/v1/notes',
+    ]);
+  });
+
+  it('compares shared segments verbatim', () => {
+    expect(grouped({ '/API/notes': get, '/api/tags': get })).toEqual(['Api GET /API/notes', 'Api GET /api/tags']);
+  });
+
+  it('does not consult path items that declare no operation', () => {
+    expect(grouped({ '/health': {}, '/status': { parameters: [] }, '/api/notes': get, '/api/tags': get })).toEqual([
+      'Notes GET /api/notes',
+      'Tags GET /api/tags',
+    ]);
+  });
+
+  it('names a single-path document from the segment after the root', () => {
+    expect(grouped({ '/api/notes': get })).toEqual(['Notes GET /api/notes']);
+    expect(grouped({ '/api': get })).toEqual(['Api GET /api']);
+    expect(grouped({ '/{id}': getById })).toEqual(['Default GET /{id}']);
+  });
+
+  it('leaves tagged operations exactly as they were', () => {
+    const tagged = { get: { tags: ['labels'], responses } };
+    const alone = extractOperations({ '/api/tags': tagged }).services;
+    const { services } = extractOperations({ '/api/notes': get, '/api/tags': tagged });
+    expect(services.map((s) => s.name)).toEqual(['Notes', 'Labels']);
+    expect(services[1]).toEqual(alone[0]);
+  });
+
+  it('still groups a tag by raw first segment when deciding whether to split it', () => {
+    const tagged = { get: { tags: ['notes'], responses } };
+    expect(grouped({ '/api/notes': tagged, '/api/note_templates': tagged })).toEqual([
+      'Notes GET /api/note_templates',
+      'Notes GET /api/notes',
+    ]);
+  });
+});
