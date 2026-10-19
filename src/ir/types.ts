@@ -185,8 +185,12 @@ export interface Operation {
   /**
    * Every declared 2xx and 3xx response, one `SuccessResponse` per status
    * code, each with its own `type`, `headers` and `description`. A 2xx entry's
-   * `type` is its body (`unknown` when it declares no content); a 3xx entry's
-   * `type` is always `unknown`, and the entry is kept so an emitter can
+   * `type` is its body, read by media type (`application/json` schema; else
+   * binary string for `application/octet-stream` / `application/pdf`; else
+   * `string` for `text/plain`, `text/html`, `text/xml`, `application/xml`;
+   * else the first media type's schema) and `unknown` when none applies, a
+   * schema-less `text/csv` included; a 3xx entry's `type` is always
+   * `unknown`, and the entry is kept so an emitter can
    * recognize a redirect endpoint. Set only when more than one such response
    * is declared, counting 2xx and 3xx together: `200` + `201`, `200` + `302`
    * and `301` + `302` all set it, while a lone `200` (or a lone `302`) leaves
