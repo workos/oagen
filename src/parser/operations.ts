@@ -842,19 +842,25 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
  *      `GET /api/notes/{noteId}` keeps `get` while
  *      `GET /api/{teamId}/notes/{noteId}` becomes `getByTeamId`, the shared
  *      `noteId` adding nothing;
- *   4. the resource noun the plain name left off because it names the
+ *   4. the API root words a path skipped beyond those the colliding rooted
+ *      paths all skipped, when the paths sit under different lengths of the
+ *      document root: `GET /api/notes` keeps `list` while `GET /api/v1/notes`
+ *      becomes `listV1`. A root-less path takes no part;
+ *   5. the resource noun the plain name left off because it names the
  *      service (inferServiceNoun), when the colliding paths do not all drop
  *      the same one. This is what tells a path-named operation from an
  *      operationId it collides with, which is never renamed and which the
  *      parameters above cannot touch: `GET /api/notes` beside
  *      `operationId: list` on `GET /api/{teamId}/notes` is `listNotes`;
- *   5. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
+ *   6. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
- *      operation keeps the plain name over a path-named one; otherwise the
- *      lexically first path keeps it, whatever the document order. The suffix
- *      is silent for a path-derived name, like a hashed inline model name; it
- *      comes with a warning when the document reuses an operationId, since
- *      that changes a name the author chose.
+ *      operation keeps the plain name over a path-named one; then the path
+ *      that skipped the shorter root, so `/health` or a tagged `/notes` keeps
+ *      `list` over `/api/health` or `/api/v1/notes`; otherwise the lexically
+ *      first path keeps it, whatever the document order. The suffix is silent
+ *      for a path-derived name, like a hashed inline model name; it comes
+ *      with a warning when the document reuses an operationId, since that
+ *      changes a name the author chose.
  *
  * Each qualifier depends only on the paths in the group, never on their
  * document order, and each runs once, so the result is deterministic.
@@ -899,6 +905,25 @@ function disambiguateOperationNames(
       });
     },
     (group) => {
+      // Paths under the document root that skipped different lengths of it
+      // differ by a version or mount word the plain name left off: `/api/notes`
+      // beside `/api/v1/notes` in `Notes`. The words a path skipped beyond the
+      // root the rooted paths all share are what tell them apart (`listV1`),
+      // the one place a root word belongs in a name. A root-less path — outside
+      // the root, or tagged — is named as if the document had none and takes
+      // no part; it keeps the plain name in the numeric pass instead.
+      const roots = group.map((op) => op.path.split('/').filter(Boolean).slice(0, apiRootLengthOf(op)));
+      const rooted = roots.filter((root) => root.length > 0);
+      if (rooted.length === 0) return;
+      let shared = rooted[0];
+      for (const root of rooted) shared = shared.slice(0, sharedPrefixLength(shared, root));
+      const words = roots.map((root) => (root.length === 0 ? '' : toPascalCase(root.slice(shared.length).join('_'))));
+      if (new Set(words).size <= 1) return;
+      group.forEach((op, i) => {
+        if (pathNamed.has(op)) rename(op, appendQualifier(op.name, words[i]));
+      });
+    },
+    (group) => {
       // The plain name leaves off the resource noun that names the service
       // (`GET /api/notes` in `Notes` is `list`); it is restored when it is
       // what tells the group apart. An operationId-named operation is never
@@ -926,10 +951,18 @@ function disambiguateOperationNames(
   for (const group of collidingGroups(operations)) {
     const name = group[0].name;
     // An operationId-named operation outranks a path-named one for the plain
-    // name; within a rank the lexically first path wins, so the outcome does
-    // not depend on document order. Operations on one path share the outcome.
+    // name; then the path that skipped the shorter API root, so a root-less
+    // path (`/health`, or a tagged `/notes`) keeps the name it has always had
+    // over `/api/health` or `/api/v1/notes`; within that the lexically first
+    // path wins. The outcome never depends on document order, and operations
+    // on one path share it.
     const rank = (op: Operation) => (pathNamed.has(op) ? 1 : 0);
-    const ordered = [...group].sort((a, b) => rank(a) - rank(b) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const ordered = [...group].sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        apiRootLengthOf(a) - apiRootLengthOf(b) ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    );
     const keeper = ordered[0];
     const nameByPath = new Map<string, string>([[keeper.path, name]]);
     let n = 2;

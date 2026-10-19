@@ -46,11 +46,58 @@ describe('1. a path-prefix split keyed on the raw first segment separated operat
   it('keeps /api/v1/notes beside /notes in Notes, where the collision rules see both', () => {
     // The split keys on the segment the service was named from, so nothing
     // moves to `Api`; the two paths differ only by the root and flatten to
-    // the same words, so the lexically first keeps the plain name.
+    // the same words, so the root-less path keeps the plain name it has
+    // always had and the rooted one takes the suffix.
     expect(services(repro)).toEqual([
-      { name: 'Notes', operations: ['list2: GET /notes', 'list: GET /api/v1/notes'] },
-      { name: 'Pets', operations: ['list2: GET /pets', 'list: GET /api/v1/pets'] },
+      { name: 'Notes', operations: ['list: GET /notes', 'list2: GET /api/v1/notes'] },
+      { name: 'Pets', operations: ['list: GET /pets', 'list2: GET /api/v1/pets'] },
     ]);
+    expect(names(reversed(repro))).toEqual(names(repro));
+  });
+
+  it('leaves the plain name with a path outside the root, whatever the document order', () => {
+    // Review on #258: /health kept `Health.list` on main and must not lose it
+    // to /api/health, which sorts first lexically.
+    const paths: Paths = { '/health': get, '/api/health': get, '/api/v1/notes': get };
+    expect(names(paths)).toEqual({
+      'GET /health': 'Health.list',
+      'GET /api/health': 'Health.list2',
+      'GET /api/v1/notes': 'Notes.list',
+    });
+    expect(names(reversed(paths))).toEqual(names(paths));
+  });
+
+  it('leaves the plain name with a tagged operation, whatever the document order', () => {
+    // A tagged service is named exactly as before: `Notes.list` for the
+    // tagged /notes, with the untagged rooted twin taking the suffix.
+    const notes = { get: { tags: ['notes'], ...ok } };
+    const paths: Paths = { '/notes': notes, '/api/v1/notes': get, '/api/v1/pets': get };
+    expect(names(paths)).toEqual({
+      'GET /notes': 'Notes.list',
+      'GET /api/v1/notes': 'Notes.list2',
+      'GET /api/v1/pets': 'Pets.list',
+    });
+    expect(names(reversed(paths))).toEqual(names(paths));
+  });
+
+  it('qualifies a versioned path with the root words its versionless twin did not skip', () => {
+    // Review on #258: /api/notes beside /api/v1/notes were Notes.list and
+    // V1.listNotes on main; the version is what tells them apart, so it is
+    // the one root word that belongs in the name.
+    const paths: Paths = { '/api/notes': get, '/api/v1/notes': get, '/api/v1/pets': get };
+    expect(names(paths)).toEqual({
+      'GET /api/notes': 'Notes.list',
+      'GET /api/v1/notes': 'Notes.listV1',
+      'GET /api/v1/pets': 'Pets.list',
+    });
+    expect(names(reversed(paths))).toEqual(names(paths));
+    // A root-less path still takes no part: it keeps `list`, the versionless
+    // rooted twin takes the suffix, and the versioned one its root word.
+    expect(names({ '/notes': get, '/api/notes': get, '/api/v1/notes': get })).toEqual({
+      'GET /notes': 'Notes.list',
+      'GET /api/notes': 'Notes.list2',
+      'GET /api/v1/notes': 'Notes.listV1',
+    });
   });
 
   it('gives no two operations in one service the same name', () => {
@@ -379,25 +426,25 @@ describe('every service has unique, order-independent operation names across the
           "tagged and untagged under one root": {
             "GET /api/notes": "Api.listNotes",
             "GET /api/notes/{id}": "Api.getNotes",
-            "GET /api/v1/notes": "Notes.list",
+            "GET /api/v1/notes": "Notes.list2",
             "GET /api/v1/notes/{id}": "Notes.get",
             "GET /health": "Ops.list",
-            "GET /notes": "Notes.list2",
+            "GET /notes": "Notes.list",
           },
           "the root itself and a parameter right after it": {
             "GET /api": "Api.list",
             "GET /api/v1/notes": "Notes.list",
             "GET /api/v1/notes/{id}": "Notes.get",
-            "GET /api/v1/{id}": "Api.get",
-            "GET /api/{id}": "Api.get2",
+            "GET /api/v1/{id}": "Api.getV1",
+            "GET /api/{id}": "Api.get",
           },
           "three-way clashes": {
             "GET /api/notes": "Notes.list",
-            "GET /api/v1/pets": "Pets.list",
+            "GET /api/v1/pets": "Pets.list2",
             "GET /api/v1/{teamId}/pets": "Pets.listByTeamId",
             "GET /api/{orgId}/notes": "Notes.listByOrgId",
             "GET /api/{teamId}/notes": "Notes.listByTeamId",
-            "GET /pets": "Pets.list2",
+            "GET /pets": "Pets.list",
           },
         }
       `);
