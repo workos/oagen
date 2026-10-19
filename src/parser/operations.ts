@@ -33,7 +33,6 @@ import {
   collectProperties,
   extractInlineModelsFromProperties,
   extractInlineModelsFromSchemas,
-  qualifyInlineModelName,
 } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
@@ -1715,20 +1714,24 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? 'undefined';
 }
 
-/** Hard cap on the candidates a name-stepping loop tries; the no-progress guard stops it long before in practice. */
+/** Hard cap on the attempts a name-stepping loop makes; the no-progress guard stops it long before in practice. */
 const MAX_NAME_STEP_ATTEMPTS = 32;
 
-/** A minted name the registries already own with another shape or other members. */
+/**
+ * A minted name the registries already own with another shape or other
+ * members, or one that two models of the same attempt carry with different
+ * shapes.
+ */
 interface NameCollision {
   name: string;
-  /** The model registry's entry, when the clash is on a model (absent for an enum). */
+  /** The model registry's entry, when the clash is with a registered model (absent otherwise). */
   owner?: { fingerprint: string; operation?: string };
 }
 
 interface MintAttempt {
   models: Model[];
   type: TypeRef;
-  /** Every model and inline enum name the attempt minted, after any qualification. */
+  /** Every model and inline enum name the attempt minted. */
   names: string[];
   collisions: NameCollision[];
 }
@@ -1740,11 +1743,16 @@ function mintedNames(trial: Model[]): string[] {
 
 function collidingNames(trial: Model[], ctx: HeaderExtractionContext, checkEnums: boolean): NameCollision[] {
   const collisions: NameCollision[] = [];
+  const minted = new Map<string, string>();
   for (const model of trial) {
+    const fingerprint = modelFingerprint(model);
     const owner = ctx.registry.get(model.name);
-    if (owner !== undefined && owner.fingerprint !== modelFingerprint(model)) {
-      collisions.push({ name: model.name, owner });
-    }
+    if (owner !== undefined && owner.fingerprint !== fingerprint) collisions.push({ name: model.name, owner });
+    // Two models of one attempt under one name with different shapes: the
+    // later merge would keep one and point every reference at it.
+    const earlier = minted.get(model.name);
+    if (earlier !== undefined && earlier !== fingerprint) collisions.push({ name: model.name });
+    minted.set(model.name, fingerprint);
   }
   if (checkEnums) {
     for (const model of trial) {
@@ -1757,55 +1765,18 @@ function collidingNames(trial: Model[], ctx: HeaderExtractionContext, checkEnums
   return collisions;
 }
 
-/** Rewrite every model and enum name in `ref` (union discriminator mappings included) through `renames`. */
-function renameTypeNames(ref: TypeRef, renames: ReadonlyMap<string, string>): void {
-  switch (ref.kind) {
-    case 'model':
-    case 'enum': {
-      const renamed = renames.get(ref.name);
-      if (renamed !== undefined) (ref as { name: string }).name = renamed;
-      return;
-    }
-    case 'array':
-      renameTypeNames(ref.items, renames);
-      return;
-    case 'nullable':
-      renameTypeNames(ref.inner, renames);
-      return;
-    case 'map':
-      if (ref.keyType) renameTypeNames(ref.keyType, renames);
-      renameTypeNames(ref.valueType, renames);
-      return;
-    case 'union':
-      for (const variant of ref.variants) renameTypeNames(variant, renames);
-      for (const [value, target] of Object.entries(ref.discriminator?.mapping ?? {})) {
-        const renamed = renames.get(target);
-        if (renamed !== undefined) ref.discriminator!.mapping[value] = renamed;
-      }
-      return;
-    default:
-      return;
-  }
-}
-
 /**
  * Mint `schema` as the one property `propertyName` (under `parentName`) and
- * type it from the same property, then check every minted model against the
- * model registry and — for error bodies — every inline enum under them
- * against the enum registry.
+ * type it from the same property, handing `reserved` to both sides as the
+ * names a variant of the body must not take, then check every minted model
+ * against the model registry and against the attempt's other models, and —
+ * for error bodies — every inline enum under them against the enum registry.
  *
- * A name the candidate does not reach cannot be stepped by trying another
- * candidate: a `oneOf` variant named by its bare title (`Circle`, when every
- * variant is titled and pins a const) and whatever is named under it
- * (`CircleState`) come out the same under `GetPetError400`,
- * `GetPetError400Body`, `GetPetError400Body2`, ... — so a clash on one of
- * them would recur forever. Such a name is qualified with the candidate's
- * stem instead (`GetPetError400Circle`, `GetPetError400CircleState`), as
- * `nameInlineVariants` qualifies a variant whose bare title is taken, and
- * every reference in the minted models and in the type — field types, union
- * variants, discriminator mappings — is rewritten with it; a sibling that did
- * not clash (`Square`) keeps its name. A name the candidate does reach is
- * left to the next candidate.
+ * Nothing is renamed after the fact. The extractor and `schemaToTypeRef`
+ * read the same reserved set through the same naming functions, so a `$ref`
+ * keeps the component it names, a variant whose title is reserved is
+ * qualified identically on both sides, and no two references can be bent
+ * onto one model.
  */
 function mintUnderName(
   schema: SchemaObject,
@@ -1814,30 +1785,20 @@ function mintUnderName(
   componentSchemas: Record<string, SchemaObject> | undefined,
   ctx: HeaderExtractionContext,
   checkEnums: boolean,
+  reserved: ReadonlySet<string>,
 ): MintAttempt {
+  const reservedNames = reserved.size > 0 ? reserved : undefined;
   const trial: Model[] = [];
-  extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, parentName, componentSchemas);
-  const type = schemaToTypeRef(schema, propertyName, parentName);
-  const stem = toPascalCase(propertyName);
-
-  let collisions = collidingNames(trial, ctx, checkEnums);
-  const unreached = collisions.filter((c) => !c.name.includes(stem)).map((c) => c.name);
-  if (unreached.length > 0) {
-    const prefix = qualifyInlineModelName(stem, parentName);
-    const renames = new Map<string, string>();
-    for (const minted of mintedNames(trial)) {
-      if (!minted.includes(stem) && unreached.some((u) => minted === u || minted.startsWith(u))) {
-        renames.set(minted, `${prefix}${minted}`);
-      }
-    }
-    for (const model of trial) {
-      model.name = renames.get(model.name) ?? model.name;
-      for (const field of model.fields) renameTypeNames(field.type, renames);
-    }
-    renameTypeNames(type, renames);
-    collisions = collidingNames(trial, ctx, checkEnums);
-  }
-  return { models: trial, type, names: mintedNames(trial), collisions };
+  extractInlineModelsFromProperties(
+    { properties: { [propertyName]: schema } },
+    trial,
+    parentName,
+    componentSchemas,
+    undefined,
+    reservedNames,
+  );
+  const type = schemaToTypeRef(schema, propertyName, parentName, undefined, reservedNames);
+  return { models: trial, type, names: mintedNames(trial), collisions: collidingNames(trial, ctx, checkEnums) };
 }
 
 /**
@@ -1845,13 +1806,27 @@ function mintUnderName(
  * collision; register what that attempt minted (a name the registry already
  * holds is shared, not re-added) and return its type.
  *
+ * A clash on a name the candidate reaches — one containing its stem — is
+ * left to the next candidate. A clash on a name it does not reach — a
+ * variant named by its bare title (`Circle`, in a title-mapped union) or
+ * anything named under it (`CircleState`) — would recur under every
+ * candidate, so that name is reserved instead, together with every minted
+ * model name it extends, and the same candidate is minted again:
+ * `nameInlineVariants` then qualifies the variant with the base, as it does
+ * whenever a title is taken by a sibling (`CircleGetPetError400`), and what
+ * is named under it follows (`CircleGetPetError400State`), while a variant
+ * that did not clash keeps its title and a `$ref` keeps its component. The
+ * qualified name contains the stem, so a further clash on it is reached by
+ * the next candidate.
+ *
  * Two guards keep the loop finite whatever the schema: an attempt whose
- * minted names equal the previous attempt's has made no progress — nothing
- * left is named from the candidate — and `MAX_NAME_STEP_ATTEMPTS` caps the
- * rest. Either way the last attempt is kept, deterministically, with a
- * warning naming what still clashes; the later merge then reports the
- * duplicate definition as it does today. `onCollision` lets a caller reorder
- * its candidates after an attempt.
+ * minted names equal the previous attempt's has made no progress — the
+ * titles of a union nested under a field are out of the reserved set's
+ * reach — and `MAX_NAME_STEP_ATTEMPTS` caps the rest. Either way the last
+ * attempt is kept, deterministically, with a warning naming what still
+ * clashes; the later merge then reports the duplicate definition as it does
+ * today. `onCollision` lets a caller reorder its candidates after a failed
+ * one.
  */
 function mintUnderFreeName(
   schema: SchemaObject,
@@ -1864,16 +1839,19 @@ function mintUnderFreeName(
   label: string,
   onCollision?: (attempt: number, collisions: NameCollision[]) => void,
 ): TypeRef {
+  const reserved = new Set<string>();
   let previous: string | undefined;
-  for (let attempt = 0; ; attempt++) {
-    const result = mintUnderName(schema, candidate(attempt), parentName, componentSchemas, ctx, checkEnums);
+  let attempt = 0;
+  for (let iteration = 0; ; iteration++) {
+    const propertyName = candidate(attempt);
+    const result = mintUnderName(schema, propertyName, parentName, componentSchemas, ctx, checkEnums, reserved);
     const names = [...result.names].sort().join('\0');
     const settled = result.collisions.length === 0;
-    if (settled || names === previous || attempt + 1 >= MAX_NAME_STEP_ATTEMPTS) {
+    if (settled || names === previous || iteration + 1 >= MAX_NAME_STEP_ATTEMPTS) {
       if (!settled) {
-        const taken = result.collisions.map((c) => `"${c.name}"`).join(', ');
+        const taken = [...new Set(result.collisions.map((c) => `"${c.name}"`))].join(', ');
         console.warn(
-          `[oagen] Warning: No free name for ${label}: ${taken} already taken with a different shape — keeping "${candidate(attempt)}"`,
+          `[oagen] Warning: No free name for ${label}: ${taken} already taken with a different shape — keeping "${propertyName}"`,
         );
       }
       for (const model of result.models) {
@@ -1890,8 +1868,19 @@ function mintUnderFreeName(
       }
       return result.type;
     }
-    onCollision?.(attempt, result.collisions);
     previous = names;
+
+    const stem = toPascalCase(propertyName);
+    const unreached = result.collisions.filter((c) => !c.name.includes(stem));
+    if (unreached.length > 0) {
+      for (const { name } of unreached) {
+        reserved.add(name);
+        for (const model of result.models) if (name.startsWith(model.name)) reserved.add(model.name);
+      }
+    } else {
+      onCollision?.(attempt, result.collisions);
+      attempt++;
+    }
   }
 }
 
@@ -1933,8 +1922,8 @@ function mintUnderFreeName(
  * extractor, whose names come from the same `qualifyInlineModelName(name,
  * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
  * path uses. A name no candidate reaches (a variant named by its bare title)
- * is qualified in place, and the search is bounded; see `mintUnderName` and
- * `mintUnderFreeName`.
+ * is reserved so the variant takes its qualified name, and the search is
+ * bounded; see `mintUnderName` and `mintUnderFreeName`.
  */
 function typeHeaderSchema(
   schema: SchemaObject,
@@ -2005,9 +1994,10 @@ function typeHeaderSchema(
  *
  * A clash on a name the body's own name does not reach — a variant named by
  * its bare title (`Circle`) or an enum under it (`CircleState`) — cannot be
- * stepped this way and is qualified in place instead
- * (`GetPetError400Circle`, `GetPetError400CircleState`); the search is
- * bounded either way. See `mintUnderName` and `mintUnderFreeName`.
+ * stepped this way; the title is reserved instead and the variant takes its
+ * qualified name (`CircleGetPetError400`, `CircleGetPetError400State`), as
+ * when a sibling owns the title. The search is bounded either way. See
+ * `mintUnderName` and `mintUnderFreeName`.
  */
 function typeErrorSchema(
   schema: SchemaObject,

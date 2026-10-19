@@ -1035,7 +1035,7 @@ describe('round 1: the reserved set covers every name the component and header p
   });
 });
 
-describe('round 3: a clash on a name the body name does not reach is qualified in place, and the search is bounded', () => {
+describe('round 3: a clash on a name the body name does not reach reserves the title, and the search is bounded', () => {
   const en = (values: string[]): SchemaObject => ({ type: 'string', enum: values });
   const enumValues = (ir: ApiSpec, name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
   const bad = (schema: SchemaObject) => ({ '400': { description: 'bad', ...json(schema) } });
@@ -1060,16 +1060,17 @@ describe('round 3: a clash on a name the body name does not reach is qualified i
     async () => {
       const ir = await parseWithoutWarnings(doc(getPet(bad(titled)), { CircleState: en(['x', 'y']) }));
       const op = onlyOperation(ir);
-      // Only the clashing name moves: the variant keeps its title, the enum is qualified with the body's stem.
-      expect(op.errors).toEqual([{ statusCode: 400, type: unionOf('Circle', 'Square') }]);
-      expect(fieldTypes(ir, 'Circle')).toEqual({
+      // The clashing enum's title is reserved: the variant takes its qualified name and the enum follows.
+      expect(op.errors).toEqual([{ statusCode: 400, type: unionOf('CircleGetPetError400', 'Square') }]);
+      expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
         kind: { kind: 'literal', value: 'circle' },
-        state: { kind: 'enum', name: 'GetPetError400CircleState', values: ['on', 'off'] },
+        state: { kind: 'enum', name: 'CircleGetPetError400State', values: ['on', 'off'] },
         radius: primitive('number'),
       });
+      expect(modelNames(ir)).not.toContain('Circle');
       expect(enumValues(ir, 'CircleState')).toEqual(['x', 'y']);
-      expect(enumValues(ir, 'GetPetError400CircleState')).toEqual(['on', 'off']);
-      expect(enumNames(ir)).toEqual(['CircleState', 'GetPetError400CircleState']);
+      expect(enumValues(ir, 'CircleGetPetError400State')).toEqual(['on', 'off']);
+      expect(enumNames(ir)).toEqual(['CircleState', 'CircleGetPetError400State']);
       expectConsistent(ir);
     },
   );
@@ -1088,18 +1089,18 @@ describe('round 3: a clash on a name the body name does not reach is qualified i
     { timeout: 10_000 },
     async () => {
       const ir = await parseWithoutWarnings(doc(getPet(bad(titled)), { Circle: obj({ unrelated: str }) }));
-      expect(onlyOperation(ir).errors).toEqual([{ statusCode: 400, type: unionOf('GetPetError400Circle', 'Square') }]);
+      expect(onlyOperation(ir).errors).toEqual([{ statusCode: 400, type: unionOf('CircleGetPetError400', 'Square') }]);
       expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
-      expect(fieldTypes(ir, 'GetPetError400Circle')?.['state']).toEqual({
+      expect(fieldTypes(ir, 'CircleGetPetError400')?.['state']).toEqual({
         kind: 'enum',
-        name: 'GetPetError400CircleState',
+        name: 'CircleGetPetError400State',
         values: ['on', 'off'],
       });
       expect(fieldTypes(ir, 'Square')).toEqual({
         kind: { kind: 'literal', value: 'square' },
         side: primitive('number'),
       });
-      expect(enumNames(ir)).toEqual(['GetPetError400CircleState']);
+      expect(enumNames(ir)).toEqual(['CircleGetPetError400State']);
       expectConsistent(ir, ['Circle']);
     },
   );
@@ -1109,7 +1110,7 @@ describe('round 3: a clash on a name the body name does not reach is qualified i
       doc(getPet(bad(titled)), { Circle: obj({ unrelated: str }), Square: obj({ other: str }) }),
     );
     expect(onlyOperation(both).errors).toEqual([
-      { statusCode: 400, type: unionOf('GetPetError400Circle', 'GetPetError400Square') },
+      { statusCode: 400, type: unionOf('CircleGetPetError400', 'SquareGetPetError400') },
     ]);
     expectConsistent(both, ['Circle', 'Square']);
 
@@ -1140,8 +1141,8 @@ describe('round 3: a clash on a name the body name does not reach is qualified i
     );
     const [first, second] = operationsOf(ir);
     expect(first.errors[0].type).toEqual(unionOf('Circle', 'Square'));
-    expect(second.errors[0].type).toEqual(unionOf('GetPetError400Circle', 'Square'));
-    expect(fieldTypes(ir, 'GetPetError400Circle')).toEqual({
+    expect(second.errors[0].type).toEqual(unionOf('CircleGetPetError400', 'Square'));
+    expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
       kind: { kind: 'literal', value: 'circle' },
       area: primitive('number'),
     });
@@ -1168,14 +1169,103 @@ describe('round 3: a clash on a name the body name does not reach is qualified i
           { Circle: obj({ unrelated: str }) },
         ),
       );
-      expect(onlyOperation(ir).responseHeaders?.[0].type).toEqual(unionOf('PetsXShapeCircle', 'Square'));
+      expect(onlyOperation(ir).responseHeaders?.[0].type).toEqual(unionOf('CirclePetsXShape', 'Square'));
       expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
-      expect(fieldTypes(ir, 'PetsXShapeCircle')?.['state']).toEqual({
+      expect(fieldTypes(ir, 'CirclePetsXShape')?.['state']).toEqual({
         kind: 'enum',
-        name: 'PetsXShapeCircleState',
+        name: 'CirclePetsXShapeState',
         values: ['on', 'off'],
       });
       expectConsistent(ir, ['Circle']);
+    },
+  );
+});
+
+describe('round 4: a clashing title is reserved, never renamed after the fact', () => {
+  const en = (values: string[]): SchemaObject => ({ type: 'string', enum: values });
+  const bad = (schema: SchemaObject) => ({ '400': { description: 'bad', ...json(schema) } });
+  const circleTitled = (properties: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { type: 'string', const: 'circle' }, ...properties }, { title: 'Circle' });
+  const square = obj({ kind: { type: 'string', const: 'square' }, side: num }, { title: 'Square' });
+  const literal = (value: string) => ({ kind: 'literal', value });
+  const unionOf = (mapping: Record<string, string>) => ({
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: Object.values(mapping).map(model),
+    discriminator: { property: 'kind', mapping },
+  });
+
+  it('a `$ref` inside the qualified variant keeps its component: no self-reference, component intact', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPet(bad({ oneOf: [circleTitled({ inner: { $ref: '#/components/schemas/Circle' }, radius: num }), square] })),
+        {
+          Circle: obj({ unrelated: str }),
+        },
+      ),
+    );
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 400, type: unionOf({ circle: 'CircleGetPetError400', square: 'Square' }) },
+    ]);
+    expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
+      kind: literal('circle'),
+      inner: model('Circle'),
+      radius: primitive('number'),
+    });
+    expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
+    expectConsistent(ir);
+  });
+
+  it('a sibling already titled like a qualified name stays distinct: three models, three mapping targets', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPet(
+          bad({
+            oneOf: [
+              circleTitled({ radius: num }),
+              obj({ kind: { type: 'string', const: 'gpe' }, side: num }, { title: 'GetPetError400Circle' }),
+            ],
+          }),
+        ),
+        { Circle: obj({ unrelated: str }) },
+      ),
+    );
+    expect(onlyOperation(ir).errors[0].type).toEqual(
+      unionOf({ circle: 'CircleGetPetError400', gpe: 'GetPetError400Circle' }),
+    );
+    expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
+    expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({ kind: literal('circle'), radius: primitive('number') });
+    expect(fieldTypes(ir, 'GetPetError400Circle')).toEqual({ kind: literal('gpe'), side: primitive('number') });
+    expect(
+      modelNames(ir)
+        .filter((n) => n.includes('Circle'))
+        .sort(),
+    ).toEqual(['Circle', 'CircleGetPetError400', 'GetPetError400Circle']);
+    expectConsistent(ir, ['Circle']);
+  });
+
+  it(
+    'a titled union nested under a field is out of the reserved set’s reach: parsing finishes with a warning',
+    { timeout: 10_000 },
+    async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const ir = await parseTempSpec(
+          doc(getPet(bad(obj({ shape: { oneOf: [circleTitled({ state: en(['on', 'off']) }), square] } }))), {
+            Circle: obj({ unrelated: str }),
+          }),
+        );
+        const messages = warn.mock.calls.map((call) => String(call[0]));
+        expect(
+          messages.some((m) => m.includes('No free name for error body "GetPetError400"') && m.includes('"Circle"')),
+        ).toBe(true);
+        // The first owner keeps the name: the field points at the component, as the warning says.
+        expect(onlyOperation(ir).errors).toEqual([{ statusCode: 400, type: model('GetPetError400') }]);
+        expect(fieldTypes(ir, 'GetPetError400')).toEqual({ shape: unionOf({ circle: 'Circle', square: 'Square' }) });
+        expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
+      } finally {
+        warn.mockRestore();
+      }
     },
   );
 });
