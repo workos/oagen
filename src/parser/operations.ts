@@ -29,6 +29,7 @@ import {
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
+import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 
@@ -296,14 +297,20 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
   // Operations without an operationId name their inline models from the
-  // path, and two distinct paths — or a path and an operationId or component
-  // schema — can produce the same name, so the prefix for every such
-  // operation is decided up front (see resolvePathModelBaseNames).
-  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+  // path, and two distinct paths — or a path and an operationId, component
+  // schema or component response — can produce the same name, so the prefix
+  // for every such operation is decided up front (see resolvePathModelBaseNames).
+  const pathModelBaseNames = resolvePathModelBaseNames(
+    paths,
+    componentModels,
+    componentRequestBodies,
+    componentResponses,
+  );
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -349,6 +356,7 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        componentResponses,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -846,6 +854,7 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
@@ -937,13 +946,22 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
-    componentHeaders,
+  } = extractResponses(
+    op.responses,
+    op,
+    pathModelBaseName,
+    path,
+    method,
     componentSchemas,
-    serviceName: opContext,
-    operationQualifier: toPascalCase(operationName),
-    registry: headerModelRegistry,
-  });
+    {
+      componentHeaders,
+      componentSchemas,
+      serviceName: opContext,
+      operationQualifier: toPascalCase(operationName),
+      registry: headerModelRegistry,
+    },
+    componentResponses,
+  );
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -1888,6 +1906,7 @@ function resolvePathModelBaseNames(
   paths: Record<string, PathItem>,
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -1896,6 +1915,12 @@ function resolvePathModelBaseNames(
 
   for (const model of componentModels ?? []) {
     reservedNames.add(model.name);
+  }
+  // A shared response names its inline body after the component, not the
+  // operation (see componentResponseModelName), so its stem is reserved like
+  // an operationId's.
+  for (const componentName of Object.keys(componentResponses ?? {})) {
+    reservedNames.add(componentResponseModelBase(componentName));
   }
 
   for (const [path, pathItem] of Object.entries(paths)) {
@@ -2042,6 +2067,9 @@ function collectOperationConstPrefixes(
   for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
     const code = parseInt(statusCode, 10);
     if (code < 200 || code >= 300) continue;
+    // A `$ref` into `components/responses` has no `content` here and is not
+    // followed either: its inline body is named after the component, so the
+    // consts it pins never prefix a path-derived name.
     for (const media of Object.values(response.content ?? {})) {
       collectConstPrefixes(media?.schema, prefixes, 0);
     }
@@ -2091,6 +2119,44 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * The `components/responses` entry a response is written as a `$ref` to, or
+ * undefined for an inline response. Only the outermost ref counts: it is the
+ * name the operation uses, and the name a chain resolves through
+ * (`resolveResponseRef`) stays the component's own business. The pointer is
+ * matched whole and JSON Pointer escapes (RFC 6901 §4) undone, exactly as the
+ * resolver does, so the name agrees with what it resolved.
+ */
+function componentResponseNameOf(resp: ResponseObject | ReferenceObject): string | undefined {
+  if (!('$ref' in resp) || typeof resp.$ref !== 'string') return undefined;
+  const match = /^#\/components\/responses\/(.+)$/.exec(resp.$ref);
+  return match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
+/**
+ * `<Component>Response`: the inline body of a response declared once under
+ * `components/responses` and referenced from each operation that returns it.
+ * It is named after the component, not the operation, so every referrer
+ * shares one model (`PetFound` → `PetFoundResponse`) instead of minting a
+ * `<Op>Response` copy each; the suffix is not doubled when the component is
+ * already named `…Response`. Cleaned like an operationId-derived name, so
+ * the stem (`componentResponseModelBase`) prefixes everything derived from
+ * it — a list's `<Component>Item`, nested `<Component>Response…` models.
+ */
+function componentResponseModelName(componentName: string): string {
+  const base = toPascalCase(componentName);
+  return cleanSchemaName(base.endsWith('Response') ? base : base + 'Response');
+}
+
+/**
+ * The stem every model derived from a component response starts with (see
+ * operationIdModelBase for the argument). Reserved by resolvePathModelBaseNames
+ * so no path-derived name takes it.
+ */
+function componentResponseModelBase(componentName: string): string {
+  return cleanSchemaName(toPascalCase(componentName).replace(/Response$/, ''));
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2099,6 +2165,7 @@ function extractResponses(
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
   headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
@@ -2129,8 +2196,21 @@ function extractResponses(
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
 
-  for (const [statusCode, resp] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
+    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+    // Reference Object has no `headers` or `content` of its own to read, so
+    // the ref is resolved before either is. Only a status code one of the
+    // branches below reads is resolved: `default`, a `2XX` range and an `x-`
+    // extension are left as written, as nothing here reads them.
+    const resp =
+      code >= 200
+        ? resolveResponseRef<ResponseObject>(rawResponse, componentResponses, `${statusCode} response of ${opLabel}`)
+        : rawResponse;
+    // Set when the response came from a component: its inline body is then
+    // named after the component, shared by every operation that returns it.
+    const componentName = code >= 200 ? componentResponseNameOf(rawResponse) : undefined;
+    const componentModelName = componentName === undefined ? undefined : componentResponseModelName(componentName);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
     // response no branch below keeps (`default`, 1xx) declares none worth
@@ -2142,7 +2222,7 @@ function extractResponses(
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
-        const contextName = deriveResponseName(op, pathModelBaseName);
+        const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
         extractedType = result.response;
         // Keep track of inline models and pagination from the latest 2xx with a schema
@@ -2184,7 +2264,9 @@ function extractResponses(
       });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
-      const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
+      const type = jsonContent?.schema
+        ? schemaToTypeRef(jsonContent.schema, componentModelName ?? `Error${code}`)
+        : undefined;
       errors.push({ statusCode: code, type, ...(headers && { headers }) });
     }
   }
