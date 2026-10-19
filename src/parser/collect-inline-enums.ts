@@ -1,4 +1,4 @@
-import type { Enum, Model, Operation, ResponseHeader, Service } from '../ir/types.js';
+import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
@@ -32,19 +32,22 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       for (const field of op.pagination?.envelopeFields ?? []) {
         collectInlineEnumFromRef(field.type, enums, enumNames);
       }
-      // An error body that is itself an inline enum, or an array of one, is
-      // typed by `schemaToTypeRef` and reaches no model, so it is promoted
-      // here; an enum nested in an error body's model is collected with every
-      // other model's. The name is already operation-qualified
-      // (`GetPetError404`), so it needs no status-code qualifier.
-      for (const error of op.errors) {
-        if (error.type) collectInlineEnumFromRef(error.type, enums, enumNames);
-      }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
-        for (const header of headers) collectHeaderEnums(header, qualifier, enums, enumNames);
+        for (const header of headers) collectRefEnums(header.type, qualifier, enums, enumNames);
+      }
+      // An error body that is itself an inline enum, or an array of one, is
+      // typed by `schemaToTypeRef` and reaches no model, so it is promoted
+      // here — after the headers, so a header enum of the same name keeps it
+      // as a header model would (`typeHeaderSchema`). The name is already
+      // operation-qualified (`GetPetError404`); one a component, header or
+      // earlier error enum owns with other members steps to
+      // `GetPetError404Body`. An enum nested in an error body's model is
+      // collected with every other model's.
+      for (const error of op.errors) {
+        if (error.type) collectRefEnums(error.type, 'Body', enums, enumNames);
       }
     }
   }
@@ -73,28 +76,24 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
 }
 
 /**
- * Promote a header's inline enums. A header enum is named from the service
- * and header name alone, so `X-Policy` allowing `fast`/`slow` on a 200 and
- * `retry`/`stop` on a 429 would share one name and whichever was collected
- * first would silently win; a request parameter named like the header
- * collides the same way. When the name is already taken by a different value
- * set, the header's ref is renamed to a distinct name before it is promoted.
- * A taken name with the same values is shared, as before.
+ * Promote the inline enums under `ref` — a response header's type, or an
+ * error body's. A header enum is named from the service and header name
+ * alone, so `X-Policy` allowing `fast`/`slow` on a 200 and `retry`/`stop` on
+ * a 429 would share one name and whichever was collected first would silently
+ * win; a request parameter named like the header, or a component enum named
+ * like an error body, collides the same way. When the name is already taken
+ * by a different value set, the ref is renamed to a distinct name before it
+ * is promoted. A taken name with the same values is shared, as before.
  */
-function collectHeaderEnums(
-  header: ResponseHeader,
-  qualifier: string | undefined,
-  enums: Enum[],
-  enumNames: Set<string>,
-): void {
-  walkTypeRef(header.type, {
-    enum: (ref) => {
-      if (!ref.values) return;
-      const existing = enums.find((e) => e.name === ref.name);
-      if (existing && !sameEnumValues(existing, ref.values)) {
-        ref.name = distinctEnumName(ref.name, ref.values, qualifier, enums);
+function collectRefEnums(ref: TypeRef, qualifier: string | undefined, enums: Enum[], enumNames: Set<string>): void {
+  walkTypeRef(ref, {
+    enum: (enumRef) => {
+      if (!enumRef.values) return;
+      const existing = enums.find((e) => e.name === enumRef.name);
+      if (existing && !sameEnumValues(existing, enumRef.values)) {
+        enumRef.name = distinctEnumName(enumRef.name, enumRef.values, qualifier, enums);
       }
-      collectInlineEnumFromRef(ref, enums, enumNames);
+      collectInlineEnumFromRef(enumRef, enums, enumNames);
     },
   });
 }

@@ -804,3 +804,162 @@ describe('every walker reaches errors[].type', () => {
     expect(op.errors[0].type).toEqual({ kind: 'model', name: 'Problem' });
   });
 });
+
+describe('round 1: the reserved set covers every name the component and header passes mint', () => {
+  const en = (values: string[]): SchemaObject => ({ type: 'string', enum: values });
+  const enumValues = (ir: ApiSpec, name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+  const notFound = (schema: SchemaObject) => ({ '404': { description: 'nf', ...json(schema) } });
+  const reason = obj({ reason: str });
+  /** `getPet` and `get-pet`: two operationIds with one stem, so one `<Op>Error404` name. */
+  const sameStem = (second: Doc) =>
+    doc({
+      ...getPet(notFound(reason)),
+      '/pet/{petId}': { get: { operationId: 'get-pet', responses: { ...ok, ...second } } },
+    });
+
+  it("steps around a component's nested inline model of the same name and a different shape", async () => {
+    // Component `GetPet.error404` mints `GetPetError404` in the component pass,
+    // which runs after operations; the registry must know it in advance.
+    const ir = await parseWithoutWarnings(
+      doc(getPet(notFound(reason)), { GetPet: obj({ error404: obj({ original: str }) }) }),
+    );
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('GetPetError404Body') }]);
+    // The child keeps its name, its shape and its parent's reference.
+    expect(fieldTypes(ir, 'GetPet')).toEqual({ error404: model('GetPetError404') });
+    expect(fieldTypes(ir, 'GetPetError404')).toEqual({ original: primitive('string') });
+    expect(fieldTypes(ir, 'GetPetError404Body')).toEqual({ reason: primitive('string') });
+    expect(modelNames(ir).filter((n) => n.startsWith('GetPetError404'))).toHaveLength(2);
+    expectConsistent(ir, ['GetPet']);
+  });
+
+  it("shares a component's nested inline model of the same name and the identical shape", async () => {
+    const ir = await parseWithoutWarnings(doc(getPet(notFound(reason)), { GetPet: obj({ error404: reason }) }));
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(fieldTypes(ir, 'GetPet')).toEqual({ error404: model('GetPetError404') });
+    expect(modelNames(ir).filter((n) => n.startsWith('GetPetError404'))).toEqual(['GetPetError404']);
+    expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
+    expectConsistent(ir, ['GetPet']);
+  });
+
+  it('two operations whose operationIds share a stem: different 404 bodies get distinct models', async () => {
+    const ir = await parseWithoutWarnings(sameStem(notFound(obj({ code: int }))));
+    const [first, second] = operationsOf(ir);
+    expect(first.errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(second.errors).toEqual([{ statusCode: 404, type: model('GetPetError404Body') }]);
+    expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
+    expect(fieldTypes(ir, 'GetPetError404Body')).toEqual({ code: primitive('integer') });
+    expectConsistent(ir);
+  });
+
+  it('two operations whose operationIds share a stem: identical 404 bodies share one model', async () => {
+    const ir = await parseWithoutWarnings(sameStem(notFound(reason)));
+    expect(operationsOf(ir).map((op) => op.errors[0].type)).toEqual([model('GetPetError404'), model('GetPetError404')]);
+    expect(modelNames(ir).filter((n) => n.startsWith('GetPetError404'))).toEqual(['GetPetError404']);
+    expectConsistent(ir);
+  });
+
+  it('an enum body steps around a component enum of the same name and other members', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet(notFound(en(['gone', 'missing']))), { GetPetError404: en(['old', 'new']) }),
+    );
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 404, type: { kind: 'enum', name: 'GetPetError404Body', values: ['gone', 'missing'] } },
+    ]);
+    expect(enumValues(ir, 'GetPetError404')).toEqual(['old', 'new']);
+    expect(enumValues(ir, 'GetPetError404Body')).toEqual(['gone', 'missing']);
+    expectConsistent(ir);
+  });
+
+  it('an enum body shares a component enum of the same name and the same members, in any order', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet(notFound(en(['gone', 'missing']))), { GetPetError404: en(['missing', 'gone']) }),
+    );
+    expect(onlyOperation(ir).errors[0].type).toEqual({
+      kind: 'enum',
+      name: 'GetPetError404',
+      values: ['gone', 'missing'],
+    });
+    expect(enumNames(ir)).toEqual(['GetPetError404']);
+    expect(enumValues(ir, 'GetPetError404')).toEqual(['missing', 'gone']);
+  });
+
+  it('an array of an enum body steps the same way', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet(notFound({ type: 'array', items: en(['gone', 'missing']) })), { GetPetError404: en(['old', 'new']) }),
+    );
+    expect(onlyOperation(ir).errors[0].type).toEqual({
+      kind: 'array',
+      items: { kind: 'enum', name: 'GetPetError404Body', values: ['gone', 'missing'] },
+    });
+    expect(enumNames(ir)).toEqual(['GetPetError404', 'GetPetError404Body']);
+  });
+
+  it('a header enum minted earlier in the same operation keeps the name; the error enum steps', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        '/pets/{petId}': {
+          get: {
+            tags: ['getPet'],
+            operationId: 'getPet',
+            responses: {
+              '200': { description: 'ok', ...json(petRef), headers: { Error404: { schema: en(['a', 'b']) } } },
+              ...notFound(en(['gone', 'missing'])),
+            },
+          },
+        },
+      }),
+    );
+    const op = onlyOperation(ir);
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['a', 'b'] });
+    expect(op.errors[0].type).toEqual({ kind: 'enum', name: 'GetPetError404Body', values: ['gone', 'missing'] });
+    expect(enumValues(ir, 'GetPetError404')).toEqual(['a', 'b']);
+    expect(enumValues(ir, 'GetPetError404Body')).toEqual(['gone', 'missing']);
+  });
+
+  it('an error enum minted earlier keeps the name; a later header enum with other members steps', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        '/a': {
+          get: { tags: ['getPet'], operationId: 'getPet', responses: { ...ok, ...notFound(en(['gone', 'missing'])) } },
+        },
+        '/b': {
+          get: {
+            tags: ['getPet'],
+            operationId: 'listPets',
+            responses: {
+              '200': { description: 'ok', ...json(petRef), headers: { Error404: { schema: en(['a', 'b']) } } },
+            },
+          },
+        },
+      }),
+    );
+    const [get, list] = operationsOf(ir);
+    expect(get.errors[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['gone', 'missing'] });
+    const headerType = list.responseHeaders?.[0].type as { kind: string; name: string };
+    expect(headerType.kind).toBe('enum');
+    expect(headerType.name).not.toBe('GetPetError404');
+    expect(enumValues(ir, 'GetPetError404')).toEqual(['gone', 'missing']);
+    expect(enumValues(ir, headerType.name)).toEqual(['a', 'b']);
+  });
+
+  it('two operations whose operationIds share a stem: enum bodies with other members get distinct enums', async () => {
+    const ir = await parseWithoutWarnings(sameStem(notFound(en(['absent', 'unknown']))));
+    // The first operation's 404 is `reason`-shaped (a model), so only its stem is shared here.
+    const second = operationsOf(ir)[1];
+    expect(second.errors[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['absent', 'unknown'] });
+
+    const both = await parseWithoutWarnings(
+      doc({
+        ...getPet(notFound(en(['gone', 'missing']))),
+        '/pet/{petId}': {
+          get: { operationId: 'get-pet', responses: { ...ok, ...notFound(en(['absent', 'unknown'])) } },
+        },
+      }),
+    );
+    expect(operationsOf(both).map((op) => op.errors[0].type)).toEqual([
+      { kind: 'enum', name: 'GetPetError404', values: ['gone', 'missing'] },
+      { kind: 'enum', name: 'GetPetError404Body', values: ['absent', 'unknown'] },
+    ]);
+    expect(enumValues(both, 'GetPetError404Body')).toEqual(['absent', 'unknown']);
+  });
+});

@@ -26,7 +26,11 @@ import {
   extractConstraints,
   constraintsEntry,
 } from './schemas.js';
-import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import {
+  collectProperties,
+  extractInlineModelsFromProperties,
+  extractInlineModelsFromSchemas,
+} from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
@@ -312,13 +316,21 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
-  // One registry for the whole spec, seeded with the component models: a
-  // header model's name must not collide with a differently shaped component
-  // (a request body may already use `DocumentsXMeta`) or with another
-  // operation's header model, or the later merge would overwrite the first.
-  const headerModelRegistry: HeaderModelRegistry = new Map(
-    (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
-  );
+  // One registry for the whole spec, seeded with the component models and the
+  // inline models nested in them (`extractInlineModelsFromSchemas` mints the
+  // same names the component pass will, so this is the full set of names that
+  // pass owns): a header or error body model's name must not collide with a
+  // differently shaped component or component child (a request body may
+  // already use `DocumentsXMeta`; `GetPet.error404` already owns
+  // `GetPetError404`) or with another operation's header or error model, or
+  // the later merge would overwrite the first. A top-level component keeps
+  // its name over a child of the same name, as the merge keeps it too.
+  const headerModelRegistry: HeaderModelRegistry = new Map();
+  for (const model of [...(componentModels ?? []), ...extractInlineModelsFromSchemas(componentSchemas)]) {
+    if (!headerModelRegistry.has(model.name)) {
+      headerModelRegistry.set(model.name, { fingerprint: modelFingerprint(model) });
+    }
+  }
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -1670,8 +1682,9 @@ function stableStringify(value: unknown): string {
  * reference silently gets the wrong fields (a request body using the
  * component would even change type without any emitter reading headers).
  *
- * The first owner of a name keeps it: component models are seeded before any
- * operation, operations are visited in path order, and a single operation's
+ * The first owner of a name keeps it: component models and the inline models
+ * nested in them are seeded before any operation, operations are visited in
+ * path order, and a single operation's
  * responses in ascending status-code order (integer-like keys iterate that
  * way), so the lowest code wins regardless of where it appears in the
  * document. A later header with a different shape — at any depth, a nested
@@ -1758,12 +1771,15 @@ function typeHeaderSchema(
  * and everything nested under those (`GetPetError404Details`). A `$ref` body
  * or a primitive mints nothing and is typed as is.
  *
- * The models share the header registry: a name a component schema or an
- * earlier header or error model already owns with a different shape is
- * stepped around (`GetPetError404Body`, then `GetPetError404Body2`, ...), and
- * a name of the identical shape is shared without a second definition, as a
- * header reuses a matching component. Every model minted here is registered
- * so a later header model steps around it in turn.
+ * The models share the header registry: a name a component schema, a model
+ * nested in one (`GetPet.error404` owns `GetPetError404`) or an earlier
+ * header or error model already owns with a different shape is stepped
+ * around (`GetPetError404Body`, then `GetPetError404Body2`, ...), and a name
+ * of the identical shape is shared without a second definition, as a header
+ * reuses a matching component. Every model minted here is registered so a
+ * later header or error model steps around it in turn — two operations whose
+ * operationIds share a stem (`getPet`, `get-pet`) and declare different
+ * inline 404 bodies get `GetPetError404` and `GetPetError404Body`.
  */
 function typeErrorSchema(
   schema: SchemaObject,
