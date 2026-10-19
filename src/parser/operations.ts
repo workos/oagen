@@ -29,7 +29,8 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
 } from './schemas.js';
-import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import { collectResponseHeaders } from '../ir/types.js';
+import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
@@ -283,6 +284,14 @@ const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'he
 export interface OperationExtractionResult {
   services: Service[];
   inlineModels: Model[];
+  /**
+   * Where the operations' inline models came from — one bundle per response
+   * and per request body that produced any — so a merge pass can rename a
+   * copy that must not share its name and repoint exactly that operation's
+   * references. List-envelope companions are not bundled:
+   * `resolveEnvelopeCompanionNames` settles their names once and for all.
+   */
+  inlineModelBundles: InlineModelBundle[];
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -303,7 +312,7 @@ export function extractOperations(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [] };
+  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
 
   // Operations without an operationId name their inline models from the
   // path, and two distinct paths — or a path and an operationId or component
@@ -318,6 +327,7 @@ export function extractOperations(
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
+  const inlineModelBundles: InlineModelBundle[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
   // Service name each tagged operation was grouped under, keyed by operation
   // identity. The path-prefix split below moves operations between services,
@@ -350,6 +360,7 @@ export function extractOperations(
       const {
         operation,
         inlineModels: opModels,
+        inlineModelBundles: opBundles,
         envelopeCompanions: opCompanions,
       } = buildOperation(
         method,
@@ -368,6 +379,7 @@ export function extractOperations(
         apiRootLength,
       );
       inlineModels.push(...opModels);
+      inlineModelBundles.push(...opBundles);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
@@ -432,7 +444,7 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels };
+  return { services, inlineModels, inlineModelBundles };
 }
 
 /**
@@ -1150,7 +1162,12 @@ function buildOperation(
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
   apiRootLength = 0,
-): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
+): {
+  operation: Operation;
+  inlineModels: Model[];
+  inlineModelBundles: InlineModelBundle[];
+  envelopeCompanions?: EnvelopeCompanion[];
+} {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
@@ -1241,7 +1258,7 @@ function buildOperation(
     responseDescription,
     successResponses,
     errors,
-    inlineModels,
+    inlineModels: responseModels,
     isPaginated,
     dataPath: responseDataPath,
     dataDescription: responseDataDescription,
@@ -1255,7 +1272,7 @@ function buildOperation(
     operationQualifier: toPascalCase(operationName),
     registry: headerModelRegistry,
   });
-  inlineModels.push(...reqBodyModels);
+  const inlineModels = [...responseModels, ...reqBodyModels];
 
   // Build structured pagination metadata from response classification and query param detection
   const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
@@ -1293,45 +1310,75 @@ function buildOperation(
   // its own field nor leaks into the description as a blank first paragraph.
   const summary = presentText(op.summary);
 
-  return {
-    operation: {
-      name: operationName,
-      // Keep the summary on its own so emitters can tell it apart from the
-      // description; the key is omitted (not set to undefined) when absent.
-      ...(summary !== undefined ? { summary } : {}),
-      description: buildDescription(summary, op.description),
-      // Same conditional shape as `summary`: present only when the document
-      // declares a usable link, absent (not undefined) otherwise.
-      ...externalDocsEntry(op.externalDocs),
-      httpMethod: method,
-      path,
-      pathParams,
-      queryParams,
-      bodyOwnedQueryParams: bodyOwnedQueryParams.length > 0 ? bodyOwnedQueryParams : undefined,
-      headerParams,
-      cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
-      requestBody,
-      requestBodyEncoding,
-      // Added only when the operation has a body so bodiless operations keep
-      // their shape.
-      ...(requestBodyRequired !== undefined && { requestBodyRequired }),
-      response,
-      // Added only when present so operations without headers keep their shape.
-      ...(responseHeaders && { responseHeaders }),
-      // Likewise only when the primary response declares a description.
-      ...(responseDescription && { responseDescription }),
-      successResponses,
-      errors,
-      pagination,
-      injectIdempotencyKey: hasIdempotencyHeader,
-      deprecated: op.deprecated || undefined,
-      async: op['x-oagen-async'],
-      security,
-      parameterGroups,
-    },
-    inlineModels,
-    envelopeCompanions,
+  const operation: Operation = {
+    name: operationName,
+    // Keep the summary on its own so emitters can tell it apart from the
+    // description; the key is omitted (not set to undefined) when absent.
+    ...(summary !== undefined ? { summary } : {}),
+    description: buildDescription(summary, op.description),
+    // Same conditional shape as `summary`: present only when the document
+    // declares a usable link, absent (not undefined) otherwise.
+    ...externalDocsEntry(op.externalDocs),
+    httpMethod: method,
+    path,
+    pathParams,
+    queryParams,
+    bodyOwnedQueryParams: bodyOwnedQueryParams.length > 0 ? bodyOwnedQueryParams : undefined,
+    headerParams,
+    cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
+    requestBody,
+    requestBodyEncoding,
+    // Added only when the operation has a body so bodiless operations keep
+    // their shape.
+    ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    response,
+    // Added only when present so operations without headers keep their shape.
+    ...(responseHeaders && { responseHeaders }),
+    // Likewise only when the primary response declares a description.
+    ...(responseDescription && { responseDescription }),
+    successResponses,
+    errors,
+    pagination,
+    injectIdempotencyKey: hasIdempotencyHeader,
+    deprecated: op.deprecated === true || undefined,
+    async: op['x-oagen-async'],
+    security,
+    parameterGroups,
   };
+
+  // Where the models came from, so a merge pass that must rename one — a
+  // deprecated response named like a live one, say — can qualify it by this
+  // operation and repoint only this operation's references: the response
+  // bundle owns the success bodies, the list envelope and the response
+  // headers; the request bundle owns the body. Qualified as a header model or
+  // list-envelope companion is (`GetLegacyWidgetWidget`).
+  const qualifier = toPascalCase(operationName);
+  const inlineModelBundles: InlineModelBundle[] = [];
+  if (responseModels.length > 0) {
+    inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
+  }
+  if (reqBodyModels.length > 0 && requestBody) {
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+  }
+
+  return { operation, inlineModels, inlineModelBundles, envelopeCompanions };
+}
+
+/**
+ * The type references an operation's responses own: the primary and every
+ * alternate success body, the list envelope's fields and item type, and
+ * every response header. Error bodies are left out: they are typed straight
+ * from their schema and reference components only, never an inline model of
+ * the operation's, so a rename must not reach them.
+ */
+function responseTypeRefs(op: Operation): TypeRef[] {
+  return [
+    op.response,
+    ...(op.successResponses ?? []).map((r) => r.type),
+    ...(op.pagination?.envelopeFields ?? []).map((f) => f.type),
+    ...(op.pagination ? [op.pagination.itemType] : []),
+    ...collectResponseHeaders(op).map((h) => h.type),
+  ];
 }
 
 /**
@@ -1396,7 +1443,8 @@ function extractParams(
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
         description: firstDescription(p.description, p.schema?.description, refTarget?.description),
-        deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
+        deprecated:
+          p.deprecated === true || p.schema?.deprecated === true || refTarget?.deprecated === true || undefined,
         default: p.schema?.default ?? refTarget?.default,
         example,
         ...(examples ? { examples } : {}),
@@ -2142,7 +2190,7 @@ function extractResponseHeaders(
       type,
       required: header.required ?? false,
       description: header.description,
-      deprecated: header.deprecated || undefined,
+      deprecated: header.deprecated === true || undefined,
     });
   }
 

@@ -256,10 +256,12 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
 /**
  * `{ deprecated: true }` when `schema` says so, `{}` otherwise — spread into
  * a Model or Enum so the key stays absent rather than present-but-false. Read
- * the way `Field.deprecated` is: only the schema's own top-level keyword.
+ * the way `Field.deprecated` is: only the schema's own top-level keyword, and
+ * only the literal `true` — `deprecated: "yes"` is not a declaration, as it
+ * is not on a field, parameter, operation or header.
  */
 export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } {
-  return schema.deprecated ? { deprecated: true } : {};
+  return schema.deprecated === true ? { deprecated: true } : {};
 }
 
 /**
@@ -362,7 +364,7 @@ export function collapsedNullableBranch(schema: SchemaObject): SchemaObject | un
  */
 export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const result: SchemaObject = { ...inner, ...deprecatedEntry(wrapper) };
-  if (!wrapper.deprecated) delete result.deprecated;
+  if (wrapper.deprecated !== true) delete result.deprecated;
   return result;
 }
 
@@ -1313,7 +1315,7 @@ export function buildFieldFromSchema(
     description: fieldSchema.description,
     readOnly: fieldSchema.readOnly || undefined,
     writeOnly: fieldSchema.writeOnly || undefined,
-    deprecated: fieldSchema.deprecated || undefined,
+    deprecated: fieldSchema.deprecated === true || undefined,
     default: fieldSchema.default,
     example,
     // Only materialise the key when there is something to carry so existing

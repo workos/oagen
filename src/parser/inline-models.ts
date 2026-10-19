@@ -1,4 +1,4 @@
-import type { Constraints, ExternalDocs, Model, Field } from '../ir/types.js';
+import type { Constraints, ExternalDocs, Model, Field, TypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -459,7 +459,10 @@ export function collectProperties(
  * `patternProperties`) values.
  * These correspond to the ModelRef entries created by schemaToTypeRef.
  */
-export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObject> | undefined): Model[] {
+export function extractInlineModelsFromSchemas(
+  schemas: Record<string, SchemaObject> | undefined,
+  groups?: FieldInlineModelGroup[],
+): Model[] {
   if (!schemas) return [];
 
   const inlineModels: Model[] = [];
@@ -468,10 +471,70 @@ export function extractInlineModelsFromSchemas(schemas: Record<string, SchemaObj
     const parentName = resolveSchemaName(schemaName);
     // The same sibling set `extractModel` / `extractAllOfModel` type the
     // component's fields from, `$ref`'d allOf members included.
-    extractInlineModelsFromProperties(schema, inlineModels, parentName, schemas, collectProperties(schema, schemas));
+    const siblings = collectProperties(schema, schemas);
+    // One field at a time — the inline `allOf` members' properties first,
+    // then the schema's own, in the order `extractInlineModelsFromProperties`
+    // walks them — so the models each field produced are known (`groups`)
+    // and the merge pass can rename one by the field that references it.
+    // Every call sees the same siblings, reserved names and results list, so
+    // the names are exactly those one call over the whole schema would mint.
+    for (const [fieldName, fieldSchema] of inlineProperties(schema)) {
+      const before = inlineModels.length;
+      extractInlineModelsFromProperties(
+        { properties: { [fieldName]: fieldSchema } },
+        inlineModels,
+        parentName,
+        schemas,
+        siblings,
+      );
+      groups?.push({ parentName, fieldName, models: inlineModels.slice(before) });
+    }
   }
 
   return inlineModels;
+}
+
+/**
+ * A schema's inline properties in extraction order: those of its inline
+ * `allOf` members (each walked the same way, members first) before its own —
+ * the order `extractInlineModelsFromProperties` visits them in, so splitting
+ * a schema by field changes nothing about which models are minted, or when.
+ */
+function* inlineProperties(schema: SchemaObject): Generator<[string, SchemaObject]> {
+  for (const sub of schema.allOf ?? []) if (sub.properties) yield* inlineProperties(sub);
+  for (const [name, property] of Object.entries(schema.properties ?? {})) if (property) yield [name, property];
+}
+
+/**
+ * Where a group of inline models came from, so a copy that must give up a
+ * name it shares with a differently flagged model can be renamed and exactly
+ * its own references repointed (see `separateDeprecatedCopies` in the merge
+ * passes). `qualifier` is prefixed to the new name — the PascalCase operation
+ * name for an operation's models, as a list-envelope companion or header
+ * model is qualified, the component name for a component field's; `roots`
+ * are the type references the site owns — an operation's response, its
+ * request body, a component field's type; `models` are the models the site
+ * produced, whose fields reference one another. Renaming one of `models`
+ * repoints `roots` and the other models' fields, and nothing outside the
+ * bundle, so a `$ref` to a same-named component elsewhere in the document is
+ * never touched.
+ */
+export interface InlineModelBundle {
+  qualifier: string;
+  roots: TypeRef[];
+  models: Model[];
+}
+
+/**
+ * The inline models one component field produced: `fieldName` of the
+ * component resolved to `parentName`. `extractInlineModelsFromSchemas` fills
+ * one per field; `fieldInlineModelBundles` turns it into an
+ * `InlineModelBundle` once the field's type can be looked up.
+ */
+export interface FieldInlineModelGroup {
+  parentName: string;
+  fieldName: string;
+  models: Model[];
 }
 
 /**
@@ -749,7 +812,7 @@ function mergeAugmentation(
     description: schema.description,
     externalDocs: readExternalDocs(schema.externalDocs),
     constraints: extractConstraints(schema),
-    deprecated: schema.deprecated || undefined,
+    deprecated: schema.deprecated === true || undefined,
   };
 }
 

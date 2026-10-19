@@ -1,6 +1,39 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
+import type { FieldInlineModelGroup, InlineModelBundle } from './inline-models.js';
+
+/**
+ * What the merge passes need to keep a deprecated and a live definition of
+ * one name apart (see `separateDeprecatedCopies`): the site each inline
+ * model came from (`bundles`), so the copy that must leave the shared name
+ * can be renamed and exactly its own references repointed, and every name
+ * already in play (`reserved`) — the component models and enums, and every
+ * inline model of every pass — so the new name is free. A name minted here
+ * is added to `reserved`, so both passes, and every mint within one, agree.
+ */
+export interface InlineModelNaming {
+  bundles: InlineModelBundle[];
+  reserved: Set<string>;
+}
+
+/**
+ * Bundle the models each component field produced with that field's type,
+ * looked up in `models` as they stand when the field pass runs — an inline
+ * response may have replaced a component's fields by then — so a renamed
+ * child is repointed from the one field that references it and nowhere
+ * else. A field the model no longer has falls back to every field of its
+ * component.
+ */
+export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
+  const byName = new Map(models.map((m) => [m.name, m]));
+  return groups.map(({ parentName, fieldName, models: fieldModels }) => {
+    const parent = byName.get(parentName);
+    const field = parent?.fields.find((f) => f.name === fieldName);
+    const roots = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
+    return { qualifier: parentName, roots, models: fieldModels };
+  });
+}
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
@@ -21,20 +54,138 @@ function keepLargestByName(models: Model[]): Model[] {
     }
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
-    } else if (differOnlyByDeprecation(existing, model) && !model.deprecated) {
-      // Identical in everything but the flag, the earlier copy deprecated and
-      // this one not. The shared name must not carry deprecation onto every
-      // live reference, so the live definition is kept; the deprecated
-      // schema's own field or operation still carries its flag. A copy that
-      // differs in anything else — requiredness, a type, a limit — is not
-      // interchangeable and takes the usual largest-or-first choice above.
-      console.warn(
-        `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
-      );
-      byName.set(model.name, model);
     }
   }
   return [...byName.values()];
+}
+
+/**
+ * Keep a deprecated and a live definition of one name apart before a merge
+ * pass folds same-named models together, so a live operation or field never
+ * resolves to a model marked `deprecated`, whatever order the document
+ * declares them in.
+ *
+ * `owners` are the models whose name and flag are authoritative — the
+ * component schemas (and, in the field pass, every model the response pass
+ * already settled, when the caller does not say which are components) — and
+ * `contenders` the inline models competing for their names. For each name,
+ * the flag the name carries is its owner's or, with no owner, live as soon
+ * as any contender is live (a name every contender deprecates stays
+ * deprecated, and the pass leaves it alone). A contender whose flag disagrees
+ * with the name's then
+ *
+ * - folds onto the live definition — the one `keepLargestByName` would keep
+ *   among the live contenders — when there is no owner and it is identical
+ *   to that definition in everything but the flag (`differOnlyByDeprecation`):
+ *   the shared name keeps the live definition, with a warning, in either
+ *   order; the deprecated schema's own field or operation still carries its
+ *   flag;
+ * - otherwise takes a name of its own (`mintQualifiedName`): its site's
+ *   qualifier prefixed — `GetLegacyWidgetWidget` for a response of
+ *   `getLegacyWidget`, `CreateNoteRequest2` for a body already named from its
+ *   operation, `PetOwner2` for a field of `Pet` — minted against every name
+ *   in play, and its site's references repointed: the operation's response
+ *   or body, the component field, and the fields of the models minted beside
+ *   it (`InlineModelBundle`). An owner is never renamed and never takes a
+ *   contender's flag, in either direction: a live inline copy never folds
+ *   onto a deprecated component, and a deprecated one never onto a live
+ *   component, whatever their shapes.
+ *
+ * A contender without a site — none the parser produces; a direct caller's —
+ * cannot be renamed and is left to the pass's usual choice, with a warning.
+ *
+ * Returns the contenders that still compete for a name, the renamed ones
+ * under their new name, and the folded copies keyed to the definition that
+ * replaced them, so a caller that keeps an owner list can seat the live copy
+ * where the folded one was.
+ */
+function separateDeprecatedCopies(
+  owners: ReadonlyMap<string, Model>,
+  contenders: Model[],
+  naming: InlineModelNaming | undefined,
+): { kept: Model[]; folded: Map<Model, Model> } {
+  const byName = new Map<string, Model[]>();
+  for (const model of contenders) {
+    const group = byName.get(model.name) ?? [];
+    group.push(model);
+    byName.set(model.name, group);
+  }
+  const bundleOf = new Map<Model, InlineModelBundle>();
+  for (const bundle of naming?.bundles ?? []) {
+    for (const model of bundle.models) bundleOf.set(model, bundle);
+  }
+  const flag = (m: Model): string => (m.deprecated ? 'deprecated' : 'live');
+
+  const folded = new Map<Model, Model>();
+  for (const [name, group] of byName) {
+    const owner = owners.get(name);
+    let nameDeprecated: boolean;
+    let liveWinner: Model | undefined;
+    if (owner) {
+      nameDeprecated = !!owner.deprecated;
+    } else {
+      const live = group.filter((m) => !m.deprecated);
+      if (live.length === 0 || live.length === group.length) continue;
+      nameDeprecated = false;
+      liveWinner = preferredDefinition(live);
+    }
+
+    for (const copy of group) {
+      if (!!copy.deprecated === nameDeprecated) continue;
+      if (liveWinner && differOnlyByDeprecation(liveWinner, copy)) {
+        console.warn(
+          `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+        );
+        folded.set(copy, liveWinner);
+        continue;
+      }
+      const bundle = naming && bundleOf.get(copy);
+      if (!bundle) {
+        console.warn(
+          `[oagen] Warning: Inline model "${name}" is ${flag(copy)} in one definition and ${nameDeprecated ? 'deprecated' : 'live'} in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name`,
+        );
+        continue;
+      }
+      const renamed = mintQualifiedName(name, bundle.qualifier, naming.reserved);
+      naming.reserved.add(renamed);
+      copy.name = renamed;
+      for (const root of bundle.roots) rewriteModelRef(root, name, renamed);
+      for (const model of bundle.models) {
+        for (const field of model.fields) rewriteModelRef(field.type, name, renamed);
+      }
+      console.warn(
+        `[oagen] Renamed inline model "${name}" → "${renamed}": it is ${flag(copy)} while "${name}" is ${nameDeprecated ? 'deprecated' : 'live'}`,
+      );
+    }
+  }
+
+  return { kept: contenders.filter((m) => !folded.has(m)), folded };
+}
+
+/** The definition `keepLargestByName` keeps of a name: the one with the most fields, the first declared on a tie. */
+function preferredDefinition(models: Model[]): Model {
+  let best = models[0]!;
+  for (const model of models) if (model.fields.length > best.fields.length) best = model;
+  return best;
+}
+
+/**
+ * A free name for a copy that must leave `name`: `qualifier` prefixed, as a
+ * list-envelope companion or header model is qualified
+ * (`GetLegacyWidgetWidget`), or — when the name already starts with the
+ * qualifier, as a request body named from its operation does — the name
+ * itself; then, while that is taken, a numeric suffix (`CreateNoteRequest2`,
+ * `…3`), the fallback a header model uses. `reserved` holds every name in
+ * play, so the search stops at the first free suffix and the result collides
+ * with nothing any pass has minted or will mint.
+ */
+function mintQualifiedName(name: string, qualifier: string, reserved: ReadonlySet<string>): string {
+  const base = name.startsWith(qualifier) ? name : `${qualifier}${name}`;
+  if (base !== name && !reserved.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}${n}`;
+    if (!reserved.has(candidate)) return candidate;
+  }
 }
 
 /**
@@ -94,12 +245,25 @@ function rewriteModelRefs(models: Model[], services: Service[], oldName: string,
   }
 }
 
-export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: Model[]): Model[] {
+/**
+ * Fold the operations' inline models into the component models. A component's
+ * name and flag are authoritative, and among the inline models a live copy
+ * owns a shared name, so `separateDeprecatedCopies` runs first: the fold below
+ * only ever joins models that agree on `deprecated`, except for a copy the
+ * caller gave no site to rename from (`naming`), which takes the choice the
+ * pass always made.
+ */
+export function mergeInlineResponseModels(
+  schemaModels: Model[],
+  inlineModels: Model[],
+  naming?: InlineModelNaming,
+): Model[] {
   const mergedSchemaModels = [...schemaModels];
   const schemaModelNames = new Set(mergedSchemaModels.map((m) => m.name));
   const schemaModelsByName = new Map(mergedSchemaModels.map((m) => [m.name, m]));
+  const { kept } = separateDeprecatedCopies(schemaModelsByName, inlineModels, naming);
 
-  const deduplicatedInlineModels = inlineModels.filter((model) => {
+  const deduplicatedInlineModels = kept.filter((model) => {
     if (!schemaModelNames.has(model.name)) return true;
 
     const existing = schemaModelsByName.get(model.name)!;
@@ -114,12 +278,13 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
       // and flags that name stays the component's: its `description` and
       // `externalDocs` where it has them (the response's fill in only where
       // the component has none, as the Json fold fills the base's link), and
-      // its `deprecated` — present or absent — always, as a component's flag
-      // is never replaced anywhere else (see mergeFieldInlineModels): a
-      // deprecated response that adds a field must not deprecate every
-      // operation referencing the live component, and a live one must not
-      // clear a deprecated component's flag. The response's own flag is not
-      // read; the operation that declared it still carries its own.
+      // its `deprecated` — present or absent — always. The two agree on the
+      // flag by now unless the response could not be renamed (no site), and
+      // then the component's still wins: a deprecated response that adds a
+      // field must not deprecate every operation referencing the live
+      // component, and a live one must not clear a deprecated component's
+      // flag. The response's own flag is not read; the operation that
+      // declared it still carries its own.
       const replacement: Model = {
         ...model,
         ...(existing.description ? { description: existing.description } : {}),
@@ -155,19 +320,53 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
  * keeping the earlier definition on a name clash. `componentNames` tells a
  * clash with a real component schema apart from one between two inline
  * models, so the warning can say which happened and name both shapes.
+ *
+ * A component's flag is authoritative and the other existing models — the
+ * response pass's inline survivors — compete with the field models for their
+ * names like any inline copy, so `separateDeprecatedCopies` runs first with
+ * the components (every existing model, when the caller does not say which
+ * are components) as owners: a deprecated and a live definition of one name
+ * are told apart before the fold below, which then only joins models that
+ * agree on the flag — except for a copy without a site to rename from
+ * (`naming`), which takes the choice the pass always made.
  */
 export function mergeFieldInlineModels(
   existingModels: Model[],
   fieldInlineModels: Model[],
   componentNames?: Set<string>,
+  naming?: InlineModelNaming,
 ): Model[] {
-  const modelNames = new Set(existingModels.map((m) => m.name));
-  const modelsByName = new Map(existingModels.map((m) => [m.name, m]));
+  const isComponent = (m: Model): boolean => !componentNames || componentNames.has(m.name);
+  const owners = new Map(existingModels.filter(isComponent).map((m) => [m.name, m]));
+  const { kept, folded } = separateDeprecatedCopies(
+    owners,
+    [...existingModels.filter((m) => !isComponent(m)), ...fieldInlineModels],
+    naming,
+  );
+  const keptSet = new Set(kept);
+  // An existing inline model folded onto a live field copy of its shape
+  // gives the copy its place; a field copy folded onto an existing model is
+  // simply dropped.
+  const promoted = new Set<Model>();
+  const retainedModels: Model[] = [];
+  for (const model of existingModels) {
+    if (isComponent(model) || keptSet.has(model)) {
+      retainedModels.push(model);
+      continue;
+    }
+    const winner = folded.get(model);
+    if (winner) {
+      retainedModels.push(winner);
+      promoted.add(winner);
+    }
+  }
+
+  const modelNames = new Set(retainedModels.map((m) => m.name));
+  const modelsByName = new Map(retainedModels.map((m) => [m.name, m]));
   const fieldList = (m: Model): string => m.fields.map((f) => f.name).join(', ') || '(no fields)';
-  /** An earlier inline model replaced by a live copy of the same name and shape. */
-  const replacements = new Map<Model, Model>();
 
   const deduplicatedFieldModels = fieldInlineModels.filter((model) => {
+    if (!keptSet.has(model) || promoted.has(model)) return false;
     if (!modelNames.has(model.name)) return true;
 
     const existing = modelsByName.get(model.name)!;
@@ -187,28 +386,12 @@ export function mergeFieldInlineModels(
           `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,
         );
       }
-    } else if (
-      !model.deprecated &&
-      componentNames &&
-      !componentNames.has(model.name) &&
-      differOnlyByDeprecation(existing, model)
-    ) {
-      // Two inline models of one name, identical but for the flag, the
-      // earlier deprecated and this one live: keep the live definition under
-      // the shared name so deprecation does not reach every reference. A
-      // component's own flag, by contrast, is authoritative and is never
-      // replaced, and a copy that differs in anything else keeps the earlier
-      // definition exactly as before.
-      console.warn(
-        `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
-      );
-      replacements.set(existing, model);
     }
 
     return false;
   });
 
-  return [...existingModels.map((m) => replacements.get(m) ?? m), ...keepLargestByName(deduplicatedFieldModels)];
+  return [...retainedModels, ...keepLargestByName(deduplicatedFieldModels)];
 }
 
 function hasModelConstDiscriminant(model: Model): boolean {
@@ -254,6 +437,16 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
 
     // Guard: a third model explicitly references the Json-suffix model
     if (isModelReferencedByOthers(model.name, normalizedModels, new Set([model.name, baseName]))) continue;
+
+    // Guard: a live Json model never folds onto a deprecated base — every
+    // live reference to it would then resolve to a deprecated type. (The
+    // other way round still folds: `<Name>` keeps its own, live, flag.)
+    if (baseModel.deprecated && !model.deprecated) {
+      console.warn(
+        `[oagen] Not merging "${model.name}" into "${baseName}": "${baseName}" is deprecated and "${model.name}" is live`,
+      );
+      continue;
+    }
 
     mergeCandidates.push({ jsonModel: model, baseModel });
   }

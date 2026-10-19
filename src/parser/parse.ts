@@ -9,10 +9,13 @@ import {
   resolveSchemaName,
 } from './schemas.js';
 import { extractOperations } from './operations.js';
+import type { FieldInlineModelGroup } from './inline-models.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
+  fieldInlineModelBundles,
+  type InlineModelNaming,
 } from './normalize-inline-models.js';
 import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
@@ -101,7 +104,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     { schemaNameTransform: options?.schemaNameTransform },
   );
 
-  const { services, inlineModels } = extractOperations(
+  const { services, inlineModels, inlineModelBundles } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
@@ -113,14 +116,15 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
   );
 
-  const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);
-
   // Extract inline models from model field definitions (objects/arrays with properties).
   // schemaNameTransform is kept active so inline child names use the
   // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
-  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget).
+  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget). Extracted before the
+  // response merge so their names are reserved by the time it mints any.
+  const fieldInlineModelGroups: FieldInlineModelGroup[] = [];
   const fieldInlineModels = extractInlineModelsFromSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    fieldInlineModelGroups,
   );
   // Resolved while the transform is still active so the names match the
   // models'; lets the merge tell a clash with a component schema from one
@@ -129,7 +133,19 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
   );
   clearSchemaNameTransform();
-  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames);
+
+  // Every name in play — component models and enums, every inline model of
+  // either pass — so a copy a merge pass must rename (a deprecated response
+  // named like a live one) takes a name nothing else has, in either pass.
+  const naming: InlineModelNaming = {
+    bundles: [...inlineModelBundles],
+    reserved: new Set([...models, ...enums, ...inlineModels, ...fieldInlineModels].map((named) => named.name)),
+  };
+  const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels, naming);
+  // The field models' sites, resolved now that the response merge may have
+  // replaced a component's fields.
+  naming.bundles.push(...fieldInlineModelBundles(fieldInlineModelGroups, responseNormalizedModels));
+  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
   applyFieldHints(finalModels, options?.fieldHints);
   collectInlineEnumsFromModels(finalModels, enums);
