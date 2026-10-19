@@ -81,8 +81,11 @@ export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>)
  * `Object.prototype`.
  *
  * The parser uses this to decide whether an operation's effective servers
- * differ from the document's (`Operation.servers` is set only when they do),
- * and the differ to report `serversChanged`.
+ * differ from the document's (`Operation.servers` is set only when they do):
+ * the IR carries exactly what the document says. The differ's
+ * `serversChanged` deliberately uses a looser rule — descriptions, enum order
+ * and position ignored, matching the document-level diff — so a description
+ * edit sets the field without being reported as a change.
  */
 export function serverListsEqual(a: readonly ServerEntry[], b: readonly ServerEntry[]): boolean {
   if (a.length !== b.length) return false;

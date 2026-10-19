@@ -151,12 +151,16 @@ export interface OperationModified {
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
   /**
-   * The operation's `servers` changed, so its requests go elsewhere. Always
-   * breaking. The field is set only when an operation's effective servers
-   * differ from the document's, so absent on both sides is unchanged (the
-   * operation inherits twice); absent on one side and set on the other, or
-   * two lists that differ by `serverListsEqual` (URL, description or
-   * variables), is a change.
+   * The servers the operation is actually served from changed, so its
+   * requests go elsewhere. Always breaking. Each side is `op.servers ??`
+   * that document's servers (`diffSpecs` supplies them), compared by the rule
+   * the document-level diff uses: matched on `url` template plus variables
+   * (names, defaults, enum values as a set), ignoring position, descriptions
+   * and enum order — except that a reorder that moves the first entry's
+   * resolved URL counts, as `base-url-changed` does for the document. Absent
+   * on both sides is unchanged: the operation inherits twice, and a moved
+   * document is the document-level diff's to report. So a document that moves
+   * to where an operation already pointed is not a change to that operation.
    */
   serversChanged: boolean;
   classification: 'additive' | 'breaking';

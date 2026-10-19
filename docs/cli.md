@@ -25,6 +25,8 @@ oagen generate --spec openapi.yml --lang node --output ./sdk --namespace Acme
 
 Compare two OpenAPI specs and output a diff report as JSON. Use this to review what changed before regenerating.
 
+An `operation-modified` change carries `serversChanged` (breaking) when the servers the operation is actually served from — its own `servers`, else the document's — changed: the two lists are matched on URL template and variables, ignoring descriptions, enum order and position, except that a reorder that moves the first entry's resolved URL counts. An operation that inherits the document's servers on both sides is not reported here even when the document's own list moved.
+
 ```bash
 oagen diff --old v1.yml --new v2.yml
 ```

@@ -12,7 +12,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
   const changes: Change[] = [
     ...diffModels(oldSpec.models, newSpec.models, directions),
     ...diffEnums(oldSpec.enums, newSpec.enums),
-    ...diffServices(oldSpec.services, newSpec.services),
+    // The documents' servers travel along so an operation is judged by where
+    // it is actually served from, not by whether it carries an override.
+    ...diffServices(oldSpec.services, newSpec.services, { old: oldSpec.servers, new: newSpec.servers }),
   ];
 
   const behaviorChanges = collectBehaviorChanges(changes);
