@@ -32,6 +32,14 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       for (const field of op.pagination?.envelopeFields ?? []) {
         collectInlineEnumFromRef(field.type, enums, enumNames);
       }
+      // An error body that is itself an inline enum, or an array of one, is
+      // typed by `schemaToTypeRef` and reaches no model, so it is promoted
+      // here; an enum nested in an error body's model is collected with every
+      // other model's. The name is already operation-qualified
+      // (`GetPetError404`), so it needs no status-code qualifier.
+      for (const error of op.errors) {
+        if (error.type) collectInlineEnumFromRef(error.type, enums, enumNames);
+      }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.

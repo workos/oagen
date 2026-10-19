@@ -497,18 +497,20 @@ function normalizeOperationIdForNaming(operationId: string): string {
 }
 
 /**
- * The inline request body or response model name of an operation that has an
- * `operationId`. The single source of that name: extractRequestBody and
- * deriveResponseName use it to name, resolvePathModelBaseNames to reserve.
+ * The inline request body, response or error body model name of an operation
+ * that has an `operationId`. The single source of that name: extractRequestBody,
+ * deriveResponseName and deriveErrorModelName use it to name,
+ * resolvePathModelBaseNames to reserve.
  */
-function operationIdModelName(operationId: string, suffix: 'Request' | 'Response'): string {
+function operationIdModelName(operationId: string, suffix: 'Request' | 'Response' | `Error${number}`): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
 }
 
 /**
  * The stem every model derived from an `operationId` starts with: its
- * `Request` and `Response` models, a list's `Item`, nested inline models under
- * those (`…ResponseOwner`) and envelope companions (`…ListMetadata`). Every
+ * `Request`, `Response` and `Error<code>` models, a list's `Item`, nested
+ * inline models under those (`…ResponseOwner`) and envelope companions
+ * (`…ListMetadata`). Every
  * step of cleanSchemaName is a global replace or acts on the leading word, so
  * this is a true prefix of each of those names. Used to reserve them all.
  */
@@ -1612,12 +1614,13 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
 }
 
 /**
- * Spec-wide record of every model name a header model must not silently
- * reuse: the component models (seeded up front) and each inline header model
- * materialized so far. The value carries the model's shape fingerprint, so a
- * header whose shape matches can share the name, and — for header models —
- * which operation produced it, so a collision inside one operation can be
- * told apart from one across operations.
+ * Spec-wide record of every model name a header or error body model must not
+ * silently reuse: the component models (seeded up front) and each inline
+ * header or error model materialized so far. The value carries the model's
+ * shape fingerprint, so a header or error body whose shape matches can share
+ * the name, and — for the inline models — which operation produced it, so a
+ * collision inside one operation can be told apart from one across
+ * operations.
  */
 type HeaderModelRegistry = Map<string, { fingerprint: string; operation?: string }>;
 
@@ -1737,6 +1740,56 @@ function typeHeaderSchema(
       models.push(model);
     }
     return schemaToTypeRef(schema, propertyName, parentName);
+  }
+}
+
+/**
+ * Type an error response's inline body and materialize the models it names,
+ * under an operation-qualified name (`deriveErrorModelName`) that collides
+ * with no differently shaped model anywhere in the spec.
+ *
+ * The body is handed to the field-level extractor as a one-property object
+ * under no parent — the trick `typeHeaderSchema` and the inline response
+ * `oneOf` path use — so every shape is named exactly as `schemaToTypeRef`
+ * references it from the same property: a plain or nullable object
+ * (`GetPetError404`), the items of an array of inline objects, every inline
+ * `oneOf`/`anyOf` variant (`GetPetError404`, `GetPetError404WithField`,
+ * `<Const>GetPetError404`), an `allOf` merge with `$ref` branches, map values
+ * and everything nested under those (`GetPetError404Details`). A `$ref` body
+ * or a primitive mints nothing and is typed as is.
+ *
+ * The models share the header registry: a name a component schema or an
+ * earlier header or error model already owns with a different shape is
+ * stepped around (`GetPetError404Body`, then `GetPetError404Body2`, ...), and
+ * a name of the identical shape is shared without a second definition, as a
+ * header reuses a matching component. Every model minted here is registered
+ * so a later header model steps around it in turn.
+ */
+function typeErrorSchema(
+  schema: SchemaObject,
+  name: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  ctx: HeaderExtractionContext,
+  models: Model[],
+): TypeRef {
+  for (let attempt = 0; ; attempt++) {
+    const propertyName = attempt === 0 ? name : attempt === 1 ? `${name}Body` : `${name}Body${attempt}`;
+    const trial: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { [propertyName]: schema } }, trial, undefined, componentSchemas);
+
+    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
+    const collides = fingerprints.some(([model, fingerprint]) => {
+      const registered = ctx.registry.get(model.name);
+      return registered !== undefined && registered.fingerprint !== fingerprint;
+    });
+    if (collides) continue;
+
+    for (const [model, fingerprint] of fingerprints) {
+      if (ctx.registry.has(model.name)) continue;
+      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
+      models.push(model);
+    }
+    return schemaToTypeRef(schema, propertyName);
   }
 }
 
@@ -2091,6 +2144,22 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * The model name an inline error body is materialized under: the operation's
+ * stem plus `Error<code>` (`GetPetError404`), so two operations' inline 404s
+ * never share one model, nor do two status codes of one operation. Built by
+ * the rule `deriveResponseName` uses for `<Op>Response`: `operationIdModelName`
+ * when the operation has an `operationId`, else the path-derived prefix
+ * (`PetsByPetIdGetError404`), which `resolvePathModelBaseNames` already keeps
+ * clear of every component schema name.
+ */
+function deriveErrorModelName(op: OperationObject | undefined, pathModelBaseName: string, code: number): string {
+  if (op?.operationId) {
+    return operationIdModelName(op.operationId, `Error${code}`);
+  }
+  return `${pathModelBaseName}Error${code}`;
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2128,6 +2197,7 @@ function extractResponses(
   // Kept apart from `inlineModels`, which the latest 2xx body replaces
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
+  const errorModels: Model[] = [];
 
   for (const [statusCode, resp] of Object.entries(responses)) {
     const code = parseInt(statusCode, 10);
@@ -2184,7 +2254,17 @@ function extractResponses(
       });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
-      const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
+      // An inline body is materialized, not merely named: `schemaToTypeRef`
+      // alone would point at a model nothing creates (workos/oagen#236).
+      const type = jsonContent?.schema
+        ? typeErrorSchema(
+            jsonContent.schema,
+            deriveErrorModelName(op, pathModelBaseName, code),
+            componentSchemas,
+            headerContext,
+            errorModels,
+          )
+        : undefined;
       errors.push({ statusCode: code, type, ...(headers && { headers }) });
     }
   }
@@ -2199,6 +2279,7 @@ function extractResponses(
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
+  if (errorModels.length > 0) inlineModels = [...inlineModels, ...errorModels];
   if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
 
   return {

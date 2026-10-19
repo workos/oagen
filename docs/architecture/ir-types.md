@@ -448,6 +448,8 @@ interface ErrorResponse {
 }
 ```
 
+`type` is the `application/json` body. A `$ref` body is a plain reference to the component model; an inline body is materialized into `spec.models` under an operation-qualified name so that two operations' inline `404`s never share one model, nor do two status codes of one operation: `<Op>Error<code>` from the `operationId` (`getPet` + `404` → `GetPetError404`), or the path-derived prefix plus `Error<code>` without one (`GET /pets/{petId}` → `PetsByPetIdGetError404`). Nested objects, array items, `oneOf`/`anyOf` variants and map values under the body follow the usual inline-model naming rules from that name (`GetPetError404Details`, `GetPetError404WithCode`). A name a component schema or header model already owns with a different shape is stepped around (`GetPetError404Body`); an identical shape shares it. Two operations with identical inline bodies get two models, exactly as they get two `<Op>Response` models.
+
 ## Operation Resolution
 
 Source: `src/ir/operation-hints.ts`

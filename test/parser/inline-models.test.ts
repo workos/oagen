@@ -2206,7 +2206,7 @@ describe('undiscriminated inline variants are named from their content', () => {
   const circle = obj({ radius: n, center }, { title: 'Circle' });
   const square = obj({ side: n, center }, { title: 'Square' });
 
-  /** Every model name referenced from any model field or any operation's body or response. */
+  /** Every model name referenced from any model field or any operation's body, response or error. */
   function referencedEverywhere(ir: Awaited<ReturnType<typeof parseSpec>>): Set<string> {
     const names = new Set<string>();
     const visit = (value: unknown): void => {
@@ -2219,7 +2219,7 @@ describe('undiscriminated inline variants are named from their content', () => {
     };
     for (const m of ir.models) visit(m.fields);
     for (const op of ir.services.flatMap((s) => s.operations)) {
-      visit([op.requestBody, op.response, op.pagination?.envelopeFields]);
+      visit([op.requestBody, op.response, op.pagination?.envelopeFields, op.errors]);
     }
     return names;
   }
@@ -2573,10 +2573,13 @@ describe('undiscriminated inline variants are named from their content', () => {
     expect(types['GetThingResponseWithSide']).toEqual({ side: num });
     expect(types['ScoredGetThingResponse']).toEqual({ points: int });
     expectConsistent(ir, []);
-    // Error unions are only typed, never extracted, but their variant names follow the same rule.
+    // Error unions are extracted under the operation-qualified error name
+    // (#236), and their variant names follow the same rule.
     expect(op.errors).toEqual([
-      { statusCode: 400, type: union([model('Error400'), model('Error400WithError')], 'anyOf') },
+      { statusCode: 400, type: union([model('GetThingError400'), model('GetThingError400WithError')], 'anyOf') },
     ]);
+    expect(types['GetThingError400']).toEqual({ message: str });
+    expect(types['GetThingError400WithError']).toEqual({ message: str, error: str });
   });
 });
 
