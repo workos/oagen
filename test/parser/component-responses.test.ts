@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { collectModelRefs } from '../../src/ir/types.js';
 import type { Model, Operation } from '../../src/ir/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -355,6 +356,85 @@ describe('responses written as $ref into components/responses (issue #234)', () 
     it('keeps a path-derived name plain when no component response reserves its stem', () => {
       const op = singleOperation(unnamedGetOwner, { responses: { PetFound: petFound } });
       expect(op.response).toEqual({ kind: 'model', name: 'OwnerGetResponse' });
+    });
+  });
+
+  describe('an operation returning different shared bodies at two success codes', () => {
+    // 200 and 201 each reference a component with its own inline body, so the
+    // two bodies take two names. Keeping only the body read last would leave
+    // the primary `response` pointing at a model nobody returned.
+    const newOwner = {
+      description: 'An owner just created, with a page of its pets',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { type: 'object', properties: { nickname: { type: 'string' } } } },
+              list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+            },
+            required: ['data', 'list_metadata'],
+          },
+        },
+      },
+    };
+    const components: ExtractOptions = { responses: { OwnerCard: ownerCard, NewOwner: newOwner } };
+
+    /** Every model a success response references, against the models extraction returned. */
+    function expectNoDanglingRefs(op: Operation, inlineModels: Model[]) {
+      const known = new Set(inlineModels.map((m) => m.name));
+      const referenced = [op.response, ...(op.successResponses ?? []).map((r) => r.type)].flatMap(collectModelRefs);
+      expect(referenced.length).toBeGreaterThan(0);
+      expect(referenced.filter((name) => !known.has(name))).toEqual([]);
+    }
+
+    it('keeps both bodies, the primary first, and takes paging from the primary', () => {
+      const { services, inlineModels } = extract(
+        get('createOwner', {
+          '200': { $ref: '#/components/responses/OwnerCard' },
+          '201': { $ref: '#/components/responses/NewOwner' },
+        }),
+        components,
+      );
+      const [op] = services.flatMap((s) => s.operations);
+      expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
+      expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+        [200, { kind: 'model', name: 'OwnerCardResponse' }],
+        [201, { kind: 'array', items: { kind: 'model', name: 'NewOwnerItem' } }],
+      ]);
+      // The 201 page was read last; the primary 200 is a plain object.
+      expect(op.pagination).toBeUndefined();
+      expect(inlineModels.map((m) => m.name)).toEqual([
+        'OwnerCardResponse',
+        'OwnerCardResponseAddress',
+        'NewOwnerItem',
+      ]);
+      expectNoDanglingRefs(op, inlineModels);
+    });
+
+    it('takes paging from the primary whatever order the status codes are declared in', () => {
+      const { services, inlineModels } = extract(
+        get('createOwner', {
+          '201': { $ref: '#/components/responses/OwnerCard' },
+          '200': { $ref: '#/components/responses/NewOwner' },
+        }),
+        components,
+      );
+      const [op] = services.flatMap((s) => s.operations);
+      // The primary is still the lowest 2xx with a typed body: the 200 page.
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'NewOwnerItem' } });
+      expect(op.pagination).toMatchObject({ dataPath: 'data', itemType: { kind: 'model', name: 'NewOwnerItem' } });
+      expect(op.pagination?.envelopeFields?.map((f) => f.name)).toEqual(['list_metadata']);
+      // The primary's models lead, the other body's follow; the primary
+      // envelope's companion is named across operations afterwards, so it
+      // comes last.
+      expect(inlineModels.map((m) => m.name)).toEqual([
+        'NewOwnerItem',
+        'OwnerCardResponse',
+        'OwnerCardResponseAddress',
+        'ListMetadata',
+      ]);
+      expectNoDanglingRefs(op, inlineModels);
     });
   });
 
