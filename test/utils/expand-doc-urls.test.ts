@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { expandDocUrls } from '../../src/utils/expand-doc-urls.js';
-import type { ApiSpec } from '../../src/ir/types.js';
+import { collectResponseHeaders } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, Parameter, ResponseHeader } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function minimalSpec(overrides: Partial<ApiSpec> = {}): ApiSpec {
@@ -387,5 +388,168 @@ describe('expandDocUrls – externalDocs (issue #217)', () => {
       description: 'See [a](https://workos.com/docs/reference/a).',
     });
     expect('externalDocs' in b).toBe(false);
+  });
+});
+
+/**
+ * PR #259 review: every collection that holds a documented node is walked —
+ * `cookieParams`, each response-header list, the list envelope's companion
+ * fields and `dataDescription`, and the mutually exclusive parameter groups
+ * — for the description and the link alike, with `externalDocs.url` kept as
+ * written. Before this, the description on those collections was not
+ * expanded either (a pre-existing gap of the same class), and a grouped
+ * parameter's copy in `parameterGroups` no longer shared identity with its
+ * copy in `queryParams`.
+ */
+describe('expandDocUrls – every collection that holds a documented node', () => {
+  const base = 'https://example.com/docs';
+  const type = { kind: 'primitive', type: 'string' } as const;
+  const relative = { url: '/guide', description: 'Read the [guide](/guide).' };
+  const absolute = { url: '/guide', description: `Read the [guide](${base}/guide).` };
+  const text = 'See the [guide](/guide).';
+  const expandedText = `See the [guide](${base}/guide).`;
+  const param = (name: string): Parameter => ({
+    name,
+    type,
+    required: false,
+    description: text,
+    externalDocs: relative,
+  });
+  const header = (name: string): ResponseHeader => ({
+    name,
+    type,
+    required: false,
+    description: text,
+    externalDocs: relative,
+  });
+  const operation = (overrides: Partial<Operation>): Operation => ({
+    name: 'listPets',
+    httpMethod: 'get',
+    path: '/pets',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: type,
+    errors: [],
+    injectIdempotencyKey: false,
+    ...overrides,
+  });
+  const run = (overrides: Partial<Operation>): Operation =>
+    expandDocUrls(minimalSpec({ services: [{ name: 'Pets', operations: [operation(overrides)] }] }), base).services[0]
+      .operations[0];
+  const expectExpanded = (node: { description?: string; externalDocs?: { url: string; description?: string } }) => {
+    expect(node.description).toBe(expandedText);
+    expect(node.externalDocs).toEqual(absolute);
+  };
+
+  it('walks cookieParams', () => {
+    const op = run({ cookieParams: [param('session')] });
+    expectExpanded(op.cookieParams![0]);
+  });
+
+  it('walks the primary response headers', () => {
+    const op = run({ responseHeaders: [header('X-Rate-Limit')] });
+    expectExpanded(op.responseHeaders![0]);
+  });
+
+  it('walks the headers of each successResponses entry', () => {
+    const op = run({
+      successResponses: [
+        { statusCode: 200, type, headers: [header('X-A')] },
+        { statusCode: 202, type, headers: [header('X-B')], description: text },
+      ],
+    });
+    expectExpanded(op.successResponses![0].headers![0]);
+    expectExpanded(op.successResponses![1].headers![0]);
+    expect(op.successResponses![1].description).toBe(expandedText);
+  });
+
+  it('walks the headers of each error response', () => {
+    const op = run({ errors: [{ statusCode: 429, headers: [header('Retry-After')], description: text }] });
+    expectExpanded(op.errors[0].headers![0]);
+    expect(op.errors[0].description).toBe(expandedText);
+  });
+
+  it('reaches every header collectResponseHeaders yields, and keeps a shared primary list shared', () => {
+    const primary = [header('X-Primary')];
+    const op = run({
+      responseHeaders: primary,
+      successResponses: [
+        { statusCode: 200, type, headers: primary },
+        { statusCode: 202, type, headers: [header('X-Accepted')] },
+      ],
+      errors: [{ statusCode: 404, headers: [header('X-Missing')] }],
+    });
+    const all = collectResponseHeaders(op);
+    expect(all.map((h) => h.name)).toEqual(['X-Primary', 'X-Accepted', 'X-Missing']);
+    for (const h of all) expectExpanded(h);
+    // The same array before, the same (expanded) array after.
+    expect(op.responseHeaders).toBe(op.successResponses![0].headers);
+  });
+
+  it('walks the list envelope companion fields and dataDescription', () => {
+    const op = run({
+      pagination: {
+        strategy: 'cursor',
+        param: 'after',
+        dataPath: 'data',
+        dataDescription: text,
+        itemType: type,
+        envelopeFields: [{ name: 'list_metadata', type, required: false, description: text, externalDocs: relative }],
+      },
+    });
+    expectExpanded(op.pagination!.envelopeFields![0]);
+    expect(op.pagination!.dataDescription).toBe(expandedText);
+  });
+
+  it('walks parameter group members, which stay the same objects as their parameter list entries', () => {
+    const byId = param('id');
+    const byName = param('name');
+    const op = run({
+      queryParams: [byId, byName],
+      parameterGroups: [
+        {
+          name: 'lookup',
+          optional: false,
+          variants: [
+            { name: 'by_id', parameters: [byId] },
+            { name: 'by_name', parameters: [byName], optionalParameters: ['name'] },
+          ],
+        },
+      ],
+    });
+    const [group] = op.parameterGroups!;
+    expectExpanded(group.variants[0].parameters[0]);
+    expectExpanded(group.variants[1].parameters[0]);
+    expect(group.variants[0].parameters[0]).toBe(op.queryParams[0]);
+    expect(group.variants[1].parameters[0]).toBe(op.queryParams[1]);
+    expect(group.variants[1].optionalParameters).toEqual(['name']);
+    // The input is untouched.
+    expect(byId.description).toBe(text);
+  });
+
+  it('walks bodyOwnedQueryParams and headerParams for the description too', () => {
+    const op = run({ bodyOwnedQueryParams: [param('secret')], headerParams: [param('X-Trace')] });
+    expectExpanded(op.bodyOwnedQueryParams![0]);
+    expectExpanded(op.headerParams[0]);
+  });
+
+  it('leaves every optional collection key absent on an operation and service that lack it', () => {
+    const op = run({});
+    for (const key of [
+      'summary',
+      'responseDescription',
+      'bodyOwnedQueryParams',
+      'cookieParams',
+      'parameterGroups',
+      'responseHeaders',
+      'successResponses',
+      'pagination',
+      'externalDocs',
+    ]) {
+      expect(key in op, key).toBe(false);
+    }
+    const service = expandDocUrls(minimalSpec({ services: [{ name: 'Pets', operations: [] }] }), base).services[0];
+    expect('description' in service).toBe(false);
   });
 });
