@@ -21,6 +21,12 @@ export interface ResponseExtractionResult {
   isPaginated: boolean;
   /** Path to the data array within the response envelope (e.g., 'data') */
   dataPath?: string;
+  /**
+   * The data array property's own description (see
+   * `PaginationMeta.dataDescription`). Set only for a list envelope whose
+   * data property declares one.
+   */
+  dataDescription?: string;
   /** TypeRef of individual items in a paginated list */
   itemType?: TypeRef;
   /**
@@ -151,6 +157,9 @@ function extractListResponse(
   const { properties, required } = collectEnvelopeProperties(schema, componentSchemas);
 
   const dataProp = properties[dataPath];
+  // The property's own text, as `buildFieldFromSchema` keeps it for every
+  // companion beside it; an item schema's description belongs to the item.
+  const dataDescription = dataProp?.description;
   if (dataProp?.type === 'array' && dataProp.items) {
     const items = dataProp.items;
     if (items.$ref) {
@@ -179,6 +188,7 @@ function extractListResponse(
     inlineModels,
     isPaginated: true,
     dataPath,
+    ...(dataDescription !== undefined && { dataDescription }),
     itemType: itemTypeRef,
     envelopeFields,
     envelopeCompanions: envelopeCompanions.length > 0 ? envelopeCompanions : undefined,

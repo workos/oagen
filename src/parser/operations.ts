@@ -974,6 +974,7 @@ function buildOperation(
     inlineModels,
     isPaginated,
     dataPath: responseDataPath,
+    dataDescription: responseDataDescription,
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
@@ -996,6 +997,7 @@ function buildOperation(
       param: paginationFromParams?.param ?? 'after',
       limitParam: paginationFromParams?.limitParam,
       dataPath: responseDataPath ?? paginationFromParams?.dataPath,
+      ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
       itemType,
       envelopeFields,
     };
@@ -2159,6 +2161,7 @@ function extractResponses(
   inlineModels: Model[];
   isPaginated: boolean;
   dataPath?: string;
+  dataDescription?: string;
   itemType?: TypeRef;
   envelopeFields?: Field[];
   envelopeCompanions?: EnvelopeCompanion[];
@@ -2169,6 +2172,7 @@ function extractResponses(
   let inlineModels: Model[] = [];
   let isPaginated = false;
   let dataPath: string | undefined;
+  let dataDescription: string | undefined;
   let itemType: TypeRef | undefined;
   let envelopeFields: Field[] | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
@@ -2201,6 +2205,7 @@ function extractResponses(
         inlineModels = result.inlineModels;
         isPaginated = result.isPaginated;
         dataPath = result.dataPath;
+        dataDescription = result.dataDescription;
         itemType = result.itemType;
         envelopeFields = result.envelopeFields;
         envelopeCompanions = result.envelopeCompanions;
@@ -2261,6 +2266,7 @@ function extractResponses(
     inlineModels,
     isPaginated,
     dataPath,
+    dataDescription,
     itemType,
     envelopeFields,
     envelopeCompanions,

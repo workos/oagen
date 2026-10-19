@@ -223,6 +223,16 @@ export interface PaginationMeta {
   param: string;
   limitParam?: string;
   dataPath?: string;
+  /**
+   * The description the document gives the data array property itself — the
+   * one `dataPath` names — so an emitter that documents what a list method
+   * returns can read it here instead of from the document. Like a `Field`'s
+   * `description` it is the property's own text, never the item schema's.
+   *
+   * Present only when the property declares one; absent whenever `dataPath`
+   * is, since there is no property to take it from.
+   */
+  dataDescription?: string;
   itemType: TypeRef;
   /**
    * Every property the list envelope carries besides the data array, in
