@@ -133,34 +133,69 @@ describe('responses written as $ref into components/responses (issue #234)', () 
       ).toThrow('Circular response $ref chain starting at "#/components/responses/A" in 200 response of getPet.');
     });
 
-    it('throws on a ref no component answers, with the status code and operation as context', () => {
-      expect(() =>
-        operations(get('getPet', { '404': { $ref: '#/components/responses/Missing' } }), { responses: {} }),
-      ).toThrow(
-        'Unresolved response $ref "#/components/responses/Missing" in 404 response of getPet: no matching entry under components/responses.',
+    it('warns on a ref no component answers, with the status code and operation as context, and reads the response as before', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const [op] = operations(
+        get('getPet', { '404': { $ref: '#/components/responses/Missing', description: 'Gone' } }),
+        { responses: {} },
       );
-      // No components/responses at all reads the same way.
-      expect(() => operations(get('getPet', { '200': { $ref: '#/components/responses/PetFound' } }))).toThrow(
-        'Unresolved response $ref "#/components/responses/PetFound" in 200 response of getPet',
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Unresolved response $ref "#/components/responses/Missing" in 404 response of getPet: no matching entry under components/responses',
+        ),
+      );
+      // As on main before refs were resolved: untyped, no headers, the sibling description kept.
+      expect(op.errors).toEqual([{ statusCode: 404, type: undefined }]);
+
+      // No components/responses at all reads the same way: the 200 is `unknown`.
+      const [noComponents] = operations(get('getPet', { '200': { $ref: '#/components/responses/PetFound' } }));
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Unresolved response $ref "#/components/responses/PetFound" in 200 response of getPet'),
+      );
+      expect(noComponents.response).toEqual({ kind: 'primitive', type: 'unknown' });
+      expect(noComponents).not.toHaveProperty('responseHeaders');
+    });
+
+    it('reads a pointer outside components/responses (a bundler-written path pointer) as it did before, with a warning', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const ops = operations({
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: { '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } } },
+          },
+        },
+        '/pets2': {
+          get: { operationId: 'listPets2', responses: { '200': { $ref: '#/paths/~1pets/get/responses/200' } } },
+        },
+      });
+      expect(ops.find((o) => o.name === 'listPets2')?.response).toEqual({ kind: 'primitive', type: 'unknown' });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Unresolved response $ref "#/paths/~1pets/get/responses/200" in 200 response of listPets2',
+        ),
       );
     });
 
-    it('names an operationId-less operation by method and path in the error', () => {
-      expect(() =>
-        operations(
-          { '/pets/{petId}': { delete: { responses: { '200': { $ref: '#/components/responses/Missing' } } } } },
-          { responses: {} },
-        ),
-      ).toThrow('in 200 response of DELETE /pets/{petId}');
+    it('names an operationId-less operation by method and path in the warning', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      operations(
+        { '/pets/{petId}': { delete: { responses: { '200': { $ref: '#/components/responses/Missing' } } } } },
+        { responses: {} },
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('in 200 response of DELETE /pets/{petId}'));
     });
 
     it('does not resolve a ref into another section off a same-named response component', () => {
-      expect(() =>
-        operations(get('getPet', { '200': { $ref: '#/components/schemas/Pet' } }), {
-          schemas: { Pet: PET_SCHEMA },
-          responses: { Pet: petFound },
-        }),
-      ).toThrow('Unresolved response $ref "#/components/schemas/Pet" in 200 response of getPet');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const [op] = operations(get('getPet', { '200': { $ref: '#/components/schemas/Pet' } }), {
+        schemas: { Pet: PET_SCHEMA },
+        responses: { Pet: petFound },
+      });
+      expect(op.response).toEqual({ kind: 'primitive', type: 'unknown' });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Unresolved response $ref "#/components/schemas/Pet" in 200 response of getPet'),
+      );
     });
 
     it('keeps the sibling description beside the $ref on the resolved response (OAS 3.1)', async () => {
