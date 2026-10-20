@@ -2575,7 +2575,7 @@ describe('undiscriminated inline variants are named from their content', () => {
     expectConsistent(ir, []);
     // Error unions are only typed, never extracted, but their variant names follow the same rule.
     expect(op.errors).toEqual([
-      { statusCode: 400, type: union([model('Error400'), model('Error400WithError')], 'anyOf') },
+      { statusCode: 400, type: union([model('Error400'), model('Error400WithError')], 'anyOf'), description: 'bad' },
     ]);
   });
 });
