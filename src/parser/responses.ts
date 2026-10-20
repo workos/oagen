@@ -96,8 +96,11 @@ export function classifyAndExtractResponse(
       if (override === undefined || override === envelope.dataPath) {
         return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
       }
+      // The full path is excluded, not its root: a stop field beside the
+      // nested array (`pagination.has_more` next to `pagination.items`) stays
+      // visible, and the array itself is never a stop field.
       const { properties } = collectEnvelopeProperties(schema, componentSchemas);
-      const endOfIteration = detectEndOfIteration(properties, override.split('.')[0], componentSchemas);
+      const endOfIteration = detectEndOfIteration(properties, override, componentSchemas);
       return {
         ...extractDirectResource(schema, contextName, componentSchemas),
         ...(endOfIteration && { endOfIteration }),

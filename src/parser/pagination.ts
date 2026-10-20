@@ -263,7 +263,7 @@ function classifyEndField(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration['kind'] | undefined {
-  const resolved = resolveComponentSchemaRef(schema, componentSchemas) ?? schema;
+  const resolved = unwrapNullableSchema(schema, componentSchemas);
   if (HAS_MORE_FIELDS.includes(name)) return hasType(resolved, 'boolean') ? 'hasMore' : undefined;
   if (TOTAL_PAGES_FIELDS.includes(name)) return isNumeric(resolved) ? 'totalPages' : undefined;
   if (TOTAL_COUNT_FIELDS.includes(name)) return isNumeric(resolved) ? 'totalCount' : undefined;
@@ -276,6 +276,20 @@ function hasType(schema: SchemaObject, type: string): boolean {
 
 function isNumeric(schema: SchemaObject): boolean {
   return hasType(schema, 'integer') || hasType(schema, 'number');
+}
+
+/**
+ * The schema a stop field is typed from: its `$ref` followed, and a nullable
+ * `oneOf`/`anyOf` wrapper (`[{ type: 'boolean' }, { type: 'null' }]`)
+ * opened onto its one non-null variant, which may itself be a `$ref`. A type
+ * list with `'null'` needs nothing: `hasType` reads through it.
+ */
+function unwrapNullableSchema(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): SchemaObject {
+  const resolved = resolveComponentSchemaRef(schema, componentSchemas) ?? schema;
+  const variants = resolved.oneOf ?? resolved.anyOf;
+  if (!variants) return resolved;
+  const nonNull = variants.filter((variant) => !isNullSchema(variant));
+  return nonNull.length === 1 ? unwrapNullableSchema(nonNull[0], componentSchemas) : resolved;
 }
 
 function isNullSchema(schema: SchemaObject): boolean {
@@ -432,31 +446,17 @@ export function applyPaginationOverride(
 
   if (merged.strategy === 'none') return undefined;
 
-  const strategy = merged.strategy ?? detected?.strategy;
-  if (!strategy) {
-    warn(`${where} sets no strategy and none was detected — ignoring the override`);
+  const resolved = resolveOverrideParams(detected, merged, queryParams);
+  if ('problem' in resolved) {
+    warn(`${where}${resolved.problem}`);
     return detected;
   }
-  const param = merged.param ?? declaredParamFor(strategy, queryParams) ?? detected?.param;
-  if (!param) {
-    warn(`${where}: strategy "${strategy}" needs a param, and none was given or detected — ignoring the override`);
-    return detected;
-  }
-  const limitParam = merged.limitParam ?? detected?.limitParam;
-  // The resolved values are checked, not only the explicit ones: a `param`
-  // detection invented (the envelope fallback's `after`) is as undeclared as
-  // a misspelled one.
-  for (const [key, name] of [
-    ['param', param],
-    ['limitParam', limitParam],
-  ] as const) {
-    if (name !== undefined && !queryParams.some((p) => p.name === name)) {
-      warn(`${where}: ${key} "${name}" is not a query parameter of the operation — ignoring the override`);
-      return detected;
-    }
-  }
+  const { strategy, param, limitParam } = resolved;
 
   const dataPath = merged.dataPath ?? detected?.dataPath;
+  // The data array's description belongs to the array detection unwrapped;
+  // it survives an override that keeps that array.
+  const dataDescription = dataPath === detected?.dataPath ? detected?.dataDescription : undefined;
   const endOfIteration = merged.endOfIteration ?? detected?.endOfIteration;
   // The page base belongs to the page parameter actually in use, which the
   // override may have swapped, so it is derived from that parameter rather
@@ -470,10 +470,46 @@ export function applyPaginationOverride(
     ...(limitParam !== undefined && { limitParam }),
     ...(pageStart !== undefined && { pageStart }),
     ...(dataPath !== undefined && { dataPath }),
+    ...(dataDescription !== undefined && { dataDescription }),
     itemType: extras.overrideItemType ?? detected?.itemType ?? (response.kind === 'array' ? response.items : response),
     ...(detected?.envelopeFields && { envelopeFields: detected.envelopeFields }),
     ...(endOfIteration && { endOfIteration }),
   };
+}
+
+/**
+ * The strategy, `param` and `limitParam` an override resolves to against
+ * what was detected, or the reason it cannot apply (the text of the warning
+ * `applyPaginationOverride` emits). Shared with `buildOperation`, which asks
+ * before classification whether an override will be usable, so an override
+ * that will be rejected never changes how the response is read.
+ */
+export function resolveOverrideParams(
+  detected: PaginationMeta | undefined,
+  merged: PaginationHint,
+  queryParams: Parameter[],
+): { strategy: PaginationStrategy; param: string; limitParam?: string } | { problem: string } {
+  const strategy = merged.strategy === 'none' ? undefined : (merged.strategy ?? detected?.strategy);
+  if (!strategy) return { problem: ' sets no strategy and none was detected — ignoring the override' };
+  const param = merged.param ?? declaredParamFor(strategy, queryParams) ?? detected?.param;
+  if (!param) {
+    return {
+      problem: `: strategy "${strategy}" needs a param, and none was given or detected — ignoring the override`,
+    };
+  }
+  const limitParam = merged.limitParam ?? detected?.limitParam;
+  // The resolved values are checked, not only the explicit ones: a `param`
+  // detection invented (the envelope fallback's `after`) is as undeclared as
+  // a misspelled one.
+  for (const [key, name] of [
+    ['param', param],
+    ['limitParam', limitParam],
+  ] as const) {
+    if (name !== undefined && !queryParams.some((p) => p.name === name)) {
+      return { problem: `: ${key} "${name}" is not a query parameter of the operation — ignoring the override` };
+    }
+  }
+  return { strategy, param, ...(limitParam !== undefined && { limitParam }) };
 }
 
 /** The first query parameter the operation declares under one of `strategy`'s own parameter names, if any. */

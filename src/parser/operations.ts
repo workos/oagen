@@ -36,6 +36,7 @@ import {
   detectPagination,
   derivePageStart,
   resolvePaginationOverride,
+  resolveOverrideParams,
   applyPaginationOverride,
   resolveDataPathItemType,
 } from './pagination.js';
@@ -1150,6 +1151,9 @@ function extractBodyParameterGroups(
   return groups.length > 0 ? groups : undefined;
 }
 
+/** A response placeholder for detecting a strategy from the query parameters alone. */
+const UNKNOWN_RESPONSE: TypeRef = { kind: 'primitive', type: 'unknown' };
+
 function buildOperation(
   method: HttpMethod,
   path: string,
@@ -1265,6 +1269,23 @@ function buildOperation(
   // `dataPath` is resolved against the response while its schema is at hand.
   let paginationOverride = resolvePaginationOverride({ extension: op['x-pagination'], hint: paginationHint }, opLabel);
   const paginationDisabled = paginationOverride?.hint.strategy === 'none';
+  // Whether the override can apply is decided here, before the response is
+  // read: one that would be rejected (a `param` the operation does not
+  // declare, no strategy from anywhere) must not keep an envelope as a
+  // wrapper that detection then reads as the list. What it is checked
+  // against is the pagination the query parameters alone yield — the
+  // envelope fallback's invented `after` never makes an override usable.
+  if (paginationOverride && !paginationDisabled) {
+    const resolved = resolveOverrideParams(
+      detectPagination(UNKNOWN_RESPONSE, queryParams, undefined, { pageStartOf }) ?? undefined,
+      paginationOverride.hint,
+      queryParams,
+    );
+    if ('problem' in resolved) {
+      console.warn(`[oagen] Warning: ${paginationOverride.source} on ${opLabel}${resolved.problem}`);
+      paginationOverride = undefined;
+    }
+  }
   const {
     response,
     responseHeaders,

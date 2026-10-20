@@ -98,6 +98,15 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
   });
 
+  it('reads a stop field through a nullable oneOf wrapper, as through a type list (Greptile)', async () => {
+    const wrapped = envelope({ has_more: { oneOf: [{ type: 'boolean' }, { type: 'null' }] } });
+    const op = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(wrapped) })));
+    expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+    const listed = envelope({ has_more: { type: ['boolean', 'null'] } });
+    const op2 = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(listed) })));
+    expect(op2.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+  });
+
   it('reads the end-of-iteration field through a $ref companion', async () => {
     const schema = envelope({ meta: { $ref: '#/components/schemas/Meta' } });
     const components = { schemas: { Meta: { type: 'object', properties: { total_pages: { type: 'integer' } } } } };
@@ -458,6 +467,64 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(itemModel?.fields.map((f) => f.name)).toEqual(['name', 'age']);
       expect(ir.models.filter((m) => m.fields.map((f) => f.name).join() === 'name,age')).toHaveLength(1);
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('leaves the response as detection reads it when the override will be rejected anyway (Greptile)', async () => {
+      // A usable alternate `dataPath` beside a `param` the operation does not declare:
+      // the override is rejected, so the envelope must stay unwrapped on `data`
+      // rather than kept as a wrapper that detection then reads as the list.
+      const body = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          result: { type: 'object', properties: { items: { type: 'array', items: { type: 'integer' } } } },
+          total: { type: 'integer' },
+        },
+      };
+      const op = onlyOperation(
+        await parseJson(
+          petsSpec({ responses: jsonResponse(body), 'x-pagination': { dataPath: 'result.items', param: 'typo' } }),
+        ),
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('param "typo" is not a query parameter'));
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(op.pagination).toMatchObject({ strategy: 'page', param: 'page', dataPath: 'data' });
+      expect(op.pagination?.itemType).toEqual({ kind: 'primitive', type: 'string' });
+    });
+
+    it('keeps a stop field beside the nested array an override selects (Greptile)', async () => {
+      const body = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          pagination: {
+            type: 'object',
+            properties: { items: { type: 'array', items: { type: 'integer' } }, has_more: { type: 'boolean' } },
+          },
+        },
+      };
+      const op = onlyOperation(
+        await parseJson(petsSpec({ responses: jsonResponse(body), 'x-pagination': { dataPath: 'pagination.items' } })),
+      );
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(op.pagination).toMatchObject({
+        dataPath: 'pagination.items',
+        itemType: { kind: 'primitive', type: 'integer' },
+        endOfIteration: { kind: 'hasMore', path: 'pagination.has_more' },
+      });
+    });
+
+    it('keeps the data description through an override that keeps the detected array (Greptile)', async () => {
+      const described = envelope({ total_pages: { type: 'integer' } });
+      (described.properties.pets as Record<string, unknown>).description = 'The pets on this page.';
+      const op = onlyOperation(
+        await parseJson(petsSpec({ responses: jsonResponse(described), 'x-pagination': { strategy: 'page' } })),
+      );
+      expect(op.pagination).toMatchObject({
+        strategy: 'page',
+        dataPath: 'pets',
+        dataDescription: 'The pets on this page.',
+      });
     });
 
     it('keeps unwrapping when the override restates the detected path, and when it names nothing', async () => {
