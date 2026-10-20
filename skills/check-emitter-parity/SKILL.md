@@ -89,6 +89,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `description` — API-level description for the root client class doc comment
 - `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults)
+- `webhooks` — Requests the API sends to its users (OpenAPI 3.1 `webhooks`), each with a payload type and the headers it carries
 
 #### Service
 
@@ -154,7 +155,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.servers`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -238,6 +239,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ApiSpec.description`        | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                     |
 | `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
+| `ApiSpec.webhooks`           | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                      |
 | `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
 | `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |

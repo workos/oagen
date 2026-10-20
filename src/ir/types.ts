@@ -65,6 +65,15 @@ export interface ApiSpec {
   baseUrl: string;
   servers?: ServerEntry[];
   services: Service[];
+  /**
+   * The requests the API sends to its users, from the document's top-level
+   * `webhooks` map (OpenAPI 3.1), in document order. Absent — not an empty
+   * list — when the document declares none, so the IR of a document without
+   * webhooks is unchanged. A webhook is not an SDK method: it belongs to no
+   * service, gets no resolved operation name, and is untouched by operation
+   * hints and mount rules. See `Webhook`.
+   */
+  webhooks?: Webhook[];
   models: Model[];
   enums: Enum[];
   auth?: AuthScheme[];
@@ -76,6 +85,75 @@ export interface ApiSpec {
   security?: SecurityRequirementSet[];
   /** Language-agnostic runtime policies (retry, errors, telemetry, etc.). */
   sdk: SdkBehavior;
+}
+
+/**
+ * A request the API sends to its users: one HTTP method of one entry in the
+ * document's top-level `webhooks` map (OpenAPI 3.1). An entry whose path item
+ * declares several methods yields one `Webhook` per method, so `name` alone
+ * does not identify a webhook; `name` + `httpMethod` does.
+ *
+ * Everything here is read from the receiver's side of the wire: the request
+ * body is the payload the receiver is handed, the parameters are the headers
+ * (signatures, event types) and query values the request carries, and
+ * `responses` are the status codes the sender expects back. An emitter uses
+ * this to generate a payload type or a typed handler per event. A webhook is
+ * never an SDK method: it has no path, belongs to no `Service`, and gets no
+ * resolved operation name.
+ */
+export interface Webhook {
+  /** The key under `webhooks`, verbatim (`petAdopted`, `user.created`). */
+  name: string;
+  /** The operation's `operationId`, when the document declares one. */
+  operationId?: string;
+  httpMethod: HttpMethod;
+  /** The document's `summary` alone, as on `Operation.summary`. */
+  summary?: string;
+  /** Combined doc text, built exactly as `Operation.description` is. */
+  description?: string;
+  /** Present, and `true`, only when the document marks the webhook deprecated. */
+  deprecated?: boolean;
+  /** The operation's `tags`, in document order; present only when non-empty. */
+  tags?: string[];
+  /** Header parameters the request carries, typed like `Operation.headerParams`. */
+  headerParams: Parameter[];
+  /** Query parameters the request carries, typed like `Operation.queryParams`. */
+  queryParams: Parameter[];
+  /** Cookie parameters; present only when the document declares at least one. */
+  cookieParams?: Parameter[];
+  /**
+   * The payload the receiver is handed. An inline object schema is
+   * materialized as a model named `<Stem>Payload`, where the stem is the
+   * `operationId` when there is one and the webhook's name otherwise (see the
+   * parser's `resolveWebhookModelStems` for how the stem is kept unique).
+   * Absent when the operation declares no `requestBody` or one with no usable
+   * content.
+   */
+  requestBody?: TypeRef;
+  /** How the payload is encoded, read like `Operation.requestBodyEncoding`. */
+  requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+  /** Present, and `true`, only when the document marks the request body `required`. */
+  requestBodyRequired?: boolean;
+  /**
+   * The responses the sender expects from the receiver, in document order:
+   * one entry per three-digit status code the operation declares. `default`
+   * and range (`2XX`) keys are not carried. Body schemas on these responses
+   * are not carried either: a webhook response is an acknowledgement, and
+   * typing it would mint models no handler needs.
+   */
+  responses: WebhookResponse[];
+  /**
+   * The security the request carries, mirroring the OpenAPI document exactly
+   * as `Operation.security` does: `undefined` inherits `ApiSpec.security`,
+   * `[]` means none, otherwise one alternative per requirement object.
+   */
+  security?: SecurityRequirementSet[];
+}
+
+/** One status code a webhook's sender expects back, with the document's description of it. */
+export interface WebhookResponse {
+  statusCode: number;
+  description?: string;
 }
 
 /** A service groups related operations (maps to an SDK resource class) */
@@ -931,6 +1009,23 @@ export function collectFallbackResponseTypes(op: Operation): TypeRef[] {
     if (range.type) result.push(range.type);
   }
   return result;
+}
+
+/**
+ * Every type reference a webhook carries: its parameters' types and its
+ * request body. Every pass that walks an operation's type refs (reachability,
+ * ref rewriting and validation, the differ's direction index, inline-enum
+ * collection) walks a webhook's through this, so a model reached only through
+ * a webhook payload or header is treated the way one reached through an
+ * operation is, and a field added to `Webhook` later has one place to join.
+ */
+export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
+  const refs: TypeRef[] = [];
+  for (const param of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
+    refs.push(param.type);
+  }
+  if (webhook.requestBody) refs.push(webhook.requestBody);
+  return refs;
 }
 
 /**

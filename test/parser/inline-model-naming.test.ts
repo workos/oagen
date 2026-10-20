@@ -93,7 +93,7 @@ describe('inline model naming without operationId (issue #188)', () => {
             "response": "NotesPostResponse",
           },
           {
-            "name": "createPin",
+            "name": "pinNote",
             "path": "/notes/{id}/pin",
             "requestBody": undefined,
             "response": "NotesByIdPinPostResponse",

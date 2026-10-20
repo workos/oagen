@@ -1,5 +1,5 @@
 import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
-import { collectResponseHeaders, collectFallbackResponseTypes } from '../ir/types.js';
+import { collectResponseHeaders, collectFallbackResponseTypes, collectWebhookTypeRefs } from '../ir/types.js';
 
 /**
  * Which side of the wire a model sits on, from the caller's point of view.
@@ -57,6 +57,10 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
         for (const type of collectFallbackResponseTypes(op)) responseSeeds.push(type);
       }
     }
+    // A webhook's payload and parameters are received, never constructed, by
+    // the SDK user, so they are response-facing: a newly required payload
+    // field is something the sender now always provides.
+    for (const webhook of spec.webhooks ?? []) responseSeeds.push(...collectWebhookTypeRefs(webhook));
   }
 
   const request = reachableModels(requestSeeds, models);
