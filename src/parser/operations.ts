@@ -320,6 +320,7 @@ export function extractOperations(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   componentResponses?: Record<string, Record<string, unknown>>,
+  componentFieldModels?: Model[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -355,6 +356,12 @@ export function extractOperations(
   const headerModelRegistry: HeaderModelRegistry = new Map(
     (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
   );
+  // The inline models the components' own fields mint (a nested object, a
+  // map's values) are component-owned too but are not among `componentModels`
+  // (see parseSpec), so they are registered beside them: a titled fallback
+  // variant, or a header, named like one steps around it instead of the
+  // later field merge dropping the component's definition for the fallback's.
+  registerInlineModels(headerModelRegistry, componentFieldModels ?? []);
   // Headers with a schema are typed after the loop (materializeHeaderModels),
   // when every inline model a header must not be confused with is known.
   const pendingHeaderModels: PendingHeaderModel[] = [];

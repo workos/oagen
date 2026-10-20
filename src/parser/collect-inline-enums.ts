@@ -3,11 +3,20 @@ import { walkTypeRef, collectFallbackResponseTypes, collectWebhookTypeRefs } fro
 import { collectInlineEnumFromRef } from './schemas.js';
 import { STATUS_RANGE_LABELS } from './responses.js';
 
+/**
+ * Promote the inline enums a model's fields declare to top-level enums. A
+ * field enum is named from its model and field alone
+ * (`ListPetsDefaultResponseStatus`), a name a component enum — or the same
+ * field of another model — may already own with other values; such a field
+ * is renamed to a distinct name before it is promoted (`…Status2`), the way
+ * header and webhook enums are, rather than left pointing at the other
+ * values. A taken name with the same values is shared.
+ */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
   for (const model of models) {
     for (const field of model.fields) {
-      collectInlineEnumFromRef(field.type, enums, enumNames);
+      collectDistinctEnums(field.type, undefined, enums, enumNames);
     }
   }
 }

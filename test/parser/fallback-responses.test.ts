@@ -663,6 +663,26 @@ describe('fallback body enums reach spec.enums', () => {
     expect(enumOf(ir, 'ListPetsDefaultResponseStatus')).toEqual(['open', 'closed']);
   });
 
+  it('numbers a field enum of an inline body model whose name a component enum with other values owns', async () => {
+    const spec = petsSpec({
+      '200': ok,
+      default: {
+        description: 'd',
+        content: json({ type: 'object', properties: { status: { type: 'string', enum: ['c', 'd'] } } }),
+      },
+    }) as { components: { schemas: Record<string, unknown> } };
+    spec.components.schemas['ListPetsDefaultResponseStatus'] = { type: 'string', enum: ['a', 'b'] };
+    const ir = await parseWithoutWarnings(spec);
+
+    // The component enum keeps its name and values; the field's enum is
+    // promoted beside it under a distinct name, not folded into it.
+    expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({
+      status: { kind: 'enum', name: 'ListPetsDefaultResponseStatus2', values: ['c', 'd'] },
+    });
+    expect(enumOf(ir, 'ListPetsDefaultResponseStatus')).toEqual(['a', 'b']);
+    expect(enumOf(ir, 'ListPetsDefaultResponseStatus2')).toEqual(['c', 'd']);
+  });
+
   it('numbers a body enum whose name a component enum with other values owns, and shares one with the same values', async () => {
     const components = { ListPetsDefaultResponse: { type: 'string', enum: ['a', 'b'] } };
     const withSchemas = (responses: Record<string, unknown>) => {
@@ -844,6 +864,66 @@ describe('names no stem can move (titled variants) terminate and step around the
 
       expect(only(ir).defaultResponse).toEqual({ type: union('Circle'), description: 'd' });
       expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Error', 'Pet', 'Square']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    'a titled variant clashing with a model a component field mints (a map value) takes its context-qualified name',
+    async () => {
+      // `Report.details` mints `ReportDetail` from its map values, a model
+      // `parseSpec` reads from the components' fields rather than from
+      // `components/schemas` directly, so it must be reserved by name before
+      // the fallback is named or the field merge would keep the fallback's
+      // shape under the component's name.
+      const ir = await parseWithoutWarnings(
+        withComponent(
+          'Report',
+          {
+            type: 'object',
+            properties: {
+              details: {
+                type: 'object',
+                additionalProperties: { type: 'object', properties: { reason: { type: 'string' } } },
+              },
+            },
+          },
+          {
+            '200': ok,
+            default: {
+              description: 'd',
+              content: json({
+                oneOf: [
+                  titled('ReportDetail', 'detail', { message: { type: 'string' } }),
+                  titled('Other', 'other', { code: { type: 'number' } }),
+                ],
+              }),
+            },
+          },
+        ),
+      );
+      const types = fieldTypesByModel(ir.models);
+
+      expect(only(ir).defaultResponse).toEqual({
+        type: {
+          kind: 'union',
+          variants: [model('ReportDetailListPetsDefaultResponse'), model('Other')],
+          compositionKind: 'oneOf',
+          discriminator: {
+            property: 'kind',
+            mapping: { detail: 'ReportDetailListPetsDefaultResponse', other: 'Other' },
+          },
+        },
+        description: 'd',
+      });
+      expect(types['Report']).toEqual({ details: { kind: 'map', valueType: model('ReportDetail') } });
+      expect(types['ReportDetail']).toEqual({ reason: str });
+      expect(types['ReportDetailListPetsDefaultResponse']).toEqual({
+        kind: { kind: 'literal', value: 'detail' },
+        message: str,
+      });
+      expect(types['Other']).toEqual({ kind: { kind: 'literal', value: 'other' }, code: num });
+      expectConsistent(ir, ['Pet', 'Error', 'Report']);
     },
     HANG_GUARD_MS,
   );
