@@ -1136,6 +1136,24 @@ describe('response content types', () => {
       expect(values('GetReportApplicationVndApiJsonResponseMetaLevel2')).toEqual(['low', 'high']);
     });
 
+    it('renames a nested enum of the primary application/json body the same way (Greptile)', async () => {
+      const spec = await parseDocument(
+        document(
+          {
+            '/reports': getWith('getReport', {
+              'application/json': { schema: obj({ status: { type: 'string', enum: ['open', 'closed'] } }) },
+            }),
+          },
+          { GetReportResponseStatus: { type: 'string', enum: ['x', 'y'] } },
+        ),
+      );
+      const field = spec.models.find((m) => m.name === 'GetReportResponse')?.fields.find((f) => f.name === 'status');
+      expect(field?.type).toMatchObject({ kind: 'enum', name: 'GetReportResponseStatus2' });
+      const values = (name: string) => spec.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+      expect(values('GetReportResponseStatus')).toEqual(['x', 'y']);
+      expect(values('GetReportResponseStatus2')).toEqual(['open', 'closed']);
+    });
+
     it("renames a nested enum of a header's model the same way", async () => {
       // A singular service name, so the component's name survives cleanSchemaName
       // unchanged and genuinely collides with the header model's field enum.

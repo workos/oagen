@@ -2,11 +2,18 @@ import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef } from '.
 import { walkTypeRef, collectResponseBodyTypes, collectModelRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
+/**
+ * Promote the inline enums of every model's fields. Collision-aware like the
+ * operation pass below: an inline enum whose name a component enum already
+ * owns with other values (`GetReportResponse.status` beside a component
+ * `GetReportResponseStatus`) is renamed before it is promoted, so the field
+ * never points at the component's values; the same values share the name.
+ */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
   for (const model of models) {
     for (const field of model.fields) {
-      collectInlineEnumFromRef(field.type, enums, enumNames);
+      collectDistinctEnums(field.type, undefined, enums, enumNames);
     }
   }
 }
