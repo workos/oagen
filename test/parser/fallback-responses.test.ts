@@ -123,7 +123,7 @@ describe('the default response (issue #214)', () => {
 
     expect(op.response).toEqual(model('GetPetResponse'));
     // `errors` is exactly what it was: the default is not an entry without a code.
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('Error') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'Not found', type: model('Error') }]);
     expect(op.defaultResponse).toEqual({ type: model('Error') });
     expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'GetPetResponse']);
     expectConsistent(ir, []);
@@ -372,7 +372,7 @@ describe('range responses (1XX–5XX)', () => {
       ),
     );
 
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('Error') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'missing', type: model('Error') }]);
     expect(op.rangeResponses).toEqual([{ range: '4XX', type: model('Error') }]);
     expect(op.defaultResponse).toEqual({});
   });

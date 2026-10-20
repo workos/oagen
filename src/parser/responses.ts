@@ -5,11 +5,14 @@ import {
   schemaToTypeRef,
   buildFieldFromSchema,
   constraintsEntry,
+  deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
+  collapsedNullableBranch,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import { externalDocsEntry } from './external-docs.js';
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -20,6 +23,12 @@ export interface ResponseExtractionResult {
   isPaginated: boolean;
   /** Path to the data array within the response envelope (e.g., 'data') */
   dataPath?: string;
+  /**
+   * The data array property's own description (see
+   * `PaginationMeta.dataDescription`). Set only for a list envelope whose
+   * data property declares one.
+   */
+  dataDescription?: string;
   /** TypeRef of individual items in a paginated list */
   itemType?: TypeRef;
   /**
@@ -164,6 +173,9 @@ function extractListResponse(
   const { properties, required } = collectEnvelopeProperties(schema, componentSchemas);
 
   const dataProp = properties[dataPath];
+  // The property's own text, as `buildFieldFromSchema` keeps it for every
+  // companion beside it; an item schema's description belongs to the item.
+  const dataDescription = dataProp?.description;
   if (dataProp?.type === 'array' && dataProp.items) {
     const items = dataProp.items;
     if (items.$ref) {
@@ -192,6 +204,7 @@ function extractListResponse(
     inlineModels,
     isPaginated: true,
     dataPath,
+    ...(dataDescription !== undefined && { dataDescription }),
     itemType: itemTypeRef,
     envelopeFields,
     envelopeCompanions: envelopeCompanions.length > 0 ? envelopeCompanions : undefined,
@@ -391,7 +404,12 @@ function extractWrappedResource(
 
     if (objectVariant) {
       const modelName = deriveModelName(objectVariant, resourceName);
-      inlineModels.push(...extractInlineModel(modelName, objectVariant, componentSchemas));
+      // `oneOf: [object, null]` is a nullable wrapper: the model built from
+      // its one branch takes the wrapper's `deprecated` and limits, as every
+      // other nullable unwrap gives it (`collapsedNullableBranch`); a
+      // multi-variant union's variant is built as written.
+      const source = collapsedNullableBranch(propSchema) ?? objectVariant;
+      inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
       const hasNullVariant = propSchema.oneOf.some(
         (v) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
@@ -481,12 +499,17 @@ function extractDirectResource(
 
     if (Object.keys(mergedProperties).length > 0) {
       // Carry the wrapper's limits, conjoined with its inline members', so the
-      // rebuilt schema still declares what an instance must satisfy.
+      // rebuilt schema still declares what an instance must satisfy, and the
+      // wrapper's own link, as a component `allOf` model carries it; a
+      // member's stays on that member (a `$ref` member's on its component).
       const merged: SchemaObject = {
         type: 'object',
         properties: mergedProperties,
         required: mergedRequired,
+        // The wrapper's own flag, as for a component `allOf` model.
+        ...deprecatedEntry(schema),
         ...extractConstraints(schema),
+        ...externalDocsEntry(schema.externalDocs),
       };
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
@@ -604,5 +627,15 @@ function extractInlineModel(
   // the rules.
   extractInlineModelsFromProperties(schema, nestedModels, name, componentSchemas);
 
-  return [{ name, description: schema.description, fields, ...constraintsEntry(schema) }, ...nestedModels];
+  return [
+    {
+      name,
+      description: schema.description,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...deprecatedEntry(schema),
+      ...constraintsEntry(schema),
+    },
+    ...nestedModels,
+  ];
 }

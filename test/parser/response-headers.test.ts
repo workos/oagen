@@ -116,6 +116,7 @@ describe('response headers', () => {
       expect(op.errors).toMatchInlineSnapshot(`
         [
           {
+            "description": "throttled",
             "headers": [
               {
                 "deprecated": undefined,
@@ -254,10 +255,12 @@ describe('response headers', () => {
       expect(op.errors).toMatchInlineSnapshot(`
         [
           {
+            "description": "missing",
             "statusCode": 404,
             "type": undefined,
           },
           {
+            "description": "throttled",
             "headers": [
               {
                 "deprecated": undefined,
