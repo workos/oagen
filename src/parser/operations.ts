@@ -43,7 +43,7 @@ import { extractSecurityRequirements, type RawSecurityRequirements } from './sec
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 
-interface PathItem {
+export interface PathItem {
   get?: OperationObject;
   post?: OperationObject;
   put?: OperationObject;
@@ -62,7 +62,7 @@ interface ParameterGroupExtension {
   optionalFields?: Record<string, string[]>;
 }
 
-interface OperationObject {
+export interface OperationObject {
   operationId?: string;
   summary?: string;
   description?: string;
@@ -92,7 +92,7 @@ interface ExampleObject {
   $ref?: string;
 }
 
-interface ParameterObject {
+export interface ParameterObject {
   name: string;
   in: 'path' | 'query' | 'header' | 'cookie';
   required?: boolean;
@@ -114,7 +114,7 @@ interface ParameterObject {
  * `components/parameters` are never inlined — they arrive here exactly as
  * written in the spec and must be resolved before use.
  */
-type RawParameterObject = ParameterObject | { $ref: string };
+export type RawParameterObject = ParameterObject | { $ref: string };
 
 /**
  * Resolve a raw parameter entry to a concrete Parameter Object, following
@@ -127,7 +127,7 @@ type RawParameterObject = ParameterObject | { $ref: string };
  * which used to drop any entry with no `in` field — every `$ref` object has
  * none).
  */
-function resolveParameterRef(
+export function resolveParameterRef(
   raw: RawParameterObject,
   componentParameters: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
@@ -158,7 +158,7 @@ function resolveParameterRef(
   return current;
 }
 
-interface RequestBodyObject {
+export interface RequestBodyObject {
   required?: boolean;
   content?: Record<string, { schema?: SchemaObject }>;
 }
@@ -168,7 +168,7 @@ interface RequestBodyObject {
  * Reference Object into `components/requestBodies`. The bundler never inlines
  * those refs (`dereference: false`), so they must be resolved before use.
  */
-type RawRequestBodyObject = RequestBodyObject | { $ref: string };
+export type RawRequestBodyObject = RequestBodyObject | { $ref: string };
 
 /**
  * Resolve a raw request body to a concrete Request Body Object, following
@@ -177,7 +177,7 @@ type RawRequestBodyObject = RequestBodyObject | { $ref: string };
  * silently losing the body — and with it the body-ownership rule that keeps
  * duplicated secrets out of the query string.
  */
-function resolveRequestBodyRef(
+export function resolveRequestBodyRef(
   raw: RawRequestBodyObject | undefined,
   componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
@@ -279,13 +279,13 @@ function resolveHeaderRef(
   return description === undefined ? current : { ...current, description };
 }
 
-interface ResponseObject {
+export interface ResponseObject {
   description?: string;
   headers?: Record<string, RawHeaderObject>;
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
-const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
+export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 export interface OperationExtractionResult {
   services: Service[];
@@ -698,7 +698,7 @@ function operationIdModelName(operationId: string, suffix: 'Request' | 'Response
  * step of cleanSchemaName is a global replace or acts on the leading word, so
  * this is a true prefix of each of those names. Used to reserve them all.
  */
-function operationIdModelBase(operationId: string): string {
+export function operationIdModelBase(operationId: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)));
 }
 
@@ -1512,7 +1512,7 @@ function headerOperationQualifier(
  * with `description: ""` yields `"List pets"` rather than `""`. Text that has
  * content is kept verbatim, surrounding whitespace included.
  */
-function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
+export function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
   const presentSummary = presentText(summary);
   const presentDescription = presentText(description);
   if (presentSummary && presentDescription && presentSummary !== presentDescription) {
@@ -1522,11 +1522,11 @@ function buildDescription(summary: string | undefined, description: string | und
 }
 
 /** The text itself when it has non-whitespace content, otherwise `undefined`. */
-function presentText(text: string | undefined): string | undefined {
+export function presentText(text: string | undefined): string | undefined {
   return typeof text === 'string' && text.trim() !== '' ? text : undefined;
 }
 
-function extractParams(
+export function extractParams(
   params: ParameterObject[],
   location: 'path' | 'query' | 'header' | 'cookie',
   operationContext?: string,
@@ -1726,7 +1726,7 @@ function resolveSchemaRefObject(
   return componentSchemas[match[1]];
 }
 
-type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+export type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
 
 /** HTTP methods whose request body is the primary parameter carrier. */
 const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['post', 'put', 'patch']);
@@ -1736,7 +1736,7 @@ const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['pos
  * priority order. JSON wins over form encodings; binary and text bodies may
  * legitimately carry no schema at all.
  */
-function selectRequestBodyContent(body: RequestBodyObject | undefined): {
+export function selectRequestBodyContent(body: RequestBodyObject | undefined): {
   encoding: RequestBodyEncoding;
   schema?: SchemaObject;
 } {

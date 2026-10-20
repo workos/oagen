@@ -1,5 +1,5 @@
-import type { Enum, Model, Operation, ResponseHeader, Service } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef, Webhook } from '../ir/types.js';
+import { walkTypeRef, collectWebhookTypeRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
@@ -36,9 +36,28 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
-        for (const header of headers) collectHeaderEnums(header, qualifier, enums, enumNames);
+        for (const header of headers) collectDistinctEnums(header.type, qualifier, enums, enumNames);
       }
     }
+  }
+}
+
+/**
+ * Promote the inline enums a webhook declares — on its header, query and
+ * cookie parameters, or as its payload itself — to top-level enums, the way
+ * response-header enums are: a name already taken by a different value set
+ * is not silently shared (the webhook's reference would otherwise point at
+ * an unrelated enum's values) but renamed to a distinct one before it is
+ * promoted (`PetAdoptedXSource2`); a taken name with the same values is
+ * shared. The parser's stem reservation keeps such a clash from arising
+ * through `parseSpec`; this guards the IR for any caller. A payload model's
+ * field enums are reached through `spec.models` by
+ * `collectInlineEnumsFromModels`, since the model is materialized there.
+ */
+export function collectInlineEnumsFromWebhooks(webhooks: Webhook[], enums: Enum[]): void {
+  const enumNames = new Set(enums.map((e) => e.name));
+  for (const webhook of webhooks) {
+    for (const ref of collectWebhookTypeRefs(webhook)) collectDistinctEnums(ref, undefined, enums, enumNames);
   }
 }
 
@@ -65,21 +84,23 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
 }
 
 /**
- * Promote a header's inline enums. A header enum is named from the service
- * and header name alone, so `X-Policy` allowing `fast`/`slow` on a 200 and
+ * Promote the inline enums under a type reference without letting a taken
+ * name mislead. A response-header enum is named from the service and header
+ * name alone, so `X-Policy` allowing `fast`/`slow` on a 200 and
  * `retry`/`stop` on a 429 would share one name and whichever was collected
- * first would silently win; a request parameter named like the header
- * collides the same way. When the name is already taken by a different value
- * set, the header's ref is renamed to a distinct name before it is promoted.
- * A taken name with the same values is shared, as before.
+ * first would silently win; a request parameter named like the header, or a
+ * webhook parameter named like a component enum, collides the same way. When
+ * the name is already taken by a different value set, the ref is renamed to
+ * a distinct name before it is promoted. A taken name with the same values is
+ * shared, as before.
  */
-function collectHeaderEnums(
-  header: ResponseHeader,
+function collectDistinctEnums(
+  ref: TypeRef,
   qualifier: string | undefined,
   enums: Enum[],
   enumNames: Set<string>,
 ): void {
-  walkTypeRef(header.type, {
+  walkTypeRef(ref, {
     enum: (ref) => {
       if (!ref.values) return;
       const existing = enums.find((e) => e.name === ref.name);
