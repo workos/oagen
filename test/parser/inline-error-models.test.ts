@@ -1491,7 +1491,10 @@ describe('review round 1: a 2xx body reserves what it mints before any error bod
           '400': {
             description: 'bad',
             ...json({
-              oneOf: [titled('AuthGetPetRequest2', 'auth', { token: str }), titled('Other', 'other', { x: str })],
+              oneOf: [
+                obj({ kind: { type: 'string', const: 'auth' }, token: str }, { title: 'AuthGetPetRequest2' }),
+                obj({ kind: { type: 'string', const: 'other' }, x: str }, { title: 'Other' }),
+              ],
             }),
           },
         },
