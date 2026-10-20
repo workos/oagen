@@ -229,24 +229,23 @@ function contentTypeOf(entry: ContentEntry, mediaType: string): TypeRef | undefi
  * removed, or retyped. A retype is left out only when another comparison
  * reports that very body: the entry's own media type on both sides, for the
  * primary (`responseChanged`) or an error (`errorsChanged`). Entries pair by
- * status code; a primary whose code the IR does not carry (a lone 2xx) pairs
- * with the other spec's primary. An error only one spec has is not a
- * media-type change — a code that came or went is the errors diff's business
- * — but a 2xx the old spec declared and the new does not has no other diff
- * to report it, so its media types are reported as removed: the formats
- * callers could ask for under that code are gone.
+ * status code (`pairContentEntries`); a primary whose code the IR does not
+ * carry (a lone 2xx) pairs with the entry of the other spec that offers its
+ * media types, else with that spec's primary. An error only one spec has is
+ * not a media-type change — a code that came or went is the errors diff's
+ * business — and neither is a 2xx the new spec adds, but a 2xx the old spec
+ * declared and the new does not has no other diff to report it, so its
+ * media types are reported as removed: the formats callers could ask for
+ * under that code are gone.
  */
 function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
   const oldEntries = contentEntries(oldOp);
-  const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
-  const oldPrimary = oldEntries.find((entry) => entry.isPrimary);
+  const newEntries = contentEntries(newOp);
+  const pairs = pairContentEntries(oldEntries, newEntries);
   const paired = new Set<ContentEntry>();
   const changes: ResponseContentTypesChange[] = [];
-  for (const entry of contentEntries(newOp)) {
-    let old = before.get(entry.key);
-    if (!old && entry.isPrimary && oldPrimary && (entry.key === 'primary' || oldPrimary.key === 'primary')) {
-      old = oldPrimary;
-    }
+  for (const entry of newEntries) {
+    const old = pairs.get(entry);
     if (!old) continue;
     paired.add(old);
     const oldTypes = new Set(old.contentTypes);
@@ -281,6 +280,48 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
     });
   }
   return changes;
+}
+
+/**
+ * Which old entry each new entry is compared with. Entries pair by key: a
+ * status code, or `primary` for a lone 2xx, which carries no code in the IR.
+ * A lone 2xx on one side only has no counterpart by key, so it pairs with
+ * the 2xx entry of the other side that offers the very same media types,
+ * whatever that entry's code — the response it most plausibly still is, as
+ * when a spec adds a `200` beside an unchanged lone `201` — and, when none
+ * does, with the other side's primary. Pairing the two primaries blindly
+ * would compare that unchanged `201` with the new `200` and report every
+ * format the `200` does not offer as removed. A new entry nothing pairs with
+ * is left out of the map.
+ */
+function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry[]): Map<ContentEntry, ContentEntry> {
+  const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
+  const pairs = new Map<ContentEntry, ContentEntry>();
+  for (const entry of newEntries) {
+    const old = before.get(entry.key);
+    if (old) pairs.set(entry, old);
+  }
+  const oldPrimary = oldEntries.find((entry) => entry.isPrimary);
+  const newPrimary = newEntries.find((entry) => entry.isPrimary);
+  if (!oldPrimary || !newPrimary || pairs.has(newPrimary)) return pairs;
+  if (newPrimary.key === 'primary') {
+    pairs.set(newPrimary, survivingEntry(newPrimary, oldEntries) ?? oldPrimary);
+  } else if (oldPrimary.key === 'primary') {
+    pairs.set(survivingEntry(oldPrimary, newEntries) ?? newPrimary, oldPrimary);
+  }
+  return pairs;
+}
+
+/** The 2xx entry among `others` that offers exactly `lone`'s media types — the primary when it does — if any. */
+function survivingEntry(lone: ContentEntry, others: ContentEntry[]): ContentEntry | undefined {
+  const mediaTypes = new Set(lone.contentTypes);
+  const sameMediaTypes = others.filter(
+    (entry) =>
+      (entry.isPrimary || entry.key.startsWith('success:')) &&
+      entry.contentTypes.length === mediaTypes.size &&
+      entry.contentTypes.every((mediaType) => mediaTypes.has(mediaType)),
+  );
+  return sameMediaTypes.find((entry) => entry.isPrimary) ?? sameMediaTypes[0];
 }
 
 function requestBodiesEqual(a: Operation['requestBody'], b: Operation['requestBody']): boolean {

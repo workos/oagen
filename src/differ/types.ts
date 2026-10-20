@@ -168,10 +168,12 @@ export interface OperationModified {
  * How one response entry's media types changed between two specs. Entries
  * pair up by status code — 2xx entries from `successResponses`, the primary
  * among them, errors from `errors` — so a primary that changes status still
- * pairs with the entry of its code; a lone 2xx carries no code in the IR, is
- * paired with the other spec's primary, and is reported with `statusCode`
- * unset. A 2xx the old spec declared and the new does not is reported with
- * its media types `removed`. Media types are compared as written and as
+ * pairs with the entry of its code; a lone 2xx carries no code in the IR and
+ * is paired with the entry of the other spec that offers its media types,
+ * else with that spec's primary — reported with `statusCode` unset when it is
+ * the new spec's lone entry. A 2xx the old spec declared and the new does not
+ * is reported with its media types `removed`; one the new spec adds is no
+ * media-type change. Media types are compared as written and as
  * sets: reordering them is no change, while a key that only gained a
  * parameter is one removed and one added.
  */

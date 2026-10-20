@@ -134,6 +134,55 @@ describe('diffOperations — response content types', () => {
     });
   });
 
+  it('pairs a lone 2xx with the entry that still offers its media types, not blindly with the other primary (Greptile)', () => {
+    const pdf = contents([['application/pdf', binary]]);
+    const pdfHtml = contents([
+      ['application/pdf', binary],
+      ['text/html', string],
+    ]);
+    // Old: a lone 201 offering PDF and HTML. New: a 200 offering PDF is added
+    // and the 201 is untouched. The lone 201 pairs with the new 201, which
+    // offers its media types, so the added 200 is not read as the 201 having
+    // lost HTML: nothing changed for callers.
+    const lone = card([
+      ['application/pdf', binary],
+      ['text/html', string],
+    ]);
+    const withAdded200 = card([['application/pdf', binary]], {
+      successResponses: [
+        { statusCode: 200, type: binary, contentTypes: ['application/pdf'], contents: pdf },
+        { statusCode: 201, type: binary, contentTypes: ['application/pdf', 'text/html'], contents: pdfHtml },
+      ],
+    });
+    (withAdded200.responseContents as ResponseContent[]) = pdf;
+    expect(diffOperations('Pets', [lone], [withAdded200])).toEqual([]);
+
+    // The other way round, the lone 201 pairs with the old 201, and the 200 that
+    // is gone is reported with its formats removed.
+    expect(diffOperations('Pets', [withAdded200], [lone])[0]).toMatchObject({
+      responseContentTypeChanges: [
+        { statusCode: 200, added: [], removed: ['application/pdf'], retyped: [], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+
+    // When no entry offers the lone 2xx's media types any more, it pairs with
+    // the other primary, and the formats that are gone are still reported.
+    const htmlDropped = card([['application/pdf', binary]], {
+      successResponses: [
+        { statusCode: 200, type: binary, contentTypes: ['application/pdf'], contents: pdf },
+        { statusCode: 201, type: binary, contentTypes: ['application/pdf'], contents: pdf },
+      ],
+    });
+    (htmlDropped.responseContents as ResponseContent[]) = pdf;
+    expect(diffOperations('Pets', [lone], [htmlDropped])[0]).toMatchObject({
+      responseContentTypeChanges: [
+        { statusCode: 200, added: [], removed: ['text/html'], retyped: [], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
   it('reports an added media type as additive', () => {
     const changes = diffOperations(
       'Pets',
