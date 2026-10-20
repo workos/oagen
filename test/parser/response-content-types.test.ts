@@ -788,6 +788,46 @@ describe('response content types', () => {
       });
     });
 
+    it('gives two collection variants of one union models of their own', async () => {
+      const spec = await parseDocument(
+        document({
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: obj({
+                      f: {
+                        oneOf: [
+                          { type: 'array', items: obj({ id: str }) },
+                          { type: 'array', items: obj({ n: str }) },
+                          { type: 'object', additionalProperties: obj({ v: str }) },
+                        ],
+                      },
+                    }),
+                  },
+                },
+              },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        }),
+      );
+      const fields = (name: string) => spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+      const f = spec.models.find((m) => m.name === 'CreateThingRequest')?.fields.find((x) => x.name === 'f')?.type;
+      expect(f).toMatchObject({
+        variants: [
+          { kind: 'array', items: { kind: 'model', name: 'CreateThingRequestFItem' } },
+          { kind: 'array', items: { kind: 'model', name: 'CreateThingRequestFArrayItem' } },
+          { kind: 'map', valueType: { kind: 'model', name: 'CreateThingRequestFValue' } },
+        ],
+      });
+      expect(fields('CreateThingRequestFItem')).toEqual(['id']);
+      expect(fields('CreateThingRequestFArrayItem')).toEqual(['n']);
+      expect(fields('CreateThingRequestFValue')).toEqual(['v']);
+    });
+
     it('does the same for a request-body field, which dangled the same way before', async () => {
       const spec = await parseDocument(
         document({

@@ -1239,41 +1239,55 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
 }
 
 /**
- * The context an array or map variant of a `oneOf`/`anyOf` is typed and
- * extracted under: `<field>_item` for an array, `<field>_value` for a map,
- * so what its items or values mint (`ReqShapesItem`, `ReqShapesValue`) can
- * never take the name an object variant of the same union keeps (`ReqShape`,
- * `ReqShapeWithX`). When a sibling property already mints that name (a real
- * `shapes_item` object), the context steps on exactly as a plain array's
- * does beside such a sibling (`firstFreeElementContext`: `shapes_array_item`,
- * `shapes_array_item2`, …); the names minted under the first candidate are
- * what `mintedInlineNameEntries` reports for the union, so the sibling steps
- * around them in turn. Any other variant keeps the field's own context. The
- * variant is read with its nullable wrapper removed, whichever form it takes
- * (`unwrapNullableSchema`), as the extractor reads it.
+ * The context each array or map variant of a `oneOf`/`anyOf` is typed and
+ * extracted under, keyed by the variant: `<field>_item` for an array,
+ * `<field>_value` for a map, so what its items or values mint
+ * (`ReqShapesItem`, `ReqShapesValue`) can never take the name an object
+ * variant of the same union keeps (`ReqShape`, `ReqShapeWithX`). When a
+ * sibling property already mints that name (a real `shapes_item` object), or
+ * an earlier collection variant of the same union does, the context steps on
+ * exactly as a plain array's does beside such a sibling
+ * (`firstFreeElementContext`: `shapes_array_item`, `shapes_array_item2`, …),
+ * so two array variants of one union never share a model. The names minted
+ * this way are what `mintedInlineNameEntries` reports for the union, so a
+ * sibling steps around them in turn. Any other variant keeps the field's own
+ * context and is not in the map. Each variant is read with its nullable
+ * wrapper removed, whichever form it takes (`unwrapNullableSchema`), as the
+ * extractor reads it. Decided in variant order, from the siblings' and the
+ * variants' content only, so both sides of the parser agree.
  */
-export function collectionVariantContext(
+export function collectionVariantContexts(
   contextName: string | undefined,
-  variant: SchemaObject,
+  variants: readonly SchemaObject[],
   siblings: ReadonlyMap<string, SchemaObject> | undefined,
   parentModelName: string | undefined,
-): string | undefined {
-  if (contextName === undefined) return undefined;
-  const member = unwrapNullableSchema(variant);
-  const kind = classifyInlineSchema(member);
-  if (kind !== 'array' && kind !== 'map') return contextName;
-  const elementKind = kind === 'array' ? 'item' : 'value';
-  if (!siblings) return `${contextName}_${elementKind}`;
+): Map<SchemaObject, string> {
+  const contexts = new Map<SchemaObject, string>();
+  if (contextName === undefined) return contexts;
   const claimed = new Set<string>();
-  for (const [siblingName, siblingSchema] of siblings) {
+  for (const [siblingName, siblingSchema] of siblings ?? []) {
     if (siblingName === contextName) continue;
     for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) claimed.add(minted);
   }
-  const dependentNames = (candidate: string): string[] =>
-    mintedInlineNameEntries(candidate, member, parentModelName)
-      .filter((entry) => !entry.contextFree)
-      .map((entry) => entry.name);
-  return firstFreeElementContext(contextName, elementKind, claimed, dependentNames, []).context;
+  for (const variant of variants) {
+    const member = unwrapNullableSchema(variant);
+    const kind = classifyInlineSchema(member);
+    if (kind !== 'array' && kind !== 'map') continue;
+    const dependentNames = (candidate: string): string[] =>
+      mintedInlineNameEntries(candidate, member, parentModelName)
+        .filter((entry) => !entry.contextFree)
+        .map((entry) => entry.name);
+    const { context } = firstFreeElementContext(
+      contextName,
+      kind === 'array' ? 'item' : 'value',
+      claimed,
+      dependentNames,
+      [],
+    );
+    contexts.set(variant, context);
+    for (const name of dependentNames(context)) claimed.add(name);
+  }
+  return contexts;
 }
 
 /** Which of its keywords types an inline schema; see `classifyInlineSchema`. */
@@ -2507,6 +2521,11 @@ export function schemaToTypeRef(
     // `inlineVariantTypeRef`. The extractor emits the model under the same
     // name in every case.
     const variants: TypeRef[] = [];
+    // An array or map variant is typed under a context of its own
+    // (`collectionVariantContexts`), so the models its items or values mint
+    // never share a name with an object variant of the same union, which
+    // keeps the field's own name, nor with another collection variant's.
+    const collectionContexts = collectionVariantContexts(contextName, rawVariants, siblingProperties, parentModelName);
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
       const inlineName = inlineVariantNames.get(v);
@@ -2514,17 +2533,7 @@ export function schemaToTypeRef(
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
         variants.push(inlineVariantTypeRef(v, mappedName ?? inlineName));
       } else {
-        // An array or map variant is typed under a context of its own
-        // (`collectionVariantContext`), so the models its items or values
-        // mint never share a name with an object variant of the same union,
-        // which keeps the field's own name.
-        variants.push(
-          schemaToTypeRef(
-            v,
-            collectionVariantContext(contextName, v, siblingProperties, parentModelName),
-            parentModelName,
-          ),
-        );
+        variants.push(schemaToTypeRef(v, collectionContexts.get(v) ?? contextName, parentModelName));
       }
     }
     const hasNull = !!nullVariant;
