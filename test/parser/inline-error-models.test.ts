@@ -1403,4 +1403,81 @@ describe('review round 1: a 2xx body reserves what it mints before any error bod
     ]);
     expectConsistent(ir, ['Pet']);
   });
+
+  it("reserves only the 2xx body that is kept, so a header sharing a dropped body's model still emits it (Greptile)", async () => {
+    // The 200 body and its header both mint `Circle`/`Square`; the 201 `$ref` body
+    // is the one whose models extractResponses keeps, dropping the 200's. The
+    // header must not have shared a model that is never emitted.
+    const shapes = { oneOf: [titled('Circle', 'circle', { radius: num }), titled('Square', 'square', { side: num })] };
+    const ir = await parseWithoutWarnings(
+      doc({
+        '/shapes': {
+          get: {
+            operationId: 'listShapes',
+            responses: {
+              '200': { description: 'ok', ...json(shapes), headers: { 'X-Shape': { schema: shapes } } },
+              '201': { description: 'created', ...json(petRef) },
+            },
+          },
+        },
+      }),
+    );
+    const op = onlyOperation(ir);
+    const header = op.successResponses?.find((r) => r.statusCode === 200)?.headers?.[0];
+    expect(header?.name).toBe('X-Shape');
+    for (const name of collectModelRefs(header!.type)) expect(modelNames(ir)).toContain(name);
+    expectConsistent(ir, ['Pet']);
+  });
+
+  it("reserves a request body's field variants, so an error union with the same titles is qualified (Greptile)", async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        '/shapes': {
+          post: {
+            operationId: 'createShape',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: obj({
+                    shape: {
+                      oneOf: [titled('Circle', 'circle', { radius: num }), titled('Square', 'square', { side: num })],
+                    },
+                  }),
+                },
+              },
+            },
+            responses: { '204': { description: 'ok' } },
+          },
+        },
+        '/notes': getNote,
+      }),
+    );
+    expect(fieldTypes(ir, 'CreateShapeRequest')?.shape).toMatchObject({
+      kind: 'union',
+      variants: [model('Circle'), model('Square')],
+    });
+    expect(fieldTypes(ir, 'Circle')).toEqual({ kind: literal('circle'), radius: primitive('number') });
+    expect(fieldTypes(ir, 'CircleGetNoteError400')).toEqual({
+      kind: literal('circle'),
+      reason: primitive('string'),
+      hint: primitive('string'),
+      extra: primitive('string'),
+    });
+    expectConsistent(ir, ['Pet']);
+  });
+
+  it('tells a numeric component enum from an error enum with the same spellings (Greptile)', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPet({ '422': { description: 'bad', ...json(obj({ severity: { type: 'string', enum: ['1', '2'] } })) } }), {
+        GetPetError422Severity: { type: 'integer', enum: [1, 2] },
+      }),
+    );
+    // Different members: the body steps around the component enum, as for `['x', 'y']`.
+    expect(onlyOperation(ir).errors[0].type).toEqual(model('GetPetError422Body'));
+    expect(fieldTypes(ir, 'GetPetError422Body')).toEqual({
+      severity: { kind: 'enum', name: 'GetPetError422BodySeverity', values: ['1', '2'] },
+    });
+    expect(ir.enums.find((e) => e.name === 'GetPetError422Severity')?.values.map((v) => v.value)).toEqual([1, 2]);
+    expectConsistent(ir);
+  });
 });

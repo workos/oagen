@@ -352,12 +352,13 @@ export function extractOperations(
   const enumRegistry: EnumRegistry = new Map(
     (componentEnums ?? []).map((e) => [e.name, enumMembersKey(e.values.map((v) => v.value))]),
   );
-  // And what every operation's 2xx body will mint, read up front from the
-  // same extractor under the same context name `extractResponses` uses: a
-  // success response's title-mapped `oneOf` names its variants by bare title
-  // (`Circle`), so an error body — of any operation, declared before or after
-  // — that gives the same title another shape must step around it, or the
-  // later merge would hand the success response the error's fields.
+  // And what every operation's request body and 2xx body will mint, read up
+  // front from the same extractors under the same context names
+  // `buildOperation` and `extractResponses` use: a title-mapped `oneOf` on a
+  // success response, or under a request body's field, names its variants by
+  // bare title (`Circle`), so an error body — of any operation, declared
+  // before or after — that gives the same title another shape must step
+  // around it, or the later merge would hand the body the error's fields.
   const reserve = (model: Model): void => {
     if (!headerModelRegistry.has(model.name)) {
       headerModelRegistry.set(model.name, { fingerprint: modelFingerprint(model) });
@@ -367,7 +368,9 @@ export function extractOperations(
     }
   };
   for (const model of [...(componentModels ?? []), ...extractInlineModelsFromSchemas(componentSchemas)]) reserve(model);
-  for (const model of successResponseModels(paths, pathModelBaseNames, componentSchemas)) reserve(model);
+  for (const model of operationBodyModels(paths, pathModelBaseNames, componentSchemas, componentRequestBodies)) {
+    reserve(model);
+  }
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -2024,9 +2027,16 @@ interface HeaderExtractionContext {
 /** Enum name → `enumMembersKey` of its members. */
 type EnumRegistry = Map<string, string>;
 
-/** Members of an enum, independent of order, so equal member sets compare equal. */
+/**
+ * Members of an enum, independent of order, so equal member sets compare
+ * equal. Each member is JSON-encoded, so a number and its spelling (`1` and
+ * `"1"`) stay apart and a `|` inside a string cannot run two members together.
+ */
 function enumMembersKey(values: readonly (string | number)[]): string {
-  return values.map(String).sort().join('|');
+  return values
+    .map((value) => JSON.stringify(value))
+    .sort()
+    .join('|');
 }
 
 /** Every inline enum (one carrying `values`) reachable from a model's field types. */
@@ -2533,30 +2543,48 @@ export function derivePathBasedName(
  * and a path that stops colliding returns to its plain name.
  */
 /**
- * The inline models every operation's 2xx JSON bodies will mint, read with
- * the extractor and under the context name `extractResponses` uses, so the
- * header/error registry can be seeded with them before any operation is
- * built (`extractOperations`). The models themselves are discarded; what
- * matters is each name and the shape it will carry.
+ * The inline models every operation's request body and 2xx JSON body will
+ * mint, read with the same extractors under the same context names
+ * `buildOperation` and `extractResponses` use, so the header/error registry
+ * can be seeded with them before any operation is built
+ * (`extractOperations`). The models themselves are discarded; what matters
+ * is each name and the shape it will carry.
+ *
+ * Only what the operation will actually emit is reserved: `extractResponses`
+ * keeps the models of the last 2xx that declares a JSON schema (an earlier
+ * body's are dropped), so only that body's are read here — a header that
+ * shared a reserved name must find the model emitted. When every 2xx body's
+ * models are kept, read every body here too.
  */
-function successResponseModels(
+function operationBodyModels(
   paths: Record<string, PathItem>,
   pathModelBaseNames: ReadonlyMap<string, string>,
   componentSchemas: Record<string, SchemaObject> | undefined,
+  componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
 ): Model[] {
   const models: Model[] = [];
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
-      if (!op?.responses) continue;
+      if (!op) continue;
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
-      for (const [statusCode, resp] of Object.entries(op.responses)) {
+      const opLabel = operationLabel(op, path, method);
+      extractRequestBody(
+        resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel),
+        op,
+        pathModelBaseName,
+        models,
+        componentSchemas,
+      );
+      let kept: SchemaObject | undefined;
+      for (const [statusCode, resp] of Object.entries(op.responses ?? {})) {
         const code = parseInt(statusCode, 10);
         const schema = resp.content?.['application/json']?.schema;
-        if (!(code >= 200 && code < 300) || !schema) continue;
+        if (code >= 200 && code < 300 && schema) kept = schema;
+      }
+      if (kept) {
         models.push(
-          ...classifyAndExtractResponse(schema, deriveResponseName(op, pathModelBaseName), componentSchemas)
-            .inlineModels,
+          ...classifyAndExtractResponse(kept, deriveResponseName(op, pathModelBaseName), componentSchemas).inlineModels,
         );
       }
     }
