@@ -48,6 +48,16 @@ let activeEnumSchemaNames: Set<string> = new Set();
  */
 let activeNullableEnumSchemaNames: Set<string> = new Set();
 
+/**
+ * Resolved names of named-union components that admit `null`
+ * (a `type: 'null'` variant, an OAS 3.1 `type` list with `'null'`, or OAS
+ * 3.0 `nullable: true`). The null variant is not a member (`namedUnionMembers`
+ * drops it), so, as for a nullable enum, a `$ref` to one of these resolves to
+ * `nullable(model)`: the IR then says what the inline form of the same union
+ * says (`nullable<union>`).
+ */
+let activeNullableUnionSchemaNames: Set<string> = new Set();
+
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
 function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
   return (values ?? []).filter((v): v is string | number => v !== null);
@@ -580,11 +590,15 @@ export function extractSchemas(
   // call schemaToTypeRef during extraction).
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
+  activeNullableUnionSchemaNames = new Set();
   for (const [name, schema] of Object.entries(schemas)) {
-    if (!schema.enum) continue;
     const resolved = resolveSchemaName(name);
-    activeEnumSchemaNames.add(resolved);
-    if (isNullableEnumSchema(schema)) activeNullableEnumSchemaNames.add(resolved);
+    if (schema.enum) {
+      activeEnumSchemaNames.add(resolved);
+      if (isNullableEnumSchema(schema)) activeNullableEnumSchemaNames.add(resolved);
+    } else if (isNamedUnionSchema(schema) && isNullableUnionSchema(schema)) {
+      activeNullableUnionSchemaNames.add(resolved);
+    }
   }
 
   const modelsByCleanName = new Map<string, Model>();
@@ -652,6 +666,7 @@ export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
+  activeNullableUnionSchemaNames = new Set();
   activeComponentSchemaKeys = new Set();
 }
 
@@ -1247,6 +1262,13 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   if (!schema || schema.$ref || !schema.properties) return false;
   const { type } = schema;
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
+/** True when a named union admits `null`: a `type: 'null'` variant, a `type` list with `'null'`, or OAS 3.0 `nullable: true`. */
+function isNullableUnionSchema(schema: SchemaObject): boolean {
+  if (schema.nullable === true) return true;
+  if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullVariantSchema);
 }
 
 /** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable; never a variant to name. */
@@ -2632,7 +2654,10 @@ export function schemaToTypeRef(
       // `oneOf: [{ $ref }, { type: 'null' }]` form.
       return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
-    return { kind: 'model', name: resolved };
+    // Likewise a named union with a `null` variant: the variant is not a
+    // member of the model, so the reference carries the nullability.
+    const modelRef: TypeRef = { kind: 'model', name: resolved };
+    return activeNullableUnionSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
