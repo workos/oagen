@@ -1,6 +1,11 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration } from '../ir/types.js';
 import { toPascalCase, singularize } from '../utils/naming.js';
-import { detectEndOfIteration, END_OF_ITERATION_FIELDS, resolveSchemaPath } from './pagination.js';
+import {
+  detectEndOfIteration,
+  END_OF_ITERATION_FIELDS,
+  looksLikePaginationMetadata,
+  resolveSchemaPath,
+} from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -60,6 +65,16 @@ export interface ResponseClassificationOptions {
    * the wire shape survives without a `pagination` entry to describe it.
    */
   paginationDisabled?: boolean;
+  /**
+   * An explicit `dataPath` (already known to reach an array in the body) that
+   * names another array than the one a list envelope would be unwrapped on.
+   * Detection was wrong for this operation, so the envelope is kept as a
+   * wrapper exactly as under `paginationDisabled` — `response` is what the
+   * wire returns, the override says where the items are in it, and the
+   * wrapper carries the companions — except that its stop field is still
+   * read, with the override's root property as the data property.
+   */
+  dataPathOverride?: string;
 }
 
 export function classifyAndExtractResponse(
@@ -77,7 +92,16 @@ export function classifyAndExtractResponse(
   if (!options.paginationDisabled) {
     const envelope = detectListEnvelope(schema);
     if (envelope.isEnvelope) {
-      return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+      const override = options.dataPathOverride;
+      if (override === undefined || override === envelope.dataPath) {
+        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+      }
+      const { properties } = collectEnvelopeProperties(schema, componentSchemas);
+      const endOfIteration = detectEndOfIteration(properties, override.split('.')[0], componentSchemas);
+      return {
+        ...extractDirectResource(schema, contextName, componentSchemas),
+        ...(endOfIteration && { endOfIteration }),
+      };
     }
   }
 
@@ -96,19 +120,6 @@ interface ListEnvelopeResult {
 }
 
 const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges']);
-
-const PAGINATION_METADATA_PATTERNS = [
-  'meta',
-  'metadata',
-  'pagination',
-  'cursor',
-  'has_more',
-  'page_info',
-  'total',
-  'next_page',
-  'previous_page',
-  'offset',
-];
 
 function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema)
@@ -156,9 +167,7 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
     // always recognized — or when its name contains one of the metadata
     // patterns (`meta`, `pagination`, `cursor`, …).
     const hasPaginationCompanion = nonArrayKeys.some(
-      (key) =>
-        END_OF_ITERATION_FIELDS.includes(key) ||
-        PAGINATION_METADATA_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern)),
+      (key) => END_OF_ITERATION_FIELDS.includes(key) || looksLikePaginationMetadata(key),
     );
 
     if (KNOWN_DATA_PATHS.has(arrayPropName) && hasPaginationCompanion) {

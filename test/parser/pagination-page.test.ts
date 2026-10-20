@@ -524,8 +524,35 @@ describe('resolvePaginationOverride + applyPaginationOverride', () => {
   });
 
   it('warns and falls back when a strategy is given but no param exists from any source', () => {
-    expect(apply(undefined, { extension: { strategy: 'page' } })).toBeUndefined();
+    // No page parameter is declared, none was detected, and the override names none.
+    const override = resolvePaginationOverride({ extension: { strategy: 'page' } }, 'listPets');
+    expect(applyPaginationOverride(undefined, override, [param('limit')], pets, 'listPets')).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('strategy "page" needs a param'));
+  });
+
+  it("takes the strategy's own query parameter over one detection guessed (MichaelDeBoey)", () => {
+    // `GET /pets?page` with `{ data, total_pages }`: the envelope fallback detected
+    // `cursor`/`after`, which the operation never declares.
+    const fallback: PaginationMeta = {
+      strategy: 'cursor',
+      param: 'after',
+      dataPath: 'data',
+      itemType: pet,
+      endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+    };
+    const override = resolvePaginationOverride({ extension: { strategy: 'page' } }, 'listPets');
+    const result = applyPaginationOverride(fallback, override, [param('page', { default: 1 })], pets, 'listPets');
+    expect(result).toMatchObject({ strategy: 'page', param: 'page', pageStart: 1 });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns and falls back when the resolved param, not only an explicit one, is undeclared', () => {
+    const fallback: PaginationMeta = { strategy: 'cursor', param: 'after', dataPath: 'data', itemType: pet };
+    const override = resolvePaginationOverride({ extension: { strategy: 'page' } }, 'listPets');
+    expect(applyPaginationOverride(fallback, override, [param('limit')], pets, 'listPets')).toBe(fallback);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('param "after" is not a query parameter of the operation — ignoring the override'),
+    );
   });
 
   it('warns and falls back when only a param is given and no strategy exists from any source', () => {

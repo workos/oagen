@@ -188,14 +188,42 @@ export const END_OF_ITERATION_FIELDS: readonly string[] = [
 const END_KIND_PRIORITY: ReadonlyArray<PaginationEndOfIteration['kind']> = ['hasMore', 'totalPages', 'totalCount'];
 
 /**
+ * Substrings that mark an envelope companion as pagination metadata (`meta`,
+ * `pagination`, `page_info`, `cursor`, ...). List-envelope detection reads
+ * them to recognize an envelope, and `detectEndOfIteration` reads them to
+ * decide which object companions to look inside for a stop field.
+ */
+export const PAGINATION_METADATA_PATTERNS: readonly string[] = [
+  'meta',
+  'metadata',
+  'pagination',
+  'cursor',
+  'has_more',
+  'page_info',
+  'total',
+  'next_page',
+  'previous_page',
+  'offset',
+];
+
+/** Whether a companion's name says it carries pagination metadata. */
+export function looksLikePaginationMetadata(name: string): boolean {
+  const lower = name.toLowerCase();
+  return PAGINATION_METADATA_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+/**
  * Find the envelope field that ends an iteration, when the envelope declares
  * an obvious one. `properties` are the envelope's merged properties and
  * `dataPath` names the data array among them.
  *
  * Top-level fields are considered first, then the fields one level down
- * inside each object companion (an inline object, a `$ref` to a component, an
- * `allOf` of those, or a nullable wrapper around one), and the path follows
- * the `dataPath` convention: `has_more` or `pagination.totalPages`. When
+ * inside each object companion whose name says it is pagination metadata
+ * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ...; an
+ * inline object, a `$ref` to a component, an `allOf` of those, or a nullable
+ * wrapper around one), so a `stats.total` beside `pagination.page` is not
+ * taken for the list's size. The path follows the `dataPath` convention: `has_more` or
+ * `pagination.totalPages`. When
  * several candidates exist, a `hasMore` boolean wins over a `totalPages`
  * integer, which wins over a `totalCount` integer; within one kind the first
  * in scan order wins. A candidate whose type does not fit its kind (a string
@@ -217,6 +245,7 @@ export function detectEndOfIteration(
   );
   for (const [name, schema] of companions) record(name, name, schema);
   for (const [name, schema] of companions) {
+    if (!looksLikePaginationMetadata(name)) continue;
     for (const [inner, innerSchema] of Object.entries(objectProperties(schema, componentSchemas))) {
       if (innerSchema) record(inner, `${name}.${inner}`, innerSchema);
     }
@@ -375,14 +404,18 @@ export function resolvePaginationOverride(
  * Layer the resolved override onto the detected pagination. A field the
  * override does not set keeps the detected value, so `{ strategy: 'page' }`
  * alone re-labels a detected offset iterator without restating its
- * parameters. `extras.overrideItemType` is the element type an explicit
+ * parameters — except `param`, which is first looked for among the
+ * operation's query parameters by the strategy's own names (`page` for
+ * `page`, `cursor` or `after` for `cursor`, ...), so a strategy the override
+ * names is driven by the parameter that fits it rather than by one detection
+ * guessed (the envelope fallback's `after`). `extras.overrideItemType` is the element type an explicit
  * `dataPath` resolved to; without it the detected item type (or the response
  * itself) stands. `extras.pageStartOf` decides the first page for the page
  * parameter in use (default: `derivePageStart` on the IR parameter alone).
  *
  * Returns `detected` unchanged when there is no override or it is unusable —
- * no strategy or no `param` from any source, a `param`/`limitParam` the
- * operation does not declare as a query parameter — after an `[oagen]
+ * no strategy or no `param` from any source, a resolved `param`/`limitParam`
+ * the operation does not declare as a query parameter — after an `[oagen]
  * Warning:` naming the problem. `strategy: 'none'` yields `undefined`.
  */
 export function applyPaginationOverride(
@@ -404,14 +437,18 @@ export function applyPaginationOverride(
     warn(`${where} sets no strategy and none was detected — ignoring the override`);
     return detected;
   }
-  const param = merged.param ?? detected?.param;
+  const param = merged.param ?? declaredParamFor(strategy, queryParams) ?? detected?.param;
   if (!param) {
     warn(`${where}: strategy "${strategy}" needs a param, and none was given or detected — ignoring the override`);
     return detected;
   }
+  const limitParam = merged.limitParam ?? detected?.limitParam;
+  // The resolved values are checked, not only the explicit ones: a `param`
+  // detection invented (the envelope fallback's `after`) is as undeclared as
+  // a misspelled one.
   for (const [key, name] of [
-    ['param', merged.param],
-    ['limitParam', merged.limitParam],
+    ['param', param],
+    ['limitParam', limitParam],
   ] as const) {
     if (name !== undefined && !queryParams.some((p) => p.name === name)) {
       warn(`${where}: ${key} "${name}" is not a query parameter of the operation — ignoring the override`);
@@ -419,7 +456,6 @@ export function applyPaginationOverride(
     }
   }
 
-  const limitParam = merged.limitParam ?? detected?.limitParam;
   const dataPath = merged.dataPath ?? detected?.dataPath;
   const endOfIteration = merged.endOfIteration ?? detected?.endOfIteration;
   // The page base belongs to the page parameter actually in use, which the
@@ -438,6 +474,19 @@ export function applyPaginationOverride(
     ...(detected?.envelopeFields && { envelopeFields: detected.envelopeFields }),
     ...(endOfIteration && { endOfIteration }),
   };
+}
+
+/** The first query parameter the operation declares under one of `strategy`'s own parameter names, if any. */
+function declaredParamFor(strategy: PaginationStrategy, queryParams: Parameter[]): string | undefined {
+  const names =
+    strategy === 'cursor'
+      ? CURSOR_PARAMS
+      : strategy === 'offset'
+        ? OFFSET_PARAMS
+        : strategy === 'page'
+          ? PAGE_PARAMS
+          : [];
+  return names.map((name) => queryParams.find((p) => p.name === name)).find((p) => p !== undefined)?.name;
 }
 
 /**

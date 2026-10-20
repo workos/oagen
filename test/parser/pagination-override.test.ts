@@ -112,6 +112,22 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     expect(op.pagination?.endOfIteration).toBeUndefined();
   });
 
+  it('looks inside pagination-looking companions only, so an unrelated total is not the stop field (MichaelDeBoey)', async () => {
+    const schema = envelope({
+      pagination: { type: 'object', properties: { page: { type: 'integer' } } },
+      stats: { type: 'object', properties: { total: { type: 'integer' } } },
+    });
+    const op = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(schema) })));
+    expect(op.pagination?.endOfIteration).toBeUndefined();
+    // Top-level stop fields are read whatever their neighbours are called.
+    const topLevel = envelope({
+      stats: { type: 'object', properties: { x: { type: 'integer' } } },
+      total: { type: 'integer' },
+    });
+    const op2 = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(topLevel) })));
+    expect(op2.pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+  });
+
   describe('stop-field aliases mark an envelope', () => {
     it.each([
       ['hasMore', { type: 'boolean' }, { kind: 'hasMore', path: 'hasMore' }],
@@ -396,8 +412,11 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     });
 
     it("keeps the data array's item model apart from an overridden nested array's", async () => {
-      // The envelope's own `data` items own `<Op>Item`; the companion's nested
-      // items must get their own model, never overwrite that one.
+      // The override names another array than the `data` the envelope pass would
+      // unwrap, so the body is kept as a wrapper (as `strategy: 'none'` keeps it):
+      // `response` is the wrapper, the `data` items and the overridden `result.items`
+      // each get their own model, and `envelopeFields` is absent since the wrapper
+      // carries the companions. Its `total` is still read as the stop field.
       const body = {
         type: 'object',
         properties: {
@@ -418,15 +437,38 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         petsSpec({ responses: jsonResponse(body), 'x-pagination': { dataPath: 'result.items' } }),
       );
       const op = onlyOperation(ir);
-      expect(ir.models.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name)).toEqual(['id']);
-      expect(op.pagination?.dataPath).toBe('result.items');
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      const wrapper = ir.models.find((m) => m.name === 'ListPetsResponse');
+      expect(wrapper?.fields.map((f) => f.name)).toEqual(['data', 'result', 'total']);
+      const dataItems = wrapper?.fields.find((f) => f.name === 'data')?.type;
+      const dataItemModel =
+        dataItems?.kind === 'array' && dataItems.items.kind === 'model'
+          ? ir.models.find((m) => m.name === (dataItems.items as { name: string }).name)
+          : undefined;
+      expect(dataItemModel?.fields.map((f) => f.name)).toEqual(['id']);
+      expect(op.pagination).toMatchObject({
+        dataPath: 'result.items',
+        endOfIteration: { kind: 'totalCount', path: 'total' },
+      });
+      expect(op.pagination).not.toHaveProperty('envelopeFields');
       const itemType = op.pagination?.itemType;
       expect(itemType?.kind).toBe('model');
       const itemModel = itemType?.kind === 'model' ? ir.models.find((m) => m.name === itemType.name) : undefined;
-      expect(itemModel?.name).not.toBe('ListPetsItem');
+      expect(itemModel?.name).not.toBe(dataItemModel?.name);
       expect(itemModel?.fields.map((f) => f.name)).toEqual(['name', 'age']);
       expect(ir.models.filter((m) => m.fields.map((f) => f.name).join() === 'name,age')).toHaveLength(1);
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps unwrapping when the override restates the detected path, and when it names nothing', async () => {
+      const op = onlyOperation(await parseJson(petsSpec({ 'x-pagination': { dataPath: 'pets' } })));
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(op.pagination?.envelopeFields?.map((f) => f.name)).toEqual(['pagination']);
+      warn.mockClear();
+      const missing = onlyOperation(await parseJson(petsSpec({ 'x-pagination': { dataPath: 'nowhere.items' } })));
+      expect(missing.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(missing.pagination?.dataPath).toBe('pets');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('does not resolve to an array'));
     });
 
     it('resolves the override against the primary response, not the last 2xx declared', async () => {
@@ -485,7 +527,8 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       ])("keeps the primary body's companion item model the override selects (%s)", async (_order, responses) => {
         const ir = await parseJson(petsSpec({ responses, 'x-pagination': { dataPath: 'result.items' } }));
         const op = onlyOperation(ir);
-        expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+        // The override names another array than `data`, so the 200 is kept as a wrapper.
+        expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
         expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
         expect(op.pagination).toMatchObject({
           dataPath: 'result.items',

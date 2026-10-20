@@ -1336,7 +1336,12 @@ function buildOperation(
       ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
     };
   } else if (paginationFromParams) {
-    detectedPagination = paginationFromParams;
+    // A stop field is also read from an envelope kept as a wrapper under an
+    // explicit `dataPath` (see `ResponseClassificationOptions.dataPathOverride`).
+    detectedPagination = {
+      ...paginationFromParams,
+      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
+    };
   }
   const pagination = applyPaginationOverride(detectedPagination, paginationOverride, queryParams, response, opLabel, {
     overrideItemType,
@@ -2644,8 +2649,18 @@ function extractResponses(
       const jsonContent = resp.content?.['application/json'];
       if (jsonContent?.schema) {
         const contextName = deriveResponseName(op, pathModelBaseName);
+        // An explicit `dataPath` is handed to classification only when it
+        // reaches an array in this body; one that does not is left for the
+        // override's own warning, and detection stands.
+        const dataPathOverride =
+          pagination.disabled ||
+          pagination.dataPath === undefined ||
+          !resolveDataPathFromSchema(jsonContent.schema, pagination.dataPath, contextName, componentSchemas)
+            ? undefined
+            : pagination.dataPath;
         const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas, {
           paginationDisabled: pagination.disabled,
+          dataPathOverride,
         });
         extractedType = result.response;
         bodyResults.set(code, result);
