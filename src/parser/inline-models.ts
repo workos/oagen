@@ -109,19 +109,16 @@ export function mintedInlineNameEntries(
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
+    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name);
     // An array or map variant mints under `<context>_item` / `<context>_value`
-    // (`collectionVariantContexts`, read here without siblings), so a sibling
-    // that would take one of those names steps around it.
-    const collections = [...collectionVariantContexts(contextName, nonNull, undefined, parentModelName)].flatMap(
-      ([variant, context]) => mintedInlineNameEntries(context, unwrapNullableSchema(variant), parentModelName),
-    );
-    return [
-      ...[...nameInlineVariantEntries(s, modelName()[0]!.name)].map(([variant, entry]) => ({
-        ...entry,
-        schema: variant,
-      })),
-      ...collections,
-    ];
+    // (`collectionVariantContexts`, read here without siblings but with the
+    // object variants' names), so a sibling that would take one of those
+    // names steps around it.
+    const objectVariantNames = new Map([...variantEntries].map(([variant, entry]) => [variant, entry.name]));
+    const collections = [
+      ...collectionVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames),
+    ].flatMap(([variant, context]) => mintedInlineNameEntries(context, unwrapNullableSchema(variant), parentModelName));
+    return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...collections];
   }
   if (kind === 'const') return [];
   if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
@@ -669,11 +666,18 @@ export function extractInlineModelsFromProperties(
     const unionVariants = kind === 'union' ? (fieldSchema.oneOf ?? fieldSchema.anyOf) : undefined;
     if (unionVariants) {
       const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
+      // Decided once, for the object variants' models and for the collection
+      // contexts, which step around those models' children.
+      const variantNames: ReadonlyMap<SchemaObject, string> =
+        inlineObjectVariants.length > 0
+          ? nameInlineVariants(
+              fieldSchema,
+              qualifyInlineModelName(toPascalCase(fieldName), parentName),
+              reservedFor(fieldName),
+            )
+          : new Map();
       if (inlineObjectVariants.length > 0) {
-        const baseName = toPascalCase(fieldName);
-        const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
-        const variantNames = nameInlineVariants(fieldSchema, modelName, reservedFor(fieldName));
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;
@@ -702,7 +706,13 @@ export function extractInlineModelsFromProperties(
       // exactly as the reference does (`ReqShapesItem` for a `shapes`
       // variant's items). The context already stepped around the siblings;
       // the re-entry sees none, exactly as `schemaToTypeRef` types the variant.
-      for (const [variant, context] of collectionVariantContexts(fieldName, unionVariants, siblings, parentName)) {
+      for (const [variant, context] of collectionVariantContexts(
+        fieldName,
+        unionVariants,
+        siblings,
+        parentName,
+        variantNames,
+      )) {
         const member = unwrapNullableField(variant);
         extractInlineModelsFromProperties({ properties: { [context]: member } }, results, parentName, componentSchemas);
       }

@@ -1244,23 +1244,32 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
  * `<field>_value` for a map, so what its items or values mint
  * (`ReqShapesItem`, `ReqShapesValue`) can never take the name an object
  * variant of the same union keeps (`ReqShape`, `ReqShapeWithX`). When a
- * sibling property already mints that name (a real `shapes_item` object), or
- * an earlier collection variant of the same union does, the context steps on
- * exactly as a plain array's does beside such a sibling
- * (`firstFreeElementContext`: `shapes_array_item`, `shapes_array_item2`, …),
- * so two array variants of one union never share a model. The names minted
- * this way are what `mintedInlineNameEntries` reports for the union, so a
- * sibling steps around them in turn. Any other variant keeps the field's own
- * context and is not in the map. Each variant is read with its nullable
- * wrapper removed, whichever form it takes (`unwrapNullableSchema`), as the
- * extractor reads it. Decided in variant order, from the siblings' and the
- * variants' content only, so both sides of the parser agree.
+ * sibling property already mints that name (a real `shapes_item` object), an
+ * object variant's own property does (`item` under `ReqShape` is
+ * `ReqShapeItem`, see `objectVariantNames`), or an earlier collection
+ * variant of the same union does, the context steps on exactly as a plain
+ * array's does beside such a sibling (`firstFreeElementContext`:
+ * `shapes_array_item`, `shapes_array_item2`, …), so two array variants of one
+ * union never share a model, and neither do an array variant's items and an
+ * object variant's child. The names minted this way are what
+ * `mintedInlineNameEntries` reports for the union, so a sibling steps around
+ * them in turn. Any other variant keeps the field's own context and is not in
+ * the map. Each variant is read with its nullable wrapper removed, whichever
+ * form it takes (`unwrapNullableSchema`), as the extractor reads it. Decided
+ * in variant order, from the siblings' and the variants' content only, so
+ * both sides of the parser agree.
+ *
+ * `objectVariantNames` is the name each inline object variant's model takes
+ * (`nameInlineVariants`), as the caller decided it; the names those models'
+ * own properties mint are claimed before any context is chosen. One level is
+ * enough: every name a child's children mint starts with the child's.
  */
 export function collectionVariantContexts(
   contextName: string | undefined,
   variants: readonly SchemaObject[],
   siblings: ReadonlyMap<string, SchemaObject> | undefined,
   parentModelName: string | undefined,
+  objectVariantNames: ReadonlyMap<SchemaObject, string>,
 ): Map<SchemaObject, string> {
   const contexts = new Map<SchemaObject, string>();
   if (contextName === undefined) return contexts;
@@ -1268,6 +1277,12 @@ export function collectionVariantContexts(
   for (const [siblingName, siblingSchema] of siblings ?? []) {
     if (siblingName === contextName) continue;
     for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) claimed.add(minted);
+  }
+  for (const [variant, variantName] of objectVariantNames) {
+    for (const [property, propertySchema] of Object.entries(unwrapNullableSchema(variant).properties ?? {})) {
+      if (!propertySchema) continue;
+      for (const minted of mintedInlineNames(property, propertySchema, variantName)) claimed.add(minted);
+    }
   }
   for (const variant of variants) {
     const member = unwrapNullableSchema(variant);
@@ -2525,7 +2540,13 @@ export function schemaToTypeRef(
     // (`collectionVariantContexts`), so the models its items or values mint
     // never share a name with an object variant of the same union, which
     // keeps the field's own name, nor with another collection variant's.
-    const collectionContexts = collectionVariantContexts(contextName, rawVariants, siblingProperties, parentModelName);
+    const collectionContexts = collectionVariantContexts(
+      contextName,
+      rawVariants,
+      siblingProperties,
+      parentModelName,
+      inlineVariantNames,
+    );
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
       const inlineName = inlineVariantNames.get(v);

@@ -745,6 +745,51 @@ describe('response content types', () => {
       expect(fields('CreateThingRequestFItem')).toEqual(['b', 'c']);
     });
 
+    it("steps the array variant's items past an object variant's child of the same name, in a body and in a secondary response (Greptile)", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // `item` under the object variant `…F` is `…FItem`, the very name the
+      // array variant's items would take under `f_item`; the items step to
+      // `f_array_item` on both sides of the parser, so neither definition
+      // overwrites the other — and a secondary body, whose models all commit
+      // under one registry, no longer fails the parse on the second.
+      const f = { oneOf: [obj({ item: obj({ a: str }) }), { type: 'array', items: obj({ b: str, c: str }) }] };
+      const spec = await parseDocument(
+        document({
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: { content: { 'application/json': { schema: obj({ f }) } } },
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: {
+                    'application/json': { schema: str },
+                    'application/vnd.thing+json': { schema: obj({ f }) },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      );
+      const fields = (name: string) => spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+      for (const root of ['CreateThingRequest', 'CreateThingApplicationVndThingJsonResponse']) {
+        const field = spec.models.find((m) => m.name === root)?.fields.find((f) => f.name === 'f');
+        expect(field?.type).toEqual({
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [
+            { kind: 'model', name: `${root}F` },
+            { kind: 'array', items: { kind: 'model', name: `${root}FArrayItem` } },
+          ],
+        });
+        expect(fields(`${root}F`)).toEqual(['item']);
+        expect(fields(`${root}FItem`)).toEqual(['a']);
+        expect(fields(`${root}FArrayItem`)).toEqual(['b', 'c']);
+      }
+      expect(warn.mock.calls).toEqual([]);
+    });
+
     it('steps the array variant past a real sibling named like its context, and reads a nullable wrapper through (Greptile)', async () => {
       const spec = await parseDocument(
         document({
