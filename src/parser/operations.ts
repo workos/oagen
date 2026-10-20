@@ -2626,17 +2626,25 @@ function extractResponses(
   // status derives the same `<Op>Response` context name, so on a name clash
   // the primary's definition — the one `response` points at — goes first and
   // wins; the other bodies follow in status order, then the header models.
+  // A dropped model whose shape differs from the kept one is warned about,
+  // since its status then points at a shape it did not declare.
   const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
     if (a === primaryStatus) return -1;
     if (b === primaryStatus) return 1;
     return a - b;
   });
-  const seenModelNames = new Set<string>();
-  for (const [, result] of bodiesByPrimacy) {
+  const keptByName = new Map<string, { model: Model; status: number }>();
+  for (const [status, result] of bodiesByPrimacy) {
     for (const model of result.inlineModels) {
-      if (seenModelNames.has(model.name)) continue;
-      seenModelNames.add(model.name);
-      inlineModels.push(model);
+      const kept = keptByName.get(model.name);
+      if (!kept) {
+        keptByName.set(model.name, { model, status });
+        inlineModels.push(model);
+      } else if (modelFingerprint(kept.model) !== modelFingerprint(model)) {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
+        );
+      }
     }
   }
 

@@ -146,6 +146,15 @@ describe('response media types are matched by essence (issue #237)', () => {
       expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['name']);
     });
 
+    it('prefers a +json media type over a binary one declared beside it, now that +json is JSON', () => {
+      // On main the binary entry won here; a +json body is JSON and is typed from its schema.
+      const { op } = getPet({
+        'application/octet-stream': {},
+        'application/vnd.pet+json': { schema: { $ref: '#/components/schemas/Pet' } },
+      });
+      expect(op.response).toEqual({ kind: 'model', name: 'Pet' });
+    });
+
     it('still prefers JSON over binary and text media types declared beside it', () => {
       const { op } = getPet({
         'application/octet-stream': {},
@@ -375,6 +384,40 @@ describe('response media types are matched by essence (issue #237)', () => {
       });
       expect(declaredFirst.op.response).toEqual(baseline.op.response);
       expect(declaredFirst.op.pagination).toEqual(baseline.op.pagination);
+    });
+
+    it('warns when a secondary body drops a model whose fields differ from the kept one', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { inlineModels } = getPetWith({
+          '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } },
+          '201': {
+            description: 'created',
+            content: { 'application/json': { schema: { type: 'object', properties: { age: { type: 'integer' } } } } },
+          },
+        });
+        expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['name']);
+        expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(
+          expect.stringContaining(
+            'Inline model "GetPetResponse" from the 201 response has different fields than the 200',
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('stays silent when a secondary body repeats the kept model exactly', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        getPetWith({
+          '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } },
+          '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('does not take paging fields from a secondary envelope', () => {
