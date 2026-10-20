@@ -202,4 +202,31 @@ describe('buildDirectionIndex — response headers', () => {
     expect(directionOf(index, 'DownloadMeta')).toBe('response');
     expect(directionOf(index, 'ThrottleInfo')).toBe('response');
   });
+
+  it('marks a model reached only through a default or range response as response-facing', () => {
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'ApiError', fields: [] },
+          { name: 'Outage', fields: [] },
+          { name: 'RejectionMeta', fields: [] },
+        ],
+        [
+          op({
+            defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+            rangeResponses: [
+              { range: '5XX', type: { kind: 'model', name: 'Outage' } },
+              {
+                range: '4XX',
+                headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'RejectionMeta' }, required: false }],
+              },
+            ],
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'ApiError')).toBe('response');
+    expect(directionOf(index, 'Outage')).toBe('response');
+    expect(directionOf(index, 'RejectionMeta')).toBe('response');
+  });
 });

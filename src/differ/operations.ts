@@ -1,4 +1,4 @@
-import type { ErrorResponse, Operation } from '../ir/types.js';
+import type { ErrorResponse, Operation, TypeRef } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
 import { classifyParamChange } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
@@ -50,6 +50,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
+    const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
+    const fallbackResponsesChanged = fallbackDiff !== 'none';
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -60,7 +62,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       pathChanged ||
       paginatedChanged ||
       injectIdempotencyKeyChanged ||
-      errorsChanged;
+      errorsChanged ||
+      fallbackResponsesChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -73,6 +76,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       // requestBodyRequired: true→false is additive (callers may now omit it)
       const requestBodyRequiredBreaking = requestBodyRequiredChanged && !!newOp.requestBodyRequired;
       const errorsBreaking = errorsDiff === 'breaking';
+      const fallbackBreaking = fallbackDiff === 'breaking';
 
       const hasBreaking =
         responseChanged ||
@@ -83,6 +87,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedBreaking ||
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
+        fallbackBreaking ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
         kind: 'operation-modified',
@@ -97,6 +102,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paginatedChanged,
         injectIdempotencyKeyChanged,
         errorsChanged,
+        fallbackResponsesChanged,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
@@ -115,28 +121,53 @@ function classifyErrorsChange(
   oldErrors: ErrorResponse[],
   newErrors: ErrorResponse[],
 ): 'none' | 'additive' | 'breaking' {
-  const oldByCode = new Map(oldErrors.map((e) => [e.statusCode, e]));
-  const newByCode = new Map(newErrors.map((e) => [e.statusCode, e]));
+  return classifyKeyedResponsesChange(
+    new Map(oldErrors.map((e) => [e.statusCode, e])),
+    new Map(newErrors.map((e) => [e.statusCode, e])),
+  );
+}
 
+/**
+ * The fallback responses, keyed the way the spec keys them (`default`,
+ * `4XX`), classified like `errors`: one added is additive (the SDK gains a
+ * typed fallback), one removed or retyped is breaking.
+ */
+function classifyFallbackResponsesChange(oldOp: Operation, newOp: Operation): 'none' | 'additive' | 'breaking' {
+  const byKey = (op: Operation): Map<string, { type?: TypeRef }> => {
+    const entries = new Map<string, { type?: TypeRef }>();
+    if (op.defaultResponse) entries.set('default', op.defaultResponse);
+    for (const range of op.rangeResponses ?? []) entries.set(range.range, range);
+    return entries;
+  };
+  return classifyKeyedResponsesChange(byKey(oldOp), byKey(newOp));
+}
+
+/**
+ * Responses matched by key (a status code, `default`, a range): a new key is
+ * additive (the SDK gains an error class or typed fallback), a removed key is
+ * breaking (it loses one), and a shared key whose body type changed is
+ * breaking. A key with no body on either side is unchanged.
+ */
+function classifyKeyedResponsesChange<K>(
+  oldByKey: Map<K, { type?: TypeRef }>,
+  newByKey: Map<K, { type?: TypeRef }>,
+): 'none' | 'additive' | 'breaking' {
   let hasAdditive = false;
   let hasBreaking = false;
 
-  // New error codes added → additive (SDK gains new error classes)
-  for (const code of newByCode.keys()) {
-    if (!oldByCode.has(code)) hasAdditive = true;
+  for (const key of newByKey.keys()) {
+    if (!oldByKey.has(key)) hasAdditive = true;
   }
 
-  // Old error codes removed → breaking (SDK loses error classes)
-  for (const code of oldByCode.keys()) {
-    if (!newByCode.has(code)) hasBreaking = true;
+  for (const key of oldByKey.keys()) {
+    if (!newByKey.has(key)) hasBreaking = true;
   }
 
-  // Shared error codes with changed types → breaking
-  for (const [code, newErr] of newByCode) {
-    const oldErr = oldByCode.get(code);
-    if (!oldErr) continue;
-    if (!oldErr.type && !newErr.type) continue;
-    if (!oldErr.type || !newErr.type || !typeRefsEqual(oldErr.type, newErr.type)) {
+  for (const [key, newEntry] of newByKey) {
+    const oldEntry = oldByKey.get(key);
+    if (!oldEntry) continue;
+    if (!oldEntry.type && !newEntry.type) continue;
+    if (!oldEntry.type || !newEntry.type || !typeRefsEqual(oldEntry.type, newEntry.type)) {
       hasBreaking = true;
     }
   }

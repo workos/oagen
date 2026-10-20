@@ -110,6 +110,19 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     { schemaNameTransform: options?.schemaNameTransform },
   );
 
+  // Extract inline models from model field definitions (objects/arrays with properties).
+  // schemaNameTransform is kept active so inline child names use the
+  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
+  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget). Read before the
+  // operations and the webhooks so the names those mint — header and
+  // fallback models, webhook payloads — are reserved against these too: a
+  // map's values or a nested object a component field mints (`ReportDetail`)
+  // is not among `models`, and a titled fallback variant would otherwise take
+  // its name and the field merge below drop the component's definition.
+  const fieldInlineModels = extractInlineModelsFromSchemas(
+    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+  );
+
   const { services, inlineModels } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
@@ -120,15 +133,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.tags,
     spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
-  );
-
-  // Extract inline models from model field definitions (objects/arrays with properties).
-  // schemaNameTransform is kept active so inline child names use the
-  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
-  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget). Read before the
-  // webhooks so their names are reserved against these too.
-  const fieldInlineModels = extractInlineModelsFromSchemas(
-    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+    fieldInlineModels,
   );
 
   // Webhooks are read while the schema-name transform is still active, like

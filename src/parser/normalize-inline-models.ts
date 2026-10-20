@@ -1,5 +1,10 @@
 import type { Model, Service, TypeRef, Webhook } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectWebhookTypeRefs } from '../ir/types.js';
+import {
+  walkTypeRef,
+  collectResponseHeaders,
+  collectFallbackResponseTypes,
+  collectWebhookTypeRefs,
+} from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
 
 function keepLargestByName(models: Model[]): Model[] {
@@ -95,6 +100,9 @@ function rewriteModelRefs(
       }
       for (const header of collectResponseHeaders(op)) {
         rewriteModelRef(header.type, oldName, newName);
+      }
+      for (const type of collectFallbackResponseTypes(op)) {
+        rewriteModelRef(type, oldName, newName);
       }
     }
   }

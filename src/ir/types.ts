@@ -233,6 +233,15 @@ export interface Operation {
    * `requestBody` is; an operation without a body has no entry.
    */
   requestBodyRequired?: boolean;
+  /**
+   * The primary success body: the lowest explicit 2xx with a body schema,
+   * else the first explicit 2xx. Never promoted from a `2XX` range or the
+   * `default` response, so when an operation declares no explicit 2xx this is
+   * `{ kind: 'primitive', type: 'string' }` and an emitter should take the
+   * success body from `rangeResponses` (`2XX`), then `defaultResponse` —
+   * the same order it resolves any status: the explicit entry, then the
+   * matching range, then the default.
+   */
   response: TypeRef;
   /**
    * Headers the primary success response declares (the one `response` is the
@@ -255,6 +264,29 @@ export interface Operation {
   responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
+  /**
+   * The document's `default` response: what the operation returns for every
+   * status it does not list explicitly or by range. Present only when the
+   * spec declares one. It is kept apart from `errors` because it carries no
+   * status code (`ErrorResponse.statusCode` is a number emitters compare and
+   * format as one) and is not always an error — a spec may use it for its
+   * success body too. An emitter should treat its `type` as the fallback for
+   * any status that neither `errors`/`successResponses` nor `rangeResponses`
+   * covers. `response` is never promoted from it: when the operation declares
+   * no explicit 2xx, the emitter takes the success body from the `2XX` entry
+   * of `rangeResponses`, then from here.
+   */
+  defaultResponse?: DefaultResponse;
+  /**
+   * The document's `1XX`–`5XX` range responses, in declaration order. Present
+   * only when the spec declares at least one. A range covers every status in
+   * its hundred that the operation does not list explicitly, so an emitter
+   * resolves a status in the order OpenAPI does: the explicit entry, then
+   * the range, then `defaultResponse`. Ranges never feed `response`,
+   * `successResponses` or `errors`, whose numeric `statusCode` could not say
+   * which codes an entry stands for.
+   */
+  rangeResponses?: RangeResponse[];
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
@@ -846,6 +878,11 @@ export function assignModelsToServices(
           referencedModels.add(name);
         }
       }
+      for (const type of collectFallbackResponseTypes(op)) {
+        for (const name of collectModelRefs(type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -945,11 +982,31 @@ export function collectResponseHeaders(op: Operation): ResponseHeader[] {
     op.responseHeaders,
     ...(op.successResponses ?? []).map((r) => r.headers),
     ...op.errors.map((e) => e.headers),
+    op.defaultResponse?.headers,
+    ...(op.rangeResponses ?? []).map((r) => r.headers),
   ];
   for (const list of lists) {
     if (!list || seen.has(list)) continue;
     seen.add(list);
     result.push(...list);
+  }
+  return result;
+}
+
+/**
+ * The body type of every fallback response an operation declares: the
+ * `default` response's, then each range response's in declaration order,
+ * skipping entries that declare no body. Every pass that walks an
+ * operation's type refs goes through this (as it goes through
+ * `collectResponseHeaders` for headers), so a model reached only as the
+ * body of a `default` or `4XX` response is materialized, assigned, renamed
+ * and validated like a primary response body.
+ */
+export function collectFallbackResponseTypes(op: Operation): TypeRef[] {
+  const result: TypeRef[] = [];
+  if (op.defaultResponse?.type) result.push(op.defaultResponse.type);
+  for (const range of op.rangeResponses ?? []) {
+    if (range.type) result.push(range.type);
   }
   return result;
 }
@@ -1007,5 +1064,36 @@ export interface SuccessResponse {
    * with its owner."). Present only when it has non-whitespace content; kept
    * verbatim.
    */
+  description?: string;
+}
+
+/**
+ * The `default` response: the body and headers for every status the
+ * operation does not list. See `Operation.defaultResponse`.
+ */
+export interface DefaultResponse {
+  /** Response body type; absent when the response declares no content. */
+  type?: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
+  /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
+  description?: string;
+}
+
+/** A Responses Object range key, uppercase as OpenAPI writes it (`4xx` is read as `4XX`). */
+export type StatusRange = '1XX' | '2XX' | '3XX' | '4XX' | '5XX';
+
+/**
+ * A range response: the body and headers for every status in one hundred
+ * (`4XX` → 400–499) that the operation does not list explicitly. See
+ * `Operation.rangeResponses`.
+ */
+export interface RangeResponse {
+  range: StatusRange;
+  /** Response body type; absent when the response declares no content. */
+  type?: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
+  /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
   description?: string;
 }

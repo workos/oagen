@@ -1,5 +1,5 @@
 import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
-import { collectResponseHeaders, collectWebhookTypeRefs } from '../ir/types.js';
+import { collectResponseHeaders, collectFallbackResponseTypes, collectWebhookTypeRefs } from '../ir/types.js';
 
 /**
  * Which side of the wire a model sits on, from the caller's point of view.
@@ -54,6 +54,7 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
         for (const header of collectResponseHeaders(op)) responseSeeds.push(header.type);
         for (const success of op.successResponses ?? []) responseSeeds.push(success.type);
         for (const error of op.errors) if (error.type) responseSeeds.push(error.type);
+        for (const type of collectFallbackResponseTypes(op)) responseSeeds.push(type);
       }
     }
     // A webhook's payload and parameters are received, never constructed, by

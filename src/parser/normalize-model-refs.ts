@@ -35,6 +35,12 @@ export function validateModelRefs(spec: ApiSpec): void {
       for (const header of collectResponseHeaders(op)) {
         walkRef(header.type, `${service.name}.${op.name}.headers.${header.name}`);
       }
+      if (op.defaultResponse?.type) {
+        walkRef(op.defaultResponse.type, `${service.name}.${op.name}.defaultResponse`);
+      }
+      for (const range of op.rangeResponses ?? []) {
+        if (range.type) walkRef(range.type, `${service.name}.${op.name}.rangeResponses.${range.range}`);
+      }
     }
   }
 

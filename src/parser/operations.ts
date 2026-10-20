@@ -8,6 +8,9 @@ import type {
   ErrorResponse,
   SuccessResponse,
   ResponseHeader,
+  DefaultResponse,
+  RangeResponse,
+  StatusRange,
   Model,
   Field,
   PaginationMeta,
@@ -38,7 +41,14 @@ import {
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
-import { classifyAndExtractResponse } from './responses.js';
+import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
+import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import {
+  materializeInlineSchema,
+  registerInlineModels,
+  modelFingerprint,
+  type InlineModelRegistry,
+} from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
@@ -309,6 +319,8 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
+  componentResponses?: Record<string, Record<string, unknown>>,
+  componentFieldModels?: Model[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -326,6 +338,9 @@ export function extractOperations(
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
+  // Each operation's fallback responses, typed only once every operation has
+  // been read (see typeFallbackResponses).
+  const deferredFallbacks: Array<[Operation, FallbackResponseSink]> = [];
   // Service name each tagged operation was grouped under, keyed by operation
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
@@ -341,6 +356,12 @@ export function extractOperations(
   const headerModelRegistry: HeaderModelRegistry = new Map(
     (componentModels ?? []).map((model) => [model.name, { fingerprint: modelFingerprint(model) }]),
   );
+  // The inline models the components' own fields mint (a nested object, a
+  // map's values) are component-owned too but are not among `componentModels`
+  // (see parseSpec), so they are registered beside them: a titled fallback
+  // variant, or a header, named like one steps around it instead of the
+  // later field merge dropping the component's definition for the fallback's.
+  registerInlineModels(headerModelRegistry, componentFieldModels ?? []);
   // Headers with a schema are typed after the loop (materializeHeaderModels),
   // when every inline model a header must not be confused with is known.
   const pendingHeaderModels: PendingHeaderModel[] = [];
@@ -361,6 +382,7 @@ export function extractOperations(
         operation,
         inlineModels: opModels,
         envelopeCompanions: opCompanions,
+        fallback: opFallback,
       } = buildOperation(
         method,
         path,
@@ -375,11 +397,13 @@ export function extractOperations(
         componentExamples,
         componentHeaders,
         headerModelRegistry,
+        componentResponses,
         apiRootLength,
         pendingHeaderModels,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
+      if (opFallback) deferredFallbacks.push([operation, opFallback]);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
@@ -391,8 +415,19 @@ export function extractOperations(
   }
 
   // Companion models of list envelopes are named once every list operation is
-  // known, so copies of one envelope shape can share a model.
-  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+  // known, so copies of one envelope shape can share a model. They take their
+  // final names — and the registry — before any fallback body is named, so a
+  // fallback variant titled `ListMetadata` steps around the companion a
+  // primary response's `list_metadata` becomes, instead of the later merge
+  // keeping whichever has more fields under one name.
+  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels);
+  registerInlineModels(headerModelRegistry, companionModels);
+
+  // Fallback bodies are named once every explicit body, header and companion
+  // of the document is in the registry, so none of them takes a name one of
+  // those mints, whichever comes first in the document.
+  for (const [operation, sink] of deferredFallbacks) typeFallbackResponses(operation, sink, inlineModels);
+  inlineModels.push(...companionModels);
 
   // Header models come last, named against every other inline model so that
   // a header can never take a name a body model owns.
@@ -687,7 +722,7 @@ function normalizeOperationIdForNaming(operationId: string): string {
  * `operationId`. The single source of that name: extractRequestBody and
  * deriveResponseName use it to name, resolvePathModelBaseNames to reserve.
  */
-function operationIdModelName(operationId: string, suffix: 'Request' | 'Response'): string {
+function operationIdModelName(operationId: string, suffix: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
 }
 
@@ -1296,9 +1331,16 @@ function buildOperation(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
+  componentResponses?: Record<string, Record<string, unknown>>,
   apiRootLength = 0,
   pendingHeaderModels?: PendingHeaderModel[],
-): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
+): {
+  operation: Operation;
+  inlineModels: Model[];
+  envelopeCompanions?: EnvelopeCompanion[];
+  /** The operation's fallback responses, to be typed once every operation has been read. */
+  fallback?: FallbackResponseSink;
+} {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
@@ -1378,6 +1420,9 @@ function buildOperation(
     reqBodyModels,
     componentSchemas,
   );
+  // The body's models take their names first; a header or fallback model of
+  // this or a later operation steps around them rather than overwriting one.
+  registerInlineModels(headerModelRegistry, reqBodyModels, toPascalCase(operationName));
   // Read off the resolved body so a `components/requestBodies` ref's flag
   // counts. Only `true` makes the body required: OpenAPI defaults the flag
   // to `false`, and a non-boolean value is not a declaration of requiredness.
@@ -1389,6 +1434,7 @@ function buildOperation(
     responseDescription,
     successResponses,
     errors,
+    fallback,
     inlineModels,
     isPaginated,
     dataPath: responseDataPath,
@@ -1396,14 +1442,23 @@ function buildOperation(
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
-    componentHeaders,
+  } = extractResponses(
+    op.responses,
+    op,
+    pathModelBaseName,
+    path,
+    method,
     componentSchemas,
-    serviceName: opContext,
-    operationQualifier: headerOperationQualifier(op, operationName, pathModelBaseName, opContext),
-    registry: headerModelRegistry,
-    pending: pendingHeaderModels,
-  });
+    {
+      componentHeaders,
+      componentSchemas,
+      serviceName: opContext,
+      operationQualifier: headerOperationQualifier(op, operationName, pathModelBaseName, opContext),
+      registry: headerModelRegistry,
+      pending: pendingHeaderModels,
+    },
+    componentResponses,
+  );
   inlineModels.push(...reqBodyModels);
 
   // Build structured pagination metadata from response classification and query param detection
@@ -1480,6 +1535,7 @@ function buildOperation(
     },
     inlineModels,
     envelopeCompanions,
+    fallback,
   };
 }
 
@@ -2125,14 +2181,12 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
 }
 
 /**
- * Spec-wide record of every model name a header model must not silently
- * reuse: the component models (seeded up front) and each inline header model
- * materialized so far. The value carries the model's shape fingerprint, so a
- * header whose shape matches can share the name, and — for header models —
- * which operation produced it, so a collision inside one operation can be
- * told apart from one across operations.
+ * The spec-wide registry of inline model shapes (see `InlineModelRegistry`):
+ * seeded with the component models, then fed every operation's request body
+ * and primary response models and every header and fallback model, so no
+ * later inline model silently reuses a name a different shape owns.
  */
-type HeaderModelRegistry = Map<string, { fingerprint: string; operation?: string }>;
+type HeaderModelRegistry = InlineModelRegistry;
 
 /** What response-header extraction needs from the operation and the spec. */
 interface HeaderExtractionContext {
@@ -2159,50 +2213,9 @@ interface PendingHeaderModel {
   header: ResponseHeader;
   schema: SchemaObject;
   name: string;
-  statusCode: number;
+  /** A status code, or a fallback response's label (`Default`, `ClientError`). */
+  statusCode: number | string;
   ctx: HeaderExtractionContext;
-}
-
-/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'example', 'examples']);
-/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
-
-/**
- * Shape of a model, independent of field order, name and documentation:
- * every field's name, type, requiredness, limits, default and access flags,
- * plus the model's own limits, type parameters and discriminator. Two
- * schemas share a model only when this agrees, so a body that repeats
- * another's fields with a different `minLength` or `minProperties` keeps its
- * own model and its own limits.
- */
-function modelFingerprint(model: Model): string {
-  const fields = model.fields
-    .map((field) => `${field.name}:${stableStringify(omitKeys(field, FIELD_DOC_KEYS))}`)
-    .sort()
-    .join('|');
-  return `${fields}#${stableStringify(omitKeys(model, MODEL_IDENTITY_KEYS))}`;
-}
-
-/** The entries of `value` whose key is not in `keys` and whose value is set. */
-function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
-  );
-}
-
-/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    const entries = Object.keys(record)
-      .filter((key) => record[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
-    return `{${entries.join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'undefined';
 }
 
 /**
@@ -2246,49 +2259,32 @@ function stableStringify(value: unknown): string {
 function typeHeaderSchema(
   schema: SchemaObject,
   name: string,
-  statusCode: number,
+  // A status code, or the label of a fallback response (`Default`, `ClientError`).
+  statusCode: number | string,
   ctx: HeaderExtractionContext,
   models: Model[],
 ): TypeRef {
-  const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
   const byStatus = `${name}${statusCode}`;
   const byOperation = `${ctx.operationQualifier}${name}`;
   const byBoth = `${ctx.operationQualifier}${name}${statusCode}`;
-  let candidates = [name, byStatus, byOperation, byBoth];
 
-  for (let attempt = 0; ; attempt++) {
-    const propertyName =
-      attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`;
-    const trial: Model[] = [];
-    extractInlineModelsFromProperties(
-      { properties: { [propertyName]: schema } },
-      trial,
-      parentName,
-      ctx.componentSchemas,
-    );
-
-    const fingerprints = trial.map((model) => [model, modelFingerprint(model)] as const);
-    const collisions = fingerprints.flatMap(([model, fingerprint]) => {
-      const registered = ctx.registry.get(model.name);
-      return registered !== undefined && registered.fingerprint !== fingerprint ? [registered] : [];
-    });
-    if (collisions.length > 0) {
-      // Decide the preference between candidates 2 and 3 from the bare name's
-      // owner: a clash within this operation reads best by status code, one
-      // with a component or another operation by operation name.
-      if (attempt === 0 && !collisions.every((c) => c.operation === ctx.operationQualifier)) {
-        candidates = [name, byOperation, byStatus, byBoth];
-      }
-      continue;
-    }
-
-    for (const [model, fingerprint] of fingerprints) {
-      if (ctx.registry.has(model.name)) continue;
-      ctx.registry.set(model.name, { fingerprint, operation: ctx.operationQualifier });
-      models.push(model);
-    }
-    return schemaToTypeRef(schema, propertyName, parentName);
-  }
+  return materializeInlineSchema(schema, {
+    // Decide the preference between candidates 2 and 3 from the bare name's
+    // owners: a clash within this operation reads best by status code, one
+    // with a component or another operation by operation name.
+    stem: (index, firstClashOwners) => {
+      const withinOperation = firstClashOwners.every((owner) => owner.operation === ctx.operationQualifier);
+      const candidates = withinOperation
+        ? [name, byStatus, byOperation, byBoth]
+        : [name, byOperation, byStatus, byBoth];
+      return index < candidates.length ? candidates[index] : `${name}${index - candidates.length + 2}`;
+    },
+    parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
+    componentSchemas: ctx.componentSchemas,
+    registry: ctx.registry,
+    operation: ctx.operationQualifier,
+    models,
+  });
 }
 
 /**
@@ -2327,7 +2323,7 @@ function materializeHeaderModels(
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
   operationLabel: string,
-  statusCode: number,
+  statusCode: number | string,
   ctx: HeaderExtractionContext,
   models: Model[],
 ): ResponseHeader[] | undefined {
@@ -2668,6 +2664,173 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
   return pathModelBaseName + 'Response';
 }
 
+/**
+ * `<Op>DefaultResponse`, `<Op>ClientErrorResponse`: a fallback body's inline
+ * model, named like the primary body's `<Op>Response` with the response's
+ * label (`Default`, or the word for its range) in between. Starts with the
+ * operation's stem, so `operationIdModelBase` reserves it with the rest.
+ */
+function deriveFallbackResponseName(op: OperationObject | undefined, pathModelBaseName: string, label: string): string {
+  if (op?.operationId) {
+    return operationIdModelName(op.operationId, `${label}Response`);
+  }
+  return `${pathModelBaseName}${label}Response`;
+}
+
+/**
+ * Where the fallback responses (`default`, `1XX`–`5XX`) of one operation
+ * land while its responses are read, with what typing their bodies and
+ * headers needs. Body models are kept apart from `inlineModels`, which the
+ * latest 2xx body replaces wholesale, and merged once every key is read.
+ */
+interface FallbackResponseSink {
+  op: OperationObject | undefined;
+  pathModelBaseName: string;
+  opLabel: string;
+  componentSchemas?: Record<string, SchemaObject>;
+  headerContext: HeaderExtractionContext;
+  /** `components/responses`, for a fallback written as a Reference Object. */
+  componentResponses?: Record<string, Record<string, unknown>>;
+  /** The body and header models the fallback responses materialize. */
+  models: Model[];
+  /**
+   * The fallback responses read so far, resolved, in document order. They
+   * are typed only once every operation in the document has been read (see
+   * `typeFallbackResponses`), so every explicit body and header is in the
+   * registry first and a fallback steps around their names, never the other
+   * way round.
+   */
+  pending: Array<{ range?: StatusRange; label: string; resp: ResponseObject }>;
+  defaultResponse?: DefaultResponse;
+  rangeResponses: RangeResponse[];
+}
+
+/** The range a key names, uppercased (`4xx` → `4XX`), or undefined when it names none. */
+function statusRangeOf(key: string): StatusRange | undefined {
+  const upper = key.toUpperCase();
+  const isRange = upper.length === 3 && upper.endsWith('XX') && upper[0] >= '1' && upper[0] <= '5';
+  return isRange ? (upper as StatusRange) : undefined;
+}
+
+/**
+ * Read a Responses Object key that is not a status code into `sink`, and
+ * say whether it was consumed: `default` and a range are kept; an `x-` key
+ * is a specification extension and carries no response; anything else
+ * OpenAPI does not define is warned about, then ignored, instead of being
+ * dropped silently. A numeric key returns false so the caller reads it as
+ * before — `parseInt` keeps `200`, `201 ` and the like exactly as they were.
+ */
+function readFallbackResponse(
+  key: string,
+  resp: ResponseObject | ReferenceObject,
+  sink: FallbackResponseSink,
+): boolean {
+  if (key.startsWith('x-')) return true;
+  const range = statusRangeOf(key);
+  if (key === 'default' || range) {
+    if (range && sink.pending.some((entry) => entry.range === range)) {
+      // `4XX` and `4xx` side by side: JSON allows the pair, OpenAPI does not.
+      console.warn(`[oagen] Warning: Duplicate "${range}" response on ${sink.opLabel}; keeping the first`);
+      return true;
+    }
+    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+    // Reference Object has no `headers` or `content` of its own to read.
+    const resolved = resolveResponseRef<ResponseObject>(
+      resp,
+      sink.componentResponses,
+      `${key} response of ${sink.opLabel}`,
+    );
+    sink.pending.push({ range, label: range ? STATUS_RANGE_LABELS[range] : 'Default', resp: resolved });
+    return true;
+  }
+  if (Number.isNaN(parseInt(key, 10))) {
+    console.warn(
+      `[oagen] Warning: Ignoring response key "${key}" on ${sink.opLabel}: not a status code, a 1XX–5XX range, or "default"`,
+    );
+    return true;
+  }
+  return false;
+}
+
+/** The body and headers of one fallback response; a key is left off when absent. */
+function extractFallbackResponse(resp: ResponseObject, label: string, sink: FallbackResponseSink): DefaultResponse {
+  const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.headerContext, sink.models);
+  const schema = jsonResponseSchema(resp);
+  const type = schema
+    ? typeFallbackBody(schema, deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label), sink)
+    : undefined;
+  // The response's own `description`, read as for a success or error entry —
+  // a sibling beside a `$ref` included, since `resolveResponseRef` kept it.
+  const description = presentText(resp.description);
+  return { ...(type && { type }), ...(headers && { headers }), ...(description && { description }) };
+}
+
+/**
+ * Type a fallback body and materialize every model it names, under a name no
+ * other model owns.
+ *
+ * The body is extracted as if it were a field named `contextName` of a parent
+ * with no name, through the extractor every field goes through — so every
+ * shape a field can take (a nullable object, an array or map of objects,
+ * `oneOf`/`anyOf` variants, an `allOf` merge, nested objects) is materialized
+ * under the name `schemaToTypeRef` references it by, by construction. List
+ * envelope and resource-wrapper detection are skipped on purpose: a fallback
+ * body is not what the SDK method returns, so it must not drive pagination.
+ *
+ * The models are checked against the spec-wide registry (the component
+ * models, and every header and fallback model so far) the way header models
+ * are: a model whose shape matches the name's owner shares it, and a clash
+ * moves the whole body to the next free name (`<Op>DefaultResponse2`, `…3`),
+ * nested models and ref together — so a component that happens to be named
+ * like the fallback is never overwritten by `mergeInlineResponseModels`.
+ */
+function typeFallbackBody(schema: SchemaObject, contextName: string, sink: FallbackResponseSink): TypeRef {
+  if (schema.$ref) return schemaToTypeRef(schema, contextName);
+  return materializeInlineSchema(schema, {
+    stem: (index) => (index === 0 ? contextName : `${contextName}${index + 1}`),
+    componentSchemas: sink.componentSchemas,
+    registry: sink.headerContext.registry,
+    operation: sink.headerContext.operationQualifier,
+    models: sink.models,
+  });
+}
+
+/**
+ * Type an operation's fallback responses and attach them, once every
+ * operation of the document has been read: the registry then holds each
+ * request body, primary response and header model of the whole document, so
+ * a fallback body steps around a name any of them mints — a variant titled
+ * `Circle` like one in another operation's 200, whichever comes first in the
+ * document — instead of the later inline-model merge keeping one definition
+ * and warning about the other. The fields are added only when present so
+ * operations without them keep their shape.
+ */
+function typeFallbackResponses(operation: Operation, sink: FallbackResponseSink, inlineModels: Model[]): void {
+  for (const { range, label, resp } of sink.pending) {
+    const entry = extractFallbackResponse(resp, label, sink);
+    if (range) sink.rangeResponses.push({ range, ...entry });
+    else sink.defaultResponse = entry;
+  }
+  if (sink.defaultResponse) operation.defaultResponse = sink.defaultResponse;
+  if (sink.rangeResponses.length > 0) operation.rangeResponses = sink.rangeResponses;
+  inlineModels.push(...sink.models);
+}
+
+/**
+ * The schema of a response's JSON body: `application/json` first, else a
+ * `+json` media type (`application/problem+json` is the usual shape of a
+ * `default` error). Media type parameters (`; charset=utf-8`) are ignored.
+ * Other media types type nothing, as they do for `errors`.
+ */
+function jsonResponseSchema(resp: ResponseObject): SchemaObject | undefined {
+  const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  const essence = (mediaType: string): string => mediaType.split(';')[0].trim().toLowerCase();
+  const match =
+    entries.find(([mediaType]) => essence(mediaType) === 'application/json') ??
+    entries.find(([mediaType]) => essence(mediaType).endsWith('+json'));
+  return match?.[1].schema;
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2676,12 +2839,15 @@ function extractResponses(
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
   headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
   responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
+  /** The fallback responses read, untyped until every operation has been (see `typeFallbackResponses`). */
+  fallback?: FallbackResponseSink;
   inlineModels: Model[];
   isPaginated: boolean;
   dataPath?: string;
@@ -2709,8 +2875,22 @@ function extractResponses(
   // Kept apart from `inlineModels`, which the latest 2xx body replaces
   // wholesale below; merged once every status code has been read.
   const headerModels: Model[] = [];
+  const fallback: FallbackResponseSink = {
+    op,
+    pathModelBaseName,
+    opLabel,
+    componentSchemas,
+    headerContext,
+    componentResponses,
+    models: [],
+    pending: [],
+    rangeResponses: [],
+  };
 
   for (const [statusCode, resp] of Object.entries(responses)) {
+    // `default` and `1XX`–`5XX` never parse as a status code (`parseInt('2XX')`
+    // is 2), so they are routed to their own fields before the numeric branches.
+    if (readFallbackResponse(statusCode, resp, fallback)) continue;
     const code = parseInt(statusCode, 10);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
@@ -2796,6 +2976,10 @@ function extractResponses(
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
+  // The primary body's models take their names before any fallback body of
+  // the document is typed (see typeFallbackResponses); header models
+  // registered themselves as they were materialized.
+  registerInlineModels(headerContext.registry, inlineModels, headerContext.operationQualifier);
   if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
 
   return {
@@ -2804,6 +2988,7 @@ function extractResponses(
     responseDescription,
     successResponses,
     errors,
+    fallback,
     inlineModels,
     isPaginated,
     dataPath,

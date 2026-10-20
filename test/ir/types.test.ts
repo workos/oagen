@@ -21,6 +21,8 @@ import {
   assignModelsToServices,
   validateModelHints,
   collectRequestBodyModels,
+  collectResponseHeaders,
+  collectFallbackResponseTypes,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -646,5 +648,126 @@ describe('assignModelsToServices — response headers', () => {
     expect(map.get('Document')).toBe('Documents');
     expect(map.get('DownloadMeta')).toBe('Documents');
     expect(map.get('ThrottleInfo')).toBe('Documents');
+  });
+});
+
+describe('assignModelsToServices — default and range responses', () => {
+  it('assigns a model reached only as a fallback response body, or through one, to that service', () => {
+    const models: Model[] = [
+      { name: 'Document', fields: [] },
+      { name: 'ApiError', fields: [{ name: 'cause', type: { kind: 'model', name: 'ErrorCause' }, required: false }] },
+      { name: 'ErrorCause', fields: [] },
+      { name: 'Outage', fields: [] },
+      { name: 'Unrelated', fields: [] },
+    ];
+    const services = [
+      {
+        name: 'Documents',
+        operations: [
+          {
+            name: 'getDocument',
+            httpMethod: 'get' as const,
+            path: '/documents/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model' as const, name: 'Document' },
+            errors: [],
+            defaultResponse: { type: { kind: 'model' as const, name: 'ApiError' } },
+            rangeResponses: [{ range: '5XX' as const, type: { kind: 'model' as const, name: 'Outage' } }],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services);
+    expect(map.get('Document')).toBe('Documents');
+    expect(map.get('ApiError')).toBe('Documents');
+    // Chased transitively through the fallback body's own fields.
+    expect(map.get('ErrorCause')).toBe('Documents');
+    expect(map.get('Outage')).toBe('Documents');
+    expect(map.get('Unrelated')).toBeUndefined();
+  });
+});
+
+describe('collectResponseHeaders — default and range responses', () => {
+  const baseOperation = {
+    name: 'getDocument',
+    httpMethod: 'get' as const,
+    path: '/documents/{id}',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: { kind: 'primitive' as const, type: 'string' as const },
+    errors: [],
+    injectIdempotencyKey: false,
+  };
+
+  it('yields default and range headers after the explicit lists', () => {
+    const headers = collectResponseHeaders({
+      ...baseOperation,
+      responseHeaders: [{ name: 'ETag', type: { kind: 'primitive', type: 'string' }, required: false }],
+      errors: [
+        {
+          statusCode: 429,
+          headers: [{ name: 'X-Throttle', type: { kind: 'primitive', type: 'string' }, required: false }],
+        },
+      ],
+      defaultResponse: {
+        headers: [{ name: 'Retry-After', type: { kind: 'primitive', type: 'integer' }, required: false }],
+      },
+      rangeResponses: [
+        { range: '4XX' },
+        {
+          range: '5XX',
+          headers: [{ name: 'X-Request-Id', type: { kind: 'primitive', type: 'string' }, required: false }],
+        },
+      ],
+    });
+    expect(headers.map((h) => h.name)).toEqual(['ETag', 'X-Throttle', 'Retry-After', 'X-Request-Id']);
+  });
+
+  it('yields nothing from fallback responses that declare no headers', () => {
+    expect(
+      collectResponseHeaders({ ...baseOperation, defaultResponse: {}, rangeResponses: [{ range: '2XX' }] }),
+    ).toEqual([]);
+  });
+});
+
+describe('collectFallbackResponseTypes', () => {
+  const baseOperation = {
+    name: 'getDocument',
+    httpMethod: 'get' as const,
+    path: '/documents/{id}',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: { kind: 'primitive' as const, type: 'string' as const },
+    errors: [],
+    injectIdempotencyKey: false,
+  };
+
+  it('yields the default body, then each range body in order, skipping entries without one', () => {
+    const types = collectFallbackResponseTypes({
+      ...baseOperation,
+      defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+      rangeResponses: [
+        { range: '5XX', type: { kind: 'model', name: 'Outage' } },
+        { range: '2XX' },
+        { range: '4XX', type: { kind: 'array', items: { kind: 'model', name: 'Violation' } } },
+      ],
+    });
+    expect(types).toEqual([
+      { kind: 'model', name: 'ApiError' },
+      { kind: 'model', name: 'Outage' },
+      { kind: 'array', items: { kind: 'model', name: 'Violation' } },
+    ]);
+  });
+
+  it('yields nothing for an operation without fallback responses, or with bodiless ones', () => {
+    expect(collectFallbackResponseTypes(baseOperation)).toEqual([]);
+    expect(
+      collectFallbackResponseTypes({ ...baseOperation, defaultResponse: {}, rangeResponses: [{ range: '1XX' }] }),
+    ).toEqual([]);
   });
 });

@@ -1,12 +1,22 @@
 import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef, Webhook } from '../ir/types.js';
-import { walkTypeRef, collectWebhookTypeRefs } from '../ir/types.js';
+import { walkTypeRef, collectFallbackResponseTypes, collectWebhookTypeRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
+import { STATUS_RANGE_LABELS } from './responses.js';
 
+/**
+ * Promote the inline enums a model's fields declare to top-level enums. A
+ * field enum is named from its model and field alone
+ * (`ListPetsDefaultResponseStatus`), a name a component enum — or the same
+ * field of another model — may already own with other values; such a field
+ * is renamed to a distinct name before it is promoted (`…Status2`), the way
+ * header and webhook enums are, rather than left pointing at the other
+ * values. A taken name with the same values is shared.
+ */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
   for (const model of models) {
     for (const field of model.fields) {
-      collectInlineEnumFromRef(field.type, enums, enumNames);
+      collectDistinctEnums(field.type, undefined, enums, enumNames);
     }
   }
 }
@@ -38,6 +48,12 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
         for (const header of headers) collectDistinctEnums(header.type, qualifier, enums, enumNames);
       }
+      // A fallback body that is itself an inline enum, or an array of one, is
+      // typed by `schemaToTypeRef` like a parameter and reaches no model, so
+      // it is walked here; enums nested in a fallback's inline models are
+      // collected with every other model's. The body's name already carries
+      // its label (`ListPetsDefaultResponse`), so a clash is numbered.
+      for (const type of collectFallbackResponseTypes(op)) collectDistinctEnums(type, undefined, enums, enumNames);
     }
   }
 }
@@ -79,6 +95,12 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
   }
   for (const error of op.errors) {
     if (error.headers) groups.push({ headers: error.headers, qualifier: String(error.statusCode) });
+  }
+  // A fallback response has no status code to qualify by; its label
+  // (`Default`, `ClientError`) is what names its inline models too.
+  if (op.defaultResponse?.headers) groups.push({ headers: op.defaultResponse.headers, qualifier: 'Default' });
+  for (const range of op.rangeResponses ?? []) {
+    if (range.headers) groups.push({ headers: range.headers, qualifier: STATUS_RANGE_LABELS[range.range] });
   }
   return groups;
 }

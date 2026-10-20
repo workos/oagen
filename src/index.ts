@@ -11,6 +11,9 @@ export type {
   SecurityRequirementSet,
   SuccessResponse,
   ResponseHeader,
+  DefaultResponse,
+  RangeResponse,
+  StatusRange,
   PaginationMeta,
   HttpMethod,
   Parameter,
@@ -47,6 +50,7 @@ export {
   validateModelHints,
   collectRequestBodyModels,
   collectResponseHeaders,
+  collectFallbackResponseTypes,
   collectWebhookTypeRefs,
 } from './ir/types.js';
 
