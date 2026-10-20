@@ -981,6 +981,8 @@ export interface DefaultResponse {
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
+  description?: string;
 }
 
 /** A Responses Object range key, uppercase as OpenAPI writes it (`4xx` is read as `4XX`). */
@@ -997,4 +999,6 @@ export interface RangeResponse {
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
+  description?: string;
 }

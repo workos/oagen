@@ -549,6 +549,7 @@ interface ErrorResponse {
 interface DefaultResponse {
   type?: TypeRef; // Response body type, if any
   headers?: ResponseHeader[]; // Only when the spec declares at least one
+  description?: string; // The response's own description, as on SuccessResponse/ErrorResponse; only with non-whitespace content
 }
 
 type StatusRange = "1XX" | "2XX" | "3XX" | "4XX" | "5XX";
@@ -558,8 +559,11 @@ interface RangeResponse {
   range: StatusRange; // Uppercase as OpenAPI writes it; `4xx` is read as `4XX`
   type?: TypeRef; // Response body type, if any
   headers?: ResponseHeader[]; // Only when the spec declares at least one
+  description?: string; // The response's own description, as on SuccessResponse/ErrorResponse; only with non-whitespace content
 }
 ```
+
+Both carry the response's `description` by the rule `SuccessResponse` and `ErrorResponse` follow: present only with non-whitespace content, kept verbatim, read from the resolved Response Object — so a `$ref` into `components/responses` gives the component's, and a sibling `description` beside the `$ref` wins where `resolveResponseRef` keeps one.
 
 See [Default and Range Responses](#default-and-range-responses) for how they are resolved and named.
 

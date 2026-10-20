@@ -2530,7 +2530,10 @@ function extractFallbackResponse(resp: ResponseObject, label: string, sink: Fall
   const type = schema
     ? typeFallbackBody(schema, deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label), sink)
     : undefined;
-  return { ...(type && { type }), ...(headers && { headers }) };
+  // The response's own `description`, read as for a success or error entry —
+  // a sibling beside a `$ref` included, since `resolveResponseRef` kept it.
+  const description = presentText(resp.description);
+  return { ...(type && { type }), ...(headers && { headers }), ...(description && { description }) };
 }
 
 /**
