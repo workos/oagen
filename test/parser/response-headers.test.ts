@@ -820,6 +820,93 @@ describe('header models across the spec', () => {
     return { ops: services.flatMap((s) => s.operations), inlineModels };
   }
 
+  it("qualifies a path-named operation's header model by its path stem, not by its derived name", () => {
+    const ok = (meta: Record<string, unknown>) => ({
+      '200': { description: 'ok', headers: { 'X-Meta': object(meta) } },
+    });
+    const { ops, inlineModels } = extractAll({
+      '/notes': { get: { responses: ok({ etag: { type: 'string' } }) } },
+      '/notes/{id}/pin': {
+        post: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: ok({ pinned_at: { type: 'integer' } }),
+        },
+      },
+    });
+    const [list, pin] = ops;
+    expect(list.name).toBe('list');
+    expect(pin.name).toBe('pinNote');
+
+    // The second shape needs a qualifier. It is the same path-derived stem the
+    // operation's body and response models use, so the model name depends only
+    // on the method and path: a verb or singular change in the operation name
+    // must never rename a generated type.
+    expect(modelNameOf(list.responseHeaders?.[0].type)).toBe('NotesXMeta');
+    expect(modelNameOf(pin.responseHeaders?.[0].type)).toBe('NotesByIdPinPostXMeta');
+    expect(fieldsOf(inlineModels, 'NotesXMeta')).toEqual(['etag']);
+    expect(fieldsOf(inlineModels, 'NotesByIdPinPostXMeta')).toEqual(['pinned_at']);
+  });
+
+  const jsonBody = (properties: Record<string, unknown>) => ({
+    content: { 'application/json': { schema: { type: 'object', properties } } },
+  });
+  const uniqueNames = (models: Model[]) => {
+    const names = models.map((m) => m.name);
+    expect(new Set(names).size, `duplicate model names in ${names.join(', ')}`).toBe(names.length);
+  };
+
+  it('never gives a header model the name of a response body model', () => {
+    // A header named `Response` on a path-named POST: the operation-qualified
+    // candidate spells the operation's own response body name.
+    const ok = (header: Record<string, unknown>, body: Record<string, unknown>) => ({
+      '200': { description: 'ok', headers: { Response: object(header) }, ...jsonBody(body) },
+    });
+    const { ops, inlineModels } = extractAll({
+      '/notes': { get: { responses: ok({ etag: { type: 'string' } }, { a: { type: 'string' } }) } },
+      '/notes/{id}/pin': {
+        post: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: ok({ pinned_at: { type: 'integer' } }, { b: { type: 'string' } }),
+        },
+      },
+    });
+    const [list, pin] = ops;
+
+    expect(modelNameOf(pin.response)).toBe('NotesByIdPinPostResponse');
+    expect(modelNameOf(list.responseHeaders?.[0].type)).toBe('NotesResponse');
+    // The body owns `NotesByIdPinPostResponse`, so the header falls through to
+    // the status-qualified candidate.
+    expect(modelNameOf(pin.responseHeaders?.[0].type)).toBe('NotesResponse200');
+    expect(fieldsOf(inlineModels, 'NotesByIdPinPostResponse')).toEqual(['b']);
+    expect(fieldsOf(inlineModels, 'NotesResponse200')).toEqual(['pinned_at']);
+    uniqueNames(inlineModels);
+  });
+
+  it('never gives a header model the name of a response body model named from an operationId', () => {
+    // With the service from a tag, service + header spells operationId + Response.
+    const { ops, inlineModels } = extractAll({
+      '/notes': {
+        get: {
+          operationId: 'getNotes',
+          tags: ['get'],
+          responses: {
+            '200': {
+              description: 'ok',
+              headers: { 'Notes-Response': object({ etag: { type: 'string' } }) },
+              ...jsonBody({ a: { type: 'string' } }),
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelNameOf(ops[0].response)).toBe('GetNotesResponse');
+    expect(modelNameOf(ops[0].responseHeaders?.[0].type)).not.toBe('GetNotesResponse');
+    expect(fieldsOf(inlineModels, 'GetNotesResponse')).toEqual(['a']);
+    expect(fieldsOf(inlineModels, modelNameOf(ops[0].responseHeaders?.[0].type))).toEqual(['etag']);
+    uniqueNames(inlineModels);
+  });
+
   // A singular service: `cleanSchemaName` singularizes a component's leading
   // word, so a component can only share a header model's name when the
   // service name is already singular (`Profile` + `X-Meta` → `ProfileXMeta`).
