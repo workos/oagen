@@ -317,3 +317,71 @@ describe('resolveEnvelopeCompanionNames', () => {
     expect(models).toEqual([{ name: 'Pagination', fields: [{ name: 'page', type: int, required: false }] }]);
   });
 });
+
+describe('resolveEnvelopeCompanionNames – deprecated', () => {
+  const next = () => [{ name: 'next', type: str, required: false }];
+  const orders = [
+    ['ListLegacy', 'ListA', 'ListB'],
+    ['ListA', 'ListLegacy', 'ListB'],
+    ['ListA', 'ListB', 'ListLegacy'],
+  ];
+
+  it('keeps a deprecated copy on its operation-qualified name, whatever the document order', () => {
+    for (const order of orders) {
+      const copies = order.map((op) => {
+        const c = companion(op, 'Pagination', next());
+        if (op === 'ListLegacy') c.models[0].deprecated = true;
+        return c;
+      });
+
+      const models = resolveEnvelopeCompanionNames(copies);
+
+      // The live copies share the bare name; the deprecated one keeps its own,
+      // so no live operation ever references a deprecated model.
+      expect(models.map((m) => [m.name, m.deprecated]).sort()).toEqual([
+        ['ListLegacyPagination', true],
+        ['Pagination', undefined],
+      ]);
+      for (const c of copies) {
+        const expected = c.models[0].deprecated ? 'ListLegacyPagination' : 'Pagination';
+        expect(c.field.type).toEqual({ kind: 'model', name: expected });
+      }
+    }
+  });
+
+  it('lets a deprecated shape take the bare name only when every copy is deprecated', () => {
+    const copies = ['ListA', 'ListB'].map((op) => {
+      const c = companion(op, 'Pagination', next());
+      c.models[0].deprecated = true;
+      return c;
+    });
+
+    const models = resolveEnvelopeCompanionNames(copies);
+
+    expect(models.map((m) => [m.name, m.deprecated])).toEqual([['Pagination', true]]);
+    for (const c of copies) expect(c.field.type).toEqual({ kind: 'model', name: 'Pagination' });
+  });
+
+  it('folds onto a component only when the flag agrees', () => {
+    const live: Model = { name: 'Pagination', fields: next() };
+    const deprecated: Model = { name: 'Pagination', deprecated: true, fields: next() };
+
+    const onto = (component: Model, flag: boolean | undefined) => {
+      const c = companion('ListA', 'Pagination', next());
+      if (flag) c.models[0].deprecated = true;
+      const models = resolveEnvelopeCompanionNames([c], [component]);
+      return { ref: c.field.type, models: models.map((m) => [m.name, m.deprecated]) };
+    };
+
+    expect(onto(live, undefined)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
+    expect(onto(deprecated, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
+    expect(onto(live, true)).toEqual({
+      ref: { kind: 'model', name: 'ListAPagination' },
+      models: [['ListAPagination', true]],
+    });
+    expect(onto(deprecated, undefined)).toEqual({
+      ref: { kind: 'model', name: 'ListAPagination' },
+      models: [['ListAPagination', undefined]],
+    });
+  });
+});

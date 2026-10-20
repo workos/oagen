@@ -46,6 +46,12 @@ export interface EnvelopeCompanion {
  * - Otherwise the most common exact shape (first declared, on a tie) becomes
  *   the target: it and every copy it admits take the bare name; any other
  *   copy keeps its operation-qualified name.
+ * - `deprecated` is part of a copy's shape, so deprecation never reaches a
+ *   live operation and never depends on document order: a copy folds only
+ *   onto a target with the same flag, and while any live copy exists the
+ *   target is chosen among the live copies, so a deprecated copy keeps its
+ *   operation-qualified name (`ListLegacyUsersListMetadata`). Only when every
+ *   copy is deprecated does a deprecated shape take the bare name.
  *
  * The comparison covers the companion's whole field type, so a `oneOf`
  * companion is judged on every variant, not just the first, and a copy folds
@@ -102,13 +108,18 @@ export function resolveEnvelopeCompanionNames(companions: EnvelopeCompanion[], c
       };
     } else {
       const counts = new Map<string, { n: number; first: EnvelopeCompanion }>();
-      for (const c of group) {
+      // The bare name is owned by a live copy while one exists: a deprecated
+      // copy keeps its operation-qualified name rather than deprecating the
+      // name every live operation shares.
+      const live = group.filter((c) => !c.models[0].deprecated);
+      const candidates = live.length > 0 ? live : group;
+      for (const c of candidates) {
         const key = `${fingerprintType(unwrap(c.field.type), localMap(c), new Set())}|${c.bareNames.join(',')}`;
         const seen = counts.get(key);
         if (seen) seen.n += 1;
         else counts.set(key, { n: 1, first: c });
       }
-      let best = { n: 0, first: group[0] };
+      let best = { n: 0, first: candidates[0] };
       for (const entry of counts.values()) if (entry.n > best.n) best = entry;
       owner = best.first;
       finalNames = owner.bareNames;
@@ -178,6 +189,10 @@ function admits(
   if (visiting.has(key)) return true;
   visiting.add(key);
   try {
+    // Deprecation is part of the shape: a live target must not absorb a
+    // deprecated copy (its flag would vanish), and a deprecated target must
+    // not absorb a live one (a live operation would then reference it).
+    if (!!target.deprecated !== !!copy.deprecated) return false;
     if (target.fields.length !== copy.fields.length) return false;
     const targetFields = new Map(target.fields.map((f) => [f.name, f]));
     for (const field of copy.fields) {
@@ -233,10 +248,11 @@ function typeAdmits(
 }
 
 /**
- * Structural fingerprint of a companion model: field names, requiredness, and
- * each field's shape, with models nested inside the companion compared by
- * shape rather than by (operation-qualified) name, and inline enums compared
- * by their values. Models outside the companion are compared by name.
+ * Structural fingerprint of a companion model: whether it is deprecated, its
+ * field names, requiredness, and each field's shape, with models nested
+ * inside the companion compared by shape rather than by (operation-qualified)
+ * name, and inline enums compared by their values. Models outside the
+ * companion are compared by name.
  */
 function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set<string>): string {
   if (visiting.has(model.name)) return `rec:${model.name}`;
@@ -245,7 +261,7 @@ function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((f) => `${f.name}${f.required ? '!' : '?'}:${fingerprintType(f.type, local, visiting)}`);
   visiting.delete(model.name);
-  return `{${fields.join(',')}}`;
+  return `${model.deprecated ? 'deprecated' : ''}{${fields.join(',')}}`;
 }
 
 function fingerprintType(ref: TypeRef, local: Map<string, Model>, visiting: Set<string>): string {

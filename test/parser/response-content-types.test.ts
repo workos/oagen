@@ -372,13 +372,16 @@ describe('response content types', () => {
       const { operation } = singleOperation(
         getWithErrorContent({ 'application/json': { schema: { $ref: '#/components/schemas/Error' } } }),
       );
-      expect(operation.errors).toEqual([{ statusCode: 400, type: { kind: 'model', name: 'Error' } }]);
-      expect(Object.keys(operation.errors[0])).toEqual(['statusCode', 'type']);
+      expect(operation.errors).toEqual([
+        { statusCode: 400, type: { kind: 'model', name: 'Error' }, description: 'bad' },
+      ]);
+      expect(Object.keys(operation.errors[0])).toEqual(['statusCode', 'type', 'description']);
     });
 
     it('keeps an error with no content, or an empty content map, without the lists', () => {
-      expect(singleOperation(getWithErrorContent()).operation.errors).toEqual([{ statusCode: 400, type: undefined }]);
-      expect(singleOperation(getWithErrorContent({})).operation.errors).toEqual([{ statusCode: 400, type: undefined }]);
+      const bare = [{ statusCode: 400, type: undefined, description: 'bad' }];
+      expect(singleOperation(getWithErrorContent()).operation.errors).toEqual(bare);
+      expect(singleOperation(getWithErrorContent({})).operation.errors).toEqual(bare);
     });
 
     it('keeps the lists on an error whose application/json body has no schema, since `type` says nothing', () => {
@@ -387,6 +390,7 @@ describe('response content types', () => {
         {
           statusCode: 400,
           type: undefined,
+          description: 'bad',
           contentTypes: ['application/json'],
           contents: [{ contentType: 'application/json', type: { kind: 'primitive', type: 'unknown' } }],
         },

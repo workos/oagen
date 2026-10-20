@@ -820,3 +820,116 @@ describe('diffOperations', () => {
     }
   });
 });
+
+describe('diffOperations – requestBodyRequired (issue #213)', () => {
+  const noBody: Operation = { ...getUser, httpMethod: 'post' };
+  const optionalBody: Operation = {
+    ...noBody,
+    requestBody: { kind: 'model', name: 'UpdateUser' },
+    requestBodyRequired: false,
+  };
+  const requiredBody: Operation = { ...optionalBody, requestBodyRequired: true };
+
+  it('reports optional → required as breaking', () => {
+    const changes = diffOperations('Users', [optionalBody], [requiredBody]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      requestBodyChanged: false,
+      requestBodyRequiredChanged: true,
+      classification: 'breaking',
+    });
+  });
+
+  it('reports required → optional as additive', () => {
+    const changes = diffOperations('Users', [requiredBody], [optionalBody]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      requestBodyChanged: false,
+      requestBodyRequiredChanged: true,
+      classification: 'additive',
+    });
+  });
+
+  it('reports nothing when the flag is unchanged', () => {
+    expect(diffOperations('Users', [requiredBody], [requiredBody])).toHaveLength(0);
+    expect(diffOperations('Users', [optionalBody], [optionalBody])).toHaveLength(0);
+  });
+
+  it('treats an absent flag as optional, as OpenAPI does', () => {
+    const unflagged: Operation = { ...optionalBody, requestBodyRequired: undefined };
+    expect(diffOperations('Users', [unflagged], [optionalBody])).toHaveLength(0);
+    expect(diffOperations('Users', [optionalBody], [unflagged])).toHaveLength(0);
+
+    const changes = diffOperations('Users', [unflagged], [requiredBody]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ requestBodyRequiredChanged: true, classification: 'breaking' });
+  });
+
+  it('leaves a body appearing or disappearing to requestBodyChanged', () => {
+    const added = diffOperations('Users', [noBody], [requiredBody]);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      requestBodyChanged: true,
+      requestBodyRequiredChanged: false,
+      classification: 'breaking',
+    });
+
+    const removed = diffOperations('Users', [requiredBody], [noBody]);
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toMatchObject({
+      requestBodyChanged: true,
+      requestBodyRequiredChanged: false,
+      classification: 'breaking',
+    });
+  });
+
+  it('reports both when the body type and its flag change together', () => {
+    const retyped: Operation = { ...requiredBody, requestBody: { kind: 'model', name: 'CreateUser' } };
+    const changes = diffOperations('Users', [optionalBody], [retyped]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      requestBodyChanged: true,
+      requestBodyRequiredChanged: true,
+      classification: 'breaking',
+    });
+  });
+
+  it('keeps a required → optional flip additive only while nothing else breaks', () => {
+    const relaxedAndRetyped: Operation = { ...optionalBody, requestBody: { kind: 'model', name: 'CreateUser' } };
+    const changes = diffOperations('Users', [requiredBody], [relaxedAndRetyped]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      requestBodyChanged: true,
+      requestBodyRequiredChanged: true,
+      classification: 'breaking',
+    });
+  });
+});
+
+describe('diffOperations response descriptions', () => {
+  it('ignores a changed response description, the way a changed operation description is ignored', () => {
+    const old: Operation = {
+      ...getUser,
+      description: 'Get a user.',
+      responseDescription: 'A user.',
+      errors: [{ statusCode: 404, description: 'Not found.' }],
+    };
+    const modified: Operation = {
+      ...getUser,
+      description: 'Fetch a user.',
+      responseDescription: 'The user, with its organization.',
+      errors: [{ statusCode: 404, description: 'No user has that id.' }],
+    };
+
+    expect(diffOperations('Users', [old], [modified])).toEqual([]);
+  });
+
+  it('ignores a response description appearing or disappearing', () => {
+    const described: Operation = { ...getUser, responseDescription: 'The user.' };
+
+    expect(diffOperations('Users', [getUser], [described])).toEqual([]);
+    expect(diffOperations('Users', [described], [getUser])).toEqual([]);
+  });
+});
