@@ -396,14 +396,20 @@ export function extractOperations(
     }
   }
 
-  // Fallback bodies are named once every explicit body and header of the
-  // document is in the registry, so none of them takes a name one of those
-  // mints, whichever comes first in the document.
-  for (const [operation, sink] of deferredFallbacks) typeFallbackResponses(operation, sink, inlineModels);
-
   // Companion models of list envelopes are named once every list operation is
-  // known, so copies of one envelope shape can share a model.
-  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+  // known, so copies of one envelope shape can share a model. They take their
+  // final names — and the registry — before any fallback body is named, so a
+  // fallback variant titled `ListMetadata` steps around the companion a
+  // primary response's `list_metadata` becomes, instead of the later merge
+  // keeping whichever has more fields under one name.
+  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels);
+  registerInlineModels(headerModelRegistry, companionModels);
+
+  // Fallback bodies are named once every explicit body, header and companion
+  // of the document is in the registry, so none of them takes a name one of
+  // those mints, whichever comes first in the document.
+  for (const [operation, sink] of deferredFallbacks) typeFallbackResponses(operation, sink, inlineModels);
+  inlineModels.push(...companionModels);
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"

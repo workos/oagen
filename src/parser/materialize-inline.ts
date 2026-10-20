@@ -11,6 +11,7 @@
  * `materializeInlineSchema`).
  */
 import type { Model, TypeRef } from '../ir/types.js';
+import { walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
@@ -304,7 +305,14 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
       );
     }
     for (const model of trial.models) {
-      if (model.name === from) model.name = to;
+      if (model.name === from) {
+        model.name = to;
+        // The inline enums of its fields were named from it (`CircleStatus`),
+        // so they follow (`ListPetsDefaultResponseCircleStatus`): left as they
+        // were, a component enum `CircleStatus` of other values would be
+        // collected first and the renamed model's field would point at it.
+        for (const field of model.fields) rewriteEnumPrefix(field.type, from, to);
+      }
       for (const field of model.fields) rewriteModelRef(field.type, from, to);
     }
     rewriteModelRef(type, from, to);
@@ -366,6 +374,16 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
   }
 
   return { ...trial, fingerprints, clashing: [], type };
+}
+
+/** Rename, in place, every inline enum under `ref` whose name was built from `oldPrefix` so it is built from `newPrefix`. */
+function rewriteEnumPrefix(ref: TypeRef, oldPrefix: string, newPrefix: string): void {
+  walkTypeRef(ref, {
+    enum: (r) => {
+      if (r.values && r.name.startsWith(oldPrefix))
+        (r as { name: string }).name = newPrefix + r.name.slice(oldPrefix.length);
+    },
+  });
 }
 
 /** Rewrite every reference to `oldName` in `ref` in place — a union's discriminator mapping included. */

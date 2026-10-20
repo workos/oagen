@@ -933,6 +933,85 @@ describe('names no stem can move (titled variants) terminate and step around the
   );
 
   it(
+    "a renamed nested variant's inline enums follow it, away from a component enum of other values (Greptile)",
+    async () => {
+      const spec = withComponent(
+        'Circle',
+        { type: 'object', properties: { radius: { type: 'number' } } },
+        {
+          '200': ok,
+          default: {
+            description: 'd',
+            content: json({
+              type: 'object',
+              properties: {
+                shape: {
+                  oneOf: [
+                    titled('Circle', 'circle', { status: { type: 'string', enum: ['c', 'd'] } }),
+                    titled('Square', 'square', { side: { type: 'number' } }),
+                  ],
+                },
+              },
+            }),
+          },
+        },
+      ) as { components: { schemas: Record<string, unknown> } };
+      spec.components.schemas['CircleStatus'] = { type: 'string', enum: ['a', 'b'] };
+      const ir = await parseWithoutWarnings(spec);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['ListPetsDefaultResponseCircle']).toMatchObject({
+        status: { kind: 'enum', name: 'ListPetsDefaultResponseCircleStatus', values: ['c', 'd'] },
+      });
+      const values = (name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+      expect(values('CircleStatus')).toEqual(['a', 'b']);
+      expect(values('ListPetsDefaultResponseCircleStatus')).toEqual(['c', 'd']);
+      expectConsistent(ir, ['Pet', 'Error', 'Circle']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
+    "a fallback variant titled like a list envelope's companion steps around it (Greptile)",
+    async () => {
+      // `list_metadata` on the 200 becomes the companion `ListMetadata` once every
+      // list operation is known; a fallback variant titled `ListMetadata` of another
+      // shape must not take that name first and leave the merge to pick one.
+      const ir = await parseWithoutWarnings(
+        petsSpec({
+          '200': {
+            description: 'ok',
+            content: json({
+              type: 'object',
+              properties: {
+                data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+                list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+              },
+            }),
+          },
+          default: {
+            description: 'd',
+            content: json({
+              oneOf: [
+                titled('ListMetadata', 'meta', { reason: { type: 'string' }, hint: { type: 'string' } }),
+                titled('Square', 'square', { side: { type: 'number' } }),
+              ],
+            }),
+          },
+        }),
+      );
+      const types = fieldTypesByModel(ir.models);
+      expect(types['ListMetadata']).toEqual({ after: str });
+      expect(only(ir).pagination?.envelopeFields?.[0]?.type).toEqual(model('ListMetadata'));
+      const fallback = only(ir).defaultResponse?.type as { variants: TypeRef[] } | undefined;
+      const variant = fallback!.variants[0];
+      expect(variant).not.toEqual(model('ListMetadata'));
+      expect(types[(variant as { name: string }).name]).toMatchObject({ reason: str, hint: str });
+      expectConsistent(ir, ['Pet', 'Error']);
+    },
+    HANG_GUARD_MS,
+  );
+
+  it(
     'fails loudly when a nested clashing title and a $ref to the same component cannot be told apart',
     async () => {
       const body = { type: 'object', properties: { shape: shapes, original: { $ref: '#/components/schemas/Circle' } } };
