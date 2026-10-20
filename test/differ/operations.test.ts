@@ -183,6 +183,62 @@ describe('diffOperations — response content types', () => {
     });
   });
 
+  it('reports the own body of a lone 2xx that pairs with an old alternate entry, which responseChanged does not compare (Greptile)', () => {
+    const integer: TypeRef = { kind: 'primitive', type: 'integer' };
+    // Old: 200 (JSON string + HTML) primary, 201 (JSON integer). New: a lone
+    // 201 (JSON string). `responseChanged` compares the two primaries — string
+    // on both sides — so the 201's integer-to-string change is only ever seen
+    // by this pairing, and must not be suppressed as covered elsewhere.
+    const old = card(
+      [
+        ['application/json', string],
+        ['text/html', string],
+      ],
+      {
+        successResponses: [
+          {
+            statusCode: 200,
+            type: string,
+            contentTypes: ['application/json', 'text/html'],
+            contents: contents([
+              ['application/json', string],
+              ['text/html', string],
+            ]),
+          },
+          {
+            statusCode: 201,
+            type: integer,
+            contentTypes: ['application/json'],
+            contents: contents([['application/json', integer]]),
+          },
+        ],
+      },
+    );
+    (old.responseContents as ResponseContent[]) = old.successResponses![0].contents!;
+    old.response = old.successResponses![0].type;
+    const next = card([['application/json', string]], { response: string });
+    next.responseContents![0].type = next.response;
+    const changes = diffOperations('Pets', [old], [next]);
+    expect(changes[0]).toMatchObject({
+      responseChanged: false,
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/json'], classification: 'breaking' },
+        {
+          statusCode: 200,
+          added: [],
+          removed: ['application/json', 'text/html'],
+          retyped: [],
+          classification: 'breaking',
+        },
+      ],
+      classification: 'breaking',
+    });
+    expect(
+      Object.keys((changes[0] as { responseContentTypeChanges: object[] }).responseContentTypeChanges[0]),
+    ).not.toContain('statusCode');
+  });
+
   it('reports an added media type as additive', () => {
     const changes = diffOperations(
       'Pets',

@@ -144,9 +144,13 @@ interface ContentEntry {
    */
   ownMediaType?: string;
   /**
-   * Whether another comparison already reports a change to the own body:
-   * `responseChanged` for the primary, `errorsChanged` for an error. An
-   * alternate 2xx has none, so even its own body is compared here.
+   * Whether another comparison reports a change to the own body when this
+   * entry is paired with one of its own kind: `responseChanged` for the
+   * primary, `errorsChanged` for an error. An alternate 2xx has none, so
+   * even its own body is compared here — and so is a primary's when it is
+   * paired with an alternate 2xx (the primary moved, or a lone 2xx paired
+   * with the entry that offers its media types), since `responseChanged`
+   * compares the two primaries, not that pair.
    */
   ownCoveredElsewhere: boolean;
 }
@@ -227,8 +231,9 @@ function contentTypeOf(entry: ContentEntry, mediaType: string): TypeRef | undefi
 /**
  * Per response entry both specs have, the media types the new spec added,
  * removed, or retyped. A retype is left out only when another comparison
- * reports that very body: the entry's own media type on both sides, for the
- * primary (`responseChanged`) or an error (`errorsChanged`). Entries pair by
+ * reports that very body: the entry's own media type on both sides, for two
+ * primaries (`responseChanged`) or two errors of one code (`errorsChanged`)
+ * — never for a primary paired with an alternate 2xx. Entries pair by
  * status code (`pairContentEntries`); a primary whose code the IR does not
  * carry (a lone 2xx) pairs with the entry of the other spec that offers its
  * media types, else with that spec's primary. An error only one spec has is
@@ -258,7 +263,7 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
       const newType = contentTypeOf(entry, mediaType);
       if (!oldType || !newType || typeRefsEqual(oldType, newType)) return false;
       const ownOnBothSides = old.ownMediaType === mediaType && entry.ownMediaType === mediaType;
-      return !(ownOnBothSides && entry.ownCoveredElsewhere);
+      return !(ownOnBothSides && old.ownCoveredElsewhere && entry.ownCoveredElsewhere);
     });
     if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
     changes.push({
