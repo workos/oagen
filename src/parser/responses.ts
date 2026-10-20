@@ -528,8 +528,11 @@ function extractDirectResource(
     );
   }
 
-  // Array with inline object items — extract the item model
-  if (schema.type === 'array' && schema.items) {
+  // Array with inline object items — extract the item model. An `items`
+  // schema with no `type` is an array to `schemaToTypeRef`, so it must be one
+  // here too, or the reference it produces names an item model nobody
+  // creates (`array<ListThingsResponse>` with no `ListThingsResponse`).
+  if ((schema.type === 'array' || !schema.type) && schema.items) {
     const items = schema.items;
     if (items.$ref) {
       return {

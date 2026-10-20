@@ -450,6 +450,18 @@ describe('response media types are matched by essence (issue #237)', () => {
       expectClosed(op, inlineModels);
     });
 
+    it('an array declared by `items` alone, with no `type`, under application/json and under another media type', () => {
+      // `schemaToTypeRef` reads `items` with no `type` as an array, so the
+      // primary branch must too — or the reference names an item model
+      // nobody creates (`array<GetPetResponse>` with no `GetPetResponse`).
+      for (const mediaType of ['application/json', 'application/x-ndjson']) {
+        const { op, inlineModels } = getPet({ [mediaType]: { schema: { items: INLINE_OBJECT } } });
+        expect(op.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'GetPetItem' } });
+        expect(fieldNames(inlineModels, 'GetPetItem')).toEqual(['email']);
+        expectClosed(op, inlineModels);
+      }
+    });
+
     it('an array whose items are a union of inline objects', () => {
       const { op, inlineModels } = getPet({
         'application/json': {
