@@ -37,6 +37,13 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const paramChanges = diffParams(oldOp, newOp);
     const responseChanged = !typeRefsEqual(oldOp.response, newOp.response);
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
+    // Only while both sides carry a body: a body appearing or disappearing is
+    // already `requestBodyChanged`. An absent flag reads as optional, as it
+    // does in OpenAPI.
+    const requestBodyRequiredChanged =
+      !!oldOp.requestBody &&
+      !!newOp.requestBody &&
+      (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
     const paginatedChanged = !!oldOp.pagination !== !!newOp.pagination;
@@ -61,6 +68,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       paramChanges.length > 0 ||
       responseChanged ||
       requestBodyChanged ||
+      requestBodyRequiredChanged ||
       httpMethodChanged ||
       pathChanged ||
       paginatedChanged ||
@@ -84,11 +92,15 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       // injectIdempotencyKey: false→true is additive (SDK gains idempotency key)
       // injectIdempotencyKey: true→false is breaking (SDK loses idempotency key)
       const injectIdempotencyKeyBreaking = injectIdempotencyKeyChanged && !newOp.injectIdempotencyKey;
+      // requestBodyRequired: false→true is breaking (callers must now send the body)
+      // requestBodyRequired: true→false is additive (callers may now omit it)
+      const requestBodyRequiredBreaking = requestBodyRequiredChanged && !!newOp.requestBodyRequired;
       const errorsBreaking = errorsDiff === 'breaking';
 
       const hasBreaking =
         responseChanged ||
         requestBodyChanged ||
+        requestBodyRequiredBreaking ||
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
@@ -110,6 +122,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         paramChanges,
         responseChanged,
         requestBodyChanged,
+        requestBodyRequiredChanged,
         httpMethodChanged,
         pathChanged,
         paginatedChanged,
