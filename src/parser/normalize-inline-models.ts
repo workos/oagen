@@ -1,5 +1,6 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs, renameModelRefs } from '../ir/types.js';
+import { modelFingerprint } from './operations.js';
 import { unionRulesKey } from './union-shape.js';
 
 function keepLargestByName(models: Model[]): Model[] {
@@ -21,9 +22,35 @@ function keepLargestByName(models: Model[]): Model[] {
     }
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
+    } else if (differOnlyByDeprecation(existing, model) && !model.deprecated) {
+      // Identical in everything but the flag, the earlier copy deprecated and
+      // this one not. The shared name must not carry deprecation onto every
+      // live reference, so the live definition is kept; the deprecated
+      // schema's own field or operation still carries its flag. A copy that
+      // differs in anything else — requiredness, a type, a limit — is not
+      // interchangeable and takes the usual largest-or-first choice above.
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+      );
+      byName.set(model.name, model);
     }
   }
   return [...byName.values()];
+}
+
+/**
+ * Whether `a` and `b` are the same model but for `deprecated` — one flagged,
+ * the other not, and otherwise identical in everything the header registry's
+ * `modelFingerprint` reads: every field's name, type, requiredness, limits,
+ * default and access flags, and the model's own limits, type parameters and
+ * discriminator (names and documentation aside). Only such a pair is
+ * interchangeable under one name; a difference in requiredness alone would
+ * make a deprecated response promise a field the wire may omit.
+ */
+function differOnlyByDeprecation(a: Model, b: Model): boolean {
+  if (!!a.deprecated === !!b.deprecated) return false;
+  const shape = (m: Model): string => modelFingerprint({ ...m, deprecated: undefined });
+  return shape(a) === shape(b);
 }
 
 /**
@@ -93,12 +120,34 @@ export function mergeInlineResponseModels(schemaModels: Model[], inlineModels: M
         `[oagen] Warning: Inline model "${model.name}" has different fields than the named union component — using component schema`,
       );
     } else if (hasDifference && model.fields.length > existing.fields.length) {
+      // The component's name is the type the SDK exposes, so what documents
+      // and flags that name stays the component's: its `description` and
+      // `externalDocs` where it has them (the response's fill in only where
+      // the component has none, as the Json fold fills the base's link), and
+      // its `deprecated` — present or absent — always, as a component's flag
+      // is never replaced anywhere else (see mergeFieldInlineModels): a
+      // deprecated response that adds a field must not deprecate every
+      // operation referencing the live component, and a live one must not
+      // clear a deprecated component's flag. The response's own flag is not
+      // read; the operation that declared it still carries its own.
+      const replacement: Model = {
+        ...model,
+        ...(existing.description ? { description: existing.description } : {}),
+        ...(existing.externalDocs ? { externalDocs: existing.externalDocs } : {}),
+        ...(existing.deprecated ? { deprecated: true } : {}),
+      };
+      if (!existing.deprecated) delete replacement.deprecated;
       const idx = mergedSchemaModels.indexOf(existing);
-      if (idx !== -1) mergedSchemaModels[idx] = model;
-      schemaModelsByName.set(model.name, model);
+      if (idx !== -1) mergedSchemaModels[idx] = replacement;
+      schemaModelsByName.set(model.name, replacement);
       console.warn(
         `[oagen] Warning: Inline model "${model.name}" has more fields than component schema (${model.fields.length} vs ${existing.fields.length}) — using inline response model`,
       );
+      if (!!existing.deprecated !== !!model.deprecated) {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" is ${model.deprecated ? 'deprecated' : 'live'} but component schema "${model.name}" is ${existing.deprecated ? 'deprecated' : 'live'} — keeping the component's flag`,
+        );
+      }
     } else if (hasDifference) {
       console.warn(
         `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,
@@ -125,6 +174,8 @@ export function mergeFieldInlineModels(
   const modelNames = new Set(existingModels.map((m) => m.name));
   const modelsByName = new Map(existingModels.map((m) => [m.name, m]));
   const fieldList = (m: Model): string => m.fields.map((f) => f.name).join(', ') || '(no fields)';
+  /** An earlier inline model replaced by a live copy of the same name and shape. */
+  const replacements = new Map<Model, Model>();
 
   const deduplicatedFieldModels = fieldInlineModels.filter((model) => {
     if (!modelNames.has(model.name)) return true;
@@ -146,12 +197,28 @@ export function mergeFieldInlineModels(
           `[oagen] Warning: Inline model "${model.name}" has different fields than component schema — using component schema`,
         );
       }
+    } else if (
+      !model.deprecated &&
+      componentNames &&
+      !componentNames.has(model.name) &&
+      differOnlyByDeprecation(existing, model)
+    ) {
+      // Two inline models of one name, identical but for the flag, the
+      // earlier deprecated and this one live: keep the live definition under
+      // the shared name so deprecation does not reach every reference. A
+      // component's own flag, by contrast, is authoritative and is never
+      // replaced, and a copy that differs in anything else keeps the earlier
+      // definition exactly as before.
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+      );
+      replacements.set(existing, model);
     }
 
     return false;
   });
 
-  return [...existingModels, ...keepLargestByName(deduplicatedFieldModels)];
+  return [...existingModels.map((m) => replacements.get(m) ?? m), ...keepLargestByName(deduplicatedFieldModels)];
 }
 
 function hasModelConstDiscriminant(model: Model): boolean {
@@ -245,6 +312,13 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     if (jsonModel.constraints || baseModel.constraints) {
       baseModel.constraints = { ...baseModel.constraints, ...jsonModel.constraints };
     }
+    // The base keeps its own documentation, link included, as it keeps its
+    // description; the Json model's link only fills in where the base has none,
+    // so folding the shape never drops the one link the document gave it.
+    if (!baseModel.externalDocs && jsonModel.externalDocs) baseModel.externalDocs = jsonModel.externalDocs;
+    // `deprecated` is deliberately not carried over: it names the type the SDK
+    // exposes, and that is `baseModel.name`, which keeps its own flag. A
+    // deprecated `<Name>Json` folded into a live `<Name>` leaves `<Name>` live.
     toRemove.add(jsonModel.name);
     rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name);
     console.warn(

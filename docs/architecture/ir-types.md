@@ -7,16 +7,24 @@ The intermediate representation (IR) is the contract between the parser and all 
 ## Top-Level: ApiSpec
 
 ```typescript
-interface ServerEntry {
-  url: string;
+interface ServerVariable {
+  default: string; // Fills the placeholder when nothing else is chosen; OpenAPI requires it
+  enum?: string[]; // The values the variable may take; present only when declared (and non-empty)
   description?: string;
+}
+
+interface ServerEntry {
+  url: string; // As written, placeholders included: https://{region}.api.example.com
+  description?: string;
+  variables?: Record<string, ServerVariable>; // Keyed by placeholder name; present only when declared
 }
 
 interface ApiSpec {
   name: string; // From info.title
   version: string; // From info.version
   description?: string; // From info.description
-  baseUrl: string; // From servers[0].url
+  externalDocs?: ExternalDocs; // The document's top-level externalDocs, when usable
+  baseUrl: string; // servers[0].url with each variable's default filled in
   servers?: ServerEntry[]; // All servers from the spec
   services: Service[]; // Grouped operations
   models: Model[]; // Schema objects
@@ -27,9 +35,26 @@ interface ApiSpec {
 }
 ```
 
-The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always set to the first server's URL for backward compatibility.
+The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always the first server's URL, resolved: each `{name}` placeholder is replaced by that variable's `default`, so a client built on `baseUrl` requests `https://eu.api.example.com/v1`, not `https://{region}.api.example.com/v1`.
+
+**Server variables.** `ServerEntry.url` keeps the template as written and `variables` carries what the document declares for it (same shape in OpenAPI 3.0 and 3.1), so an emitter can offer the choice — an environment or region picker — rather than only the default. There is no `resolvedUrl` on `ServerEntry`: `resolveServerUrl(server)` from `src/ir/server-url.ts` (exported from the package) returns `{ url, unresolved }` for any entry, which is exactly how the parser produced `baseUrl`. It is plain string scanning: a variable may appear more than once, the substituted value is not scanned again, and no pattern is built from the variable names.
+
+The parser checks every server, not only the first, and reports each problem once with an `[oagen] Warning:`: a variable without a usable `default` is omitted from `variables` (the IR requires one) and its placeholder stays in the URL; a placeholder that names no declared variable stays in the URL; a `default` outside the variable's `enum` is kept as written. A declared variable the URL never uses is kept without comment. `default` and `enum` entries are strings; a number or boolean (YAML reads `default: 8443` as a number) is carried as its text. `variables`, `enum` and `description` are absent, not `undefined`, when the document does not declare them.
 
 `security` is the document-level `security` list, in the same shape as `Operation.security`; every operation that declares no `security` of its own inherits it. It is `undefined` when the document declares none.
+
+### ExternalDocs
+
+```typescript
+interface ExternalDocs {
+  url: string; // Exactly as written in the document
+  description?: string; // Only when it has non-whitespace content
+}
+```
+
+An OpenAPI External Documentation Object — the document's way of linking to fuller documentation — carried on `ApiSpec` (the top-level `externalDocs`), `Service` (from the document tag, see below), `Operation`, `Model` and `Enum`, so an emitter can add it to a doc comment (a JSDoc `@see`, say). The key is present only when the document declares an entry with a non-blank `url`: a non-object, a missing or blank `url`, is dropped — silently, the way a malformed document tag is, since the parser ignored `externalDocs` entirely before and a malformed value must keep parsing. `url` is kept verbatim. OpenAPI allows it to be relative to the document's own location, which the parser does not know, so it is neither resolved nor rewritten, and `expandDocUrls` leaves it alone too; `expandDocUrls` does expand relative links inside `description`, which is CommonMark like every other description it walks. `description` is present only when it has non-whitespace content and is kept verbatim otherwise.
+
+A `Model` built from an inline schema — a request body, a response, a `oneOf` variant, an object nested in a component field, array items, an `allOf` merge, a discriminated `allOf` + `oneOf` variant — carries the `externalDocs` of the schema it was built from. A wrapper the parser collapses or merges — a nullable `oneOf`/`anyOf` or `type: [..., "null"]`, a single-member `allOf`, an `allOf` response, field or nested-field merge — is the schema the document wrote, so the model built from what it unwraps or merges to carries the wrapper's link; a member's own stays on that member (a `$ref` member's on its component model), and a collapsed branch or member keeps its own link only when the wrapper has none. Every later pass that keeps, renames or merges models preserves the link; when `collapseJsonSuffixModels` folds `PetJson` into `Pet`, `Pet` keeps its own link as it keeps its own description, and takes `PetJson`'s only when it has none. An `Enum` carries the component schema's; an enum lifted from an inline field schema carries none.
 
 ### SdkBehavior
 
@@ -169,6 +194,7 @@ interface PaginationMeta {
   param: string; // Query param name (e.g., "after" for cursor, "offset" for offset)
   limitParam?: string; // Limit param name (offset strategy only, e.g., "limit")
   dataPath?: string; // JSON path to the data array (e.g., "data", "results") — undefined means the response IS the data
+  dataDescription?: string; // The data array property's own description, when it declares one
   itemType: TypeRef; // Type of each item in the paginated list
   envelopeFields?: Field[]; // Every envelope property besides the data array, in document order
 }
@@ -179,12 +205,13 @@ Present on `Operation` when pagination is detected. The `strategy` discriminant 
 When the parser recognizes an inline list envelope — one array property plus a companion that looks like pagination metadata — `Operation.response` becomes the bare array, and `envelopeFields` keeps everything else the envelope carries: the pagination companion (`list_metadata`, `pagination`, `has_more`, `total`, …) and any discriminant such as `object: "list"`. Each entry is an ordinary `Field` (wire name, type, `required`, description), so `dataPath` + `itemType` + `envelopeFields` together describe the full shape of what the endpoint returns, and an emitter can both type the response and read the page details it needs for the next request:
 
 ```typescript
-// GET /customers → { customers: Customer[], pagination: Pagination }
+// GET /customers → { customers: Customer[] ("The customers on this page."), pagination: Pagination }
 op.pagination = {
   strategy: "offset",
   param: "page",
   limitParam: "limit",
   dataPath: "customers",
+  dataDescription: "The customers on this page.",
   itemType: { kind: "model", name: "Customer" },
   envelopeFields: [
     {
@@ -198,22 +225,31 @@ op.pagination = {
 
 A companion that is an inline object is lifted to a model. The same envelope recurs on every list endpoint of an API, so copies that agree structurally share one model named from the property alone (`list_metadata` → `ListMetadata`, `pagination` → `Pagination`) rather than one per operation as list items are (`ListUsersItem`). The bare name is taken only where it cannot change another type's shape. A copy collapses onto a target only when the target admits every value the copy can hold: the same fields with the same types, where the target may be looser (optional where the copy requires, nullable where the copy is not) but never stricter. When a component model of that name exists, the copies it admits collapse onto the component as written; otherwise the most common shape becomes the target. Any other copy keeps its operation-qualified name (`ListUsersPagination`). An inline enum in a companion is qualified by operation exactly like a parameter enum (`ListUsersSortOrder`). Companions declared through an `allOf` `$ref` branch are resolved against the component schemas, and a companion declared by more than one branch merges both declarations. Models and enums reached only through `envelopeFields` count as referenced for emission, service assignment, compat scoping, and the differ's request/response direction.
 
-`envelopeFields` is absent when the response is a bare array, when the response is a `$ref` to a component schema (the wrapper model itself carries the companions), or when pagination was inferred from query parameters alone.
+The data array property's own description, when it declares one, is kept beside `dataPath` as `dataDescription`, so an emitter documenting what a list method returns (an `@returns` tag, say) reads it from the IR like the companions' descriptions rather than from the document. As with a `Field`'s `description`, it is the property's text and never the item schema's; an inline item object's description is on the lifted item model.
+
+`envelopeFields` is absent when the response is a bare array, when the response is a `$ref` to a component schema (the wrapper model itself carries the companions), or when pagination was inferred from query parameters alone. `dataDescription` is absent in the same cases — the wrapper model's own data field carries the description — and whenever the data property declares none.
 
 The `link-header` strategy is for APIs that use RFC 5988 `Link` headers for pagination (e.g., GitHub API).
 
 ## Service & Operation
 
-Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to the first path segment (e.g., `/organizations/{id}` → `Organizations`). Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
+Service names are derived from OpenAPI tags when present — the first tag on an operation is converted to PascalCase (e.g., `tags: ["multi-factor-auth"]` → service `MultiFactorAuth`). When no tag is present, the parser falls back to a path segment (e.g., `/organizations/{id}` → `Organizations`), skipping the API root the document's untagged operations sit under. Each untagged path contributes its leading literal segments through the last API marker — `api`, `rest`, or a version such as `v1`, `2.0` or `2010-04-01` — and the root is the longest marker-terminated prefix every contribution shares (compared verbatim), so a document whose paths all start with `/api/v1/` groups `/api/v1/notes` under `Notes` rather than collapsing the whole API into one `Api` service, and `/wiki/rest/api/content` lands in `Content`. The service is named from the first literal segment after the root, so `/v1/notes` and `/v1/{teamId}/notes` share `Notes`; a path with nothing literal after the root (`/api` itself, `/api/{id}`) keeps its first segment, `Api`. A path with no marker at all (`/health`, `/openapi.json`) sits outside the root, keeps its own first segment, and does not switch the root off for the rest of the document. A shared prefix that carries no marker is kept whole, since a module prefix every path shares (`/user_management/users`, `/user_management/invitations` → `UserManagement`) is the service, not noise; and `/v1/…` beside `/v2/…` has no shared root, so the versions stay separate services. Tagged operations and path items without an operation take no part. Fallback operation names skip the root and the service segment the same way, so `/api/v1/notes` is `Notes.list`, never `Notes.listV1Notes`; when two path-named operations still share a name in one service and their paths differ only by parameters, the parameters qualify them (`/v1/notes` → `Notes.list`, `/v1/{teamId}/notes` → `Notes.listByTeamId`; see the collision rules under Operation below). Without a root — a root-less document, a path outside the root, or a tagged operation — services are exactly what they were before this rule, and so are fallback names up to those collision rules: an untagged `/{tenant}/users` stays `Default.listUsers`. Emitters can further remap service names via an overlay (e.g., `MultiFactorAuth` → `Mfa`) to match existing SDK class names.
 
 `Service.description` comes from the document's top-level `tags` list, matched by name: a tag entry applies to the service whose PascalCase name its `name` converts to, so `user-management`, `User Management`, and `user_management` all map to `UserManagement`. A service whose own name is a declared tag is described by that tag alone — its description when it has one, nothing otherwise — so another tag's wording is never borrowed for it (operations tagged `api_keys` that the path-prefix split merges into `UserManagement` do not label it "API keys"). A service whose own name is not declared, which is what the split produces when it carves `OrganizationDomains` out of operations tagged `organizations`, inherits the description of the first described tag its operations carry. The key is omitted when neither rule yields a description, including for path-named services whose operations have no tag. Malformed `tags` values (a non-array, `null` entries, non-string names) are skipped rather than failing the parse.
 
+`Service.externalDocs` is the tag's `externalDocs` (see [ExternalDocs](#externaldocs)), resolved by the same rule through the same code path: a service named after a declared tag takes that tag's link or nothing, and a split-off service inherits the link of the first linked tag its operations carry. Each field is chosen independently, from the first tag that gives it — among the tags a split-off service inherits from and among several document tags that normalize to one service name — so the description and the link need not come from the same tag, and adding a link to a tag never changes which description a service shows. A tag entry whose `externalDocs` is unusable keeps its description and gives no link.
+
+`Operation.externalDocs` is the operation's own `externalDocs`, present only when it declares a usable one.
+
 An operation carries its OpenAPI `summary` and `description` in two fields. `Operation.description` is the combined doc text: `summary + "\n\n" + description` when the document declares both with content, or whichever one has content (a summary identical to the description is not repeated). An empty or whitespace-only `summary` or `description` is treated as absent — `summary: "List pets"` with `description: ""` yields `description: "List pets"` — and text that has content is kept verbatim, surrounding whitespace included. An emitter that prints `description` as the doc comment therefore sees the same text whether or not the document used a summary. `Operation.summary` is the document's `summary` alone and is present only when the operation declares one with content, so an emitter that wants a one-line label (and the description without it) reads `summary` rather than guessing whether the first paragraph of `description` is one. When a doc URL base is configured, relative links are expanded in `summary` exactly as in `description`.
+
+An operation without an `operationId` is named from its method and path (`GET /orgs/{id}/teams` → `listTeams`), and that name is only as unique as the path words it was built from. Within a service, a name taken from an `operationId` is kept as written, and path-derived names that collide with each other or with it are qualified until every path has a name of its own; operations on one path that share a name (PUT and PATCH both `update`) are left sharing it. Qualifiers are tried in order, each on whatever still collides, and a qualifier never puts the same word twice in a row into a name (word for word on the camelCase boundary): one the name already ends with is not repeated, so `listNotes` never becomes `listNotesNotes`, and one that repeats a word itself is collapsed, so `/org/analytics/analytics/teams` next to `/org/teams` yields `listTeamsAnalytics`. Every qualifier skips the API root and the service segment just as the name itself does, so `DELETE /api/v1/notes/all` in `Notes` is `deleteAll`, never `deleteAllV1Notes`. The order: first the resource noun; then the path segments between the service and the resource (`GET /users/{id}/sso/factors` next to `GET /users/{id}/factors` becomes `listFactorsSso`); then `By<Param>` for each path parameter in path order, when the parameters are what tell the paths apart (`GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes `listByTeamId`, `GET /users/teams` keeps `listTeams` while `GET /users/{id}/teams` becomes `listTeamsById`, and `/orgs/{orgId}/teams/{teamId}/members` gains `ByOrgIdByTeamId`); and finally a numeric suffix (`list2`, `list3`, …) for paths that flatten to the same words (`/v1/{userId}/notes` and `/v1/{user_id}/notes`). For the plain name, an `operationId`-named operation outranks a path-named one and otherwise the lexically first path wins, so the outcome does not depend on document order. The suffix is silent for a path-derived name, like a hashed inline model name; when the document itself reuses an `operationId` within a service, the later path is suffixed with a `[oagen] Warning:`, since that changes a name the author chose.
 
 ```typescript
 interface Service {
   name: string; // e.g., "Organizations"
   description?: string;
+  externalDocs?: ExternalDocs; // The document tag's link, by the same rule as description
   operations: Operation[];
 }
 
@@ -221,6 +257,7 @@ interface Operation {
   name: string; // e.g., "listUsers", "getUser", "createUser"
   summary?: string; // The document's summary alone; only when it has non-whitespace content
   description?: string; // summary + "\n\n" + description when both have content, else whichever does
+  externalDocs?: ExternalDocs; // The operation's own externalDocs, when usable
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   pathParams: Parameter[];
@@ -235,8 +272,10 @@ interface Operation {
   requestBody?: TypeRef;
   requestBodyEncoding?:
     "json" | "form-data" | "form-urlencoded" | "binary" | "text";
+  requestBodyRequired?: boolean; // Whether the caller must send the body; present exactly when requestBody is
   response: TypeRef; // Primary response (lowest 2xx with body)
   responseHeaders?: ResponseHeader[]; // Headers declared on the primary response (only when any exist)
+  responseDescription?: string; // The primary response's description (only when it has content)
   successResponses?: SuccessResponse[]; // All 2xx responses (only when multiple exist)
   errors: ErrorResponse[];
   pagination?: PaginationMeta;
@@ -272,6 +311,7 @@ interface SuccessResponse {
   statusCode: number;
   type: TypeRef;
   headers?: ResponseHeader[]; // Only when the spec declares at least one
+  description?: string; // The response's description; only when it has non-whitespace content
 }
 
 interface ResponseHeader {
@@ -323,9 +363,19 @@ The `requestBodyEncoding` field tells emitters how to serialize the request body
 | `binary`          | `application/octet-stream`          |
 | `text`            | `text/plain`                        |
 
+### Request Body Required
+
+`requestBodyRequired` carries the Request Body Object's `required` flag, so an emitter can make the body argument mandatory or optional to match the document. It is read after a `$ref` into `components/requestBodies` is resolved, so a referenced body's flag counts. OpenAPI defaults the flag to `false`, so a body the document does not mark required is `false` here — an explicit `required: false` and an omitted flag are the same thing, and only a literal `true` makes a body required. The field is present exactly when `requestBody` is, whatever the encoding or the body's shape (an inline object, a bare `$ref`, a `oneOf`, a schema-less binary or text body); an operation without a body, or whose declared body yields no `requestBody`, has no entry.
+
+The differ reports a flip as `requestBodyRequiredChanged` on an `operation-modified` change: optional → required is breaking (callers must now send a body), required → optional is additive. A body appearing or disappearing is reported as `requestBodyChanged` alone.
+
 ### Multiple 2xx Responses
 
 When an operation has multiple 2xx status codes, `successResponses` contains all of them. The `response` field always points to the primary response (lowest 2xx with a body schema). This is useful for emitters that need to handle different status codes differently (e.g., 200 vs 204).
+
+### Response Descriptions
+
+A response's `description` — often the clearest statement of what an operation gives back ("The pet, with its owner.", "Not found") — is kept with the status code it belongs to as `description` on each `SuccessResponse` and `ErrorResponse`. Because `successResponses` is only set when more than one 2xx exists, the primary response's description (the one `response` is the body of) is also exposed directly as `Operation.responseDescription`, where an emitter can print it as a `@returns` tag. All three fields follow the rule `Operation.summary` uses: present only when the document declares a description with non-whitespace content, kept verbatim when it does, and omitted otherwise — a description is never borrowed from another status code. A `$ref` into `components/responses` is not resolved, so for one only a `description` written next to the `$ref` (an OAS 3.1 sibling override) is seen. When a doc URL base is configured, relative links are expanded in response descriptions exactly as in `description`. The differ does not report a changed response description, the same as a changed operation description.
 
 ### Response Headers
 
@@ -343,6 +393,8 @@ An object-shaped header (directly, inside an array, or as a oneOf variant) is ma
 interface Model {
   name: string; // PascalCase, e.g., "Organization"
   description?: string;
+  externalDocs?: ExternalDocs; // The schema's externalDocs, when usable
+  deprecated?: boolean; // The schema's own `deprecated: true`; absent otherwise (see Deprecation below)
   fields: Field[];
   typeParams?: TypeParam[]; // Generic type parameters
   variants?: TypeRef[]; // A named union's members, one per non-null oneOf/anyOf variant (see Named unions)
@@ -439,12 +491,27 @@ A 3.1 document's numeric form passes through unchanged, including the legal-but-
 
 **Scope.** The keywords declared on the field, parameter or model schema are collected, conjoined with those of its inline `allOf` members: the parser unwraps a single-member `allOf`, so `{ allOf: [{ type: string, maxLength: 3 }] }` is a string field carrying `{ maxLength: 3 }`, and a `$ref` member contributes the keywords written beside the reference while the referenced model keeps its own. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried. The one exception is a nullable wrapper — a `oneOf`/`anyOf` with exactly one non-null, non-`$ref` branch, which the IR collapses to `nullable<T>` — whose branch keywords are conjoined with the wrapper's own (and its `allOf` members'), so `anyOf: [{ type: string, maxLength: 8 }, { type: "null" }]` gives `{ maxLength: 8 }` and `{ allOf: [{ maxLength: 30 }], anyOf: [{ type: string, minLength: 20 }, { type: "null" }] }` gives `{ maxLength: 30, minLength: 20 }`, and an inline model built from that branch carries the same conjoined keywords, so `minProperties` written beside `anyOf: [{ type: object, … }, { type: "null" }]` reaches both the field and its model. Limits on a general multi-variant union are not carried. Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` field gets no `constraints`, because its limits belong to the referenced model. A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model — a component, or an inline response, request body or field the parser rebuilds from `allOf` members — it is the wrapper's keywords conjoined with its members' (the stricter bound wins; a `$ref` member contributes the keywords written beside the reference, while the referenced model keeps its own). A variant model of a discriminated `allOf` + `oneOf` union conjoins the shared keywords — the outer wrapper's, the base members' and any written beside the `oneOf` — with the variant's own the way `allOf` does — an instance must satisfy both, so the larger `min*` and the smaller `max*` win and `dependentRequired` maps are unioned per property.
 
+### Deprecation
+
+`Model.deprecated` and `Enum.deprecated` are present, and `true`, only when the schema the type was built from says `deprecated: true`; the key is absent otherwise, as on `Field`, `Parameter` and `Operation`. Which schema that is, per model:
+
+- A component schema: its own top-level keyword. For an `allOf` component it is the wrapper's; a member's flag is not read — a `$ref` member's stays on the referenced model, so `Composed: { allOf: [{ $ref: Legacy }, …] }` is live while `Legacy` is deprecated, and an inline member's is dropped, as `Field.deprecated` drops it on a field.
+- A discriminated `allOf` + `oneOf` union: the wrapper deprecates the dispatcher model; each variant model carries its own variant's flag.
+- An inline object that becomes a model — a request body, a `oneOf` body variant (a discriminated body takes the wrapper's flag, since the variants merge into one model), a response (an `allOf` response takes the wrapper's flag), a nested field object, array items, map values, a field's `oneOf` variant — carries that schema's flag. A multi-variant union is never collapsed, nullable or not (`type: ['object', 'null']` beside a `oneOf` included): each variant model is built from its variant, with the variant's own flag, and the wrapper's flag stays on the field. A field spelled `{ deprecated: true, anyOf: [{ type: object, … }, { type: "null" }] }` or `{ deprecated: true, allOf: […] }` carries its wrapper's flag onto the model built from the branch or the merge, the same way its `constraints` travel, so the nullable and composed forms match the direct-object form — and only the wrapper's: a flag written on the null-wrapped branch or on an `allOf` member is not read, exactly as `Field.deprecated` does not read it.
+- A `<Name>Json` model folded into `<Name>` does not carry its flag over: deprecation names the type the SDK exposes, and `<Name>` keeps its own.
+
+An inline enum (one declared on a field, parameter or header rather than under `components.schemas`) carries no flag of its own: the IR reaches it through an `EnumRef`, and the field or parameter that declares it carries `deprecated`.
+
+Wherever two inline models are folded into one by structural agreement — list-envelope companions sharing a bare name, header models sharing a registry entry, same-named inline models in the merge passes — `deprecated` is part of the shape. A deprecated copy never shares a live model's name: an envelope companion keeps its operation-qualified name (`ListLegacyUsersListMetadata`) while the live copies share the component or majority name, a header model gets a qualified name of its own, and when two same-named inline models are identical in everything but the flag — fields, requiredness, types, limits, defaults — the live definition is kept under the shared name (with a warning); copies that differ in anything else take the merge pass's usual choice, so a deprecated response never starts promising a field its live twin requires. So deprecation never reaches a live operation and never depends on document order. A component's own flag and documentation are authoritative: an inline response that resolves to a component's name and replaces its fields (a larger shape pinned by the same `object` const) leaves the component's `deprecated` — present or absent — as it was and keeps its `description` and `externalDocs` where it has them (the response's fill in only where the component has none), so a response never deprecates a live component, clears a deprecated one or rewrites its documentation.
+
 ## Enum
 
 ```typescript
 interface Enum {
   name: string; // PascalCase
   values: EnumValue[];
+  externalDocs?: ExternalDocs; // The component enum schema's externalDocs, when usable; inline enums carry none
+  deprecated?: boolean; // The component enum schema's own `deprecated: true`; absent otherwise
 }
 
 interface EnumValue {
@@ -462,6 +529,7 @@ interface ErrorResponse {
   statusCode: number; // e.g., 401, 404, 422
   type?: TypeRef; // Response body type, if any
   headers?: ResponseHeader[]; // e.g. Retry-After on a 429; only when the spec declares at least one
+  description?: string; // e.g. "Not found"; only when it has non-whitespace content
 }
 ```
 

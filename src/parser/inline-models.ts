@@ -1,16 +1,22 @@
-import type { Constraints, Model, Field } from '../ir/types.js';
+import type { Constraints, ExternalDocs, Model, Field } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   constraintsEntry,
+  deprecatedEntry,
   extractConstraints,
   isInlineObjectSchema,
+  isNullSchema,
+  unwrapNullableField,
+  unwrapNullableSchema,
+  withWrapperDeprecation,
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
   variantMemberSchemas,
 } from './schemas.js';
+import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -608,9 +614,18 @@ export function extractInlineModelsFromProperties(
       } else if (only) {
         // The wrapper's own keywords, conjoined with the member's, are the
         // field's limits (see extractConstraints), so they ride along with the
-        // unwrapped member and its model carries the same constraints.
+        // unwrapped member and its model carries the same constraints. Its
+        // `deprecated` is the wrapper's alone, as `Field.deprecated` reads it,
+        // and its link is the wrapper's too, when the wrapper has one.
         extractInlineModelsFromProperties(
-          { properties: { [fieldName]: { ...only, ...extractConstraints(fieldSchema) } } },
+          {
+            properties: {
+              [fieldName]: withWrapperExternalDocs(
+                withWrapperDeprecation({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
+                fieldSchema,
+              ),
+            },
+          },
           results,
           parentName,
           componentSchemas,
@@ -675,8 +690,12 @@ interface MergedAllOf {
   properties: MergedProperty[];
   required: string[];
   description: string | undefined;
+  /** The wrapper's own link, read like its description. */
+  externalDocs: ExternalDocs | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
+  /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
+  deprecated: boolean | undefined;
 }
 
 /**
@@ -724,7 +743,14 @@ function mergeAugmentation(
   visit(schema, null);
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
-  return { properties, required, description: schema.description, constraints: extractConstraints(schema) };
+  return {
+    properties,
+    required,
+    description: schema.description,
+    externalDocs: readExternalDocs(schema.externalDocs),
+    constraints: extractConstraints(schema),
+    deprecated: schema.deprecated || undefined,
+  };
 }
 
 /**
@@ -752,64 +778,11 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
   return {
     name,
     description: merged.description,
+    ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
     fields,
+    ...(merged.deprecated ? { deprecated: true } : {}),
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
   };
-}
-
-/**
- * Strip the nullable wrappers `schemaToTypeRef` unwraps before it names
- * anything — the OAS 3.1 `type: [X, 'null']` array, the OAS 3.0
- * `nullable: true` flag, and a `oneOf`/`anyOf` with a single non-null
- * variant — so extraction dispatches on the same shape the TypeRef was built
- * from. The unwrap keeps `contextName`/`parentModelName` semantics intact:
- * `schemaToTypeRef` passes both through each of these wrappers unchanged.
- */
-function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
-  if (schema.$ref) return schema;
-  if (Array.isArray(schema.type)) {
-    const nonNullTypes = schema.type.filter((t) => t !== 'null');
-    if (nonNullTypes.length !== 1) return schema;
-    return unwrapNullableSchema({ ...schema, type: nonNullTypes[0], nullable: false });
-  }
-  if (schema.nullable && schema.type) {
-    return unwrapNullableSchema({ ...schema, nullable: false });
-  }
-  // `allOf` takes precedence over `oneOf`/`anyOf` in schemaToTypeRef, so only
-  // a bare union is a nullable wrapper candidate.
-  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
-  if (variants) {
-    const nullVariant = variants.find(isNullSchema);
-    const nonNullVariants = variants.filter((v) => v !== nullVariant);
-    const only = nonNullVariants[0];
-    if (nullVariant && nonNullVariants.length === 1 && only) {
-      return unwrapNullableSchema(only);
-    }
-  }
-  return schema;
-}
-
-/**
- * `unwrapNullableSchema` for a field, carrying the wrapper's limits onto the
- * branch it unwraps to. The type-array and `nullable: true` forms unwrap by
- * spreading, so every keyword survives; the union form swaps in the bare
- * branch, which would drop a `minProperties` written beside
- * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
- * conjoins that wrapper's own keywords with its branch's as the field's
- * limits, so the model built from the branch must carry the same ones or
- * `Model.constraints` would omit what the field declares.
- */
-function unwrapNullableField(schema: SchemaObject): SchemaObject {
-  const inner = unwrapNullableSchema(schema);
-  if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return { ...inner, ...extractConstraints(schema) };
-}
-
-/** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable — same test as schemaToTypeRef. */
-function isNullSchema(schema: SchemaObject): boolean {
-  return (
-    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
-  );
 }
 
 /**
@@ -848,5 +821,12 @@ export function buildInlineModel(
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, componentSchemas, siblings));
   }
 
-  return { name, description: schema.description, fields, ...constraintsEntry(schema) };
+  return {
+    name,
+    description: schema.description,
+    ...externalDocsEntry(schema.externalDocs),
+    fields,
+    ...deprecatedEntry(schema),
+    ...constraintsEntry(schema),
+  };
 }
