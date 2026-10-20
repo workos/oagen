@@ -1765,6 +1765,88 @@ describe('beside default and range responses', () => {
     },
   );
 
+  it('keeps every media type of a default or range response, typing each beside the JSON body', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(
+      document(
+        {
+          '/things': getWith(
+            'listThings',
+            { 'application/json': { schema: str } },
+            {
+              default: {
+                description: 'd',
+                content: {
+                  'application/json': { schema: { $ref: '#/components/schemas/Problem' } },
+                  'application/yaml': { schema: obj({ code: str }) },
+                  'text/plain': { schema: str },
+                },
+              },
+              '5XX': {
+                description: 'down',
+                content: { 'application/problem+json; charset=utf-8': { schema: obj({ title: str }) } },
+              },
+            },
+          ),
+        },
+        { Problem: obj({ message: str }) },
+      ),
+    );
+    const op = findOp(spec, 'listThings');
+
+    // `type` is the JSON body; its entry shares the object, the YAML body is
+    // its own model named after the media type, and text is a string.
+    expect(op.defaultResponse).toEqual({
+      type: { kind: 'model', name: 'Problem' },
+      contentTypes: ['application/json', 'application/yaml', 'text/plain'],
+      contents: [
+        { contentType: 'application/json', type: { kind: 'model', name: 'Problem' } },
+        { contentType: 'application/yaml', type: { kind: 'model', name: 'ListThingsDefaultApplicationYamlResponse' } },
+        { contentType: 'text/plain', type: { kind: 'primitive', type: 'string' } },
+      ],
+      description: 'd',
+    });
+    expect(op.defaultResponse?.contents?.[0].type).toBe(op.defaultResponse?.type);
+    expect(fieldsOf(spec, 'ListThingsDefaultApplicationYamlResponse')).toEqual(['code']);
+    // A lone `+json` body, parameters and all, is `type` and the entry it shares.
+    expect(op.rangeResponses?.[0]).toEqual({
+      range: '5XX',
+      type: { kind: 'model', name: 'ListThingsServerErrorResponse' },
+      contentTypes: ['application/problem+json; charset=utf-8'],
+      contents: [
+        {
+          contentType: 'application/problem+json; charset=utf-8',
+          type: { kind: 'model', name: 'ListThingsServerErrorResponse' },
+        },
+      ],
+      description: 'down',
+    });
+    expect(op.rangeResponses?.[0].contents?.[0].type).toBe(op.rangeResponses?.[0].type);
+    expect(fieldsOf(spec, 'ListThingsServerErrorResponse')).toEqual(['title']);
+    // Reached by every walker through `collectResponseBodyTypes`, under its own source.
+    expect(collectResponseBodyTypes(op)).toEqual([
+      {
+        type: { kind: 'model', name: 'ListThingsDefaultApplicationYamlResponse' },
+        source: 'defaultResponse.contents.application/yaml',
+      },
+      { type: { kind: 'primitive', type: 'string' }, source: 'defaultResponse.contents.text/plain' },
+      { type: { kind: 'model', name: 'Problem' }, source: 'defaultResponse' },
+      { type: { kind: 'model', name: 'ListThingsServerErrorResponse' }, source: 'rangeResponses.5XX' },
+    ]);
+    expect(assignModelsToServices(spec.models, spec.services).get('ListThingsDefaultApplicationYamlResponse')).toBe(
+      'Things',
+    );
+    expect(warn.mock.calls).toEqual([]);
+    op.defaultResponse!.contents![1].type = { kind: 'model', name: 'Missing' };
+    validateModelRefs(spec);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Unresolved model reference "Missing" (context: Things.listThings.defaultResponse.contents.application/yaml)',
+      ),
+    );
+    warn.mockRestore();
+  });
+
   it('reaches a model declared only under a fallback body through collectResponseBodyTypes, beside a secondary body', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const spec = await parseDocument(
@@ -1805,5 +1887,6 @@ describe('beside default and range responses', () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('Unresolved model reference "Missing" (context: Things.listThings.rangeResponses.4XX)'),
     );
+    warn.mockRestore();
   });
 });

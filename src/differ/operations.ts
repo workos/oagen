@@ -1,4 +1,4 @@
-import type { ErrorResponse, Operation, ResponseContent, TypeRef } from '../ir/types.js';
+import type { ErrorResponse, Operation, ResponseContent, StatusRange, TypeRef } from '../ir/types.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
 import { classifyParamChange } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
@@ -130,6 +130,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
 interface ContentEntry {
   key: string;
   statusCode?: number;
+  /** The fallback response this is, when it is one: `default` or a range. */
+  fallback?: 'default' | StatusRange;
   /** The primary success response: the one `response` is the body of. */
   isPrimary: boolean;
   contentTypes: string[];
@@ -168,14 +170,15 @@ function ownMediaTypeOf(
 
 /**
  * Every response entry of an operation, keyed so the two specs' entries pair
- * up by status code: every 2xx/3xx entry as `success:<code>` and every error
- * as `error:<code>`. The primary success response (the one `response` is the
+ * up by status code: every 2xx/3xx entry as `success:<code>`, every error as
+ * `error:<code>`, the `default` and each range response as
+ * `fallback:<key>`. The primary success response (the one `response` is the
  * body of, read from the operation's own lists) is `success:<code>` too when
  * `successResponses` lists it — with several 2xx it is the lowest-coded entry
  * whose type is the operation's `response`, the parser's own pick — so a
  * primary that changes status still pairs with the entry of its code; a lone
- * 2xx carries no code in the IR and is keyed `primary`, pairing with the
- * other spec's primary whatever its code.
+ * 2xx carries no code in the IR and is keyed `primary` (see
+ * `pairContentEntries` for what it pairs with).
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
@@ -218,6 +221,24 @@ function contentEntries(op: Operation): ContentEntry[] {
       contentTypes: error.contentTypes ?? implicitJson.map((c) => c.contentType),
       contents,
       ownMediaType: ownMediaTypeOf(contents, error.type, error.type ? JSON_MEDIA_TYPE : undefined),
+      ownCoveredElsewhere: true,
+    });
+  }
+  // A fallback's own body is its JSON entry, whose retype `fallbackResponsesChanged` reports.
+  const fallbacks: Array<
+    ['default' | StatusRange, { type?: TypeRef; contentTypes?: string[]; contents?: ResponseContent[] }]
+  > = [];
+  if (op.defaultResponse) fallbacks.push(['default', op.defaultResponse]);
+  for (const range of op.rangeResponses ?? []) fallbacks.push([range.range, range]);
+  for (const [fallback, entry] of fallbacks) {
+    const contents = entry.contents ?? [];
+    entries.push({
+      key: `fallback:${fallback}`,
+      fallback,
+      isPrimary: false,
+      contentTypes: entry.contentTypes ?? [],
+      contents,
+      ownMediaType: ownMediaTypeOf(contents, entry.type),
       ownCoveredElsewhere: true,
     });
   }
@@ -268,12 +289,15 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
     if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
     changes.push({
       ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
+      ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
       added,
       removed,
       retyped,
       classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
     });
   }
+  // An error or fallback the old spec alone declares is the errors or
+  // fallback diff's business; a 2xx is nobody else's.
   for (const old of oldEntries) {
     if (paired.has(old) || !old.key.startsWith('success:') || old.contentTypes.length === 0) continue;
     changes.push({

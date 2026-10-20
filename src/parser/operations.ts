@@ -2209,7 +2209,13 @@ interface DeferredInlineType {
   componentSchemas?: Record<string, SchemaObject>;
   /** Names the schema in diagnostics: the header, media type or response key, status code and operation. */
   label: string;
-  target: { type?: TypeRef };
+  /**
+   * Everything the resolved type is written to: the header or content entry,
+   * and for a fallback body both the response entry and the content entry of
+   * the media type it was read from, which share one TypeRef as a success
+   * entry's do.
+   */
+  targets: Array<{ type?: TypeRef }>;
 }
 
 /** What response header and body typing needs from the operation and the spec. */
@@ -2256,7 +2262,10 @@ function resolveDeferredInlineTypes(
     registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
   }
   const models: Model[] = [];
-  for (const item of deferred) item.target.type = materializeDeferredType(item, registry, models);
+  for (const item of deferred) {
+    const type = materializeDeferredType(item, registry, models);
+    for (const target of item.targets) target.type = type;
+  }
   return models;
 }
 
@@ -2434,7 +2443,7 @@ function extractResponseHeaders(
         parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
         componentSchemas: ctx.componentSchemas,
         label: `header ${name} on ${statusCode} of ${operationLabel}`,
-        target: entry,
+        targets: [entry],
       });
     }
     result.push(entry);
@@ -2755,11 +2764,12 @@ const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html',
 
 /** Where an inline body declared for a secondary media type gets its name. */
 interface ContentModelNaming {
-  /** The operation's response-model stem, e.g. `RenderPetCard`. */
+  /** The operation's response-model stem, e.g. `RenderPetCard`; with the response's label for a fallback, `ListPetsDefault`. */
   base: string;
-  /** `Response` for a success entry, `Error` for an error entry. */
+  /** `Response` for a success or fallback entry, `Error` for an error entry. */
   suffix: string;
-  statusCode: number;
+  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
+  statusCode: number | string;
   /** The operation in diagnostics: its operationId, else `METHOD /path`. */
   label: string;
 }
@@ -2832,7 +2842,7 @@ function typeSecondaryContent(
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     label: `${contentType} on ${naming.statusCode} of ${naming.label}`,
-    target,
+    targets: [target],
   });
   return target.type;
 }
@@ -2947,10 +2957,13 @@ function readFallbackResponse(
 }
 
 /**
- * Read the body and headers of one fallback response onto `entry`; a key is
- * left off when absent. The body is read before the headers so its deferred
- * models are named first, as they were when every fallback body was typed
- * ahead of every header.
+ * Read the body, media types and headers of one fallback response onto
+ * `entry`; a key is left off when absent. The body is read before the
+ * headers so its deferred models are named first, as they were when every
+ * fallback body was typed ahead of every header. The media types are read
+ * exactly as a success entry's: every one declared, the one `type` was read
+ * from sharing its TypeRef, each other typed on its own — an inline object
+ * under `text/plain` of the `default` response is `<Op>DefaultTextPlainResponse`.
  */
 function fillFallbackResponse(
   entry: DefaultResponse | RangeResponse,
@@ -2959,10 +2972,24 @@ function fillFallbackResponse(
   label: string,
   sink: FallbackResponseSink,
 ): void {
-  const schema = jsonResponseSchema(resp);
-  if (schema) {
-    const contextName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
-    entry.type = typeFallbackBody(schema, contextName, key, label, sink, entry);
+  const contextName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
+  const json = jsonResponseSchema(resp);
+  // Shared by reference with the deferred body, so the content entry of the
+  // media type `type` was read from can join it once it exists.
+  const targets: Array<{ type?: TypeRef }> = [entry];
+  if (json) entry.type = typeFallbackBody(json.schema, contextName, key, label, sink, targets);
+  const contents = extractResponseContents(
+    resp.content,
+    json?.contentType,
+    entry.type,
+    { base: contextName.replace(/Response$/, ''), suffix: 'Response', statusCode: label, label: sink.opLabel },
+    sink.ctx,
+  );
+  if (contents) {
+    entry.contentTypes = contents.contentTypes;
+    entry.contents = contents.contents;
+    const own = contents.contents.find((content) => content.contentType === json?.contentType);
+    if (own) targets.push(own);
   }
   const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.ctx);
   if (headers) entry.headers = headers;
@@ -2996,7 +3023,7 @@ function typeFallbackBody(
   key: string,
   label: string,
   sink: FallbackResponseSink,
-  target: DefaultResponse | RangeResponse,
+  targets: Array<{ type?: TypeRef }>,
 ): TypeRef {
   if (schema.$ref) return schemaToTypeRef(schema, contextName);
   sink.ctx.deferred.push({
@@ -3007,24 +3034,24 @@ function typeFallbackBody(
     operationQualifier: sink.ctx.operationQualifier,
     componentSchemas: sink.ctx.componentSchemas,
     label: `${key} response of ${sink.opLabel}`,
-    target,
+    targets,
   });
   return { kind: 'primitive', type: 'unknown' };
 }
 
 /**
- * The schema of a response's JSON body: `application/json` first, else a
- * `+json` media type (`application/problem+json` is the usual shape of a
- * `default` error), matched by essence — parameters (`; charset=utf-8`)
- * stripped, case folded. Other media types type nothing, as they do for
- * `errors`.
+ * The schema of a response's JSON body, with the media type it was declared
+ * under as written: `application/json` first, else a `+json` media type
+ * (`application/problem+json` is the usual shape of a `default` error),
+ * matched by essence — parameters (`; charset=utf-8`) stripped, case folded.
+ * Other media types type nothing, as they do for `errors`.
  */
-function jsonResponseSchema(resp: ResponseObject): SchemaObject | undefined {
+function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
   const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
   const match =
     entries.find(([mediaType]) => mediaTypeEssence(mediaType) === 'application/json') ??
     entries.find(([mediaType]) => mediaTypeEssence(mediaType).endsWith('+json'));
-  return match?.[1].schema;
+  return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 
 function extractResponses(

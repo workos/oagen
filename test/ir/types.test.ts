@@ -834,6 +834,8 @@ describe('collectResponseBodyTypes — default and range responses', () => {
 
   it('yields the fallback bodies after the secondary media types, each with the source its ref is validated under', () => {
     const html: TypeRef = { kind: 'primitive', type: 'string' };
+    const apiError: TypeRef = { kind: 'model', name: 'ApiError' };
+    const yamlError: TypeRef = { kind: 'model', name: 'GetDocumentDefaultApplicationYamlResponse' };
     const op: Operation = {
       ...baseOperation,
       responseContentTypes: ['application/json', 'text/html'],
@@ -841,7 +843,15 @@ describe('collectResponseBodyTypes — default and range responses', () => {
         { contentType: 'application/json', type: baseOperation.response },
         { contentType: 'text/html', type: html },
       ],
-      defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+      // The entry for the media type `type` was read from shares its object and is not yielded again.
+      defaultResponse: {
+        type: apiError,
+        contentTypes: ['application/json', 'application/yaml'],
+        contents: [
+          { contentType: 'application/json', type: apiError },
+          { contentType: 'application/yaml', type: yamlError },
+        ],
+      },
       rangeResponses: [
         { range: '5XX', type: { kind: 'model', name: 'Outage' } },
         { range: '2XX' },
@@ -850,14 +860,15 @@ describe('collectResponseBodyTypes — default and range responses', () => {
     };
     expect(collectResponseBodyTypes(op)).toEqual([
       { type: html, source: 'contents.text/html' },
-      { type: { kind: 'model', name: 'ApiError' }, source: 'defaultResponse' },
+      { type: yamlError, source: 'defaultResponse.contents.application/yaml' },
+      { type: apiError, source: 'defaultResponse' },
       { type: { kind: 'model', name: 'Outage' }, source: 'rangeResponses.5XX' },
       { type: { kind: 'array', items: { kind: 'model', name: 'Violation' } }, source: 'rangeResponses.4XX' },
     ]);
     // The same bodies `collectFallbackResponseTypes` yields, in its order.
     expect(
       collectResponseBodyTypes(op)
-        .slice(1)
+        .slice(2)
         .map((entry) => entry.type),
     ).toEqual(collectFallbackResponseTypes(op));
   });

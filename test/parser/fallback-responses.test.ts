@@ -17,6 +17,11 @@ const json = (schema: unknown) => ({ 'application/json': { schema } });
 const errorSchema = { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] };
 const petSchema = { type: 'object', properties: { name: { type: 'string' } } };
 const ok = { description: 'ok', content: json({ $ref: '#/components/schemas/Pet' }) };
+/** The media-type lists a fallback declaring only `application/json` carries, its entry sharing the body's type. */
+const jsonBody = (type: TypeRef) => ({
+  contentTypes: ['application/json'],
+  contents: [{ contentType: 'application/json', type }],
+});
 
 /** A `GET /pets` (`listPets`) document with the given responses and the `Pet` and `Error` components. */
 function petsSpec(responses: Record<string, unknown>): Record<string, unknown> {
@@ -124,7 +129,11 @@ describe('the default response (issue #214)', () => {
     expect(op.response).toEqual(model('GetPetResponse'));
     // `errors` is exactly what it was: the default is not an entry without a code.
     expect(op.errors).toEqual([{ statusCode: 404, description: 'Not found', type: model('Error') }]);
-    expect(op.defaultResponse).toEqual({ type: model('Error'), description: 'Any other error' });
+    expect(op.defaultResponse).toEqual({
+      type: model('Error'),
+      ...jsonBody(model('Error')),
+      description: 'Any other error',
+    });
     expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'GetPetResponse']);
     expectConsistent(ir, []);
   });
@@ -147,7 +156,7 @@ describe('the default response (issue #214)', () => {
     expect(op.response).toEqual(str);
     expect(op.successResponses).toBeUndefined();
     expect(op.errors).toEqual([]);
-    expect(op.defaultResponse).toEqual({ type: model('Error'), description: 'err' });
+    expect(op.defaultResponse).toEqual({ type: model('Error'), ...jsonBody(model('Error')), description: 'err' });
   });
 
   it('leaves the key off an operation that declares none', async () => {
@@ -177,7 +186,11 @@ describe('the default response (issue #214)', () => {
     );
     const op = only(ir);
 
-    expect(op.defaultResponse).toEqual({ type: model('ListPetsDefaultResponse'), description: 'err' });
+    expect(op.defaultResponse).toEqual({
+      type: model('ListPetsDefaultResponse'),
+      ...jsonBody(model('ListPetsDefaultResponse')),
+      description: 'err',
+    });
     const types = fieldTypesByModel(ir.models);
     expect(types['ListPetsDefaultResponse']).toEqual({ message: str, detail: model('ListPetsDefaultResponseDetail') });
     expect(types['ListPetsDefaultResponseDetail']).toEqual({ field: str });
@@ -201,10 +214,8 @@ describe('the default response (issue #214)', () => {
       }),
     );
 
-    expect(only(ir).defaultResponse).toEqual({
-      type: { kind: 'array', items: model('ListPetsDefaultResponse') },
-      description: 'errs',
-    });
+    const items: TypeRef = { kind: 'array', items: model('ListPetsDefaultResponse') };
+    expect(only(ir).defaultResponse).toEqual({ type: items, ...jsonBody(items), description: 'errs' });
     expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({ code: str });
     expectConsistent(ir);
   });
@@ -252,10 +263,8 @@ describe('the default response (issue #214)', () => {
     const primary = (op.response as { name: string }).name;
 
     expect(primary.endsWith('Response')).toBe(true);
-    expect(op.defaultResponse).toEqual({
-      type: model(primary.replace(/Response$/, 'DefaultResponse')),
-      description: 'err',
-    });
+    const body = model(primary.replace(/Response$/, 'DefaultResponse'));
+    expect(op.defaultResponse).toEqual({ type: body, ...jsonBody(body), description: 'err' });
     expectConsistent(ir, []);
   });
 
@@ -265,7 +274,15 @@ describe('the default response (issue #214)', () => {
       await parseWithoutWarnings(petsSpec({ '200': ok, default: { description: 'err', content: problem } })),
     );
 
-    expect(op.defaultResponse).toEqual({ type: model('Error'), description: 'err' });
+    // The media type is kept as written and its entry shares the body's type,
+    // so a reader can tell which media type `type` was read from.
+    expect(op.defaultResponse).toEqual({
+      type: model('Error'),
+      contentTypes: ['application/problem+json; charset=utf-8'],
+      contents: [{ contentType: 'application/problem+json; charset=utf-8', type: model('Error') }],
+      description: 'err',
+    });
+    expect(op.defaultResponse?.contents?.[0].type).toBe(op.defaultResponse?.type);
   });
 
   it('prefers application/json over a +json media type', async () => {
@@ -273,16 +290,33 @@ describe('the default response (issue #214)', () => {
       'application/problem+json': { schema: { type: 'object', properties: { title: { type: 'string' } } } },
       'application/json': { schema: { $ref: '#/components/schemas/Error' } },
     };
-    const op = only(await parseWithoutWarnings(petsSpec({ '200': ok, default: { description: 'err', content } })));
+    const ir = await parseWithoutWarnings(petsSpec({ '200': ok, default: { description: 'err', content } }));
+    const op = only(ir);
 
-    expect(op.defaultResponse).toEqual({ type: model('Error'), description: 'err' });
+    // `type` is the `application/json` body; the `+json` body is typed on its
+    // own and its inline object materialized like a secondary media type's.
+    expect(op.defaultResponse).toEqual({
+      type: model('Error'),
+      contentTypes: ['application/problem+json', 'application/json'],
+      contents: [
+        { contentType: 'application/problem+json', type: model('ListPetsDefaultApplicationProblemJsonResponse') },
+        { contentType: 'application/json', type: model('Error') },
+      ],
+      description: 'err',
+    });
+    expect(fieldTypesByModel(ir.models)['ListPetsDefaultApplicationProblemJsonResponse']).toEqual({ title: str });
+    expectConsistent(ir);
   });
 
-  it('has no type for a non-JSON body, as errors do', async () => {
+  it('has no type for a non-JSON body, as errors do, but keeps its media type', async () => {
     const content = { 'text/plain': { schema: { type: 'string' } } };
     const op = only(await parseWithoutWarnings(petsSpec({ '200': ok, default: { description: 'err', content } })));
 
-    expect(op.defaultResponse).toEqual({ description: 'err' });
+    expect(op.defaultResponse).toEqual({
+      contentTypes: ['text/plain'],
+      contents: [{ contentType: 'text/plain', type: str }],
+      description: 'err',
+    });
   });
 });
 
@@ -301,9 +335,14 @@ describe('range responses (1XX–5XX)', () => {
     const op = only(ir);
 
     expect(op.rangeResponses).toEqual([
-      { range: '5XX', type: model('Error'), description: 'down' },
+      { range: '5XX', type: model('Error'), ...jsonBody(model('Error')), description: 'down' },
       { range: '2XX', description: 'other success' },
-      { range: '4XX', type: model('ListPetsClientErrorResponse'), description: 'rejected' },
+      {
+        range: '4XX',
+        type: model('ListPetsClientErrorResponse'),
+        ...jsonBody(model('ListPetsClientErrorResponse')),
+        description: 'rejected',
+      },
       { range: '1XX', description: 'info' },
       { range: '3XX', description: 'moved' },
     ]);
@@ -319,7 +358,9 @@ describe('range responses (1XX–5XX)', () => {
     const op = only(await parseWithoutWarnings(petsSpec({ '2XX': ok })));
 
     expect(op.response).toEqual(str);
-    expect(op.rangeResponses).toEqual([{ range: '2XX', type: model('Pet'), description: 'ok' }]);
+    expect(op.rangeResponses).toEqual([
+      { range: '2XX', type: model('Pet'), ...jsonBody(model('Pet')), description: 'ok' },
+    ]);
   });
 
   it.each([
@@ -336,7 +377,7 @@ describe('range responses (1XX–5XX)', () => {
       }),
     );
 
-    expect(only(ir).rangeResponses).toEqual([{ range, type: model(name), description: 'r' }]);
+    expect(only(ir).rangeResponses).toEqual([{ range, type: model(name), ...jsonBody(model(name)), description: 'r' }]);
     expect(fieldTypesByModel(ir.models)[name]).toEqual({ code: str });
     expectConsistent(ir);
   });
@@ -351,7 +392,9 @@ describe('range responses (1XX–5XX)', () => {
       ),
     );
 
-    expect(op.rangeResponses).toEqual([{ range: '4XX', type: model('Error'), description: 'rejected' }]);
+    expect(op.rangeResponses).toEqual([
+      { range: '4XX', type: model('Error'), ...jsonBody(model('Error')), description: 'rejected' },
+    ]);
   });
 
   it('keeps the first of a duplicate range and warns', () => {
@@ -362,7 +405,9 @@ describe('range responses (1XX–5XX)', () => {
       '4xx': { description: 'second' },
     });
 
-    expect(op.rangeResponses).toEqual([{ range: '4XX', type: model('Error'), description: 'first' }]);
+    expect(op.rangeResponses).toEqual([
+      { range: '4XX', type: model('Error'), ...jsonBody(model('Error')), description: 'first' },
+    ]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Duplicate "4XX" response on listPets'));
   });
 
@@ -379,7 +424,9 @@ describe('range responses (1XX–5XX)', () => {
     );
 
     expect(op.errors).toEqual([{ statusCode: 404, description: 'missing', type: model('Error') }]);
-    expect(op.rangeResponses).toEqual([{ range: '4XX', type: model('Error'), description: 'rejected' }]);
+    expect(op.rangeResponses).toEqual([
+      { range: '4XX', type: model('Error'), ...jsonBody(model('Error')), description: 'rejected' },
+    ]);
     expect(op.defaultResponse).toEqual({ description: 'other' });
   });
 });
@@ -739,7 +786,11 @@ describe('a fallback body never overwrites a model that owns its name', () => {
 
     // The component is exactly what it was.
     expect(types['ListPetsDefaultResponse']).toEqual({ message: str });
-    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2'), description: 'd' });
+    expect(only(ir).defaultResponse).toEqual({
+      type: model('ListPetsDefaultResponse2'),
+      ...jsonBody(model('ListPetsDefaultResponse2')),
+      description: 'd',
+    });
     expect(types['ListPetsDefaultResponse2']).toEqual({
       message: str,
       code: str,
@@ -757,7 +808,11 @@ describe('a fallback body never overwrites a model that owns its name', () => {
       }),
     );
 
-    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse'), description: 'd' });
+    expect(only(ir).defaultResponse).toEqual({
+      type: model('ListPetsDefaultResponse'),
+      ...jsonBody(model('ListPetsDefaultResponse')),
+      description: 'd',
+    });
     expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'ListPetsDefaultResponse', 'Pet']);
     expectConsistent(ir);
   });
@@ -773,7 +828,12 @@ describe('a fallback body never overwrites a model that owns its name', () => {
 
     expect(types['ListPetsClientErrorResponse']).toEqual({ message: str });
     expect(only(ir).rangeResponses).toEqual([
-      { range: '4XX', type: model('ListPetsClientErrorResponse2'), description: 'r' },
+      {
+        range: '4XX',
+        type: model('ListPetsClientErrorResponse2'),
+        ...jsonBody(model('ListPetsClientErrorResponse2')),
+        description: 'r',
+      },
     ]);
     expect(types['ListPetsClientErrorResponse2']).toEqual({ code: str });
     expectConsistent(ir, ['Pet', 'Error', 'ListPetsClientErrorResponse']);
@@ -789,7 +849,11 @@ describe('a fallback body never overwrites a model that owns its name', () => {
     const types = fieldTypesByModel(ir.models);
 
     expect(types['ListPetsDefaultResponseDetail']).toEqual({ other: str });
-    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2'), description: 'd' });
+    expect(only(ir).defaultResponse).toEqual({
+      type: model('ListPetsDefaultResponse2'),
+      ...jsonBody(model('ListPetsDefaultResponse2')),
+      description: 'd',
+    });
     expect(types['ListPetsDefaultResponse2']).toEqual({ detail: model('ListPetsDefaultResponse2Detail') });
     expectConsistent(ir, ['Pet', 'Error', 'ListPetsDefaultResponseDetail']);
   });
@@ -840,7 +904,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       );
       const types = fieldTypesByModel(ir.models);
 
-      expect(only(ir).defaultResponse).toEqual({ type: union('CircleListPetsDefaultResponse'), description: 'd' });
+      expect(only(ir).defaultResponse).toEqual({
+        type: union('CircleListPetsDefaultResponse'),
+        ...jsonBody(union('CircleListPetsDefaultResponse')),
+        description: 'd',
+      });
       expect(types['Circle']).toEqual({ radius: num });
       expect(types['CircleListPetsDefaultResponse']).toEqual({
         kind: { kind: 'literal', value: 'circle' },
@@ -862,7 +930,11 @@ describe('names no stem can move (titled variants) terminate and step around the
         }),
       );
 
-      expect(only(ir).defaultResponse).toEqual({ type: union('Circle'), description: 'd' });
+      expect(only(ir).defaultResponse).toEqual({
+        type: union('Circle'),
+        ...jsonBody(union('Circle')),
+        description: 'd',
+      });
       expect(ir.models.map((m) => m.name).sort()).toEqual(['Circle', 'Error', 'Pet', 'Square']);
     },
     HANG_GUARD_MS,
@@ -904,18 +976,16 @@ describe('names no stem can move (titled variants) terminate and step around the
       );
       const types = fieldTypesByModel(ir.models);
 
-      expect(only(ir).defaultResponse).toEqual({
-        type: {
-          kind: 'union',
-          variants: [model('ReportDetailListPetsDefaultResponse'), model('Other')],
-          compositionKind: 'oneOf',
-          discriminator: {
-            property: 'kind',
-            mapping: { detail: 'ReportDetailListPetsDefaultResponse', other: 'Other' },
-          },
+      const body: TypeRef = {
+        kind: 'union',
+        variants: [model('ReportDetailListPetsDefaultResponse'), model('Other')],
+        compositionKind: 'oneOf',
+        discriminator: {
+          property: 'kind',
+          mapping: { detail: 'ReportDetailListPetsDefaultResponse', other: 'Other' },
         },
-        description: 'd',
-      });
+      };
+      expect(only(ir).defaultResponse).toEqual({ type: body, ...jsonBody(body), description: 'd' });
       expect(types['Report']).toEqual({ details: { kind: 'map', valueType: model('ReportDetail') } });
       expect(types['ReportDetail']).toEqual({ reason: str });
       expect(types['ReportDetailListPetsDefaultResponse']).toEqual({
@@ -950,7 +1020,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       const types = fieldTypesByModel(ir.models);
 
       expect(getShape.response).toEqual(union('Circle'));
-      expect(listPets.defaultResponse).toEqual({ type: union('CircleListPetsDefaultResponse'), description: 'd' });
+      expect(listPets.defaultResponse).toEqual({
+        type: union('CircleListPetsDefaultResponse'),
+        ...jsonBody(union('CircleListPetsDefaultResponse')),
+        description: 'd',
+      });
       expect(types['Circle']).toEqual({ kind: { kind: 'literal', value: 'circle' }, radius: num });
       expect(types['CircleListPetsDefaultResponse']).toEqual({
         kind: { kind: 'literal', value: 'circle' },
@@ -979,7 +1053,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       const op = only(ir);
 
       expect(op.response).toEqual(union('Circle'));
-      expect(op.defaultResponse).toEqual({ type: union('CircleListPetsDefaultResponse'), description: 'd' });
+      expect(op.defaultResponse).toEqual({
+        type: union('CircleListPetsDefaultResponse'),
+        ...jsonBody(union('CircleListPetsDefaultResponse')),
+        description: 'd',
+      });
       expectConsistent(ir, ['Pet', 'Error']);
     },
     HANG_GUARD_MS,
@@ -1000,7 +1078,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       );
       const types = fieldTypesByModel(ir.models);
 
-      expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse'), description: 'd' });
+      expect(only(ir).defaultResponse).toEqual({
+        type: model('ListPetsDefaultResponse'),
+        ...jsonBody(model('ListPetsDefaultResponse')),
+        description: 'd',
+      });
       expect(types['ListPetsDefaultResponse']).toEqual({ shape: union('ListPetsDefaultResponseCircle') });
       expect(types['ListPetsDefaultResponseCircle']).toEqual({
         kind: { kind: 'literal', value: 'circle' },
@@ -1139,7 +1221,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       const ir = await parseWithoutWarnings(spec);
       const types = fieldTypesByModel(ir.models);
 
-      expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2'), description: 'd' });
+      expect(only(ir).defaultResponse).toEqual({
+        type: model('ListPetsDefaultResponse2'),
+        ...jsonBody(model('ListPetsDefaultResponse2')),
+        description: 'd',
+      });
       expect(types['ListPetsDefaultResponse2']).toEqual({ shape: union('ListPetsDefaultResponse2Circle') });
       expect(types['ListPetsDefaultResponse2Circle']).toEqual({
         kind: { kind: 'literal', value: 'circle' },
@@ -1208,7 +1294,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       const ir = await parseWithoutWarnings(spec);
       const types = fieldTypesByModel(ir.models);
 
-      expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2'), description: 'd' });
+      expect(only(ir).defaultResponse).toEqual({
+        type: model('ListPetsDefaultResponse2'),
+        ...jsonBody(model('ListPetsDefaultResponse2')),
+        description: 'd',
+      });
       // Only the parent and the clashing child moved; the matching child is the component's.
       expect(types['ListPetsDefaultResponse2']).toEqual({
         shape: union('ListPetsDefaultResponse2Circle'),
@@ -1282,7 +1372,11 @@ describe('names no stem can move (titled variants) terminate and step around the
       const types = fieldTypesByModel(ir.models);
 
       expect(getShape.response).toEqual(union('Circle'));
-      expect(listPets.defaultResponse).toEqual({ type: model('ListPetsDefaultResponse2'), description: 'd' });
+      expect(listPets.defaultResponse).toEqual({
+        type: model('ListPetsDefaultResponse2'),
+        ...jsonBody(model('ListPetsDefaultResponse2')),
+        description: 'd',
+      });
       expect(types['ListPetsDefaultResponse2']).toEqual({ shape: union('ListPetsDefaultResponse2Circle') });
       expect(types['ListPetsDefaultResponse2Circle']).toEqual({
         kind: { kind: 'literal', value: 'circle' },
@@ -1309,6 +1403,11 @@ describe('a fallback written as a $ref into components/responses', () => {
     spec.components['responses'] = components;
     return spec;
   };
+  /** The lists the component's `application/problem+json` body carries, its entry sharing the body's type. */
+  const problemBody = {
+    contentTypes: ['application/problem+json'],
+    contents: [{ contentType: 'application/problem+json', type: model('Error') }],
+  };
 
   it('is resolved, body and headers alike, for default and for a range', async () => {
     const ir = await parseWithoutWarnings(
@@ -1325,9 +1424,14 @@ describe('a fallback written as a $ref into components/responses', () => {
     const retryAfter = [{ name: 'Retry-After', type: int, required: false }];
 
     // The component's own description comes through the resolved ref.
-    expect(op.defaultResponse).toEqual({ type: model('Error'), headers: retryAfter, description: 'A problem' });
+    expect(op.defaultResponse).toEqual({
+      type: model('Error'),
+      ...problemBody,
+      headers: retryAfter,
+      description: 'A problem',
+    });
     expect(op.rangeResponses).toEqual([
-      { range: '5XX', type: model('Error'), headers: retryAfter, description: 'A problem' },
+      { range: '5XX', type: model('Error'), ...problemBody, headers: retryAfter, description: 'A problem' },
     ]);
   });
 
@@ -1339,7 +1443,11 @@ describe('a fallback written as a $ref into components/responses', () => {
       ),
     );
 
-    expect(only(ir).defaultResponse).toEqual({ type: model('ListPetsDefaultResponse'), description: 'p' });
+    expect(only(ir).defaultResponse).toEqual({
+      type: model('ListPetsDefaultResponse'),
+      ...jsonBody(model('ListPetsDefaultResponse')),
+      description: 'p',
+    });
     expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({ code: str });
     expectConsistent(ir);
   });

@@ -239,6 +239,60 @@ describe('diffOperations — response content types', () => {
     ).not.toContain('statusCode');
   });
 
+  it('covers the default and range responses by key, reported with `fallback` in place of a status code', () => {
+    const integer: TypeRef = { kind: 'primitive', type: 'integer' };
+    const problem: TypeRef = { kind: 'model', name: 'Problem' };
+    const withFallbacks = (defaultTypes: Array<[string, TypeRef]>, rangeTypes: Array<[string, TypeRef]>): Operation =>
+      card([['application/pdf', binary]], {
+        defaultResponse: {
+          type: problem,
+          contentTypes: defaultTypes.map(([contentType]) => contentType),
+          contents: contents(defaultTypes),
+        },
+        rangeResponses: [
+          {
+            range: '4XX',
+            type: problem,
+            contentTypes: rangeTypes.map(([contentType]) => contentType),
+            contents: contents(rangeTypes),
+          },
+        ],
+      });
+    const old = withFallbacks(
+      [
+        ['application/json', problem],
+        ['text/plain', string],
+      ],
+      [['application/json', problem]],
+    );
+    const next = withFallbacks(
+      [['application/json', problem]],
+      [
+        ['application/json', problem],
+        ['application/yaml', integer],
+      ],
+    );
+    expect(diffOperations('Pets', [old], [next])[0]).toMatchObject({
+      fallbackResponsesChanged: false,
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [
+        { fallback: 'default', added: [], removed: ['text/plain'], retyped: [], classification: 'breaking' },
+        { fallback: '4XX', added: ['application/yaml'], removed: [], retyped: [], classification: 'additive' },
+      ],
+      classification: 'breaking',
+    });
+    const [lost] = (diffOperations('Pets', [old], [next])[0] as { responseContentTypeChanges: object[] })
+      .responseContentTypeChanges;
+    expect(Object.keys(lost)).not.toContain('statusCode');
+
+    // A fallback only one spec declares is the fallback diff's business, not a media-type change.
+    const none = card([['application/pdf', binary]]);
+    expect(diffOperations('Pets', [old], [none])[0]).toMatchObject({
+      fallbackResponsesChanged: true,
+      responseContentTypesChanged: false,
+    });
+  });
+
   it('reports an added media type as additive', () => {
     const changes = diffOperations(
       'Pets',

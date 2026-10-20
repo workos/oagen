@@ -1134,21 +1134,21 @@ export interface ResponseBodyType {
 
 /**
  * Every response body type an operation declares besides `response`: the
- * bodies of its secondary media types (`collectAlternateResponseContents`),
- * then the fallback bodies of its `default` and range responses
- * (`collectFallbackResponseTypes`), and any body a later field adds. The
- * primary type of each alternate 2xx and error entry is not included —
- * walkers reach those through `successResponses[].type` and `errors[].type`
- * where they do today. Every pass that walks an operation's type refs
- * (reachability, model assignment, ref rewriting and validation, direction,
- * compat filtering, enum collection) calls this beside
+ * bodies of its secondary media types (`collectAlternateResponseContents`,
+ * fallback responses' included), then the fallback bodies of its `default`
+ * and range responses (`collectFallbackResponseTypes`), and any body a later
+ * field adds. The primary type of each alternate 2xx and error entry is not
+ * included — walkers reach those through `successResponses[].type` and
+ * `errors[].type` where they do today. Every pass that walks an operation's
+ * type refs (reachability, model assignment, ref rewriting and validation,
+ * direction, compat filtering, enum collection) calls this beside
  * `collectResponseHeaders`, so a new kind of body is reached everywhere by
  * extending this one function.
  */
 export function collectResponseBodyTypes(op: Operation): ResponseBodyType[] {
-  const result: ResponseBodyType[] = collectAlternateResponseContents(op).map((content) => ({
+  const result: ResponseBodyType[] = alternateResponseContents(op).map(({ content, source }) => ({
     type: content.type,
-    source: `contents.${content.contentType}`,
+    source: `${source}.${content.contentType}`,
   }));
   if (op.defaultResponse?.type) result.push({ type: op.defaultResponse.type, source: 'defaultResponse' });
   for (const range of op.rangeResponses ?? []) {
@@ -1159,25 +1159,32 @@ export function collectResponseBodyTypes(op: Operation): ResponseBodyType[] {
 
 /**
  * Every response content entry whose type is reachable only through it: the
- * entries of each success and error response other than the one the
- * response's own `type` was read from, which shares that very TypeRef and is
- * already reached through `response`, `successResponses[].type` or
- * `errors[].type`. The primary list is the same array as its
- * `successResponses` entry when both exist, so it is visited once. Feeds
- * `collectResponseBodyTypes`, which the walkers call.
+ * entries of each success, error and fallback response other than the one
+ * the response's own `type` was read from, which shares that very TypeRef
+ * and is already reached through `response`, `successResponses[].type`,
+ * `errors[].type` or `collectFallbackResponseTypes`. The primary list is the
+ * same array as its `successResponses` entry when both exist, so it is
+ * visited once. Feeds `collectResponseBodyTypes`, which the walkers call.
  */
 export function collectAlternateResponseContents(op: Operation): ResponseContent[] {
-  const result: ResponseContent[] = [];
+  return alternateResponseContents(op).map(({ content }) => content);
+}
+
+/** `collectAlternateResponseContents`, each entry with the list it was read from (`contents`, `defaultResponse.contents`, `rangeResponses.4XX.contents`). */
+function alternateResponseContents(op: Operation): Array<{ content: ResponseContent; source: string }> {
+  const result: Array<{ content: ResponseContent; source: string }> = [];
   const seen = new Set<ResponseContent[]>();
-  const owners: Array<{ contents?: ResponseContent[]; type?: TypeRef }> = [
-    { contents: op.responseContents, type: op.response },
-    ...(op.successResponses ?? []),
-    ...op.errors,
+  const owners: Array<{ contents?: ResponseContent[]; type?: TypeRef; source: string }> = [
+    { contents: op.responseContents, type: op.response, source: 'contents' },
+    ...(op.successResponses ?? []).map((entry) => ({ ...entry, source: 'contents' })),
+    ...op.errors.map((entry) => ({ ...entry, source: 'contents' })),
+    ...(op.defaultResponse ? [{ ...op.defaultResponse, source: 'defaultResponse.contents' }] : []),
+    ...(op.rangeResponses ?? []).map((entry) => ({ ...entry, source: `rangeResponses.${entry.range}.contents` })),
   ];
-  for (const { contents, type } of owners) {
+  for (const { contents, type, source } of owners) {
     if (!contents || seen.has(contents)) continue;
     seen.add(contents);
-    for (const content of contents) if (content.type !== type) result.push(content);
+    for (const content of contents) if (content.type !== type) result.push({ content, source });
   }
   return result;
 }
@@ -1187,10 +1194,24 @@ export function collectAlternateResponseContents(op: Operation): ResponseContent
  * operation does not list. See `Operation.defaultResponse`.
  */
 export interface DefaultResponse {
-  /** Response body type; absent when the response declares no content. */
+  /**
+   * Response body type: the `application/json` body, else the first `+json`
+   * one; absent when the response declares neither.
+   */
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /**
+   * Media types declared under `content`, in document order and as written,
+   * exactly as on `SuccessResponse`. Present only when there is at least one.
+   */
+  contentTypes?: string[];
+  /**
+   * One entry per `contentTypes` entry, in the same order. The entry for the
+   * media type `type` was read from carries that same TypeRef. Present only
+   * when `contentTypes` is.
+   */
+  contents?: ResponseContent[];
   /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
   description?: string;
 }
@@ -1205,10 +1226,17 @@ export type StatusRange = '1XX' | '2XX' | '3XX' | '4XX' | '5XX';
  */
 export interface RangeResponse {
   range: StatusRange;
-  /** Response body type; absent when the response declares no content. */
+  /**
+   * Response body type: the `application/json` body, else the first `+json`
+   * one; absent when the response declares neither.
+   */
   type?: TypeRef;
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
+  /** Media types declared under `content`, as on `DefaultResponse`. */
+  contentTypes?: string[];
+  /** One entry per `contentTypes` entry, as on `DefaultResponse`. */
+  contents?: ResponseContent[];
   /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
   description?: string;
 }

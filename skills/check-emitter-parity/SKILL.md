@@ -105,8 +105,8 @@ A missing kind means an entire category of types won't generate correctly.
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
-- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape)
-- `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description`)
+- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
+- `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
 - `cookieParams` — Cookie parameter handling
 
 #### Parameter
