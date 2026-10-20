@@ -13,10 +13,11 @@ import type {
   PaginationMeta,
   Enum,
   EnumRef,
+  ExternalDocs,
 } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import { toPascalCase, toCamelCase, splitWords, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -28,6 +29,8 @@ import {
   resolveComponentSchemaRef,
   extractConstraints,
   constraintsEntry,
+  deprecatedEntry,
+  collapsedNullableBranch,
 } from './schemas.js';
 import {
   collectProperties,
@@ -38,6 +41,7 @@ import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse } from './responses.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
+import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 
 interface PathItem {
   get?: OperationObject;
@@ -63,6 +67,7 @@ interface OperationObject {
   summary?: string;
   description?: string;
   tags?: string[];
+  externalDocs?: RawExternalDocs;
   parameters?: RawParameterObject[];
   requestBody?: RawRequestBodyObject;
   responses?: Record<string, ResponseObject>;
@@ -291,6 +296,7 @@ export interface OperationExtractionResult {
 export interface TagObject {
   name?: string;
   description?: string;
+  externalDocs?: RawExternalDocs;
 }
 
 export function extractOperations(
@@ -312,6 +318,11 @@ export function extractOperations(
   // schema — can produce the same name, so the prefix for every such
   // operation is decided up front (see resolvePathModelBaseNames).
   const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+  // An API root the untagged paths sit under (`/api`, `/v1`) tells the
+  // services apart no better than nothing, so untagged operations skip it
+  // when their service and fallback name are taken from the path (see
+  // documentApiRoot). Tagged operations are named exactly as before.
+  const apiRoot = documentApiRoot(paths);
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -320,6 +331,10 @@ export function extractOperations(
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
+  // Operations named from the method and path rather than an operationId.
+  // Only these may be renamed when names collide within a service (see
+  // disambiguateOperationNames); a name taken from an operationId is kept as is.
+  const pathNamed = new Set<Operation>();
   // One registry for the whole spec, seeded with the component models and the
   // inline models nested in them (`extractInlineModelsFromSchemas` mints the
   // same names the component pass will, so this is the full set of names that
@@ -354,7 +369,8 @@ export function extractOperations(
       if (!op) continue;
 
       const tag = op.tags?.[0];
-      const serviceName = inferServiceName(path, tag);
+      const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
+      const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
 
       const {
@@ -376,12 +392,14 @@ export function extractOperations(
         componentHeaders,
         headerModelRegistry,
         enumRegistry,
+        apiRootLength,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
+      if (!op.operationId) pathNamed.add(operation);
       const ops = serviceMap.get(serviceName) ?? [];
       ops.push(operation);
       serviceMap.set(serviceName, ops);
@@ -422,89 +440,242 @@ export function extractOperations(
   // Disambiguate operation names within each service.
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
-  for (const [, operations] of serviceMap) {
-    disambiguateOperationNames(operations);
+  for (const [serviceName, operations] of serviceMap) {
+    disambiguateOperationNames(operations, pathNamed, serviceName, (op) =>
+      tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot),
+    );
   }
 
   const declaredTags = indexDocumentTags(documentTags);
   const services: Service[] = Array.from(serviceMap.entries()).map(([name, operations]) => {
-    const description = resolveServiceDescription(name, operations, tagServiceByOperation, declaredTags);
-    // Omit the key entirely when no tag describes the service so the IR shape
-    // is unchanged for documents without tag descriptions.
-    return description === undefined ? { name, operations } : { name, description, operations };
+    const { description, externalDocs } = resolveServiceDocs(name, operations, tagServiceByOperation, declaredTags);
+    // Omit each key entirely when no tag gives it so the IR shape is
+    // unchanged for documents without tag descriptions or links.
+    return {
+      name,
+      ...(description !== undefined ? { description } : {}),
+      ...(externalDocs !== undefined ? { externalDocs } : {}),
+      operations,
+    };
   });
 
   return { services, inlineModels };
 }
 
 /**
+ * What a document tag contributes to the service it names. Both keys are
+ * absent when the tag declares neither, so a declared-but-undocumented tag is
+ * an empty record — still an entry in the index, which is what marks its
+ * service as one that must not borrow another tag's wording.
+ */
+interface TagDocs {
+  description?: string;
+  externalDocs?: ExternalDocs;
+}
+
+/**
+ * `base` with each doc field it lacks filled in from `extra`; a field `base`
+ * already has is kept. The one rule for combining tag docs — among duplicate
+ * tags in the index and among the tags a split-off service inherits from —
+ * so `description` and `externalDocs` cannot resolve by different rules.
+ */
+function fillMissingTagDocs(base: TagDocs, extra: TagDocs): TagDocs {
+  return { ...extra, ...base };
+}
+
+/**
  * Index the document's top-level `tags[]` by the service name each tag
  * produces, so a tag spelled `user_management`, `User Management`, or
  * `user-management` all map to the `UserManagement` service. Every named tag
- * is indexed — with its description when it declares a non-blank one, and
- * `undefined` otherwise — because a declared-but-undescribed tag still marks
- * its service as one that must not borrow another tag's wording. When several
- * tags normalize to the same service name, the first described one wins.
+ * is indexed — with its description when it declares a non-blank one, with
+ * its `externalDocs` when it declares a usable one, and as an empty record
+ * otherwise — because a declared-but-undocumented tag still marks its service
+ * as one that must not borrow another tag's wording. When several tags
+ * normalize to the same service name, each field is taken from the first of
+ * them that gives it, so adding a link to one spelling never changes which
+ * description the service shows.
  *
  * `parseSpec` ignored `tags` entirely before descriptions were read, so a
  * document with a malformed value — `tags` written as an object, a `null`
  * entry, a numeric `name` — used to parse and must keep parsing. Anything
- * that cannot be matched is skipped rather than thrown on.
+ * that cannot be matched is skipped rather than thrown on, and a malformed
+ * `externalDocs` is dropped the same way (see `readExternalDocs`).
  */
-function indexDocumentTags(documentTags: unknown): Map<string, string | undefined> {
-  const index = new Map<string, string | undefined>();
+function indexDocumentTags(documentTags: unknown): Map<string, TagDocs> {
+  const index = new Map<string, TagDocs>();
   if (!Array.isArray(documentTags)) return index;
   for (const tag of documentTags as unknown[]) {
     if (typeof tag !== 'object' || tag === null) continue;
-    const { name, description } = tag as TagObject;
+    const { name, description, externalDocs } = tag as TagObject;
     if (typeof name !== 'string' || name === '') continue;
     const serviceName = toPascalCase(name);
-    if (index.get(serviceName) !== undefined) continue;
     const described = typeof description === 'string' && description.trim() !== '';
-    index.set(serviceName, described ? description : undefined);
+    const docs: TagDocs = { ...(described ? { description } : {}), ...externalDocsEntry(externalDocs) };
+    index.set(serviceName, fillMissingTagDocs(index.get(serviceName) ?? {}, docs));
   }
   return index;
 }
 
 /**
- * Pick a service's description from the document's tags.
+ * Pick a service's docs — its `description` and `externalDocs` — from the
+ * document's tags. Both fields go through this one path so they cannot
+ * resolve to different tags by different rules.
  *
- * A service whose own name is a declared tag is described by that tag alone:
- * its description when it has one, nothing otherwise. Another tag's wording is
- * never borrowed for it — operations tagged `api_keys` that the path-prefix
- * split merges into `UserManagement` must not label that service "API keys".
+ * A service whose own name is a declared tag is documented by that tag alone:
+ * its description and link when it has them, nothing otherwise. Another tag's
+ * wording is never borrowed for it — operations tagged `api_keys` that the
+ * path-prefix split merges into `UserManagement` must not label that service
+ * "API keys".
  *
  * A service whose own name is not declared is one the split carved out of a
  * tag (e.g. `OrganizationDomains` from operations tagged `organizations`); it
- * inherits the description of the first described tag its operations carry.
- * Path-named services whose operations have no tag carry nothing and stay
- * undescribed.
+ * inherits each field on its own from the first tag its operations carry that
+ * gives it: the description of the first described tag, the link of the first
+ * linked one, which need not be the same tag. Path-named services whose
+ * operations have no tag carry nothing and stay undocumented.
  */
-function resolveServiceDescription(
+function resolveServiceDocs(
   serviceName: string,
   operations: Operation[],
   tagServiceByOperation: Map<Operation, string>,
-  declaredTags: Map<string, string | undefined>,
-): string | undefined {
-  if (declaredTags.has(serviceName)) return declaredTags.get(serviceName);
+  declaredTags: Map<string, TagDocs>,
+): TagDocs {
+  const declared = declaredTags.get(serviceName);
+  if (declared !== undefined) return declared;
+  let docs: TagDocs = {};
   for (const op of operations) {
     const tagService = tagServiceByOperation.get(op);
     if (tagService === undefined) continue;
-    const description = declaredTags.get(tagService);
-    if (description !== undefined) return description;
+    const inherited = declaredTags.get(tagService);
+    if (inherited !== undefined) docs = fillMissingTagDocs(docs, inherited);
   }
-  return undefined;
+  return docs;
 }
 
-function inferServiceName(path: string, tag?: string): string {
+/**
+ * Words that mark where an API is mounted rather than naming a resource.
+ * Deliberately tiny: `mountRules` regroup whatever this does not cover.
+ */
+const API_MARKER_SEGMENTS: ReadonlySet<string> = new Set(['api', 'rest']);
+
+/**
+ * Whether a path segment marks the API root rather than naming a resource:
+ * one of API_MARKER_SEGMENTS in any case, or a version such as `v1`,
+ * `v2beta`, `1.0` or `2010-04-01`.
+ */
+function isApiMarkerSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return API_MARKER_SEGMENTS.has(lower) || /^v\d/.test(lower) || /^\d+([.-]\d+)*$/.test(lower);
+}
+
+/** Leading literal segments of a path through its last API marker; `0` without one. */
+function pathRootLength(segments: readonly string[]): number {
+  let length = 0;
+  for (let i = 0; i < segments.length && !segments[i].startsWith('{'); i++) {
+    if (isApiMarkerSegment(segments[i])) length = i + 1;
+  }
+  return length;
+}
+
+/**
+ * The API root the document's untagged operations sit under, as path
+ * segments: `['api', 'v1']` for a document whose untagged paths all start
+ * with `/api/v1/`, `[]` when there is none. Untagged operations skip it when
+ * their service and fallback name are taken from the path.
+ *
+ * Each untagged operation's path contributes its own root — its leading
+ * literal segments through the last API marker (see isApiMarkerSegment), so
+ * `/api/v1/notes` contributes `api/v1`, `/wiki/rest/api/content` contributes
+ * `wiki/rest/api`, `/api/user_management/users` contributes `api` alone and
+ * `/api/{tenant}/notes` contributes `api`, a parameter ending the run. The
+ * document root is the longest marker-terminated prefix every contribution
+ * shares, compared verbatim: `/api/v1/…` beside `/api/v2/…` gives `api`, and
+ * `/v1/…` beside `/v2/…` gives nothing, so the two versions stay apart
+ * instead of merging into one service per resource.
+ *
+ * A path with no marker at all (`/health`, `/openapi.json`) contributes
+ * nothing: it sits outside any root and keeps its own first segment, and it
+ * does not switch the root off for the rest of the document (see
+ * apiRootLengthOf). A shared prefix without a marker is therefore kept whole
+ * — `/user_management/users` and `/user_management/invitations` stay one
+ * `UserManagement` service — because a module prefix every path shares is
+ * the service, not noise, and nothing but the word tells it from `/api`.
+ * Tagged operations never take part, since only path-named services use the
+ * root; nor do path items that declare no operation.
+ */
+function documentApiRoot(paths: Record<string, PathItem>): string[] {
+  let root: string[] | undefined;
+  for (const [path, pathItem] of Object.entries(paths)) {
+    // Same truthiness check as inferServiceName: a first tag names the service.
+    const hasUntaggedOperation = HTTP_METHODS.some((method) => {
+      const op = pathItem[method];
+      return Boolean(op) && !op?.tags?.[0];
+    });
+    if (!hasUntaggedOperation) continue;
+    const segments = path.split('/').filter(Boolean);
+    const own = segments.slice(0, pathRootLength(segments));
+    if (own.length === 0) continue;
+    if (root === undefined) {
+      root = own;
+      continue;
+    }
+    let shared = 0;
+    while (shared < root.length && shared < own.length && root[shared] === own[shared]) shared++;
+    root = root.slice(0, shared);
+  }
+  if (root === undefined) return [];
+  return root.slice(0, pathRootLength(root));
+}
+
+/**
+ * How many leading segments of a path are the document's API root: the root's
+ * length when the path starts with it, compared verbatim, else `0` for a path
+ * outside the root, which is named as if the document had none.
+ */
+function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
+  const segments = path.split('/').filter(Boolean);
+  return apiRoot.length > 0 && apiRoot.every((segment, i) => segments[i] === segment) ? apiRoot.length : 0;
+}
+
+/**
+ * Index of the segment a path-named service takes its name from. Under an
+ * API root it is the first literal segment after the root, so `/v1/notes` and
+ * `/v1/{teamId}/notes` both name `Notes`; when nothing literal follows the
+ * root, the first segment, so `/api` and `/api/{id}` name `Api` as they
+ * always did rather than `Default`. The fallback operation name skips the
+ * same segment (see inferResourceFromPath), so it is never echoed as
+ * `Api.getApi`.
+ *
+ * Without a root (`apiRootLength` of 0: a root-less document, a path outside
+ * the root, or a tagged operation) it is always the first segment, parameter
+ * or not, so every such operation is named exactly as before this rule
+ * existed: an untagged `/{tenant}/users` stays `Default.listUsers`.
+ */
+function serviceSegmentIndex(segments: readonly string[], apiRootLength: number): number {
+  if (apiRootLength === 0) return 0;
+  const index = segments.findIndex((segment, i) => i >= apiRootLength && !segment.startsWith('{'));
+  return index === -1 ? 0 : index;
+}
+
+/**
+ * The service an operation belongs to: its first tag, else a path segment.
+ *
+ * The path fallback takes the first literal segment after the API root the
+ * document sits under (`apiRootLength`, see documentApiRoot): `/widgets/{id}/sub`
+ * is `Widgets`, and so are `/api/widgets` and `/api/{tenant}/widgets` when the
+ * root is `/api`, instead of the whole API collapsing into one `Api` service.
+ * When nothing literal follows the root — the path is the root itself, or
+ * only parameters come next — the first segment names the service as it
+ * always did, so `/api` and `/api/{id}` land in `Api` rather than in `Default`.
+ */
+function inferServiceName(path: string, tag: string | undefined, apiRootLength: number): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
   // (e.g., "multi-factor-auth" for /auth/factors/* endpoints).
   if (tag) {
     return toPascalCase(tag);
   }
-  // Fallback: extract first meaningful path segment: /widgets/{id}/sub → "Widgets"
   const segments = path.split('/').filter(Boolean);
-  const first = segments[0] ?? 'Default';
+  const first = segments[serviceSegmentIndex(segments, apiRootLength)] ?? 'Default';
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
@@ -550,6 +721,7 @@ function inferOperationName(
   path: string,
   operationId?: string,
   operationIdTransform?: (id: string) => string,
+  apiRootLength = 0,
 ): string {
   if (operationId) {
     const normalized = normalizeOperationIdForNaming(operationId);
@@ -562,7 +734,7 @@ function inferOperationName(
   // Fallback when no operationId is available — use method + path to build
   // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor"
   const verb = inferVerb(method, path);
-  const resource = inferResourceFromPath(path);
+  const resource = inferResourceFromPath(path, apiRootLength);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
 }
 
@@ -604,14 +776,18 @@ function inferVerb(method: HttpMethod, path: string): string {
  *   /accounts/users/{id}/auth_factors → "AuthFactors"
  *   /organizations/{id}/api_keys → "ApiKeys"
  *   /auth/authorize → "Authorize" (action endpoint)
+ *
+ * `apiRootLength` is the document's API root the path sits under (see
+ * documentApiRoot); the service segment is the first literal one after it.
  */
-function inferResourceFromPath(path: string): string | null {
+function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
   const segments = path.split('/').filter(Boolean);
   if (segments.length <= 1) return null;
 
-  // Find the last meaningful (non-param) segment
+  // Find the last meaningful (non-param) segment past the API root, so a
+  // root word is never the resource: /api/v1/{id} is Api.delete, not deleteV1.
   let resourceSegment: string | null = null;
-  for (let i = segments.length - 1; i >= 0; i--) {
+  for (let i = segments.length - 1; i >= apiRootLength; i--) {
     if (!segments[i].startsWith('{')) {
       resourceSegment = segments[i];
       break;
@@ -619,8 +795,9 @@ function inferResourceFromPath(path: string): string | null {
   }
 
   if (!resourceSegment) return null;
-  // Skip the service name (first segment) — it would be redundant
-  if (resourceSegment === segments[0]) return null;
+  // Skip the service name (the segment the service was named from) — it
+  // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
+  if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
 
   return toPascalCase(resourceSegment);
 }
@@ -628,57 +805,179 @@ function inferResourceFromPath(path: string): string | null {
 /**
  * Detect and resolve name collisions within a service's operations.
  *
- * When multiple operations share the same name (e.g., several "list" from
- * different sub-resources), disambiguate by appending the resource noun
- * from the path. Only renames operations on DIFFERENT paths — same-name
- * operations on the same path (e.g., PUT + PATCH both "update") are left as-is
- * since they represent the same logical resource.
+ * A name taken from an `operationId` is the author's choice and is never
+ * rewritten here. A name derived from the method and path (inferOperationName)
+ * is only as unique as the path words it was built from, so when operations on
+ * different paths share one, the path-named operations are qualified until
+ * every path in the service has a name of its own. Same-name operations on
+ * the same path (PUT + PATCH both "update") are left as-is since they
+ * represent the same logical resource.
+ *
+ * `apiRootLengthOf` gives the API root each operation's path sits under (see
+ * documentApiRoot), so neither the resource nor the deeper context echoes the
+ * root or the service segment into a name: `DELETE /api/v1/notes/all` in
+ * `Notes` is `deleteAll`, never `deleteAllV1Notes`.
+ *
+ * Qualifiers are tried in order, each on every group still colliding after
+ * the one before. A qualifier never puts the same word twice in a row into a
+ * name, whether the name already ends with it (`listNotes` never becomes
+ * `listNotesNotes`) or the qualifier repeats it itself
+ * (`/api/analytics/analytics/teams` → `listTeamsAnalytics`), compared word by
+ * word on the camelCase boundary rather than as a substring:
+ *
+ *   1. the resource noun (inferResourceFromPath);
+ *   2. the path segments between the service and the resource
+ *      (inferDeeperContext): `GET /users/{id}/sso/factors` next to
+ *      `GET /users/{id}/factors` → `listFactorsSso`;
+ *   3. `By<Param>` for each path parameter, in path order, when the
+ *      parameters are what tell the paths apart: `GET /v1/notes` keeps `list`
+ *      while `GET /v1/{teamId}/notes` becomes `listByTeamId`, and with no
+ *      root `GET /users/teams` keeps `listTeams` while `GET /users/{id}/teams`
+ *      becomes `listTeamsById`;
+ *   4. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
+ *      sees two methods with one name in one class. An operationId-named
+ *      operation keeps the plain name over a path-named one; otherwise the
+ *      lexically first path keeps it, whatever the document order. The suffix
+ *      is silent for a path-derived name, like a hashed inline model name; it
+ *      comes with a warning when the document reuses an operationId, since
+ *      that changes a name the author chose.
  */
-function disambiguateOperationNames(operations: Operation[]): void {
-  // Group by name
+function disambiguateOperationNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  serviceName: string,
+  apiRootLengthOf: (op: Operation) => number,
+): void {
+  const rename = (op: Operation, name: string) => {
+    (op as { name: string }).name = name;
+  };
+
+  const qualifiers: Array<(group: Operation[]) => void> = [
+    (group) => {
+      for (const op of group) {
+        if (!pathNamed.has(op)) continue;
+        rename(op, appendQualifier(op.name, inferResourceFromPath(op.path, apiRootLengthOf(op))));
+      }
+    },
+    (group) => {
+      for (const op of group) {
+        if (!pathNamed.has(op)) continue;
+        rename(op, appendQualifier(op.name, inferDeeperContext(op.path, apiRootLengthOf(op))));
+      }
+    },
+    (group) => {
+      // Parameters only help when they differ between the colliding paths:
+      // `/v1/{id}/notes` and `/v1/{id}/Notes` would both gain `ById` and
+      // still collide, further from the plain name. Every path-named
+      // operation takes part, under an API root or not: a service must not
+      // hand an emitter two methods with one name.
+      const suffixes = group.map((op) => inferByParamsSuffix(op.path));
+      if (new Set(suffixes).size <= 1) return;
+      group.forEach((op, i) => {
+        if (pathNamed.has(op)) rename(op, appendQualifier(op.name, suffixes[i]));
+      });
+    },
+  ];
+
+  for (const qualify of qualifiers) {
+    for (const group of collidingGroups(operations)) qualify(group);
+  }
+
+  // Groups come in name order and members are sorted below, so suffixes are
+  // allocated from the shared pool in an order that depends only on the data.
+  const taken = new Set(operations.map((op) => op.name));
+  for (const group of collidingGroups(operations)) {
+    const name = group[0].name;
+    // An operationId-named operation outranks a path-named one for the plain
+    // name; within a rank the lexically first path wins, so the outcome does
+    // not depend on document order. Operations on one path share the outcome.
+    const rank = (op: Operation) => (pathNamed.has(op) ? 1 : 0);
+    const ordered = [...group].sort((a, b) => rank(a) - rank(b) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const keeper = ordered[0];
+    const nameByPath = new Map<string, string>([[keeper.path, name]]);
+    let n = 2;
+    for (const op of ordered) {
+      let next = nameByPath.get(op.path);
+      if (next === undefined) {
+        while (taken.has(`${name}${n}`)) n++;
+        next = `${name}${n}`;
+        taken.add(next);
+        nameByPath.set(op.path, next);
+        // A path-derived name is the parser's own and is refined silently,
+        // like a hashed inline model name. A name the document chose is only
+        // changed when the document reuses it, which is worth saying.
+        if (!pathNamed.has(op)) {
+          console.warn(
+            `[oagen] Warning: Operations ${keeper.httpMethod.toUpperCase()} ${keeper.path} and ` +
+              `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
+              `"${name}" from their operationId; the latter is renamed "${next}" — give each a distinct operationId`,
+          );
+        }
+      }
+      rename(op, next);
+    }
+  }
+}
+
+/**
+ * The groups of operations that share a name but not a path, in name order.
+ * A name shared only by operations on one path (PUT + PATCH) is not a
+ * collision and is excluded.
+ *
+ * Name order, not document order: the numeric pass draws suffixed names from
+ * one pool per service, and two groups can reach the same one (`listNotes` +
+ * `12` and `listNotes1` + `2`), so whichever is served first decides. Names
+ * are unique per group, so this is a total order, and with the members of a
+ * group also sorted the whole assignment depends only on the paths.
+ */
+function collidingGroups(operations: Operation[]): Operation[][] {
   const byName = new Map<string, Operation[]>();
   for (const op of operations) {
     const group = byName.get(op.name) ?? [];
     group.push(op);
     byName.set(op.name, group);
   }
+  return [...byName.entries()]
+    .filter(([, group]) => new Set(group.map((op) => op.path)).size > 1)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, group]) => group);
+}
 
-  for (const [name, group] of byName) {
-    if (group.length <= 1) continue;
+/**
+ * Append a qualifier to an operation name without repeating what the name
+ * already says. A qualifier never contributes the same word twice in a row:
+ * the deeper context of `/api/analytics/analytics/teams` is
+ * `AnalyticsAnalytics`, which joins as `listTeamsAnalytics`. The words that
+ * remain are then joined where they overlap the end of the name: `listNotes`
+ * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
+ * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
+ * case-insensitively on the camelCase boundary, so `listNotes` + `Note` does
+ * not overlap and is appended whole. The name's own words are never touched.
+ */
+function appendQualifier(name: string, qualifier: string | null): string {
+  if (!qualifier) return name;
+  const have = splitWords(name).map((w) => w.toLowerCase());
+  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || w.toLowerCase() !== all[i - 1].toLowerCase());
+  const want = words.map((w) => w.toLowerCase());
+  // The longest run of words that both ends the name and starts the qualifier.
+  let overlap = Math.min(have.length, want.length);
+  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
+  const rest = words.slice(overlap);
+  return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
+}
 
-    // Check if these are genuinely different resources (different paths)
-    // vs the same resource with different methods (PUT + PATCH)
-    const uniquePaths = new Set(group.map((op) => op.path));
-    if (uniquePaths.size <= 1) continue; // same path, different methods — no disambiguation needed
-
-    for (const op of group) {
-      const resource = inferResourceFromPath(op.path);
-      if (resource) {
-        const newName = toCamelCase(`${name}_${resource}`);
-        (op as { name: string }).name = newName;
-      }
-    }
-
-    // If disambiguation still left collisions (same sub-resource),
-    // use the full distinguishing path segment chain
-    const renamed = new Map<string, Operation[]>();
-    for (const op of group) {
-      const rGroup = renamed.get(op.name) ?? [];
-      rGroup.push(op);
-      renamed.set(op.name, rGroup);
-    }
-    for (const [, rGroup] of renamed) {
-      if (rGroup.length <= 1) continue;
-      // Still colliding — different paths map to same resource name.
-      // Use deeper path context to disambiguate.
-      for (const op of rGroup) {
-        const deeper = inferDeeperContext(op.path);
-        if (deeper) {
-          (op as { name: string }).name = toCamelCase(`${op.name}_${deeper}`);
-        }
-      }
-    }
-  }
+/**
+ * `By<Param>` for each path parameter, in path order, as one qualifier:
+ * `/v1/{teamId}/notes` → `ByTeamId`, `/a/{x}/b/{y}/c` → `ByXByY`. Empty for a
+ * path without parameters. Mirrors derivePathModelBaseName's `By` + PascalCase
+ * spelling of a parameter segment, so `{team_id}` and `{teamId}` read alike.
+ */
+function inferByParamsSuffix(path: string): string {
+  return path
+    .split('/')
+    .filter((segment) => segment.startsWith('{'))
+    .map((segment) => 'By' + toPascalCase(segment.replace(/[{}]/g, '')))
+    .join('');
 }
 
 /**
@@ -687,10 +986,14 @@ function disambiguateOperationNames(operations: Operation[]): void {
  *
  * /users/{id}/auth_factors → already captured as "AuthFactors"
  * /users/external_id/{external_id} → "ExternalId" (special path, not a sub-resource)
+ *
+ * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
+ * left out along with the service segment that follows it, so
+ * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
  */
-function inferDeeperContext(path: string): string | null {
+function inferDeeperContext(path: string, apiRootLength = 0): string | null {
   const segments = path.split('/').filter(Boolean);
-  const nonParams = segments.filter((s) => !s.startsWith('{'));
+  const nonParams = segments.slice(apiRootLength).filter((s) => !s.startsWith('{'));
   // Skip first (service) and last (already used) — use the middle ones
   if (nonParams.length >= 3) {
     return toPascalCase(nonParams.slice(1, -1).join('_'));
@@ -876,9 +1179,10 @@ function buildOperation(
   componentHeaders?: Record<string, Record<string, unknown>>,
   headerModelRegistry: HeaderModelRegistry = new Map(),
   enumRegistry: EnumRegistry = new Map(),
+  apiRootLength = 0,
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
-  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform);
+  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
@@ -956,14 +1260,21 @@ function buildOperation(
     reqBodyModels,
     componentSchemas,
   );
+  // Read off the resolved body so a `components/requestBodies` ref's flag
+  // counts. Only `true` makes the body required: OpenAPI defaults the flag
+  // to `false`, and a non-boolean value is not a declaration of requiredness.
+  // Set exactly when a body is, so the two fields can be read together.
+  const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
   const {
     response,
     responseHeaders,
+    responseDescription,
     successResponses,
     errors,
     inlineModels,
     isPaginated,
     dataPath: responseDataPath,
+    dataDescription: responseDataDescription,
     itemType: responseItemType,
     envelopeFields,
     envelopeCompanions,
@@ -987,6 +1298,7 @@ function buildOperation(
       param: paginationFromParams?.param ?? 'after',
       limitParam: paginationFromParams?.limitParam,
       dataPath: responseDataPath ?? paginationFromParams?.dataPath,
+      ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
       itemType,
       envelopeFields,
     };
@@ -1019,6 +1331,9 @@ function buildOperation(
       // description; the key is omitted (not set to undefined) when absent.
       ...(summary !== undefined ? { summary } : {}),
       description: buildDescription(summary, op.description),
+      // Same conditional shape as `summary`: present only when the document
+      // declares a usable link, absent (not undefined) otherwise.
+      ...externalDocsEntry(op.externalDocs),
       httpMethod: method,
       path,
       pathParams,
@@ -1028,9 +1343,14 @@ function buildOperation(
       cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
       requestBody,
       requestBodyEncoding,
+      // Added only when the operation has a body so bodiless operations keep
+      // their shape.
+      ...(requestBodyRequired !== undefined && { requestBodyRequired }),
       response,
       // Added only when present so operations without headers keep their shape.
       ...(responseHeaders && { responseHeaders }),
+      // Likewise only when the primary response declares a description.
+      ...(responseDescription && { responseDescription }),
       successResponses,
       errors,
       pagination,
@@ -1412,7 +1732,14 @@ function extractRequestBody(
       if (!fieldSchema) continue;
       fields.push(buildFieldFromSchema(fieldName, fieldSchema, contextName, requiredSet, componentSchemas, siblings));
     }
-    inlineModels.push({ name: contextName, description: undefined, fields, ...constraintsEntry(schema) });
+    inlineModels.push({
+      name: contextName,
+      description: undefined,
+      ...externalDocsEntry(schema.externalDocs),
+      fields,
+      ...deprecatedEntry(schema),
+      ...constraintsEntry(schema),
+    });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
     // by this branch. Recurse to materialize them, matching how component
@@ -1432,6 +1759,12 @@ function extractRequestBody(
       (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
     );
     const contentNamed: string[] = [];
+    // A nullable body (`oneOf: [object, null]`) is one schema: the model built
+    // from its object branch takes the wrapper's `deprecated` and limits, as
+    // every other nullable unwrap gives it (`collapsedNullableBranch`). The
+    // null branch still makes the body nullable below. A multi-variant union,
+    // nullable or not, is not collapsed: every variant is built as written.
+    const branch = collapsedNullableBranch(schema);
 
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
@@ -1450,10 +1783,11 @@ function extractRequestBody(
         );
         const variantName = named.name;
         if (named.fromContent) contentNamed.push(variantName);
-        const requiredSet = new Set(variant.required ?? []);
-        const siblings = collectProperties(variant);
+        const source = branch ?? variant;
+        const requiredSet = new Set(source.required ?? []);
+        const siblings = collectProperties(source);
         const fields: Field[] = [];
-        for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
+        for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
           if (!fieldSchema) continue;
           fields.push(
             buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
@@ -1461,11 +1795,13 @@ function extractRequestBody(
         }
         inlineModels.push({
           name: variantName,
-          description: variant.description,
+          description: source.description,
+          ...externalDocsEntry(source.externalDocs),
           fields,
-          ...constraintsEntry(variant),
+          ...deprecatedEntry(source),
+          ...constraintsEntry(source),
         });
-        extractInlineModelsFromProperties(variant, inlineModels, variantName, componentSchemas);
+        extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
         variants.push({ kind: 'model', name: variantName });
       } else {
         variants.push(schemaToTypeRef(variant, contextName));
@@ -1571,6 +1907,11 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     properties,
     required: requiredFields,
     ...(schema.description ? { description: schema.description } : {}),
+    // The wrapper's deprecation is the body's; a variant's is not carried,
+    // since its fields are merged away into the one body model.
+    ...deprecatedEntry(schema),
+    // The wrapper's link is the body's, like its description.
+    ...externalDocsEntry(schema.externalDocs),
     // The wrapper's own keywords bind every branch, so they ride along; the
     // variants' keywords are alternatives and are not carried.
     ...extractConstraints(schema),
@@ -1693,20 +2034,41 @@ function nestedEnumRefs(model: Model): Array<EnumRef & { values: (string | numbe
   return refs;
 }
 
-/** Shape of a model, independent of field order: name, requiredness, and type of every field. */
+/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'example', 'examples']);
+/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+
+/**
+ * Shape of a model, independent of field order, name and documentation:
+ * every field's name, type, requiredness, limits, default and access flags,
+ * plus the model's own limits, type parameters and discriminator. Two
+ * schemas share a model only when this agrees, so a body that repeats
+ * another's fields with a different `minLength` or `minProperties` keeps its
+ * own model and its own limits.
+ */
 function modelFingerprint(model: Model): string {
-  return model.fields
-    .map((f) => `${f.name}${f.required ? '!' : '?'}:${stableStringify(f.type)}`)
+  const fields = model.fields
+    .map((field) => `${field.name}:${stableStringify(omitKeys(field, FIELD_DOC_KEYS))}`)
     .sort()
     .join('|');
+  return `${fields}#${stableStringify(omitKeys(model, MODEL_IDENTITY_KEYS))}`;
 }
 
-/** `JSON.stringify` with object keys sorted, so equal shapes serialize equally. */
+/** The entries of `value` whose key is not in `keys` and whose value is set. */
+function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
+  );
+}
+
+/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
     return `{${entries.join(',')}}`;
@@ -2396,11 +2758,13 @@ function extractResponses(
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
+  responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   inlineModels: Model[];
   isPaginated: boolean;
   dataPath?: string;
+  dataDescription?: string;
   itemType?: TypeRef;
   envelopeFields?: Field[];
   envelopeCompanions?: EnvelopeCompanion[];
@@ -2408,9 +2772,11 @@ function extractResponses(
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
   let responseHeaders: ResponseHeader[] | undefined;
+  let responseDescription: string | undefined;
   let inlineModels: Model[] = [];
   let isPaginated = false;
   let dataPath: string | undefined;
+  let dataDescription: string | undefined;
   let itemType: TypeRef | undefined;
   let envelopeFields: Field[] | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
@@ -2432,6 +2798,12 @@ function extractResponses(
     // materializing models for.
     const headers =
       code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, headerContext, headerModels) : undefined;
+    // The response's own `description`, success or error alike. Blank text
+    // counts as absent, the way an operation's summary is read, and the key is
+    // only added when there is something to keep. A `$ref` into
+    // `components/responses` is not resolved here, so for one only a sibling
+    // `description` written next to the `$ref` (OAS 3.1) is visible.
+    const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
@@ -2444,6 +2816,7 @@ function extractResponses(
         inlineModels = result.inlineModels;
         isPaginated = result.isPaginated;
         dataPath = result.dataPath;
+        dataDescription = result.dataDescription;
         itemType = result.itemType;
         envelopeFields = result.envelopeFields;
         envelopeCompanions = result.envelopeCompanions;
@@ -2469,13 +2842,19 @@ function extractResponses(
           }
         }
       }
-      allSuccessResponses.push({ statusCode: code, type: extractedType, ...(headers && { headers }) });
+      allSuccessResponses.push({
+        statusCode: code,
+        type: extractedType,
+        ...(headers && { headers }),
+        ...(description && { description }),
+      });
     } else if (code >= 300 && code < 400) {
       // 3xx redirects — include so emitter can detect redirect endpoints
       allSuccessResponses.push({
         statusCode: code,
         type: { kind: 'primitive', type: 'unknown' },
         ...(headers && { headers }),
+        ...(description && { description }),
       });
     } else if (code >= 400) {
       const jsonContent = resp.content?.['application/json'];
@@ -2490,7 +2869,7 @@ function extractResponses(
             errorModels,
           )
         : undefined;
-      errors.push({ statusCode: code, type, ...(headers && { headers }) });
+      errors.push({ statusCode: code, type, ...(headers && { headers }), ...(description && { description }) });
     }
   }
 
@@ -2501,6 +2880,9 @@ function extractResponses(
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    // The operation-level description is the primary response's — the same
+    // entry `response` and `responseHeaders` come from.
+    responseDescription = primary.description;
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
@@ -2510,13 +2892,21 @@ function extractResponses(
   return {
     response,
     responseHeaders,
+    responseDescription,
     successResponses,
     errors,
     inlineModels,
     isPaginated,
     dataPath,
+    dataDescription,
     itemType,
     envelopeFields,
     envelopeCompanions,
   };
 }
+
+/**
+ * Shared with the inline-model merge passes, which decide whether two
+ * same-named inline models are the same shape but for `deprecated` by it.
+ */
+export { modelFingerprint };

@@ -179,7 +179,7 @@ describe("the issue's repro: an inline 404 body gets a model (#236)", () => {
     const op = onlyOperation(ir);
 
     expect(modelNames(ir)).toEqual(['Pet', 'GetPetError404']);
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'No such pet', type: model('GetPetError404') }]);
     expect(ir.models.find((m) => m.name === 'GetPetError404')).toMatchInlineSnapshot(`
       {
         "description": undefined,
@@ -211,14 +211,14 @@ describe("the issue's repro: an inline 404 body gets a model (#236)", () => {
         Problem: obj({ title: str }),
       }),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('Problem') }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, description: 'nf', type: model('Problem') }]);
     expect(modelNames(ir)).toEqual(['Pet', 'Problem']);
     expectConsistent(ir);
   });
 
   it('a primitive body stays primitive and mints nothing', async () => {
     const ir = await parseWithoutWarnings(doc(getPet({ '404': { description: 'nf', ...json(str) } })));
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: primitive('string') }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, description: 'nf', type: primitive('string') }]);
     expect(modelNames(ir)).toEqual(['Pet']);
   });
 
@@ -231,7 +231,7 @@ describe("the issue's repro: an inline 404 body gets a model (#236)", () => {
         }),
       ),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404 }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, description: 'nf' }]);
     expect(modelNames(ir)).toEqual(['Pet']);
   });
 });
@@ -244,7 +244,7 @@ describe('every inline body shape is materialized under the name its TypeRef ref
       ),
     );
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 400, type: { kind: 'array', items: model('GetPetError400') } },
+      { statusCode: 400, description: 'bad', type: { kind: 'array', items: model('GetPetError400') } },
     ]);
     expect(fieldTypes(ir, 'GetPetError400')).toEqual({ field: primitive('string'), message: primitive('string') });
     expectConsistent(ir);
@@ -264,6 +264,7 @@ describe('every inline body shape is materialized under the name its TypeRef ref
     expect(onlyOperation(ir).errors).toEqual([
       {
         statusCode: 400,
+        description: 'bad',
         type: {
           kind: 'union',
           compositionKind: 'oneOf',
@@ -337,7 +338,9 @@ describe('every inline body shape is materialized under the name its TypeRef ref
         { Problem: obj({ title: str, status: int }) },
       ),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 409, type: model('GetPetError409') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 409, description: 'conflict', type: model('GetPetError409') },
+    ]);
     expect(fieldTypes(ir, 'GetPetError409')).toEqual({
       title: primitive('string'),
       status: primitive('integer'),
@@ -353,7 +356,7 @@ describe('every inline body shape is materialized under the name its TypeRef ref
         Problem: obj({ title: str }),
       }),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 409, type: model('Problem') }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 409, description: 'c', type: model('Problem') }]);
     expect(modelNames(ir)).toEqual(['Pet', 'Problem']);
     expectConsistent(ir);
   });
@@ -362,7 +365,7 @@ describe('every inline body shape is materialized under the name its TypeRef ref
     const ir = await parseWithoutWarnings(
       doc(getPet({ '409': { description: 'c', ...json({ allOf: [obj({ a: str }), obj({ b: str })] }) } })),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 409, type: model('GetPetError409') }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 409, description: 'c', type: model('GetPetError409') }]);
     expect(fieldTypes(ir, 'GetPetError409')).toEqual({ a: primitive('string'), b: primitive('string') });
     expectConsistent(ir);
   });
@@ -374,7 +377,7 @@ describe('every inline body shape is materialized under the name its TypeRef ref
   ])('nullable object (%s): a nullable reference to the one model', async (_label, schema) => {
     const ir = await parseWithoutWarnings(doc(getPet({ '404': { description: 'nf', ...json(schema) } })));
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 404, type: { kind: 'nullable', inner: model('GetPetError404') } },
+      { statusCode: 404, description: 'nf', type: { kind: 'nullable', inner: model('GetPetError404') } },
     ]);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
     expectConsistent(ir);
@@ -401,7 +404,9 @@ describe('every inline body shape is materialized under the name its TypeRef ref
         }),
       ),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422') },
+    ]);
     expect(modelNames(ir)).toEqual([
       'Pet',
       'GetPetError422',
@@ -432,7 +437,7 @@ describe('every inline body shape is materialized under the name its TypeRef ref
       ),
     );
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 400, type: { kind: 'map', valueType: model('GetPetError400') } },
+      { statusCode: 400, description: 'bad', type: { kind: 'map', valueType: model('GetPetError400') } },
     ]);
     expect(fieldTypes(ir, 'GetPetError400')).toEqual({ message: primitive('string') });
     expectConsistent(ir);
@@ -443,7 +448,11 @@ describe('every inline body shape is materialized under the name its TypeRef ref
       doc(getPet({ '404': { description: 'nf', ...json({ type: 'string', enum: ['gone', 'never_existed'] }) } })),
     );
     expect(onlyOperation(asEnum).errors).toEqual([
-      { statusCode: 404, type: { kind: 'enum', name: 'GetPetError404', values: ['gone', 'never_existed'] } },
+      {
+        statusCode: 404,
+        description: 'nf',
+        type: { kind: 'enum', name: 'GetPetError404', values: ['gone', 'never_existed'] },
+      },
     ]);
     expect(asEnum.enums).toEqual([
       {
@@ -528,7 +537,7 @@ describe('the name is operation-qualified: `<Op>Error<code>`', () => {
     );
     const op = onlyOperation(ir);
     expect(op.response).toEqual(model('PetsGetResponse'));
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('PetsGetError404') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('PetsGetError404') }]);
     expectConsistent(ir, ['Pet']);
   });
 
@@ -548,7 +557,7 @@ describe('the name is operation-qualified: `<Op>Error<code>`', () => {
     );
     const op = onlyOperation(ir);
     expect(op.response).toEqual(model('PetsByPetIdGetResponse'));
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('PetsByPetIdGetError404') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('PetsByPetIdGetError404') }]);
     expectConsistent(ir, ['Pet']);
   });
 
@@ -561,8 +570,8 @@ describe('the name is operation-qualified: `<Op>Error<code>`', () => {
       }),
     );
     const [get, del] = operationsOf(ir);
-    expect(get.errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
-    expect(del.errors).toEqual([{ statusCode: 404, type: model('DeletePetsError404') }]);
+    expect(get.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
+    expect(del.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('DeletePetsError404') }]);
     expect(modelNames(ir)).toEqual(['Pet', 'GetPetError404', 'DeletePetsError404']);
     expect(fieldTypes(ir, 'DeletePetsError404')).toEqual(fieldTypes(ir, 'GetPetError404'));
     expectConsistent(ir);
@@ -578,8 +587,8 @@ describe('the name is operation-qualified: `<Op>Error<code>`', () => {
       ),
     );
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 404, type: model('GetPetError404') },
-      { statusCode: 409, type: model('GetPetError409') },
+      { statusCode: 404, description: 'nf', type: model('GetPetError404') },
+      { statusCode: 409, description: 'conflict', type: model('GetPetError409') },
     ]);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
     expect(fieldTypes(ir, 'GetPetError409')).toEqual({ conflicting_id: primitive('string') });
@@ -592,7 +601,9 @@ describe('the name is reserved like a header model name', () => {
 
   it('steps around a component schema of the same name and a different shape', async () => {
     const ir = await parseWithoutWarnings(doc(getPet(notFound), { GetPetError404: obj({ unrelated: int }) }));
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('GetPetError404Body') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 404, description: 'nf', type: model('GetPetError404Body') },
+    ]);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ unrelated: primitive('integer') });
     expect(fieldTypes(ir, 'GetPetError404Body')).toEqual({ reason: primitive('string') });
     expectConsistent(ir, ['GetPetError404']);
@@ -600,7 +611,7 @@ describe('the name is reserved like a header model name', () => {
 
   it('shares a component schema of the same name and the identical shape, minting nothing', async () => {
     const ir = await parseWithoutWarnings(doc(getPet(notFound), { GetPetError404: obj({ reason: str }) }));
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
     expect(modelNames(ir)).toEqual(['Pet', 'GetPetError404']);
     expectConsistent(ir);
   });
@@ -631,7 +642,7 @@ describe('the name is reserved like a header model name', () => {
         deprecated: undefined,
       },
     ]);
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('GetPetError404Body') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404Body') }]);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ hint: primitive('string') });
     expect(fieldTypes(ir, 'GetPetError404Body')).toEqual({ reason: primitive('string') });
     expectConsistent(ir);
@@ -653,7 +664,7 @@ describe('the name is reserved like a header model name', () => {
       }),
     );
     const [get, list] = operationsOf(ir);
-    expect(get.errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(get.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
     expect(list.responseHeaders?.[0].type).toEqual(model('GetPetListPetsError404'));
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
     expect(fieldTypes(ir, 'GetPetListPetsError404')).toEqual({ hint: primitive('string') });
@@ -680,7 +691,7 @@ describe('error models survive the other response merges', () => {
     const op = onlyOperation(ir);
     expect(op.response).toEqual(model('Pet'));
     expect(op.successResponses?.map((r) => r.type)).toEqual([model('Pet'), model('GetPetResponse')]);
-    expect(op.errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
     expect(modelNames(ir)).toEqual(['Pet', 'GetPetResponse', 'GetPetError404']);
     expectConsistent(ir);
   });
@@ -708,6 +719,7 @@ describe('error models survive the other response merges', () => {
     expect(op.errors).toEqual([
       {
         statusCode: 404,
+        description: 'nf',
         type: model('GetPetError404'),
         headers: [
           { name: 'X-Meta', type: model('PetsXMeta'), required: false, description: undefined, deprecated: undefined },
@@ -745,7 +757,7 @@ describe('every walker reaches errors[].type', () => {
   };
   const withError = (type: Operation['errors'][number]['type']): Operation => ({
     ...baseOperation,
-    errors: [{ statusCode: 404, type }],
+    errors: [{ statusCode: 404, description: 'nf', type }],
   });
   const specOf = (operations: Operation[], models: Model[]): ApiSpec => ({
     name: 'Test',
@@ -823,7 +835,9 @@ describe('round 1: the reserved set covers every name the component and header p
     const ir = await parseWithoutWarnings(
       doc(getPet(notFound(reason)), { GetPet: obj({ error404: obj({ original: str }) }) }),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('GetPetError404Body') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 404, description: 'nf', type: model('GetPetError404Body') },
+    ]);
     // The child keeps its name, its shape and its parent's reference.
     expect(fieldTypes(ir, 'GetPet')).toEqual({ error404: model('GetPetError404') });
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ original: primitive('string') });
@@ -834,7 +848,7 @@ describe('round 1: the reserved set covers every name the component and header p
 
   it("shares a component's nested inline model of the same name and the identical shape", async () => {
     const ir = await parseWithoutWarnings(doc(getPet(notFound(reason)), { GetPet: obj({ error404: reason }) }));
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
+    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
     expect(fieldTypes(ir, 'GetPet')).toEqual({ error404: model('GetPetError404') });
     expect(modelNames(ir).filter((n) => n.startsWith('GetPetError404'))).toEqual(['GetPetError404']);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
@@ -844,8 +858,8 @@ describe('round 1: the reserved set covers every name the component and header p
   it('two operations whose operationIds share a stem: different 404 bodies get distinct models', async () => {
     const ir = await parseWithoutWarnings(sameStem(notFound(obj({ code: int }))));
     const [first, second] = operationsOf(ir);
-    expect(first.errors).toEqual([{ statusCode: 404, type: model('GetPetError404') }]);
-    expect(second.errors).toEqual([{ statusCode: 404, type: model('GetPetError404Body') }]);
+    expect(first.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
+    expect(second.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404Body') }]);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
     expect(fieldTypes(ir, 'GetPetError404Body')).toEqual({ code: primitive('integer') });
     expectConsistent(ir);
@@ -863,7 +877,11 @@ describe('round 1: the reserved set covers every name the component and header p
       doc(getPet(notFound(en(['gone', 'missing']))), { GetPetError404: en(['old', 'new']) }),
     );
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 404, type: { kind: 'enum', name: 'GetPetError404Body', values: ['gone', 'missing'] } },
+      {
+        statusCode: 404,
+        description: 'nf',
+        type: { kind: 'enum', name: 'GetPetError404Body', values: ['gone', 'missing'] },
+      },
     ]);
     expect(enumValues(ir, 'GetPetError404')).toEqual(['old', 'new']);
     expect(enumValues(ir, 'GetPetError404Body')).toEqual(['gone', 'missing']);
@@ -970,7 +988,9 @@ describe('round 1: the reserved set covers every name the component and header p
     const ir = await parseWithoutWarnings(
       doc(getPet(unprocessable(severityBody)), { GetPetError422Severity: en(['x', 'y']) }),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422Body') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422Body') },
+    ]);
     // The field reference and the promoted enum move together, as for a nested model.
     expect(fieldTypes(ir, 'GetPetError422Body')).toEqual({
       severity: { kind: 'enum', name: 'GetPetError422BodySeverity', values: ['warning', 'fatal'] },
@@ -985,7 +1005,9 @@ describe('round 1: the reserved set covers every name the component and header p
     const ir = await parseWithoutWarnings(
       doc(getPet(unprocessable(severityBody)), { GetPetError422Severity: en(['fatal', 'warning']) }),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422') },
+    ]);
     expect(fieldTypes(ir, 'GetPetError422')).toEqual({
       severity: { kind: 'enum', name: 'GetPetError422Severity', values: ['warning', 'fatal'] },
     });
@@ -998,7 +1020,9 @@ describe('round 1: the reserved set covers every name the component and header p
     const ir = await parseWithoutWarnings(
       doc(getPet(unprocessable(severityBody)), { GetPet: obj({ error422_severity: en(['x', 'y']) }) }),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 422, type: model('GetPetError422Body') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422Body') },
+    ]);
     expect(fieldTypes(ir, 'GetPet')).toEqual({
       error422_severity: { kind: 'enum', name: 'GetPetError422Severity', values: ['x', 'y'] },
     });
@@ -1061,7 +1085,9 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
       const ir = await parseWithoutWarnings(doc(getPet(bad(titled)), { CircleState: en(['x', 'y']) }));
       const op = onlyOperation(ir);
       // The clashing enum's title is reserved: the variant takes its qualified name and the enum follows.
-      expect(op.errors).toEqual([{ statusCode: 400, type: unionOf('CircleGetPetError400', 'Square') }]);
+      expect(op.errors).toEqual([
+        { statusCode: 400, description: 'bad', type: unionOf('CircleGetPetError400', 'Square') },
+      ]);
       expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
         kind: { kind: 'literal', value: 'circle' },
         state: { kind: 'enum', name: 'CircleGetPetError400State', values: ['on', 'off'] },
@@ -1077,7 +1103,9 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
 
   it('the same enum with identical members (any order) is shared, nothing is renamed', async () => {
     const ir = await parseWithoutWarnings(doc(getPet(bad(titled)), { CircleState: en(['off', 'on']) }));
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 400, type: unionOf('Circle', 'Square') }]);
+    expect(onlyOperation(ir).errors).toEqual([
+      { statusCode: 400, description: 'bad', type: unionOf('Circle', 'Square') },
+    ]);
     expect(fieldTypes(ir, 'Circle')?.['state']).toEqual({ kind: 'enum', name: 'CircleState', values: ['on', 'off'] });
     expect(enumNames(ir)).toEqual(['CircleState']);
     expect(enumValues(ir, 'CircleState')).toEqual(['off', 'on']);
@@ -1089,7 +1117,9 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
     { timeout: 10_000 },
     async () => {
       const ir = await parseWithoutWarnings(doc(getPet(bad(titled)), { Circle: obj({ unrelated: str }) }));
-      expect(onlyOperation(ir).errors).toEqual([{ statusCode: 400, type: unionOf('CircleGetPetError400', 'Square') }]);
+      expect(onlyOperation(ir).errors).toEqual([
+        { statusCode: 400, description: 'bad', type: unionOf('CircleGetPetError400', 'Square') },
+      ]);
       expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
       expect(fieldTypes(ir, 'CircleGetPetError400')?.['state']).toEqual({
         kind: 'enum',
@@ -1110,14 +1140,16 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
       doc(getPet(bad(titled)), { Circle: obj({ unrelated: str }), Square: obj({ other: str }) }),
     );
     expect(onlyOperation(both).errors).toEqual([
-      { statusCode: 400, type: unionOf('CircleGetPetError400', 'SquareGetPetError400') },
+      { statusCode: 400, description: 'bad', type: unionOf('CircleGetPetError400', 'SquareGetPetError400') },
     ]);
     expectConsistent(both, ['Circle', 'Square']);
 
     const shared = await parseWithoutWarnings(
       doc(getPet(bad(titled)), { Square: obj({ kind: { type: 'string', const: 'square' }, side: num }) }),
     );
-    expect(onlyOperation(shared).errors).toEqual([{ statusCode: 400, type: unionOf('Circle', 'Square') }]);
+    expect(onlyOperation(shared).errors).toEqual([
+      { statusCode: 400, description: 'bad', type: unionOf('Circle', 'Square') },
+    ]);
     expect(modelNames(shared).filter((n) => n === 'Square')).toEqual(['Square']);
     expectConsistent(shared);
   });
@@ -1205,7 +1237,7 @@ describe('round 4: a clashing title is reserved, never renamed after the fact', 
       ),
     );
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 400, type: unionOf({ circle: 'CircleGetPetError400', square: 'Square' }) },
+      { statusCode: 400, description: 'bad', type: unionOf({ circle: 'CircleGetPetError400', square: 'Square' }) },
     ]);
     expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
       kind: literal('circle'),
@@ -1260,7 +1292,9 @@ describe('round 4: a clashing title is reserved, never renamed after the fact', 
           messages.some((m) => m.includes('No free name for error body "GetPetError400"') && m.includes('"Circle"')),
         ).toBe(true);
         // The first owner keeps the name: the field points at the component, as the warning says.
-        expect(onlyOperation(ir).errors).toEqual([{ statusCode: 400, type: model('GetPetError400') }]);
+        expect(onlyOperation(ir).errors).toEqual([
+          { statusCode: 400, description: 'bad', type: model('GetPetError400') },
+        ]);
         expect(fieldTypes(ir, 'GetPetError400')).toEqual({ shape: unionOf({ circle: 'Circle', square: 'Square' }) });
         expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
       } finally {

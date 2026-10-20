@@ -2576,7 +2576,11 @@ describe('undiscriminated inline variants are named from their content', () => {
     // Error unions are extracted under the operation-qualified error name
     // (#236), and their variant names follow the same rule.
     expect(op.errors).toEqual([
-      { statusCode: 400, type: union([model('GetThingError400'), model('GetThingError400WithError')], 'anyOf') },
+      {
+        statusCode: 400,
+        type: union([model('GetThingError400'), model('GetThingError400WithError')], 'anyOf'),
+        description: 'bad',
+      },
     ]);
     expect(types['GetThingError400']).toEqual({ message: str });
     expect(types['GetThingError400WithError']).toEqual({ message: str, error: str });
