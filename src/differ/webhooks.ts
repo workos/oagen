@@ -41,16 +41,20 @@ export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Ch
 
     const paramChanges = diffWebhookParams(oldWebhook, newWebhook);
     const body = diffWebhookBody(oldWebhook, newWebhook);
-    if (paramChanges.length === 0 && body.changes.length === 0) continue;
+    const responses = diffWebhookResponses(oldWebhook, newWebhook);
+    if (paramChanges.length === 0 && body.changes.length === 0 && responses.changes.length === 0) continue;
 
-    const hasBreaking = body.breaking || paramChanges.some((pc) => pc.classification === 'breaking');
+    const hasBreaking =
+      body.breaking || responses.breaking || paramChanges.some((pc) => pc.classification === 'breaking');
+    const details = [...body.changes, ...responses.changes];
     changes.push({
       kind: 'webhook-modified',
       name: newWebhook.name,
       httpMethod: newWebhook.httpMethod,
       paramChanges,
       requestBodyChanged: body.changes.length > 0,
-      ...(body.changes.length > 0 ? { details: body.changes.join('; ') } : {}),
+      responsesChanged: responses.changes.length > 0,
+      ...(details.length > 0 ? { details: details.join('; ') } : {}),
       classification: hasBreaking ? 'breaking' : 'additive',
     });
   }
@@ -93,6 +97,23 @@ function diffWebhookBody(oldWebhook: Webhook, newWebhook: Webhook): { changes: s
   }
 
   return { changes, breaking };
+}
+
+/**
+ * Compare the status codes the sender accepts from the receiver. A code no
+ * longer accepted is breaking — a handler that keeps returning it now fails
+ * the delivery — and a newly accepted one is additive. Descriptions are not
+ * compared, as nowhere else in the differ.
+ */
+function diffWebhookResponses(oldWebhook: Webhook, newWebhook: Webhook): { changes: string[]; breaking: boolean } {
+  const oldCodes = new Set(oldWebhook.responses.map((r) => r.statusCode));
+  const newCodes = new Set(newWebhook.responses.map((r) => r.statusCode));
+  const removed = [...oldCodes].filter((code) => !newCodes.has(code));
+  const added = [...newCodes].filter((code) => !oldCodes.has(code));
+  const changes: string[] = [];
+  if (removed.length > 0) changes.push(`accepted response ${removed.join(', ')} removed`);
+  if (added.length > 0) changes.push(`accepted response ${added.join(', ')} added`);
+  return { changes, breaking: removed.length > 0 };
 }
 
 /**

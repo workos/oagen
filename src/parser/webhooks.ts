@@ -215,7 +215,12 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
   for (const [name, raw] of Object.entries(webhooks)) {
     const pathItem = resolveWebhookPathItem(name, raw, components.pathItems);
     if (!pathItem) continue;
-    const methods = HTTP_METHODS.filter((method) => isRecord(pathItem[method]));
+    // The path item's own key order, as the IR promises document order; an
+    // entry declaring `put` before `post` keeps `put` first.
+    const methods = (Object.keys(pathItem) as string[]).filter(
+      (key): key is HttpMethod =>
+        (HTTP_METHODS as readonly string[]).includes(key) && isRecord(pathItem[key as HttpMethod]),
+    );
     for (const method of methods) {
       const op = pathItem[method] as OperationObject;
       const label = `webhooks.${name}.${method}`;

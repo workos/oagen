@@ -58,6 +58,35 @@ describe('diffSpecs — webhooks', () => {
     expect(removed.summary).toMatchObject({ removed: 1, breaking: 1, additive: 0 });
   });
 
+  it('reports an accepted response code removed as breaking and one added as additive (Greptile)', () => {
+    const was200 = webhook({ responses: [{ statusCode: 200 }] });
+    const is202 = webhook({ responses: [{ statusCode: 202 }] });
+    const swapped = diffSpecs(spec([was200]), spec([is202]));
+    expect(swapped.changes).toEqual([
+      {
+        kind: 'webhook-modified',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramChanges: [],
+        requestBodyChanged: false,
+        responsesChanged: true,
+        details: 'accepted response 200 removed; accepted response 202 added',
+        classification: 'breaking',
+      },
+    ]);
+    const widened = diffSpecs(
+      spec([was200]),
+      spec([webhook({ responses: [{ statusCode: 200 }, { statusCode: 202 }] })]),
+    );
+    expect(widened.changes[0]).toMatchObject({ responsesChanged: true, classification: 'additive' });
+    // A description change alone is not reported.
+    const described = diffSpecs(
+      spec([was200]),
+      spec([webhook({ responses: [{ statusCode: 200, description: 'ok' }] })]),
+    );
+    expect(described.changes).toEqual([]);
+  });
+
   it('identifies a webhook by name and method, so a method change is a removal plus an addition', () => {
     const { changes } = diffSpecs(spec([webhook({ httpMethod: 'post' })]), spec([webhook({ httpMethod: 'put' })]));
     expect(changes.map((c) => c.kind)).toEqual(['webhook-added', 'webhook-removed']);
@@ -72,6 +101,7 @@ describe('diffSpecs — webhooks', () => {
         httpMethod: 'post',
         paramChanges: [],
         requestBodyChanged: true,
+        responsesChanged: false,
         details: 'payload type changed',
         classification: 'breaking',
       },
@@ -82,6 +112,7 @@ describe('diffSpecs — webhooks', () => {
     expect(lost.changes[0]).toMatchObject({
       kind: 'webhook-modified',
       requestBodyChanged: true,
+      responsesChanged: false,
       details: 'payload removed',
       classification: 'breaking',
     });
@@ -89,6 +120,7 @@ describe('diffSpecs — webhooks', () => {
     const gained = diffSpecs(spec([webhook({ requestBody: undefined })]), spec([webhook()]));
     expect(gained.changes[0]).toMatchObject({
       requestBodyChanged: true,
+      responsesChanged: false,
       details: 'payload added',
       classification: 'breaking',
     });
@@ -102,6 +134,7 @@ describe('diffSpecs — webhooks', () => {
     expect(relaxed.changes[0]).toMatchObject({
       kind: 'webhook-modified',
       requestBodyChanged: true,
+      responsesChanged: false,
       details: 'body required → optional',
       classification: 'breaking',
     });
@@ -109,6 +142,7 @@ describe('diffSpecs — webhooks', () => {
     const tightened = diffSpecs(spec([optional]), spec([required]));
     expect(tightened.changes[0]).toMatchObject({
       requestBodyChanged: true,
+      responsesChanged: false,
       details: 'body optional → required',
       classification: 'additive',
     });
@@ -119,6 +153,7 @@ describe('diffSpecs — webhooks', () => {
     );
     expect(reencoded.changes[0]).toMatchObject({
       requestBodyChanged: true,
+      responsesChanged: false,
       details: 'encoding json → form-urlencoded',
       classification: 'breaking',
     });
@@ -145,6 +180,7 @@ describe('diffSpecs — webhooks', () => {
           { kind: 'param-removed', paramName: 'delivery_id', classification: 'breaking', paramLocation: 'header' },
         ],
         requestBodyChanged: false,
+        responsesChanged: false,
         classification: 'breaking',
       },
     ]);

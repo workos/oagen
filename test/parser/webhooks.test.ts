@@ -781,6 +781,13 @@ describe('webhooks', () => {
         expect(webhooks.map((w) => w.httpMethod)).toEqual(['post', 'delete']);
       });
 
+      it('keeps the methods in document order, not HTTP_METHODS order (Greptile)', () => {
+        const { webhooks } = extractWebhooks({
+          petUpdated: { summary: 'x', put: { responses: {} }, post: { responses: {} } },
+        });
+        expect(webhooks.map((w) => w.httpMethod)).toEqual(['put', 'post']);
+      });
+
       it('lets an operation-level parameter override a path-item-level one, and drops path parameters', () => {
         const { webhooks } = extractWebhooks({
           petAdopted: {

@@ -190,7 +190,9 @@ export interface WebhookModified {
   paramChanges: ParamChange[];
   /** True when the payload's type, encoding, or `requestBodyRequired` changed; `details` says which. */
   requestBodyChanged: boolean;
-  /** What changed about the body, e.g. `payload type changed; body required → optional`. */
+  /** True when the set of status codes the sender accepts changed; `details` says which (a code removed is breaking). */
+  responsesChanged: boolean;
+  /** What changed about the body or the accepted responses, e.g. `payload type changed; accepted response 200 removed`. */
   details?: string;
   classification: 'additive' | 'breaking';
 }
