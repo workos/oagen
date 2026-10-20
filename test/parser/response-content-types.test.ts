@@ -1019,7 +1019,7 @@ describe('response content types', () => {
     });
 
     it(
-      'settles on the first candidate and reports, rather than looping, when a nested title-mapped variant cannot leave a taken name',
+      'renames a nested title-mapped variant under the body, rather than looping, when it cannot leave a taken name',
       { timeout: 5000 },
       async () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -1029,15 +1029,30 @@ describe('response content types', () => {
             { Circle: obj({ diameter: str }) },
           ),
         );
-        // The component keeps its name and shape; the body keeps its plain name.
+        // No reservation reaches a variant nested below the top level, so the
+        // body keeps its plain name and the variant is renamed under it, with
+        // the union's reference and discriminator mapping rewritten to match
+        // — as a header's or a fallback body's is. The component is untouched.
         expect(fieldNames(spec, 'Circle')).toEqual(['diameter']);
-        expect(findOp(spec, 'listShapes').responseContents?.[1].type).toEqual({
-          kind: 'model',
-          name: 'ListShapesApplicationVndShapeJsonResponse',
+        const body = findOp(spec, 'listShapes').responseContents?.[1].type;
+        expect(body).toEqual({ kind: 'model', name: 'ListShapesApplicationVndShapeJsonResponse' });
+        const shape = spec.models
+          .find((m) => m.name === 'ListShapesApplicationVndShapeJsonResponse')
+          ?.fields.find((f) => f.name === 'shape')?.type;
+        expect(shape).toMatchObject({
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'ListShapesApplicationVndShapeJsonResponseCircle' },
+            { kind: 'model', name: 'Square' },
+          ],
+          discriminator: {
+            property: 'kind',
+            mapping: { circle: 'ListShapesApplicationVndShapeJsonResponseCircle', square: 'Square' },
+          },
         });
-        expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(
-          '[oagen] Warning: No free model name for application/vnd.shape+json on 200 of listShapes: "Circle" already name a different shape — keeping the existing definition',
-        );
+        expect(fieldNames(spec, 'ListShapesApplicationVndShapeJsonResponseCircle')).toEqual(['kind', 'radius']);
+        expect(spec.models.filter((m) => m.name === 'Circle')).toHaveLength(1);
+        expect(warn.mock.calls).toEqual([]);
       },
     );
 

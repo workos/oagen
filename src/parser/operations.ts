@@ -47,7 +47,6 @@ import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
-  stableStringify,
   type InlineModelRegistry,
   type InlineModelOwner,
 } from './materialize-inline.js';
@@ -2207,8 +2206,6 @@ interface DeferredInlineType {
   /** Qualifies a header's names (`Documents` + `X-Meta` → `DocumentsXMeta`); a body has none. */
   parentName?: string;
   componentSchemas?: Record<string, SchemaObject>;
-  /** Names the schema in diagnostics: the header, media type or response key, status code and operation. */
-  label: string;
   /**
    * Everything the resolved type is written to: the header or content entry,
    * and for a fallback body both the response entry and the content entry of
@@ -2269,15 +2266,6 @@ function resolveDeferredInlineTypes(
   return models;
 }
 
-/** How many `<name>2`, `<name>3`, ... candidates a secondary body tries before the hash. */
-const NUMERIC_NAME_CANDIDATES = 8;
-
-/** How a deferred schema's property name advances, and how a clash no candidate clears is settled. */
-interface DeferredNamingStrategy {
-  stem: (index: number, firstClashOwners: InlineModelOwner[]) => string;
-  clash: 'rename' | 'report';
-}
-
 /**
  * Type a deferred schema and materialize the inline models it names, under a
  * property name that does not collide with a different shape anywhere in the
@@ -2298,21 +2286,20 @@ interface DeferredNamingStrategy {
  * The first owner of a name keeps it (see `resolveDeferredInlineTypes`), and
  * a later schema with a different shape — at any depth, a nested object that
  * differs counts — is re-derived under the first free candidate of its kind
- * (`deferredNamingStrategy`):
+ * (`deferredNamingStem`):
  *
- *   header    1. the bare name                        `DocumentsXMeta`
+ *   header    1. the bare name                `DocumentsXMeta`
  *             2. when the name is taken inside this operation, the status
  *                code (`DocumentsXMeta429`); when taken by a component or
  *                another operation, the operation (`DocumentsCreateDocumentXMeta`)
  *             3. the other of those two
- *             4. operation and status code            `DocumentsCreateDocumentXMeta429`
- *             5. a numeric suffix                     `DocumentsXMeta2`, `DocumentsXMeta3`, …
- *   content   1. the bare name                        `RenderPetCardTextHtmlResponse`
- *             2. the status code                      `RenderPetCardTextHtmlResponse201`
- *             3. a numeric suffix                     `…Response2` … `…Response9`
- *             4. a six-character hash of the schema   `…Response5A7B1C`
- *   fallback  1. the bare name                        `ListPetsDefaultResponse`
- *             2. a numeric suffix                     `ListPetsDefaultResponse2`, `…3`, …
+ *             4. operation and status code    `DocumentsCreateDocumentXMeta429`
+ *             5. a numeric suffix             `DocumentsXMeta2`, `DocumentsXMeta3`, …
+ *   content   1. the bare name                `RenderPetCardTextHtmlResponse`
+ *             2. the status code              `RenderPetCardTextHtmlResponse201`
+ *             3. a numeric suffix             `…Response2`, `…Response3`, …
+ *   fallback  1. the bare name                `ListPetsDefaultResponse`
+ *             2. a numeric suffix             `ListPetsDefaultResponse2`, `…3`, …
  *
  * Both the type and the models come from the same property name, so nested
  * models (`DocumentsXMeta429Origin`) line up by construction. A shape
@@ -2323,10 +2310,9 @@ interface DeferredNamingStrategy {
  * such a variant falls back to its context-qualified name
  * (`CircleDocumentsXMeta`, see `nameInlineVariants`). A clash neither a
  * candidate nor a reservation can clear — a titled variant nested below the
- * top level — is settled per kind rather than looped on: a header or fallback
- * body renames the clashing models under its root with every reference
- * rewritten (`clash: 'rename'`), while a secondary body keeps the owner's
- * definition and reports the clash (`clash: 'report'`).
+ * top level — is not looped on: the clashing models are renamed under the
+ * schema's root (`RenderPetCardTextHtmlResponseCircle`) with every reference
+ * rewritten, whatever the kind.
  *
  * Treating the schema as a one-property object reuses the field-level
  * extractor, whose names come from the same `qualifyInlineModelName(name,
@@ -2334,63 +2320,41 @@ interface DeferredNamingStrategy {
  * path uses.
  */
 function materializeDeferredType(item: DeferredInlineType, registry: ModelShapeRegistry, models: Model[]): TypeRef {
-  const { stem, clash } = deferredNamingStrategy(item);
   return materializeInlineSchema(item.schema, {
-    stem,
+    stem: deferredNamingStem(item),
     parentName: item.parentName,
     componentSchemas: item.componentSchemas,
     registry,
     operation: item.operationQualifier,
     models,
-    clash,
-    label: item.label,
   });
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
-function deferredNamingStrategy(item: DeferredInlineType): DeferredNamingStrategy {
-  const { schema, name, statusCode, operationQualifier } = item;
+function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
+  const { name, statusCode, operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
   const byOperation = `${operationQualifier}${name}`;
   const byBoth = `${operationQualifier}${name}${statusCode}`;
   const numbered = (index: number): string => `${name}${index + 2}`;
   switch (item.kind) {
     case 'header':
-      return {
-        // Decide the preference between candidates 2 and 3 from the bare
-        // name's owners: a clash within this operation reads best by status
-        // code, one with a component, a primary body or another operation by
-        // operation name.
-        stem: (index, firstClashOwners) => {
-          const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
-          const candidates = withinOperation
-            ? [name, byStatus, byOperation, byBoth]
-            : [name, byOperation, byStatus, byBoth];
-          return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
-        },
-        clash: 'rename',
+      // Decide the preference between candidates 2 and 3 from the bare
+      // name's owners: a clash within this operation reads best by status
+      // code, one with a component, a primary body or another operation by
+      // operation name.
+      return (index, firstClashOwners) => {
+        const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
+        const candidates = withinOperation
+          ? [name, byStatus, byOperation, byBoth]
+          : [name, byOperation, byStatus, byBoth];
+        return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
       };
-    case 'content': {
-      const candidates = [
-        name,
-        byStatus,
-        ...Array.from({ length: NUMERIC_NAME_CANDIDATES }, (_, i) => numbered(i)),
-        `${name}${schemaDisambiguator(schema)}`,
-      ];
-      // The hash is the last candidate: the loop settles there when it too is taken.
-      return { stem: (index) => candidates[Math.min(index, candidates.length - 1)], clash: 'report' };
-    }
+    case 'content':
+      return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
     case 'fallback':
-      return { stem: (index) => (index === 0 ? name : numbered(index - 1)), clash: 'rename' };
+      return (index) => (index === 0 ? name : numbered(index - 1));
   }
-}
-
-/**
- * The first six hex characters of the SHA-1 of a schema's shape, upper-cased
- * so the name it ends stays a `toPascalCase` fixed point.
- */
-function schemaDisambiguator(schema: SchemaObject): string {
-  return createHash('sha1').update(stableStringify(schema)).digest('hex').slice(0, 6).toUpperCase();
 }
 
 /**
@@ -2442,7 +2406,6 @@ function extractResponseHeaders(
         operationQualifier: ctx.operationQualifier,
         parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
         componentSchemas: ctx.componentSchemas,
-        label: `header ${name} on ${statusCode} of ${operationLabel}`,
         targets: [entry],
       });
     }
@@ -2770,8 +2733,6 @@ interface ContentModelNaming {
   suffix: string;
   /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
   statusCode: number | string;
-  /** The operation in diagnostics: its operationId, else `METHOD /path`. */
-  label: string;
 }
 
 /**
@@ -2841,7 +2802,6 @@ function typeSecondaryContent(
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
-    label: `${contentType} on ${naming.statusCode} of ${naming.label}`,
     targets: [target],
   });
   return target.type;
@@ -2938,11 +2898,11 @@ function readFallbackResponse(
     // very object once every operation has been read.
     if (range) {
       const entry: RangeResponse = { range };
-      fillFallbackResponse(entry, resolved, key, STATUS_RANGE_LABELS[range], sink);
+      fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink);
       sink.rangeResponses.push(entry);
     } else {
       const entry: DefaultResponse = {};
-      fillFallbackResponse(entry, resolved, key, 'Default', sink);
+      fillFallbackResponse(entry, resolved, 'Default', sink);
       sink.defaultResponse = entry;
     }
     return true;
@@ -2968,7 +2928,6 @@ function readFallbackResponse(
 function fillFallbackResponse(
   entry: DefaultResponse | RangeResponse,
   resp: ResponseObject,
-  key: string,
   label: string,
   sink: FallbackResponseSink,
 ): void {
@@ -2977,12 +2936,12 @@ function fillFallbackResponse(
   // Shared by reference with the deferred body, so the content entry of the
   // media type `type` was read from can join it once it exists.
   const targets: Array<{ type?: TypeRef }> = [entry];
-  if (json) entry.type = typeFallbackBody(json.schema, contextName, key, label, sink, targets);
+  if (json) entry.type = typeFallbackBody(json.schema, contextName, label, sink, targets);
   const contents = extractResponseContents(
     resp.content,
     json?.contentType,
     entry.type,
-    { base: contextName.replace(/Response$/, ''), suffix: 'Response', statusCode: label, label: sink.opLabel },
+    { base: contextName.replace(/Response$/, ''), suffix: 'Response', statusCode: label },
     sink.ctx,
   );
   if (contents) {
@@ -3020,7 +2979,6 @@ function fillFallbackResponse(
 function typeFallbackBody(
   schema: SchemaObject,
   contextName: string,
-  key: string,
   label: string,
   sink: FallbackResponseSink,
   targets: Array<{ type?: TypeRef }>,
@@ -3033,7 +2991,6 @@ function typeFallbackBody(
     statusCode: label,
     operationQualifier: sink.ctx.operationQualifier,
     componentSchemas: sink.ctx.componentSchemas,
-    label: `${key} response of ${sink.opLabel}`,
     targets,
   });
   return { kind: 'primitive', type: 'unknown' };
@@ -3172,7 +3129,7 @@ function extractResponses(
         resp.content,
         primaryContentType,
         extractedType,
-        { base: contentModelBase, suffix: 'Response', statusCode: code, label: opLabel },
+        { base: contentModelBase, suffix: 'Response', statusCode: code },
         ctx,
       );
       allSuccessResponses.push({
@@ -3190,7 +3147,7 @@ function extractResponses(
         resp.content,
         undefined,
         undefined,
-        { base: contentModelBase, suffix: 'Response', statusCode: code, label: opLabel },
+        { base: contentModelBase, suffix: 'Response', statusCode: code },
         ctx,
       );
       allSuccessResponses.push({
@@ -3207,7 +3164,7 @@ function extractResponses(
         resp.content,
         type ? 'application/json' : undefined,
         type,
-        { base: contentModelBase, suffix: 'Error', statusCode: code, label: opLabel },
+        { base: contentModelBase, suffix: 'Error', statusCode: code },
         ctx,
       );
       // An error's `type` is its application/json body by definition, so the

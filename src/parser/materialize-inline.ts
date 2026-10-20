@@ -62,7 +62,7 @@ function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unkn
 }
 
 /** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
-export function stableStringify(value: unknown): string {
+function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
@@ -100,16 +100,6 @@ export interface MaterializeInlineOptions {
   operation?: string;
   /** Where the materialized models go. */
   models: Model[];
-  /**
-   * How a clash that neither a reservation nor a stem advance can clear (a
-   * titled variant nested below the top level) is settled: `rename` (the
-   * default) renames the clashing models under the root and rewrites every
-   * reference to them; `report` keeps the owners' definitions, types the
-   * schema under the stem it settled on, and warns naming `label`.
-   */
-  clash?: 'rename' | 'report';
-  /** Names the schema in the `report` warning: the media type, status code and operation. */
-  label?: string;
 }
 
 /**
@@ -150,24 +140,17 @@ const MAX_RENAME_ROUNDS = 64;
  * it unchanged, neither move can clear it (a titled variant nested below the
  * top level, where the reservation does not reach) — the fixed point — and
  * the loop stops rather than retrying forever. The earlier trial is then kept
- * and settled in place, as `options.clash` says:
- *
- *   - `rename` (the default, `renameClashing`): the clashing names themselves
- *     are renamed, qualified by the root model name
- *     (`ListPetsDefaultResponseCircle`) then numbered, with every reference
- *     among the trial's models and in the returned type rewritten to match;
- *     and because renaming a child changes its parent's shape, the trial is
- *     checked again on its new fingerprints, so a parent that matched a
- *     registered model before and differs from it now moves to the next free
- *     stem with its children, instead of being dropped at commit as already
- *     defined. That rewrite cannot tell an inline model's reference from a
- *     `$ref` to a component of the same name, so a schema that both inlines
- *     a clashing `Circle` and references component `Circle` fails loudly
- *     instead.
- *   - `report` (`commitReported`): the clashing names are left to their
- *     owners, the schema is typed under the stem it settled on, and the
- *     clash is reported as a warning naming `options.label` — a secondary
- *     response body's choice, which keeps its references as written.
+ * and settled in place (`renameClashing`): the clashing names themselves are
+ * renamed, qualified by the root model name (`ListPetsDefaultResponseCircle`)
+ * then numbered, with every reference among the trial's models and in the
+ * returned type rewritten to match; and because renaming a child changes its
+ * parent's shape, the trial is checked again on its new fingerprints, so a
+ * parent that matched a registered model before and differs from it now
+ * moves to the next free stem with its children, instead of being dropped at
+ * commit as already defined. That rewrite cannot tell an inline model's
+ * reference from a `$ref` to a component of the same name, so a schema that
+ * both inlines a clashing `Circle` and references component `Circle` fails
+ * loudly instead.
  */
 export function materializeInlineSchema(schema: SchemaObject, options: MaterializeInlineOptions): TypeRef {
   const { registry } = options;
@@ -193,19 +176,13 @@ export function materializeInlineSchema(schema: SchemaObject, options: Materiali
     if (previous?.move === 'stem' && sameNames(previous.trial.clashing, trial.clashing)) {
       // The stem advance changed nothing: the fixed point. The earlier of the
       // two identical trials carries the lower stem, so it is the one kept.
-      return settle(previous.trial, options, firstClashOwners);
+      return commit(renameClashing(previous.trial, options, firstClashOwners), options);
     }
     stemIndex++;
     previous = { trial, move: 'stem' };
   }
 
-  return settle(previous!.trial, options, firstClashOwners);
-}
-
-/** Settle a trial the loop could not clear, the way `options.clash` says, and commit it. */
-function settle(trial: Trial, options: MaterializeInlineOptions, firstClashOwners: InlineModelOwner[]): TypeRef {
-  if (options.clash === 'report') return commitReported(trial, options);
-  return commit(renameClashing(trial, options, firstClashOwners), options);
+  return commit(renameClashing(previous!.trial, options, firstClashOwners), options);
 }
 
 interface Trial {
@@ -274,26 +251,6 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
     options.models.push(model);
   }
   return trial.type ?? schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
-}
-
-/**
- * Commit a trial the loop could not clear without renaming anything: every
- * model whose name the registry gives another shape is left to its owner and
- * reported, the rest are registered and emitted, and the schema is typed under
- * the trial's stem — so a reference to a clashing name resolves to the owner's
- * definition, as the warning says, rather than to a model renamed behind it.
- */
-function commitReported(trial: Trial, options: MaterializeInlineOptions): TypeRef {
-  const taken = trial.clashing.map((name) => `"${name}"`).join(', ');
-  console.warn(
-    `[oagen] Warning: No free model name for ${options.label ?? 'an inline schema'}: ${taken} already name a different shape — keeping the existing definition`,
-  );
-  for (const model of trial.models) {
-    if (options.registry.has(model.name)) continue;
-    options.registry.set(model.name, { fingerprint: trial.fingerprints.get(model)!, operation: options.operation });
-    options.models.push(model);
-  }
-  return schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
 }
 
 /**

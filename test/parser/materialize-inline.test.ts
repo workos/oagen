@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 describe('materializeInlineSchema — settling a clash no stem can move', () => {
-  it('renames the nested clashing variant under the root and rewrites the reference, by default', () => {
+  it('renames the nested clashing variant under the root and rewrites the reference', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const registry = registryWithCircle();
     const models: Model[] = [];
@@ -60,37 +60,7 @@ describe('materializeInlineSchema — settling a clash no stem can move', () => 
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("with clash: 'report', keeps the owner's definition, types the body under the settled stem, and warns", () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const registry = registryWithCircle();
-    const before = registry.get('Circle');
-    const models: Model[] = [];
-
-    const type = materializeInlineSchema(body, {
-      stem,
-      registry,
-      models,
-      clash: 'report',
-      label: 'application/vnd.shape+json on 200 of listShapes',
-    });
-
-    expect(type).toEqual({ kind: 'model', name: 'Body' });
-    // The clashing `Circle` is neither emitted nor re-registered; the reference stays as written.
-    expect(names(models)).toEqual(['Body', 'Square']);
-    expect(fieldTypes(models, 'Body').shape).toMatchObject({
-      variants: [
-        { kind: 'model', name: 'Circle' },
-        { kind: 'model', name: 'Square' },
-      ],
-    });
-    expect(registry.get('Circle')).toBe(before);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(
-      '[oagen] Warning: No free model name for application/vnd.shape+json on 200 of listShapes: "Circle" already name a different shape — keeping the existing definition',
-    );
-  });
-
-  it('needs neither mode when the stem alone clears the clash', () => {
+  it('moves the body to the next stem when the stem alone clears a root clash', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const taken: Model = { name: 'Body', fields: [{ name: 'other', type: num, required: false }] };
     const registry: InlineModelRegistry = new Map([[taken.name, { fingerprint: modelFingerprint(taken) }]]);
@@ -98,7 +68,7 @@ describe('materializeInlineSchema — settling a clash no stem can move', () => 
 
     const type = materializeInlineSchema(
       { type: 'object', properties: { code: { type: 'string' } } },
-      { stem, registry, models, clash: 'report' },
+      { stem, registry, models },
     );
 
     expect(type).toEqual({ kind: 'model', name: 'Body2' });
