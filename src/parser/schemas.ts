@@ -1243,24 +1243,37 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
  * extracted under: `<field>_item` for an array, `<field>_value` for a map,
  * so what its items or values mint (`ReqShapesItem`, `ReqShapesValue`) can
  * never take the name an object variant of the same union keeps (`ReqShape`,
- * `ReqShapeWithX`). Any other variant keeps the field's own context. Read
- * on the variant with its nullable wrapper removed.
+ * `ReqShapeWithX`). When a sibling property already mints that name (a real
+ * `shapes_item` object), the context steps on exactly as a plain array's
+ * does beside such a sibling (`firstFreeElementContext`: `shapes_array_item`,
+ * `shapes_array_item2`, …); the names minted under the first candidate are
+ * what `mintedInlineNameEntries` reports for the union, so the sibling steps
+ * around them in turn. Any other variant keeps the field's own context. The
+ * variant is read with its nullable wrapper removed, whichever form it takes
+ * (`unwrapNullableSchema`), as the extractor reads it.
  */
-export function collectionVariantContext(contextName: string | undefined, variant: SchemaObject): string | undefined {
+export function collectionVariantContext(
+  contextName: string | undefined,
+  variant: SchemaObject,
+  siblings: ReadonlyMap<string, SchemaObject> | undefined,
+  parentModelName: string | undefined,
+): string | undefined {
   if (contextName === undefined) return undefined;
-  const kind = classifyInlineSchema(unwrapNullableVariant(variant));
-  if (kind === 'array') return `${contextName}_item`;
-  if (kind === 'map') return `${contextName}_value`;
-  return contextName;
-}
-
-/** A variant with its OAS 3.0 `nullable` or `['x', 'null']` wrapper removed, for classification. */
-function unwrapNullableVariant(variant: SchemaObject): SchemaObject {
-  if (Array.isArray(variant.type)) {
-    const nonNull = variant.type.filter((t) => t !== 'null');
-    if (nonNull.length === 1) return { ...variant, type: nonNull[0] };
+  const member = unwrapNullableSchema(variant);
+  const kind = classifyInlineSchema(member);
+  if (kind !== 'array' && kind !== 'map') return contextName;
+  const elementKind = kind === 'array' ? 'item' : 'value';
+  if (!siblings) return `${contextName}_${elementKind}`;
+  const claimed = new Set<string>();
+  for (const [siblingName, siblingSchema] of siblings) {
+    if (siblingName === contextName) continue;
+    for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) claimed.add(minted);
   }
-  return variant;
+  const dependentNames = (candidate: string): string[] =>
+    mintedInlineNameEntries(candidate, member, parentModelName)
+      .filter((entry) => !entry.contextFree)
+      .map((entry) => entry.name);
+  return firstFreeElementContext(contextName, elementKind, claimed, dependentNames, []).context;
 }
 
 /** Which of its keywords types an inline schema; see `classifyInlineSchema`. */
@@ -2505,7 +2518,13 @@ export function schemaToTypeRef(
         // (`collectionVariantContext`), so the models its items or values
         // mint never share a name with an object variant of the same union,
         // which keeps the field's own name.
-        variants.push(schemaToTypeRef(v, collectionVariantContext(contextName, v), parentModelName));
+        variants.push(
+          schemaToTypeRef(
+            v,
+            collectionVariantContext(contextName, v, siblingProperties, parentModelName),
+            parentModelName,
+          ),
+        );
       }
     }
     const hasNull = !!nullVariant;
@@ -2677,7 +2696,10 @@ export function schemaToTypeRef(
 import {
   collectProperties,
   elementContextName,
+  firstFreeElementContext,
   mapValueSchema,
+  mintedInlineNameEntries,
+  mintedInlineNames,
   qualifyInlineModelName,
   reservedInlineNames,
 } from './inline-models.js';

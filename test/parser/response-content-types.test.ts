@@ -739,6 +739,55 @@ describe('response content types', () => {
       expect(fields('CreateThingRequestFItem')).toEqual(['b', 'c']);
     });
 
+    it('steps the array variant past a real sibling named like its context, and reads a nullable wrapper through (Greptile)', async () => {
+      const spec = await parseDocument(
+        document({
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: obj({
+                      f: { oneOf: [{ type: 'array', items: obj({ b: str, c: str }) }, str] },
+                      f_item: obj({ x: str }),
+                      g: { oneOf: [{ oneOf: [{ type: 'array', items: obj({ id: str }) }, { type: 'null' }] }, str] },
+                    }),
+                  },
+                },
+              },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        }),
+      );
+      const body = spec.models.find((m) => m.name === 'CreateThingRequest');
+      const fields = (name: string) => spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+      const names = spec.models.map((m) => m.name);
+      // The sibling keeps its own model; the array variant's items step on.
+      expect(body?.fields.find((f) => f.name === 'f_item')?.type).toEqual({
+        kind: 'model',
+        name: 'CreateThingRequestFItem',
+      });
+      expect(fields('CreateThingRequestFItem')).toEqual(['x']);
+      expect(body?.fields.find((f) => f.name === 'f')?.type).toMatchObject({
+        variants: [
+          { kind: 'array', items: { kind: 'model', name: 'CreateThingRequestFArrayItem' } },
+          { kind: 'primitive' },
+        ],
+      });
+      expect(fields('CreateThingRequestFArrayItem')).toEqual(['b', 'c']);
+      // A nullable wrapper around the array variant is read through on both sides.
+      const g = body?.fields.find((f) => f.name === 'g')?.type;
+      for (const name of collectModelRefs(g!)) expect(names).toContain(name);
+      expect(g).toMatchObject({
+        variants: [
+          { kind: 'nullable', inner: { kind: 'array', items: { kind: 'model', name: 'CreateThingRequestGItem' } } },
+          { kind: 'primitive' },
+        ],
+      });
+    });
+
     it('does the same for a request-body field, which dangled the same way before', async () => {
       const spec = await parseDocument(
         document({

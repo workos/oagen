@@ -109,10 +109,23 @@ export function mintedInlineNameEntries(
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    return [...nameInlineVariantEntries(s, modelName()[0]!.name)].map(([variant, entry]) => ({
-      ...entry,
-      schema: variant,
-    }));
+    // An array or map variant mints under `<context>_item` / `<context>_value`
+    // (`collectionVariantContext`, read here under its first candidate), so
+    // a sibling that would take one of those names steps around it.
+    const collections = nonNull.flatMap((v) => {
+      const member = unwrapNullableSchema(v);
+      const memberKind = classifyInlineSchema(member);
+      if (memberKind !== 'array' && memberKind !== 'map') return [];
+      const suffix = memberKind === 'array' ? 'item' : 'value';
+      return mintedInlineNameEntries(`${contextName}_${suffix}`, member, parentModelName);
+    });
+    return [
+      ...[...nameInlineVariantEntries(s, modelName()[0]!.name)].map(([variant, entry]) => ({
+        ...entry,
+        schema: variant,
+      })),
+      ...collections,
+    ];
   }
   if (kind === 'const') return [];
   if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
@@ -693,16 +706,11 @@ export function extractInlineModelsFromProperties(
       // (`ReqShapesItem` for a `shapes` variant's items).
       for (const variant of unionVariants) {
         const member = unwrapNullableField(variant);
-        const context = collectionVariantContext(fieldName, member);
+        const context = collectionVariantContext(fieldName, member, siblings, parentName);
         if (context === undefined || context === fieldName) continue;
-        extractInlineModelsFromProperties(
-          { properties: { [context]: member } },
-          results,
-          parentName,
-          componentSchemas,
-          siblings,
-          reservedNames,
-        );
+        // The context already stepped around the siblings; the re-entry sees
+        // none, exactly as `schemaToTypeRef` types the variant.
+        extractInlineModelsFromProperties({ properties: { [context]: member } }, results, parentName, componentSchemas);
       }
     }
   }
