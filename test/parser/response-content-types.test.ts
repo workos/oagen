@@ -7,7 +7,13 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
-import { collectAlternateResponseContents, collectModelRefs, collectEnumRefs } from '../../src/ir/types.js';
+import {
+  collectAlternateResponseContents,
+  collectResponseBodyTypes,
+  collectModelRefs,
+  collectEnumRefs,
+  assignModelsToServices,
+} from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Enum, Model, Operation, ResponseContent, Service, TypeRef } from '../../src/ir/types.js';
 
@@ -1662,5 +1668,97 @@ describe('response content types', () => {
       expect(messages.filter((m) => m.includes('Unknown schema shape'))).toEqual([]);
       expect(messages.filter((m) => m.includes('Unresolved'))).toEqual([]);
     });
+  });
+});
+
+describe('beside default and range responses', () => {
+  const fieldNames = (spec: ApiSpec, name: string) =>
+    spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+  const json = (schema: unknown) => ({ 'application/json': { schema } });
+
+  it(
+    'names a fallback body and a secondary body of one operation against each other, in document order',
+    { timeout: 5000 },
+    async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // The vendor body comes first in the document, so its `Circle` keeps the
+      // title; the default's differently shaped `Circle` takes its
+      // context-qualified name and the identical `Square` is shared.
+      const spec = await parseDocument(
+        document({
+          '/shapes': getWith(
+            'listShapes',
+            { 'application/json': { schema: str }, 'application/vnd.shape+json': { schema: shapes({ radius: str }) } },
+            { default: { description: 'd', content: json(shapes({ diameter: str })) } },
+          ),
+        }),
+      );
+      const op = findOp(spec, 'listShapes');
+
+      expect(op.responseContents?.[1].type).toMatchObject({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'Circle' },
+          { kind: 'model', name: 'Square' },
+        ],
+      });
+      expect(op.defaultResponse).toMatchObject({
+        description: 'd',
+        type: {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'CircleListShapesDefaultResponse' },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+      });
+      expect(fieldNames(spec, 'Circle')).toEqual(['kind', 'radius']);
+      expect(fieldNames(spec, 'CircleListShapesDefaultResponse')).toEqual(['kind', 'diameter']);
+      expect(spec.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+      expect(spec.models.filter((m) => m.name === 'Circle')).toHaveLength(1);
+      expect(warn.mock.calls).toEqual([]);
+    },
+  );
+
+  it('reaches a model declared only under a fallback body through collectResponseBodyTypes, beside a secondary body', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(
+      document({
+        '/things': getWith(
+          'listThings',
+          { 'application/json': { schema: str }, 'application/vnd.thing+json': { schema: obj({ id: str }) } },
+          {
+            '4XX': { description: 'rejected', content: json(obj({ code: str })) },
+            default: { description: 'd', content: json(obj({ message: str })) },
+          },
+        ),
+      }),
+    );
+    const op = findOp(spec, 'listThings');
+
+    expect(collectResponseBodyTypes(op)).toEqual([
+      {
+        type: { kind: 'model', name: 'ListThingsApplicationVndThingJsonResponse' },
+        source: 'contents.application/vnd.thing+json',
+      },
+      { type: { kind: 'model', name: 'ListThingsDefaultResponse' }, source: 'defaultResponse' },
+      { type: { kind: 'model', name: 'ListThingsClientErrorResponse' }, source: 'rangeResponses.4XX' },
+    ]);
+    for (const name of [
+      'ListThingsApplicationVndThingJsonResponse',
+      'ListThingsDefaultResponse',
+      'ListThingsClientErrorResponse',
+    ]) {
+      expect(fieldNames(spec, name)).toBeDefined();
+      expect(assignModelsToServices(spec.models, spec.services).get(name)).toBe('Things');
+    }
+    expect(warn.mock.calls).toEqual([]);
+
+    // A fallback ref nothing defines is reported under the source `collectResponseBodyTypes` gives it.
+    op.rangeResponses![0].type = { kind: 'model', name: 'Missing' };
+    validateModelRefs(spec);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Unresolved model reference "Missing" (context: Things.listThings.rangeResponses.4XX)'),
+    );
   });
 });

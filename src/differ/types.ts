@@ -27,8 +27,8 @@ export interface BehaviorChange {
   operationName: string;
   /** Parameter name (e.g. 'order', 'limit'). */
   paramName: string;
-  /** 'path' | 'query' | 'header'. */
-  paramLocation: 'path' | 'query' | 'header';
+  /** Where the parameter lives; kept in step with `ParamChange.paramLocation`. */
+  paramLocation: 'path' | 'query' | 'header' | 'cookie';
   /** Old default value as a string, or null if previously unset. */
   oldDefault: string | null;
   /** New default value as a string, or null if now unset. */
@@ -47,7 +47,10 @@ export type Change =
   | ServiceRemoved
   | OperationAdded
   | OperationRemoved
-  | OperationModified;
+  | OperationModified
+  | WebhookAdded
+  | WebhookRemoved
+  | WebhookModified;
 
 export interface ModelAdded {
   kind: 'model-added';
@@ -156,6 +159,8 @@ export interface OperationModified {
    */
   responseContentTypesChanged: boolean;
   responseContentTypeChanges: ResponseContentTypesChange[];
+  /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
+  fallbackResponsesChanged: boolean;
   classification: 'additive' | 'breaking';
 }
 
@@ -186,6 +191,47 @@ export interface ResponseContentTypesChange {
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * A webhook is identified by its `name` and `httpMethod` together, since one
+ * `webhooks` key may declare several methods; a method change therefore
+ * reports as one webhook removed and another added.
+ */
+export interface WebhookAdded {
+  kind: 'webhook-added';
+  name: string;
+  httpMethod: string;
+  classification: 'additive';
+}
+
+export interface WebhookRemoved {
+  kind: 'webhook-removed';
+  name: string;
+  httpMethod: string;
+  classification: 'breaking';
+}
+
+/**
+ * Changes to a webhook the receiver already handles. Read from the receiver's
+ * side: a payload type or encoding change breaks the handler's signature, a
+ * body that may now be absent breaks a handler that assumed one, and
+ * parameter changes are classified the way a response's would be (see
+ * `diffWebhookParams`). Every `ParamChange` carries its `paramLocation`,
+ * since a header and a query parameter may share a name.
+ */
+export interface WebhookModified {
+  kind: 'webhook-modified';
+  name: string;
+  httpMethod: string;
+  paramChanges: ParamChange[];
+  /** True when the payload's type, encoding, or `requestBodyRequired` changed; `details` says which. */
+  requestBodyChanged: boolean;
+  /** True when the set of status codes the sender accepts changed; `details` says which (a code removed is breaking). */
+  responsesChanged: boolean;
+  /** What changed about the body or the accepted responses, e.g. `payload type changed; accepted response 200 removed`. */
+  details?: string;
+  classification: 'additive' | 'breaking';
+}
+
 export interface ParamChange {
   kind:
     | 'param-added'
@@ -200,7 +246,11 @@ export interface ParamChange {
   oldDefault?: string | null;
   /** For `param-default-changed`: serialized new default value, or `null` if now unset. */
   newDefault?: string | null;
-  /** For `param-default-changed`: 'query' | 'header' | 'path' — where the parameter lives. */
-  paramLocation?: 'path' | 'query' | 'header';
+  /**
+   * Where the parameter lives. Set on an operation's `param-default-changed`
+   * and on every change of a webhook parameter (whose header, query and
+   * cookie parameters may share a name).
+   */
+  paramLocation?: 'path' | 'query' | 'header' | 'cookie';
   details?: string;
 }

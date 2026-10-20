@@ -782,4 +782,46 @@ describe('specDerivedNames — response headers', () => {
     expect(names.has('DownloadMeta')).toBe(true);
     expect(names.has('ThrottleInfo')).toBe(true);
   });
+
+  it('counts a type reached only through a default or range response as spec-derived', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Documents',
+          operations: [
+            {
+              name: 'getDocument',
+              httpMethod: 'get',
+              path: '/documents/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'primitive', type: 'string' },
+              errors: [],
+              defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+              rangeResponses: [
+                { range: '5XX', type: { kind: 'array', items: { kind: 'model', name: 'Outage' } } },
+                {
+                  range: '4XX',
+                  headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'RejectionMeta' }, required: false }],
+                },
+              ],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('ApiError')).toBe(true);
+    expect(names.has('Outage')).toBe(true);
+    expect(names.has('RejectionMeta')).toBe(true);
+  });
 });

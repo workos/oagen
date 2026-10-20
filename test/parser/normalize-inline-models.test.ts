@@ -394,6 +394,66 @@ describe('collapseJsonSuffixModels — response headers', () => {
     });
     expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Meta' } });
   });
+
+  it('rewrites default and range response body and header refs when a Json-suffix model collapses', () => {
+    const models: Model[] = [
+      { name: 'Meta', fields: [{ name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false }] },
+      {
+        name: 'MetaJson',
+        fields: [
+          { name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false },
+          { name: 'version', type: { kind: 'primitive', type: 'integer' }, required: false },
+        ],
+      },
+    ];
+    const services: Service[] = [
+      {
+        name: 'Widgets',
+        operations: [
+          {
+            name: 'getWidget',
+            httpMethod: 'get',
+            path: '/widgets/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'primitive', type: 'string' },
+            errors: [],
+            defaultResponse: {
+              type: { kind: 'model', name: 'MetaJson' },
+              headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'MetaJson' }, required: false }],
+            },
+            rangeResponses: [
+              { range: '5XX', type: { kind: 'array', items: { kind: 'model', name: 'MetaJson' } } },
+              {
+                range: '4XX',
+                headers: [
+                  {
+                    name: 'X-Meta',
+                    type: { kind: 'nullable', inner: { kind: 'model', name: 'MetaJson' } },
+                    required: false,
+                  },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+
+    const result = collapseJsonSuffixModels(models, services);
+
+    expect(result.map((m) => m.name)).toEqual(['Meta']);
+    const op = services[0].operations[0];
+    expect(op.defaultResponse?.type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(op.defaultResponse?.headers?.[0].type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(op.rangeResponses?.[0].type).toEqual({ kind: 'array', items: { kind: 'model', name: 'Meta' } });
+    expect(op.rangeResponses?.[1].headers?.[0].type).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'model', name: 'Meta' },
+    });
+  });
 });
 
 describe('mergeFieldInlineModels', () => {

@@ -299,4 +299,56 @@ describe('collectReferencedNames — response headers', () => {
     expect(referenced.enums.has('RateLimitPolicy')).toBe(true);
     expect(referenced.models.has('Unrelated')).toBe(false);
   });
+
+  it('reaches models and enums referenced only by a default or range response', () => {
+    const services: Service[] = [
+      {
+        name: 'Documents',
+        operations: [
+          {
+            name: 'getDocument',
+            httpMethod: 'get',
+            path: '/documents/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'primitive', type: 'string' },
+            errors: [],
+            defaultResponse: {
+              type: { kind: 'model', name: 'ApiError' },
+              headers: [{ name: 'X-Policy', type: { kind: 'enum', name: 'RateLimitPolicy' }, required: false }],
+            },
+            rangeResponses: [
+              { range: '5XX', type: { kind: 'array', items: { kind: 'model', name: 'Outage' } } },
+              {
+                range: '4XX',
+                headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'RejectionMeta' }, required: false }],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const models: Model[] = [
+      {
+        name: 'ApiError',
+        fields: [{ name: 'cause', type: { kind: 'model', name: 'ErrorCause' }, required: false }],
+      },
+      { name: 'ErrorCause', fields: [] },
+      { name: 'Outage', fields: [] },
+      { name: 'RejectionMeta', fields: [] },
+      { name: 'Unrelated', fields: [] },
+    ];
+
+    const referenced = collectReferencedNames(services, models);
+
+    expect(referenced.models.has('ApiError')).toBe(true);
+    // Chased transitively through the fallback body's own fields.
+    expect(referenced.models.has('ErrorCause')).toBe(true);
+    expect(referenced.models.has('Outage')).toBe(true);
+    expect(referenced.models.has('RejectionMeta')).toBe(true);
+    expect(referenced.enums.has('RateLimitPolicy')).toBe(true);
+    expect(referenced.models.has('Unrelated')).toBe(false);
+  });
 });

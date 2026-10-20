@@ -116,6 +116,7 @@ Emitters should handle these additional variants introduced for open-source read
 - **Response descriptions:** Optional `responseDescription: string` on `Operation` (the primary response's description, e.g. for a `@returns` tag) and `description: string` on each `SuccessResponse` / `ErrorResponse`, present only when the spec declares one with non-whitespace content
 - **Request body required:** Optional `requestBodyRequired: boolean` on `Operation`, present exactly when `requestBody` is; `false` when the spec omits the flag (the OpenAPI default)
 - **Response content types:** Optional `responseContentTypes: string[]` and `responseContents: ResponseContent[]` on `Operation` (the primary response's media types, verbatim and in document order, with a type per media type) and `contentTypes` / `contents` on each `SuccessResponse` / `ErrorResponse`, present only when the response declares at least one media type (an error carries them only when they add to its `type`); `response` is still the fixed-order pick
+- **Fallback responses:** Optional `defaultResponse: DefaultResponse` (the `default` response) and `rangeResponses: RangeResponse[]` (`1XX`–`5XX`) on `Operation`, present only when the spec declares them, each with its own `type`, `headers` and `description`; resolve a status as the explicit entry, then its range, then `defaultResponse`. Neither feeds `response` or `errors`
 - **Idempotency:** `injectIdempotencyKey` is now spec-driven (true only when the spec declares an `Idempotency-Key` header)
 
 ## OperationPlan

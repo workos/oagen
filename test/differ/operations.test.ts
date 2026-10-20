@@ -691,6 +691,71 @@ describe('diffOperations', () => {
     }
   });
 
+  it('detects a default response added as additive', () => {
+    const modified: Operation = { ...getUser, defaultResponse: { type: { kind: 'model', name: 'ApiError' } } };
+    const changes = diffOperations('Users', [getUser], [modified]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].fallbackResponsesChanged).toBe(true);
+      expect(changes[0].errorsChanged).toBe(false);
+      expect(changes[0].classification).toBe('additive');
+    }
+  });
+
+  it('detects a default response removed as breaking', () => {
+    const withDefault: Operation = { ...getUser, defaultResponse: { type: { kind: 'model', name: 'ApiError' } } };
+    const changes = diffOperations('Users', [withDefault], [getUser]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].fallbackResponsesChanged).toBe(true);
+      expect(changes[0].classification).toBe('breaking');
+    }
+  });
+
+  it('detects a default response type changed as breaking', () => {
+    const before: Operation = { ...getUser, defaultResponse: { type: { kind: 'model', name: 'ApiError' } } };
+    const after: Operation = { ...getUser, defaultResponse: { type: { kind: 'model', name: 'Problem' } } };
+    const changes = diffOperations('Users', [before], [after]);
+    expect(changes).toHaveLength(1);
+    if (changes[0].kind === 'operation-modified') {
+      expect(changes[0].fallbackResponsesChanged).toBe(true);
+      expect(changes[0].classification).toBe('breaking');
+    }
+  });
+
+  it('detects a range response added as additive and one removed as breaking', () => {
+    const withRange: Operation = {
+      ...getUser,
+      rangeResponses: [{ range: '5XX', type: { kind: 'model', name: 'Outage' } }],
+    };
+    const added = diffOperations('Users', [getUser], [withRange]);
+    expect(added).toHaveLength(1);
+    if (added[0].kind === 'operation-modified') {
+      expect(added[0].fallbackResponsesChanged).toBe(true);
+      expect(added[0].classification).toBe('additive');
+    }
+    const removed = diffOperations('Users', [withRange], [getUser]);
+    expect(removed).toHaveLength(1);
+    if (removed[0].kind === 'operation-modified') {
+      expect(removed[0].fallbackResponsesChanged).toBe(true);
+      expect(removed[0].classification).toBe('breaking');
+    }
+  });
+
+  it('detects no change when fallback responses are the same, or bodiless on both sides', () => {
+    const before: Operation = {
+      ...getUser,
+      defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+      rangeResponses: [{ range: '4XX' }],
+    };
+    const after: Operation = {
+      ...getUser,
+      defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+      rangeResponses: [{ range: '4XX' }],
+    };
+    expect(diffOperations('Users', [before], [after])).toHaveLength(0);
+  });
+
   it('detects error responses added as additive', () => {
     const modified: Operation = {
       ...getUser,

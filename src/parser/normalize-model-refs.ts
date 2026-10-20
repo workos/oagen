@@ -40,4 +40,12 @@ export function validateModelRefs(spec: ApiSpec): void {
       }
     }
   }
+
+  for (const webhook of spec.webhooks ?? []) {
+    const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
+    for (const p of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
+      walkRef(p.type, `${context}.${p.name}`);
+    }
+    if (webhook.requestBody) walkRef(webhook.requestBody, `${context}.requestBody`);
+  }
 }
