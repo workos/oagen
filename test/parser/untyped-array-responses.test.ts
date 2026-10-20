@@ -40,6 +40,10 @@ describe('isArraySchema', () => {
     expect(isArraySchema({ items: petItems, oneOf: shapeVariants.oneOf })).toBe(false);
     expect(isArraySchema({ items: petItems, anyOf: shapeVariants.oneOf })).toBe(false);
     expect(isArraySchema({ items: petItems, allOf: [{ type: 'object', properties: {} }] })).toBe(false);
+    expect(isArraySchema({ items: petItems, allOf: [{ $ref: '#/components/schemas/List' }] })).toBe(false);
+    expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }] })).toBe(false);
+    // An allOf of bare limits falls through to the array branch in schemaToTypeRef.
+    expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }, { maxItems: 10 }] })).toBe(true);
     expect(isArraySchema(undefined)).toBe(false);
     expect(isArraySchema({})).toBe(false);
     expect(isArraySchema({ type: 'string' })).toBe(false);
@@ -629,6 +633,27 @@ describe('parseSpec — arrays without type', () => {
     expect(first).toEqual({ kind: 'model', name: 'CreateThingRequestThing' });
     // The object alternative owns the name, not the `items` schema.
     expect(ir.models.find((m) => m.name === 'CreateThingRequestThing')?.fields.map((f) => f.name)).toEqual(['message']);
+    expect(danglingRefs(ir)).toEqual([]);
+  });
+
+  it('creates the item model of an untyped array whose allOf only adds limits (Greptile)', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: jsonResponse({ items: petItems, allOf: [{ minItems: 1 }, { maxItems: 10 }] }),
+          },
+        },
+      },
+      components: {},
+    });
+    expect(operation(ir, 'listPets').response).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'ListPetsItem' },
+    });
     expect(danglingRefs(ir)).toEqual([]);
   });
 

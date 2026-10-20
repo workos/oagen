@@ -1242,18 +1242,34 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
  * this same question, or the items reference a model nobody creates. A
  * `$ref` is a reference whatever else it carries, and a type list naming
  * another type beside `array` is a union, so neither counts; nor does an
- * untyped schema that also composes (`allOf`, `oneOf`, `anyOf`), which
- * `schemaToTypeRef` reads as the composition before it ever looks at
- * `items`, so the item extractor must not claim a variant's name first.
- * `items` is not required: a site that needs them checks for them, as
- * `schemaToTypeRef` does. A plain boolean rather than a type guard, because
- * a guard on a `SchemaObject` narrows the variable to `never` in the other
- * branch.
+ * untyped schema that also composes — a `oneOf`/`anyOf`, or an `allOf`
+ * `schemaToTypeRef` acts on (a `$ref` member, a lone member, a member with
+ * `properties`) — which it reads as the composition before it ever looks at
+ * `items`, so the item extractor must not claim a variant's name first. An
+ * `allOf` of bare limits (`[{ minItems: 1 }, { maxItems: 10 }]`) falls
+ * through there and is still an array here. `items` is not required: a site
+ * that needs them checks for them, as `schemaToTypeRef` does. A plain
+ * boolean rather than a type guard, because a guard on a `SchemaObject`
+ * narrows the variable to `never` in the other branch.
  */
+/**
+ * Whether an `allOf` is what types the schema, i.e. the cases its branch in
+ * `schemaToTypeRef` acts on: a `$ref` member, a lone member (unwrapped), or
+ * a member declaring `properties` (a merged model). Members that only add
+ * limits fall through to the schema's own keywords there.
+ */
+function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
+  return members.length === 1 || members.some((member) => member.$ref !== undefined || member.properties !== undefined);
+}
+
 export function isArraySchema(schema: SchemaObject | undefined): boolean {
   if (!schema || schema.$ref) return false;
   const { type } = schema;
-  if (type === undefined) return schema.items !== undefined && !schema.allOf && !schema.oneOf && !schema.anyOf;
+  if (type === undefined) {
+    return (
+      schema.items !== undefined && !schema.oneOf && !schema.anyOf && !(schema.allOf && allOfTypesSchema(schema.allOf))
+    );
+  }
   if (Array.isArray(type)) return type.includes('array') && type.every((t) => t === 'array' || t === 'null');
   return type === 'array';
 }
