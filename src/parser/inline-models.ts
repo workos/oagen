@@ -684,6 +684,24 @@ export function extractInlineModelsFromProperties(
           }
         }
       }
+      // An array or map variant is typed as if it were the field itself
+      // (`schemaToTypeRef` hands it the field's context), so its inline items
+      // or values are extracted the same way: re-entered as a same-named
+      // property, the array and map branches above name them exactly as the
+      // reference does (`ReqShape` for a `shapes` variant's items).
+      for (const variant of unionVariants) {
+        const member = unwrapNullableField(variant);
+        const memberKind = classifyInlineSchema(member);
+        if (memberKind !== 'array' && memberKind !== 'map') continue;
+        extractInlineModelsFromProperties(
+          { properties: { [fieldName]: member } },
+          results,
+          parentName,
+          componentSchemas,
+          siblings,
+          reservedNames,
+        );
+      }
     }
   }
 }

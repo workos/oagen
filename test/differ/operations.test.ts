@@ -77,6 +77,63 @@ describe('diffOperations — response content types', () => {
     ).not.toContain('statusCode');
   });
 
+  it('pairs entries by status code across a primary change, and reports a vanished 2xx as its formats removed (Greptile)', () => {
+    // Old: 200 (PDF) primary, 201 (PDF + HTML). New: the 200 is gone and the 201,
+    // now the lone 2xx, dropped HTML. The IR carries no code for a lone 2xx, so
+    // the new primary pairs with the old primary (PDF vs PDF: nothing), and the
+    // old 201 — which nothing else reports — is reported with its formats removed.
+    const pdf = contents([['application/pdf', binary]]);
+    const pdfHtml = contents([
+      ['application/pdf', binary],
+      ['text/html', string],
+    ]);
+    const old = card([['application/pdf', binary]], {
+      successResponses: [
+        { statusCode: 200, type: binary, contentTypes: ['application/pdf'], contents: pdf },
+        { statusCode: 201, type: binary, contentTypes: ['application/pdf', 'text/html'], contents: pdfHtml },
+      ],
+    });
+    (old.responseContents as ResponseContent[]) = pdf;
+    const next = card([['application/pdf', binary]]);
+    const changes = diffOperations('Pets', [old], [next]);
+    expect(changes[0]).toMatchObject({
+      responseContentTypesChanged: true,
+      responseContentTypeChanges: [
+        {
+          statusCode: 201,
+          added: [],
+          removed: ['application/pdf', 'text/html'],
+          retyped: [],
+          classification: 'breaking',
+        },
+      ],
+      classification: 'breaking',
+    });
+
+    // Both sides listing several 2xx: the primary pairs by its own code even when it moves.
+    const oldTwo = card([['application/pdf', binary]], {
+      successResponses: [
+        { statusCode: 200, type: binary, contentTypes: ['application/pdf'], contents: pdf },
+        { statusCode: 201, type: binary, contentTypes: ['application/pdf', 'text/html'], contents: pdfHtml },
+      ],
+    });
+    (oldTwo.responseContents as ResponseContent[]) = pdf;
+    const newPrimary201 = card([['application/pdf', binary]], {
+      successResponses: [
+        { statusCode: 201, type: binary, contentTypes: ['application/pdf'], contents: pdf },
+        { statusCode: 202, type: { kind: 'primitive', type: 'unknown' } },
+      ],
+    });
+    (newPrimary201.responseContents as ResponseContent[]) = pdf;
+    const moved = diffOperations('Pets', [oldTwo], [newPrimary201]);
+    expect(moved[0]).toMatchObject({
+      responseContentTypeChanges: [
+        { statusCode: 201, added: [], removed: ['text/html'], retyped: [], classification: 'breaking' },
+        { statusCode: 200, added: [], removed: ['application/pdf'], retyped: [], classification: 'breaking' },
+      ],
+    });
+  });
+
   it('reports an added media type as additive', () => {
     const changes = diffOperations(
       'Pets',

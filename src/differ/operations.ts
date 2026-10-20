@@ -124,6 +124,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
 interface ContentEntry {
   key: string;
   statusCode?: number;
+  /** The primary success response: the one `response` is the body of. */
+  isPrimary: boolean;
   contentTypes: string[];
   contents: ResponseContent[];
   /**
@@ -156,34 +158,40 @@ function ownMediaTypeOf(
 
 /**
  * Every response entry of an operation, keyed so the two specs' entries pair
- * up: the primary success response as `primary` (from the operation's own
- * lists, whether or not `successResponses` exists), every other 2xx/3xx
- * entry as `success:<code>`, and every error as `error:<code>`. With several
- * 2xx the primary is the lowest-coded entry whose type is the operation's
- * `response` (the parser's own pick), listed once, under `primary`.
+ * up by status code: every 2xx/3xx entry as `success:<code>` and every error
+ * as `error:<code>`. The primary success response (the one `response` is the
+ * body of, read from the operation's own lists) is `success:<code>` too when
+ * `successResponses` lists it — with several 2xx it is the lowest-coded entry
+ * whose type is the operation's `response`, the parser's own pick — so a
+ * primary that changes status still pairs with the entry of its code; a lone
+ * 2xx carries no code in the IR and is keyed `primary`, pairing with the
+ * other spec's primary whatever its code.
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
+  const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
+  const primaryEntry = successes.find(
+    (entry) =>
+      (op.responseContents !== undefined && entry.contents === op.responseContents) ||
+      typeRefsEqual(entry.type, op.response),
+  );
   const primaryContents = op.responseContents ?? [];
   entries.push({
-    key: 'primary',
+    key: primaryEntry ? `success:${primaryEntry.statusCode}` : 'primary',
+    ...(primaryEntry ? { statusCode: primaryEntry.statusCode } : {}),
+    isPrimary: true,
     contentTypes: op.responseContentTypes ?? [],
     contents: primaryContents,
     ownMediaType: ownMediaTypeOf(primaryContents, op.response),
     ownCoveredElsewhere: true,
   });
-  let primaryListed = false;
-  const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
   for (const entry of successes) {
-    const sharesPrimaryLists = op.responseContents !== undefined && entry.contents === op.responseContents;
-    if (!primaryListed && (sharesPrimaryLists || typeRefsEqual(entry.type, op.response))) {
-      primaryListed = true;
-      continue;
-    }
+    if (entry === primaryEntry) continue;
     const contents = entry.contents ?? [];
     entries.push({
       key: `success:${entry.statusCode}`,
       statusCode: entry.statusCode,
+      isPrimary: false,
       contentTypes: entry.contentTypes ?? [],
       contents,
       ownMediaType: ownMediaTypeOf(contents, entry.type),
@@ -196,6 +204,7 @@ function contentEntries(op: Operation): ContentEntry[] {
     entries.push({
       key: `error:${error.statusCode}`,
       statusCode: error.statusCode,
+      isPrimary: false,
       contentTypes: error.contentTypes ?? implicitJson.map((c) => c.contentType),
       contents,
       ownMediaType: ownMediaTypeOf(contents, error.type, error.type ? JSON_MEDIA_TYPE : undefined),
@@ -213,16 +222,27 @@ function contentTypeOf(entry: ContentEntry, mediaType: string): TypeRef | undefi
  * Per response entry both specs have, the media types the new spec added,
  * removed, or retyped. A retype is left out only when another comparison
  * reports that very body: the entry's own media type on both sides, for the
- * primary (`responseChanged`) or an error (`errorsChanged`). An entry only
- * one spec has is not a media-type change: a status code that came or went
- * is the errors diff's business.
+ * primary (`responseChanged`) or an error (`errorsChanged`). Entries pair by
+ * status code; a primary whose code the IR does not carry (a lone 2xx) pairs
+ * with the other spec's primary. An error only one spec has is not a
+ * media-type change — a code that came or went is the errors diff's business
+ * — but a 2xx the old spec declared and the new does not has no other diff
+ * to report it, so its media types are reported as removed: the formats
+ * callers could ask for under that code are gone.
  */
 function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
-  const before = new Map(contentEntries(oldOp).map((entry) => [entry.key, entry]));
+  const oldEntries = contentEntries(oldOp);
+  const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
+  const oldPrimary = oldEntries.find((entry) => entry.isPrimary);
+  const paired = new Set<ContentEntry>();
   const changes: ResponseContentTypesChange[] = [];
   for (const entry of contentEntries(newOp)) {
-    const old = before.get(entry.key);
+    let old = before.get(entry.key);
+    if (!old && entry.isPrimary && oldPrimary && (entry.key === 'primary' || oldPrimary.key === 'primary')) {
+      old = oldPrimary;
+    }
     if (!old) continue;
+    paired.add(old);
     const oldTypes = new Set(old.contentTypes);
     const newTypes = new Set(entry.contentTypes);
     const added = entry.contentTypes.filter((mediaType) => !oldTypes.has(mediaType));
@@ -242,6 +262,16 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
       removed,
       retyped,
       classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
+    });
+  }
+  for (const old of oldEntries) {
+    if (paired.has(old) || !old.key.startsWith('success:') || old.contentTypes.length === 0) continue;
+    changes.push({
+      statusCode: old.statusCode,
+      added: [],
+      removed: old.contentTypes,
+      retyped: [],
+      classification: 'breaking',
     });
   }
   return changes;

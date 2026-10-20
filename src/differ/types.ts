@@ -161,12 +161,14 @@ export interface OperationModified {
 
 /**
  * How one response entry's media types changed between two specs. Entries
- * pair up by status code — alternate 2xx entries from `successResponses`,
- * errors from `errors` — except the primary success response, which is read
- * from the operation's own `responseContentTypes` and carries no code in the
- * IR, so it is reported with `statusCode` unset. Media types are compared as
- * written and as sets: reordering them is no change, while a key that only
- * gained a parameter is one removed and one added.
+ * pair up by status code — 2xx entries from `successResponses`, the primary
+ * among them, errors from `errors` — so a primary that changes status still
+ * pairs with the entry of its code; a lone 2xx carries no code in the IR, is
+ * paired with the other spec's primary, and is reported with `statusCode`
+ * unset. A 2xx the old spec declared and the new does not is reported with
+ * its media types `removed`. Media types are compared as written and as
+ * sets: reordering them is no change, while a key that only gained a
+ * parameter is one removed and one added.
  */
 export interface ResponseContentTypesChange {
   statusCode?: number;

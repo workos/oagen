@@ -682,6 +682,49 @@ describe('response content types', () => {
     });
   });
 
+  describe('array and map variants of a union body (Greptile)', () => {
+    const union = {
+      oneOf: [
+        { type: 'array', items: obj({ id: str }) },
+        { type: 'object', additionalProperties: obj({ n: str }) },
+        str,
+      ],
+    };
+
+    it("materializes the inline items and values a secondary body's union variants reference", async () => {
+      const spec = await parseDocument(
+        document({
+          '/things': getWith('listThings', {
+            'application/json': { schema: str },
+            'application/vnd.x+json': { schema: union },
+          }),
+        }),
+      );
+      const op = spec.services[0].operations[0];
+      const vnd = op.responseContents?.find((c) => c.contentType === 'application/vnd.x+json')?.type;
+      expect(vnd?.kind).toBe('union');
+      const names = spec.models.map((m) => m.name);
+      for (const name of collectModelRefs(vnd!)) expect(names).toContain(name);
+    });
+
+    it('does the same for a request-body field, which dangled the same way before', async () => {
+      const spec = await parseDocument(
+        document({
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: { content: { 'application/json': { schema: obj({ f: union }) } } },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        }),
+      );
+      const field = spec.models.find((m) => m.name === 'CreateThingRequest')?.fields.find((f) => f.name === 'f');
+      const names = spec.models.map((m) => m.name);
+      for (const name of collectModelRefs(field!.type)) expect(names).toContain(name);
+    });
+  });
+
   describe('naming against every other model', () => {
     const fieldNames = (spec: ApiSpec, name: string) =>
       spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
