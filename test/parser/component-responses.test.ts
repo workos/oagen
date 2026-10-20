@@ -108,7 +108,9 @@ describe('responses written as $ref into components/responses (issue #234)', () 
 
     it('types the 4xx from the component body', () => {
       const op = singleOperation(paths, components);
-      expect(op.errors).toEqual([{ statusCode: 404, type: { kind: 'model', name: 'Problem' } }]);
+      expect(op.errors).toEqual([
+        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } },
+      ]);
     });
 
     it('mints no model for a component body that is itself a $ref', () => {
@@ -145,7 +147,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         ),
       );
       // As on main before refs were resolved: untyped, no headers, the sibling description kept.
-      expect(op.errors).toEqual([{ statusCode: 404, type: undefined }]);
+      expect(op.errors).toEqual([{ statusCode: 404, type: undefined, description: 'Gone' }]);
 
       // No components/responses at all reads the same way: the 200 is `unknown`.
       const [noComponents] = operations(get('getPet', { '200': { $ref: '#/components/responses/PetFound' } }));
@@ -350,7 +352,9 @@ describe('responses written as $ref into components/responses (issue #234)', () 
           },
         },
       });
-      expect(op.errors).toEqual([{ statusCode: 409, type: { kind: 'model', name: 'ConflictResponse' } }]);
+      expect(op.errors).toEqual([
+        { statusCode: 409, description: 'Taken', type: { kind: 'model', name: 'ConflictResponse' } },
+      ]);
     });
 
     // An operationId-less `GET /owner` names its inline body `OwnerGetResponse`
@@ -488,12 +492,13 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         ['X-Rate-Limit', { kind: 'primitive', type: 'integer' }, undefined],
         ['X-Request-Id', { kind: 'primitive', type: 'string' }, 'Correlates the response with a request.'],
       ]);
-      expect(getPet.errors).toEqual([{ statusCode: 404, type: { kind: 'model', name: 'Problem' } }]);
+      const notFound = { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } };
+      expect(getPet.errors).toEqual([notFound]);
 
       // Two operations, one shared inline body: one model, both point at it.
       expect(byName.get('getOwner')!.response).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
       expect(byName.get('previewOwner')!.response).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
-      expect(byName.get('getOwner')!.errors).toEqual([{ statusCode: 404, type: { kind: 'model', name: 'Problem' } }]);
+      expect(byName.get('getOwner')!.errors).toEqual([notFound]);
 
       // A shared inline list envelope: one item model, one page shape.
       const listPetPhotos = byName.get('listPetPhotos')!;
@@ -504,7 +509,13 @@ describe('responses written as $ref into components/responses (issue #234)', () 
       const adoptPet = byName.get('adoptPet')!;
       expect(adoptPet.response).toEqual({ kind: 'primitive', type: 'unknown' });
       expect(adoptPet.responseHeaders?.map((h) => h.name)).toEqual(['X-Request-Id']);
-      expect(adoptPet.errors).toEqual([{ statusCode: 409, type: { kind: 'model', name: 'ConflictResponse' } }]);
+      expect(adoptPet.errors).toEqual([
+        {
+          statusCode: 409,
+          description: 'Already adopted, declared inline',
+          type: { kind: 'model', name: 'ConflictResponse' },
+        },
+      ]);
 
       const modelNames = spec.models.map((m: Model) => m.name).sort();
       expect(new Set(modelNames).size).toBe(modelNames.length);

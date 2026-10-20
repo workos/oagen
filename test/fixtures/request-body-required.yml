@@ -1,0 +1,75 @@
+openapi: '3.1.0'
+info:
+  title: Request body required
+  version: '1'
+paths:
+  # Issue #213 repro: one body the document marks required, one it does not.
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+              required: [name]
+      responses:
+        '204':
+          description: ok
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+  /pets/{petId}/notes:
+    post:
+      operationId: addNote
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+      responses:
+        '204':
+          description: ok
+  # A referenced body: the flag lives on the component, not on the reference,
+  # and the body is multipart rather than JSON.
+  /pets/{petId}/photo:
+    put:
+      operationId: setPhoto
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        $ref: '#/components/requestBodies/Photo'
+      responses:
+        '204':
+          description: ok
+components:
+  requestBodies:
+    Photo:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            properties:
+              file:
+                type: string
+                format: binary
