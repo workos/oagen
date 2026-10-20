@@ -340,6 +340,49 @@ ${animals}`);
     expect(pet.compositionKind).toBe('oneOf');
   });
 
+  it.each([
+    [
+      'a type: null variant',
+      "      oneOf:\n        - $ref: '#/components/schemas/Cat'\n        - $ref: '#/components/schemas/Dog'\n        - type: 'null'",
+    ],
+    [
+      'an OAS 3.0 nullable: true',
+      "      nullable: true\n      oneOf:\n        - $ref: '#/components/schemas/Cat'\n        - $ref: '#/components/schemas/Dog'",
+    ],
+    [
+      'a type list with null',
+      "      type: [object, 'null']\n      oneOf:\n        - $ref: '#/components/schemas/Cat'\n        - $ref: '#/components/schemas/Dog'",
+    ],
+  ])(
+    'carries %s on every $ref to the union as nullable(model), like the inline form (MichaelDeBoey)',
+    async (_, petSchema) => {
+      const ir = await parseInline(`${header}
+components:
+  schemas:
+    Pet:
+${petSchema}
+    Owner:
+      type: object
+      properties:
+        pet: { $ref: '#/components/schemas/Pet' }
+        inline:
+          oneOf:
+            - $ref: '#/components/schemas/Cat'
+            - $ref: '#/components/schemas/Dog'
+            - type: 'null'
+${animals}`);
+
+      const pet = model(ir, 'Pet');
+      expect(pet.variants).toEqual([modelRef('Cat'), modelRef('Dog')]);
+      const owner = model(ir, 'Owner');
+      expect(owner.fields.find((f) => f.name === 'pet')?.type).toEqual({ kind: 'nullable', inner: modelRef('Pet') });
+      expect(owner.fields.find((f) => f.name === 'inline')?.type.kind).toBe('nullable');
+      // The request body is a `$ref` to Pet as well.
+      expect(ir.services[0].operations[0].requestBody).toEqual({ kind: 'nullable', inner: modelRef('Pet') });
+      expect(unresolvedRefs(ir)).toEqual([]);
+    },
+  );
+
   it('keeps an anyOf as an open union and never discriminates it implicitly', async () => {
     const ir = await parseInline(`${header}
 components:
@@ -1007,6 +1050,67 @@ components:
       };
       expect(collapseJsonSuffixModels([dispatcher, otherRules], []).map((m) => m.name)).toEqual(['Foo', 'FooJson']);
       expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('refuses to fold when two undiscriminated unions dispatch to different members (MichaelDeBoey)', async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    // `Pet: oneOf [$ref Cat, $ref Dog]` beside `PetJson: oneOf [{ name }, { tag }]`: the rules
+    // agree (`oneOf`, no discriminator) and a union of refs has no merged fields, so only
+    // the variants tell them apart.
+    const pet: Model = {
+      name: 'Pet',
+      fields: [],
+      variants: [modelRef('Cat'), modelRef('Dog')],
+      compositionKind: 'oneOf',
+    };
+    const petJson: Model = {
+      name: 'PetJson',
+      fields: [
+        { name: 'name', type: { kind: 'primitive', type: 'string' }, required: false },
+        { name: 'tag', type: { kind: 'primitive', type: 'string' }, required: false },
+      ],
+      variants: [modelRef('PetJsonWithName'), modelRef('PetJsonWithTag')],
+      compositionKind: 'oneOf',
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kept = collapseJsonSuffixModels([pet, petJson], []);
+      expect(kept.map((m) => m.name)).toEqual(['Pet', 'PetJson']);
+      expect(kept[0]?.variants).toEqual([modelRef('Cat'), modelRef('Dog')]);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Json-suffix model "PetJson" does not preserve the union rules of "Pet" — keeping both',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("still folds a Json-suffixed union whose variants are the base's under the Json name", async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    // Pass 3 renames `PetJsonWithName` → `PetWithName`, so the variants are compared under the base's name.
+    const pet: Model = {
+      name: 'Pet',
+      fields: [{ name: 'name', type: { kind: 'primitive', type: 'string' }, required: false }],
+      variants: [modelRef('PetWithName'), modelRef('PetWithTag')],
+      compositionKind: 'oneOf',
+    };
+    const petJson: Model = {
+      name: 'PetJson',
+      fields: [
+        { name: 'name', type: { kind: 'primitive', type: 'string' }, required: false },
+        { name: 'tag', type: { kind: 'primitive', type: 'string' }, required: false },
+      ],
+      variants: [modelRef('PetJsonWithName'), modelRef('PetJsonWithTag')],
+      compositionKind: 'oneOf',
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kept = collapseJsonSuffixModels([pet, petJson], []);
+      expect(kept.map((m) => m.name)).toEqual(['Pet']);
+      expect(kept[0]?.variants).toEqual([modelRef('PetJsonWithName'), modelRef('PetJsonWithTag')]);
     } finally {
       warn.mockRestore();
     }

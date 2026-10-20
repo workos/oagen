@@ -1,7 +1,7 @@
 import type { Model, Service, TypeRef } from '../ir/types.js';
 import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs, renameModelRefs } from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
-import { unionRulesKey } from './union-shape.js';
+import { unionShapeKey } from './union-shape.js';
 
 function keepLargestByName(models: Model[]): Model[] {
   const byName = new Map<string, Model>();
@@ -285,14 +285,19 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     // Guard: a third model explicitly references the Json-suffix model
     if (isModelReferencedByOthers(model.name, normalizedModels, new Set([model.name, baseName]))) continue;
 
-    // Guard: the base dispatches by union rules — a named union's composition
+    // Guard: the base is a union — a named union's variants, composition
     // keyword and discriminator, or an allOf+oneOf dispatcher's mapping (such
     // a base may have no fields at all) — that the Json model does not
-    // preserve: it has none, or different ones. Folding would turn the
-    // dispatcher into a plain object, or swap its rules, under operations
-    // that already use it. Identical rules fold as before.
-    const baseRules = unionRulesKey(baseModel);
-    if (baseRules !== '' && baseRules !== unionRulesKey(model)) {
+    // preserve: it has no variants or rules, or different ones. Folding would
+    // turn the dispatcher into a plain object, or swap its variants or rules,
+    // under operations that already use it (two undiscriminated unions share
+    // the rules `oneOf` while dispatching to different members). A Json
+    // model's variants are read under the base's name, as pass 3 renames
+    // them, so `PetJsonWithName` matches `PetWithName`. Identical shapes fold
+    // as before.
+    const baseShape = unionShapeKey(baseModel, (v) => JSON.stringify(v));
+    const jsonShape = unionShapeKey(model, (v) => JSON.stringify(v).split(`"${model.name}`).join(`"${baseName}`));
+    if (baseShape !== '' && baseShape !== jsonShape) {
       console.warn(
         `[oagen] Warning: Json-suffix model "${model.name}" does not preserve the union rules of "${baseName}" — keeping both`,
       );
