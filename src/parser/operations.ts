@@ -2569,13 +2569,18 @@ function operationBodyModels(
       if (!op) continue;
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
       const opLabel = operationLabel(op, path, method);
+      // Each request into its own array, as buildOperation extracts it: the
+      // extractor steps around names already in the array it is given, so a
+      // shared one would reserve names no operation emits.
+      const requestModels: Model[] = [];
       extractRequestBody(
         resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel),
         op,
         pathModelBaseName,
-        models,
+        requestModels,
         componentSchemas,
       );
+      models.push(...requestModels);
       let kept: SchemaObject | undefined;
       for (const [statusCode, resp] of Object.entries(op.responses ?? {})) {
         const code = parseInt(statusCode, 10);

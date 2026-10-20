@@ -1466,6 +1466,46 @@ describe('review round 1: a 2xx body reserves what it mints before any error bod
     expectConsistent(ir, ['Pet']);
   });
 
+  it("reserves each request body as its own operation mints it, never a stepped twin of another's (Greptile)", async () => {
+    // Two operations whose request bodies are the same const-pinned union mint the
+    // same AuthGetPetRequest each; a shared pre-pass array would have reserved an
+    // AuthGetPetRequest2 nobody emits, which an error variant could then share
+    // without a model behind it.
+    const body = (operationId: string) => ({
+      post: {
+        operationId,
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                oneOf: [
+                  obj({ kind: { type: 'string', const: 'auth' }, token: str }),
+                  obj({ kind: { type: 'string', const: 'anon' } }),
+                ],
+              },
+            },
+          },
+        },
+        responses: {
+          '204': { description: 'ok' },
+          '400': {
+            description: 'bad',
+            ...json({
+              oneOf: [titled('AuthGetPetRequest2', 'auth', { token: str }), titled('Other', 'other', { x: str })],
+            }),
+          },
+        },
+      },
+    });
+    const ir = await parseWithoutWarnings(doc({ '/a': body('getPet'), '/b': body('get-pet') }));
+    for (const op of operationsOf(ir)) {
+      for (const error of op.errors) {
+        for (const name of collectModelRefs(error.type!)) expect(modelNames(ir)).toContain(name);
+      }
+    }
+    expectConsistent(ir, ['Pet']);
+  });
+
   it('tells a numeric component enum from an error enum with the same spellings (Greptile)', async () => {
     const ir = await parseWithoutWarnings(
       doc(getPet({ '422': { description: 'bad', ...json(obj({ severity: { type: 'string', enum: ['1', '2'] } })) } }), {
