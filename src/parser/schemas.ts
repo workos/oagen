@@ -1238,6 +1238,31 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
 }
 
+/**
+ * The context an array or map variant of a `oneOf`/`anyOf` is typed and
+ * extracted under: `<field>_item` for an array, `<field>_value` for a map,
+ * so what its items or values mint (`ReqShapesItem`, `ReqShapesValue`) can
+ * never take the name an object variant of the same union keeps (`ReqShape`,
+ * `ReqShapeWithX`). Any other variant keeps the field's own context. Read
+ * on the variant with its nullable wrapper removed.
+ */
+export function collectionVariantContext(contextName: string | undefined, variant: SchemaObject): string | undefined {
+  if (contextName === undefined) return undefined;
+  const kind = classifyInlineSchema(unwrapNullableVariant(variant));
+  if (kind === 'array') return `${contextName}_item`;
+  if (kind === 'map') return `${contextName}_value`;
+  return contextName;
+}
+
+/** A variant with its OAS 3.0 `nullable` or `['x', 'null']` wrapper removed, for classification. */
+function unwrapNullableVariant(variant: SchemaObject): SchemaObject {
+  if (Array.isArray(variant.type)) {
+    const nonNull = variant.type.filter((t) => t !== 'null');
+    if (nonNull.length === 1) return { ...variant, type: nonNull[0] };
+  }
+  return variant;
+}
+
 /** Which of its keywords types an inline schema; see `classifyInlineSchema`. */
 export type InlineSchemaKind = 'ref' | 'allOf' | 'union' | 'const' | 'enum' | 'array' | 'object' | 'map' | 'other';
 
@@ -2476,7 +2501,11 @@ export function schemaToTypeRef(
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
         variants.push(inlineVariantTypeRef(v, mappedName ?? inlineName));
       } else {
-        variants.push(schemaToTypeRef(v, contextName, parentModelName));
+        // An array or map variant is typed under a context of its own
+        // (`collectionVariantContext`), so the models its items or values
+        // mint never share a name with an object variant of the same union,
+        // which keeps the field's own name.
+        variants.push(schemaToTypeRef(v, collectionVariantContext(contextName, v), parentModelName));
       }
     }
     const hasNull = !!nullVariant;

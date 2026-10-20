@@ -707,6 +707,38 @@ describe('response content types', () => {
       for (const name of collectModelRefs(vnd!)) expect(names).toContain(name);
     });
 
+    it('keeps an object variant apart from an array variant of the same union (Greptile)', async () => {
+      const spec = await parseDocument(
+        document({
+          '/things': {
+            post: {
+              operationId: 'createThing',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: obj({ f: { oneOf: [obj({ a: str }), { type: 'array', items: obj({ b: str, c: str }) }] } }),
+                  },
+                },
+              },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        }),
+      );
+      const fields = (name: string) => spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+      const field = spec.models.find((m) => m.name === 'CreateThingRequest')?.fields.find((f) => f.name === 'f');
+      expect(field?.type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'CreateThingRequestF' },
+          { kind: 'array', items: { kind: 'model', name: 'CreateThingRequestFItem' } },
+        ],
+      });
+      expect(fields('CreateThingRequestF')).toEqual(['a']);
+      expect(fields('CreateThingRequestFItem')).toEqual(['b', 'c']);
+    });
+
     it('does the same for a request-body field, which dangled the same way before', async () => {
       const spec = await parseDocument(
         document({
