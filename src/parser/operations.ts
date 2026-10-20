@@ -352,14 +352,22 @@ export function extractOperations(
   const enumRegistry: EnumRegistry = new Map(
     (componentEnums ?? []).map((e) => [e.name, enumMembersKey(e.values.map((v) => v.value))]),
   );
-  for (const model of [...(componentModels ?? []), ...extractInlineModelsFromSchemas(componentSchemas)]) {
+  // And what every operation's 2xx body will mint, read up front from the
+  // same extractor under the same context name `extractResponses` uses: a
+  // success response's title-mapped `oneOf` names its variants by bare title
+  // (`Circle`), so an error body — of any operation, declared before or after
+  // — that gives the same title another shape must step around it, or the
+  // later merge would hand the success response the error's fields.
+  const reserve = (model: Model): void => {
     if (!headerModelRegistry.has(model.name)) {
       headerModelRegistry.set(model.name, { fingerprint: modelFingerprint(model) });
     }
     for (const ref of nestedEnumRefs(model)) {
       if (!enumRegistry.has(ref.name)) enumRegistry.set(ref.name, enumMembersKey(ref.values));
     }
-  }
+  };
+  for (const model of [...(componentModels ?? []), ...extractInlineModelsFromSchemas(componentSchemas)]) reserve(model);
+  for (const model of successResponseModels(paths, pathModelBaseNames, componentSchemas)) reserve(model);
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -2524,6 +2532,38 @@ export function derivePathBasedName(
  * document's paths, operationIds and component names, never on their order,
  * and a path that stops colliding returns to its plain name.
  */
+/**
+ * The inline models every operation's 2xx JSON bodies will mint, read with
+ * the extractor and under the context name `extractResponses` uses, so the
+ * header/error registry can be seeded with them before any operation is
+ * built (`extractOperations`). The models themselves are discarded; what
+ * matters is each name and the shape it will carry.
+ */
+function successResponseModels(
+  paths: Record<string, PathItem>,
+  pathModelBaseNames: ReadonlyMap<string, string>,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): Model[] {
+  const models: Model[] = [];
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op?.responses) continue;
+      const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
+      for (const [statusCode, resp] of Object.entries(op.responses)) {
+        const code = parseInt(statusCode, 10);
+        const schema = resp.content?.['application/json']?.schema;
+        if (!(code >= 200 && code < 300) || !schema) continue;
+        models.push(
+          ...classifyAndExtractResponse(schema, deriveResponseName(op, pathModelBaseName), componentSchemas)
+            .inlineModels,
+        );
+      }
+    }
+  }
+  return models;
+}
+
 function resolvePathModelBaseNames(
   paths: Record<string, PathItem>,
   componentModels?: Model[],

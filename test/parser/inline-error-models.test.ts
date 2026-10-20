@@ -1303,3 +1303,104 @@ describe('round 4: a clashing title is reserved, never renamed after the fact', 
     },
   );
 });
+
+describe('review round 1: a 2xx body reserves what it mints before any error body is typed (MichaelDeBoey)', () => {
+  const titled = (title: string, kind: string, properties: Record<string, SchemaObject>): SchemaObject =>
+    obj(
+      { kind: { type: 'string', const: kind }, ...properties },
+      { title, required: ['kind', ...Object.keys(properties)] },
+    );
+  const listShapes = {
+    get: {
+      operationId: 'listShapes',
+      responses: {
+        '200': {
+          description: 'ok',
+          ...json({ oneOf: [titled('Circle', 'circle', { radius: num }), titled('Square', 'square', { side: num })] }),
+        },
+      },
+    },
+  };
+  const getNote = {
+    get: {
+      operationId: 'getNote',
+      responses: {
+        '400': {
+          description: 'bad',
+          ...json({
+            oneOf: [
+              titled('Circle', 'circle', { reason: str, hint: str, extra: str }),
+              titled('Square', 'square', { code: int }),
+            ],
+          }),
+        },
+      },
+    },
+  };
+  const literal = (value: string) => ({ kind: 'literal', value });
+
+  it.each([
+    ['success first', { '/shapes': listShapes, '/notes': getNote }],
+    ['error first', { '/notes': getNote, '/shapes': listShapes }],
+  ])('an error variant titled like a success variant is qualified, not merged over it (%s)', async (_, paths) => {
+    const ir = await parseWithoutWarnings(doc(paths));
+    const byName = Object.fromEntries(operationsOf(ir).map((op) => [op.name, op]));
+    // The success response keeps its bare titles and its own fields.
+    expect(byName.listShapes.response).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [model('Circle'), model('Square')],
+      discriminator: { property: 'kind', mapping: { circle: 'Circle', square: 'Square' } },
+    });
+    expect(fieldTypes(ir, 'Circle')).toEqual({ kind: literal('circle'), radius: primitive('number') });
+    expect(fieldTypes(ir, 'Square')).toEqual({ kind: literal('square'), side: primitive('number') });
+    // The error's variants step around them, in either order.
+    expect(byName.getNote.errors).toEqual([
+      {
+        statusCode: 400,
+        description: 'bad',
+        type: {
+          kind: 'union',
+          compositionKind: 'oneOf',
+          variants: [model('CircleGetNoteError400'), model('SquareGetNoteError400')],
+          discriminator: {
+            property: 'kind',
+            mapping: { circle: 'CircleGetNoteError400', square: 'SquareGetNoteError400' },
+          },
+        },
+      },
+    ]);
+    expect(fieldTypes(ir, 'CircleGetNoteError400')).toEqual({
+      kind: literal('circle'),
+      reason: primitive('string'),
+      hint: primitive('string'),
+      extra: primitive('string'),
+    });
+    expect(fieldTypes(ir, 'SquareGetNoteError400')).toEqual({ kind: literal('square'), code: primitive('integer') });
+    expectConsistent(ir, ['Pet']);
+  });
+
+  it('an error variant with the identical shape shares the success model', async () => {
+    const sameShapes = {
+      get: {
+        operationId: 'getNote',
+        responses: {
+          '400': {
+            description: 'bad',
+            ...json({
+              oneOf: [titled('Circle', 'circle', { radius: num }), titled('Square', 'square', { side: num })],
+            }),
+          },
+        },
+      },
+    };
+    const ir = await parseWithoutWarnings(doc({ '/notes': sameShapes, '/shapes': listShapes }));
+    const byName = Object.fromEntries(operationsOf(ir).map((op) => [op.name, op]));
+    expect(byName.getNote.errors[0].type).toEqual(byName.listShapes.response);
+    expect(modelNames(ir).filter((n) => n.startsWith('Circle') || n.startsWith('Square'))).toEqual([
+      'Circle',
+      'Square',
+    ]);
+    expectConsistent(ir, ['Pet']);
+  });
+});
