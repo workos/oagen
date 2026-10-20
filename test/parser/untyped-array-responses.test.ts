@@ -36,6 +36,10 @@ describe('isArraySchema', () => {
   });
 
   it('rejects what schemaToTypeRef types as something else', () => {
+    // An untyped schema that also composes is read as the composition first.
+    expect(isArraySchema({ items: petItems, oneOf: shapeVariants.oneOf })).toBe(false);
+    expect(isArraySchema({ items: petItems, anyOf: shapeVariants.oneOf })).toBe(false);
+    expect(isArraySchema({ items: petItems, allOf: [{ type: 'object', properties: {} }] })).toBe(false);
     expect(isArraySchema(undefined)).toBe(false);
     expect(isArraySchema({})).toBe(false);
     expect(isArraySchema({ type: 'string' })).toBe(false);
@@ -588,6 +592,73 @@ describe('parseSpec — arrays without type', () => {
     };
     return walk(doc) as T;
   }
+
+  it('types an untyped field with both items and oneOf as the union, with the right fields (Greptile)', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/things': {
+          post: {
+            operationId: 'createThing',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      thing: {
+                        items: { type: 'object', properties: { id: { type: 'string' } } },
+                        oneOf: [{ type: 'object', properties: { message: { type: 'string' } } }, { type: 'array' }],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { '204': { description: 'ok' } },
+          },
+        },
+      },
+      components: {},
+    });
+    const body = ir.models.find((m) => m.name === 'CreateThingRequest');
+    const thing = body?.fields.find((f) => f.name === 'thing')?.type;
+    expect(thing?.kind).toBe('union');
+    const first = thing?.kind === 'union' ? thing.variants[0] : undefined;
+    expect(first).toEqual({ kind: 'model', name: 'CreateThingRequestThing' });
+    // The object alternative owns the name, not the `items` schema.
+    expect(ir.models.find((m) => m.name === 'CreateThingRequestThing')?.fields.map((f) => f.name)).toEqual(['message']);
+    expect(danglingRefs(ir)).toEqual([]);
+  });
+
+  it('iterates the items of a nullable array response, not the whole nullable array (Greptile)', async () => {
+    const ir = await parseJson({
+      openapi: '3.0.3',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+            responses: jsonResponse({ type: 'array', nullable: true, items: petItems }),
+          },
+        },
+      },
+      components: {},
+    });
+    const op = operation(ir, 'listPets');
+    expect(op.response).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } },
+    });
+    expect(op.pagination).toMatchObject({
+      strategy: 'cursor',
+      param: 'after',
+      itemType: { kind: 'model', name: 'ListPetsItem' },
+    });
+    expect(danglingRefs(ir)).toEqual([]);
+  });
 
   it('parses every untyped array exactly as if `type: array` were spelled out', async () => {
     const doc = {

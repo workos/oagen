@@ -1241,15 +1241,19 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
  * site that decides whether to materialize an array's item model must ask
  * this same question, or the items reference a model nobody creates. A
  * `$ref` is a reference whatever else it carries, and a type list naming
- * another type beside `array` is a union, so neither counts. `items` is not
- * required: a site that needs them checks for them, as `schemaToTypeRef`
- * does. A plain boolean rather than a type guard, because a guard on a
- * `SchemaObject` narrows the variable to `never` in the other branch.
+ * another type beside `array` is a union, so neither counts; nor does an
+ * untyped schema that also composes (`allOf`, `oneOf`, `anyOf`), which
+ * `schemaToTypeRef` reads as the composition before it ever looks at
+ * `items`, so the item extractor must not claim a variant's name first.
+ * `items` is not required: a site that needs them checks for them, as
+ * `schemaToTypeRef` does. A plain boolean rather than a type guard, because
+ * a guard on a `SchemaObject` narrows the variable to `never` in the other
+ * branch.
  */
 export function isArraySchema(schema: SchemaObject | undefined): boolean {
   if (!schema || schema.$ref) return false;
   const { type } = schema;
-  if (type === undefined) return schema.items !== undefined;
+  if (type === undefined) return schema.items !== undefined && !schema.allOf && !schema.oneOf && !schema.anyOf;
   if (Array.isArray(type)) return type.includes('array') && type.every((t) => t === 'array' || t === 'null');
   return type === 'array';
 }
