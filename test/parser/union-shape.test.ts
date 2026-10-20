@@ -16,6 +16,13 @@ describe('unionShapeKey / unionRulesKey', () => {
     expect(unionRulesKey(plain)).toBe('');
   });
 
+  it('keeps mappings apart whose joined entries would read alike (Greptile)', () => {
+    const base: Model = { name: 'U', fields: [], compositionKind: 'oneOf' };
+    const a = unionRulesKey({ ...base, discriminator: { property: 'kind', mapping: { a: 'A', b: 'B' } } });
+    const b = unionRulesKey({ ...base, discriminator: { property: 'kind', mapping: { 'a=A,b': 'B' } } });
+    expect(a).not.toBe(b);
+  });
+
   it('tells two unions with the same members but different dispatch rules apart', () => {
     const byKind: Model = {
       name: 'Pet',
@@ -31,7 +38,7 @@ describe('unionShapeKey / unionRulesKey', () => {
 
     const keys = [byKind, byType, remapped, anyOf, undiscriminated].map((m) => unionShapeKey(m, key));
     expect(new Set(keys).size).toBe(keys.length);
-    expect(unionShapeKey(byKind, key)).toBe('|oneOf<Cat,Dog>|kind:oneOf|disc:kind{cat=Cat,dog=Dog}');
+    expect(unionShapeKey(byKind, key)).toBe('|oneOf<Cat,Dog>|kind:oneOf|disc:"kind"[["cat","Cat"],["dog","Dog"]]');
   });
 
   it('ignores mapping key order, and member order only when asked to', () => {

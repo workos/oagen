@@ -23,17 +23,16 @@ export function unionShapeKey(
 /**
  * The rules a named union dispatches by, independent of its members: the
  * composition keyword and the discriminator property and mapping (entries
- * sorted by value, so key order in the document plays no part). `''` when
- * the model declares neither.
+ * sorted by value, so key order in the document plays no part; each entry
+ * JSON-encoded, so a value or target containing `=` or `,` cannot read as
+ * another mapping). `''` when the model declares neither.
  */
 export function unionRulesKey(model: Model): string {
   const parts: string[] = [];
   if (model.compositionKind) parts.push(`kind:${model.compositionKind}`);
   if (model.discriminator) {
-    const entries = Object.entries(model.discriminator.mapping)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([value, target]) => `${value}=${target}`);
-    parts.push(`disc:${model.discriminator.property}{${entries.join(',')}}`);
+    const entries = Object.entries(model.discriminator.mapping).sort(([a], [b]) => a.localeCompare(b));
+    parts.push(`disc:${JSON.stringify(model.discriminator.property)}${JSON.stringify(entries)}`);
   }
   return parts.length > 0 ? `|${parts.join('|')}` : '';
 }
