@@ -305,8 +305,13 @@ export function extractOperations(
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
   componentResponses?: Record<string, Record<string, unknown>>,
+  openapiVersion?: string,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
+
+  // OAS 3.0 ignores properties beside a `$ref`; 3.1 lets a sibling
+  // `description` override the referenced response's. Unknown is read as 3.1.
+  const refSiblingDescriptions = openapiVersion?.startsWith('3.0') ? 'ignore' : 'override';
 
   // Operations without an operationId name their inline models from the
   // path, and two distinct paths — or a path and an operationId, component
@@ -375,6 +380,7 @@ export function extractOperations(
         headerModelRegistry,
         componentResponses,
         apiRootLength,
+        refSiblingDescriptions,
       );
       inlineModels.push(...opModels);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
@@ -1160,6 +1166,7 @@ function buildOperation(
   headerModelRegistry: HeaderModelRegistry = new Map(),
   componentResponses?: Record<string, Record<string, unknown>>,
   apiRootLength = 0,
+  refSiblingDescriptions: 'override' | 'ignore' = 'override',
 ): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
@@ -1273,6 +1280,7 @@ function buildOperation(
       registry: headerModelRegistry,
     },
     componentResponses,
+    refSiblingDescriptions,
   );
   inlineModels.push(...reqBodyModels);
 
@@ -2529,6 +2537,7 @@ function extractResponses(
   componentSchemas?: Record<string, SchemaObject>,
   headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
   componentResponses?: Record<string, Record<string, unknown>>,
+  refSiblingDescriptions: 'override' | 'ignore' = 'override',
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
@@ -2575,7 +2584,12 @@ function extractResponses(
     // extension are left as written, as nothing here reads them.
     const resp =
       code >= 200
-        ? resolveResponseRef<ResponseObject>(rawResponse, componentResponses, `${statusCode} response of ${opLabel}`)
+        ? resolveResponseRef<ResponseObject>(
+            rawResponse,
+            componentResponses,
+            `${statusCode} response of ${opLabel}`,
+            refSiblingDescriptions,
+          )
         : rawResponse;
     // Set when the response came from a component: its inline body is then
     // named after the component, shared by every operation that returns it.

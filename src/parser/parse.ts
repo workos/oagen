@@ -113,6 +113,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
     spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+    version,
   );
 
   const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels);

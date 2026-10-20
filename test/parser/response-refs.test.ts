@@ -63,6 +63,18 @@ describe('resolveResponseRef', () => {
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
+  it("ignores a sibling description under 'ignore' (OAS 3.0), keeping the component's own", () => {
+    const components = { Problem: problem, Alias: { $ref: '#/components/responses/Problem', description: 'Inner' } };
+    expect(
+      resolveResponseRef<Response>(
+        { $ref: '#/components/responses/Alias', description: 'Outer' },
+        components,
+        'ctx',
+        'ignore',
+      ),
+    ).toBe(problem);
+  });
+
   it('keeps the sibling description on a ref it cannot resolve', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(

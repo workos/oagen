@@ -19,9 +19,11 @@ export interface ReferenceObject {
 
 /**
  * Resolve a raw response to a concrete Response Object, following `$ref`
- * chains into `components/responses` with a cycle guard. Each ref in a chain
- * overrides what it points at, so the outermost sibling `description` wins
- * over any inner one and over the component's. A ref nothing under
+ * chains into `components/responses` with a cycle guard. In an OAS 3.1
+ * document each ref in a chain overrides what it points at, so the outermost
+ * sibling `description` wins over any inner one and over the component's;
+ * OAS 3.0 says properties beside a `$ref` are ignored, so under
+ * `siblingDescriptions: 'ignore'` the component's own is kept. A ref nothing under
  * `components/responses` answers (a pointer into another section, or one a
  * bundler wrote to the first place it inlined a repeated external ref,
  * `#/paths/~1pets/get/responses/200`) is warned about and returned as written, so the response reads as it always
@@ -33,13 +35,16 @@ export function resolveResponseRef<T extends object>(
   raw: T | ReferenceObject,
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   context: string,
+  siblingDescriptions: 'override' | 'ignore' = 'override',
 ): T {
   const seenRefs = new Set<string>();
   let current: T | ReferenceObject = raw;
   let description: string | undefined;
 
   while ('$ref' in current && typeof current.$ref === 'string') {
-    if (description === undefined && typeof current.description === 'string') description = current.description;
+    if (siblingDescriptions === 'override' && description === undefined && typeof current.description === 'string') {
+      description = current.description;
+    }
     if (seenRefs.has(current.$ref)) {
       throw new Error(`Circular response $ref chain starting at "${current.$ref}" in ${context}.`);
     }

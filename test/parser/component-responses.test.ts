@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
@@ -478,6 +480,45 @@ describe('responses written as $ref into components/responses (issue #234)', () 
   });
 
   describe('through parseSpec', () => {
+    describe('a description written beside the $ref', () => {
+      let dir: string | undefined;
+      afterEach(() => {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+        dir = undefined;
+      });
+
+      async function parseWithVersion(openapi: string): Promise<Operation> {
+        dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
+        const specPath = join(dir, 'spec.json');
+        writeFileSync(
+          specPath,
+          JSON.stringify({
+            openapi,
+            info: { title: 'sibling', version: '1' },
+            paths: {
+              '/pet': {
+                get: {
+                  operationId: 'getPet',
+                  responses: { '200': { $ref: '#/components/responses/PetFound', description: 'Sibling.' } },
+                },
+              },
+            },
+            components: { schemas: { Pet: PET_SCHEMA }, responses: { PetFound: petFound } },
+          }),
+        );
+        const spec = await parseSpec(specPath);
+        return spec.services.flatMap((s) => s.operations)[0];
+      }
+
+      it("overrides the component's in an OAS 3.1 document", async () => {
+        expect((await parseWithVersion('3.1.0')).responseDescription).toBe('Sibling.');
+      });
+
+      it('is ignored in an OAS 3.0 document, where properties beside a $ref are ignored', async () => {
+        expect((await parseWithVersion('3.0.3')).responseDescription).toBe('The pet');
+      });
+    });
+
     it('resolves every component response of the fixture with no warnings and no dangling model refs', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const spec = await parseSpec(FIXTURE);
