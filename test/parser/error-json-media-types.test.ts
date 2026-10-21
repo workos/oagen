@@ -11,6 +11,10 @@ import type { SchemaObject } from '../../src/parser/schemas.js';
  * Issue #235: an explicit error response (`4xx`/`5xx`) only read
  * `application/json`, so a body served as `application/problem+json`
  * (RFC 9457) or any other `+json` media type came out untyped.
+ *
+ * Since #233 an error keeps the media types it declares in `contentTypes` /
+ * `contents` unless it declares exactly one plain `application/json` with a
+ * schema, and the entry `type` was read from shares `type`'s very TypeRef.
  */
 
 const PROBLEM_REF = { $ref: '#/components/schemas/Problem' };
@@ -53,8 +57,16 @@ describe('error responses served as +json media types (issue #235)', () => {
     it('types a body declared only as application/problem+json', () => {
       const { operation } = getPetWith404({ 'application/problem+json': { schema: PROBLEM_REF } });
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Problem' },
+          contentTypes: ['application/problem+json'],
+          contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+        },
       ]);
+      // The entry `type` was read from shares its very TypeRef, as for a success response.
+      expect(operation.errors[0].contents?.[0].type).toBe(operation.errors[0].type);
     });
 
     it('still types a plain application/json body', () => {
@@ -70,14 +82,29 @@ describe('error responses served as +json media types (issue #235)', () => {
         'application/json': { schema: ERROR_REF },
       });
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Error' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Error' },
+          contentTypes: ['application/problem+json', 'application/json'],
+          contents: [
+            { contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } },
+            { contentType: 'application/json', type: { kind: 'model', name: 'Error' } },
+          ],
+        },
       ]);
     });
 
     it('types any +json structured-syntax suffix, not only problem+json', () => {
       const { operation } = getPetWith404({ 'application/vnd.api+json': { schema: PROBLEM_REF } });
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Problem' },
+          contentTypes: ['application/vnd.api+json'],
+          contents: [{ contentType: 'application/vnd.api+json', type: { kind: 'model', name: 'Problem' } }],
+        },
       ]);
     });
 
@@ -85,8 +112,17 @@ describe('error responses served as +json media types (issue #235)', () => {
       const { operation } = getPetWith404({
         'APPLICATION/PROBLEM+JSON; charset=utf-8': { schema: PROBLEM_REF },
       });
+      // The key is kept exactly as written; only the match is by essence.
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Problem' },
+          contentTypes: ['APPLICATION/PROBLEM+JSON; charset=utf-8'],
+          contents: [
+            { contentType: 'APPLICATION/PROBLEM+JSON; charset=utf-8', type: { kind: 'model', name: 'Problem' } },
+          ],
+        },
       ]);
     });
 
@@ -96,7 +132,16 @@ describe('error responses served as +json media types (issue #235)', () => {
         'application/json; charset=utf-8': { schema: ERROR_REF },
       });
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Error' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Error' },
+          contentTypes: ['application/problem+json', 'application/json; charset=utf-8'],
+          contents: [
+            { contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } },
+            { contentType: 'application/json; charset=utf-8', type: { kind: 'model', name: 'Error' } },
+          ],
+        },
       ]);
     });
 
@@ -106,7 +151,16 @@ describe('error responses served as +json media types (issue #235)', () => {
         'application/problem+json': { schema: PROBLEM_REF },
       });
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Error' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Error' },
+          contentTypes: ['application/vnd.api+json', 'application/problem+json'],
+          contents: [
+            { contentType: 'application/vnd.api+json', type: { kind: 'model', name: 'Error' } },
+            { contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } },
+          ],
+        },
       ]);
     });
   });
@@ -114,12 +168,28 @@ describe('error responses served as +json media types (issue #235)', () => {
   describe('bodies that stay untyped', () => {
     it('leaves a text/plain-only error untyped', () => {
       const { operation } = getPetWith404({ 'text/plain': { schema: { type: 'string' } } });
-      expect(operation.errors).toEqual([{ statusCode: 404, description: 'No such pet', type: undefined }]);
+      expect(operation.errors).toEqual([
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: undefined,
+          contentTypes: ['text/plain'],
+          contents: [{ contentType: 'text/plain', type: { kind: 'primitive', type: 'string' } }],
+        },
+      ]);
     });
 
     it('leaves a +json entry without a schema untyped', () => {
       const { operation } = getPetWith404({ 'application/problem+json': {} });
-      expect(operation.errors).toEqual([{ statusCode: 404, description: 'No such pet', type: undefined }]);
+      expect(operation.errors).toEqual([
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: undefined,
+          contentTypes: ['application/problem+json'],
+          contents: [{ contentType: 'application/problem+json', type: { kind: 'primitive', type: 'unknown' } }],
+        },
+      ]);
     });
 
     it('skips a schema-less application/json in favour of a +json entry that has one', () => {
@@ -128,7 +198,16 @@ describe('error responses served as +json media types (issue #235)', () => {
         'application/problem+json': { schema: PROBLEM_REF },
       });
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Problem' },
+          contentTypes: ['application/json', 'application/problem+json'],
+          contents: [
+            { contentType: 'application/json', type: { kind: 'primitive', type: 'unknown' } },
+            { contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } },
+          ],
+        },
       ]);
     });
 
@@ -143,8 +222,21 @@ describe('error responses served as +json media types (issue #235)', () => {
       const inline = { type: 'object', properties: { detail: { type: 'string' } } };
       const viaJson = getPetWith404({ 'application/json': { schema: inline } });
       const viaProblem = getPetWith404({ 'application/problem+json': { schema: inline } });
-      expect(viaProblem.operation.errors).toEqual(viaJson.operation.errors);
+      expect(viaJson.operation.errors).toEqual([
+        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Error404' } },
+      ]);
+      expect(viaProblem.operation.errors[0].type).toEqual(viaJson.operation.errors[0].type);
       expect(viaProblem.operation.errors[0].type).toEqual({ kind: 'model', name: 'Error404' });
+      // Only the media type lists differ: a lone plain application/json leaves them off.
+      expect(viaProblem.operation.errors).toEqual([
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Error404' },
+          contentTypes: ['application/problem+json'],
+          contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Error404' } }],
+        },
+      ]);
     });
 
     it('keeps a 4XX range key out of errors while typing the numeric sibling', () => {
@@ -169,7 +261,13 @@ describe('error responses served as +json media types (issue #235)', () => {
       });
       expect(operation.errors).toEqual([
         { statusCode: 404, description: 'No such pet', type: undefined },
-        { statusCode: 500, description: 'Boom', type: { kind: 'model', name: 'Problem' } },
+        {
+          statusCode: 500,
+          description: 'Boom',
+          type: { kind: 'model', name: 'Problem' },
+          contentTypes: ['application/problem+json'],
+          contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+        },
       ]);
     });
   });
@@ -214,7 +312,13 @@ describe('error responses served as +json media types (issue #235)', () => {
       const spec = await parseSpec(specPath);
       const [operation] = spec.services.flatMap(({ operations }) => operations);
       expect(operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Problem' } },
+        {
+          statusCode: 404,
+          description: 'No such pet',
+          type: { kind: 'model', name: 'Problem' },
+          contentTypes: ['application/problem+json'],
+          contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+        },
       ]);
       expect(spec.models.map((m) => m.name).sort()).toEqual(['Pet', 'Problem']);
     });

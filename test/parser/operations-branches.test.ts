@@ -298,8 +298,8 @@ components:
     expect(opNames).toContain('listOrganizationMemberships');
 
     // Non-list operations should also be unique
-    expect(opNames).toContain('getUsers');
-    expect(opNames).toContain('deleteUsers');
+    expect(opNames).toContain('getUser');
+    expect(opNames).toContain('deleteUser');
     expect(opNames).toContain('createInvitations');
 
     // No bare "list" should remain (all were disambiguated)

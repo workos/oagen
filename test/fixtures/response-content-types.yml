@@ -1,0 +1,321 @@
+openapi: '3.1.0'
+info:
+  title: Response content types
+  version: '1'
+paths:
+  # Issue #211 repro: a card that renders as a web page or a printable PDF.
+  /pets/{petId}/card:
+    get:
+      operationId: renderPetCard
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The pet's card, as a web page or a printable PDF.
+          content:
+            text/html:
+              schema:
+                type: string
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: No such pet, as JSON or as an HTML page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            text/html:
+              schema:
+                type: string
+        # An error body declared as +json: `type` is read from it (#235), named
+        # like an inline application/json body, and the media type is kept
+        # beside it since it is not application/json. The secondary YAML body is
+        # materialized under its own media-type name, for its role.
+        '500':
+          description: A problem document.
+          content:
+            application/problem+json:
+              schema:
+                type: object
+                properties:
+                  title:
+                    type: string
+                  detail:
+                    type: string
+            application/yaml:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+  # JSON stays primary; a vendor type with its own inline shape (nested object
+  # included) and a parameterized JSON type referencing a component ride along.
+  /reports/{id}:
+    get:
+      operationId: getReport
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+            application/vnd.api+json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Report'
+                  links:
+                    type: object
+                    properties:
+                      self:
+                        type: string
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/Report'
+        # An inline application/json error body: its pre-existing `Error422`
+        # ref is untouched, and the text/plain alternative is typed beside it.
+        '422':
+          description: invalid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+            text/plain:
+              schema:
+                type: string
+  # Wildcards and a schema-less media type.
+  /exports/{id}:
+    get:
+      operationId: downloadExport
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+            '*/*':
+              schema:
+                type: string
+                format: binary
+            application/*: {}
+  # An inline enum under a secondary media type is promoted; the text/plain
+  # enum is a string because text types ignore their schema.
+  /status:
+    get:
+      operationId: getStatus
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+            application/vnd.status+json:
+              schema:
+                type: string
+                enum: [ok, degraded, down]
+            text/plain:
+              schema:
+                type: string
+                enum: [ok, degraded, down]
+  # Three 2xx entries declaring the same secondary media type: 200 and 201
+  # share one inline shape (one model), 202 differs (re-derived by code).
+  /jobs:
+    post:
+      operationId: startJob
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: already running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+            application/x-ndjson:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  state:
+                    type: string
+        '201':
+          description: started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+            application/x-ndjson:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  state:
+                    type: string
+        '202':
+          description: queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+            application/x-ndjson:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  state:
+                    type: string
+                  eta:
+                    type: integer
+  # No media type at all: an empty content map and a bodiless 204.
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        '200':
+          description: ok
+          content: {}
+        '204':
+          description: ok, nothing to say
+  # A redirect that also carries a body.
+  /legacy:
+    get:
+      operationId: getLegacy
+      responses:
+        '302':
+          description: moved
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            text/html:
+              schema:
+                type: string
+  # No operationId: the path names the models. A media type with no schema
+  # is unknown; one outside the fixed order with a schema follows its schema.
+  /pets/{petId}/avatar:
+    get:
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+            image/png: {}
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            application/vnd.pet+json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                  width:
+                    type: integer
+  # The name a secondary inline body would take is already a component with a
+  # different shape: the body is re-derived under its status code.
+  /cards/{id}:
+    get:
+      operationId: getCard
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+            application/vnd.card+json:
+              schema:
+                type: object
+                properties:
+                  front:
+                    type: string
+components:
+  schemas:
+    Card:
+      type: object
+      properties:
+        id:
+          type: string
+    GetCardApplicationVndCardJsonResponse:
+      type: object
+      properties:
+        back:
+          type: string
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    Report:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+        state:
+          type: string
