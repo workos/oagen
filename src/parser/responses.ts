@@ -216,7 +216,15 @@ function extractListResponse(
   );
 
   return {
-    response: { kind: 'array', items: itemTypeRef },
+    // The data array's own nullability is the response's: a `data` declared
+    // `type: ['array', 'null']` (or OAS 3.0 `nullable: true`) means the list
+    // the SDK returns may be null, so the wrapper `schemaToTypeRef` would give
+    // the field stays on `response` — `envelopeFields` leaves `data` out, so
+    // nothing else records it — while `itemType` is still what an iterator
+    // yields (`paginatedItemType` unwraps the same wrapper).
+    response: dataProp
+      ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef })
+      : { kind: 'array', items: itemTypeRef },
     inlineModels,
     isPaginated: true,
     dataPath,

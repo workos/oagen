@@ -233,7 +233,7 @@ describe('classifyAndExtractResponse — list envelope whose data array has no t
     expect(untyped).toEqual(typed);
   });
 
-  it('detects a nullable data array', () => {
+  it('detects a nullable data array and keeps its null on the response, with the element as the item type', () => {
     const result = classifyAndExtractResponse(
       envelope({ type: ['array', 'null'], items: { $ref: '#/components/schemas/Event' } }),
       'ListEventsResponse',
@@ -242,6 +242,24 @@ describe('classifyAndExtractResponse — list envelope whose data array has no t
     expect(result.isPaginated).toBe(true);
     expect(result.dataPath).toBe('data');
     expect(result.itemType).toEqual({ kind: 'model', name: 'Event' });
+    // `envelopeFields` leaves `data` out, so the response is the one place
+    // that records the list may be null.
+    expect(result.response).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'model', name: 'Event' } },
+    });
+    expect(result.envelopeFields?.map((f) => f.name)).toEqual(['list_metadata']);
+
+    // The OAS 3.0 spelling yields the same IR; a plain data array stays plain.
+    const oas30 = classifyAndExtractResponse(
+      envelope({ type: 'array', nullable: true, items: { $ref: '#/components/schemas/Event' } }),
+      'ListEventsResponse',
+    );
+    expect(oas30).toEqual(result);
+    expect(
+      classifyAndExtractResponse(envelope({ items: { $ref: '#/components/schemas/Event' } }), 'ListEventsResponse')
+        .response,
+    ).toEqual({ kind: 'array', items: { kind: 'model', name: 'Event' } });
   });
 
   it('keeps the untyped data items when a later allOf branch only constrains the array', () => {
@@ -712,6 +730,42 @@ describe('parseSpec — arrays without type', () => {
     expect(op.pagination).toMatchObject({
       strategy: 'cursor',
       param: 'after',
+      itemType: { kind: 'model', name: 'ListPetsItem' },
+    });
+    expect(danglingRefs(ir)).toEqual([]);
+  });
+
+  it('pages a list envelope whose data array is nullable by its items, keeping the null on the response (Greptile)', async () => {
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+            responses: jsonResponse({
+              type: 'object',
+              properties: {
+                data: { type: ['array', 'null'], items: petItems },
+                list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+              },
+              required: ['data', 'list_metadata'],
+            }),
+          },
+        },
+      },
+      components: {},
+    });
+    const op = operation(ir, 'listPets');
+    expect(op.response).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } },
+    });
+    expect(op.pagination).toMatchObject({
+      strategy: 'cursor',
+      param: 'after',
+      dataPath: 'data',
       itemType: { kind: 'model', name: 'ListPetsItem' },
     });
     expect(danglingRefs(ir)).toEqual([]);
