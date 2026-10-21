@@ -923,8 +923,11 @@ function extractNestedSchema(
     ];
   }
 
-  // Handle array with inline items
-  if (kind === 'array' && schema.type === 'array' && schema.items?.properties) {
+  // Handle array with inline items — typed, nullable, or `items` with no
+  // `type`: `isArraySchema` is `classifyInlineSchema`'s answer once the
+  // nullable type list is unwrapped, the same test `schemaToTypeRef` applied
+  // when it named the ref.
+  if (isArraySchema(schema) && schema.items?.properties) {
     const requiredSet = new Set(schema.items.required ?? []);
     const siblings = collectProperties(schema.items);
     const fields: Field[] = [];
@@ -1236,6 +1239,40 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   if (!schema || schema.$ref || !schema.properties) return false;
   const { type } = schema;
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
+/**
+ * True for a schema that `schemaToTypeRef` types as an array: `type: 'array'`,
+ * an OAS 3.1 type list whose only non-null member is `array` (`['array',
+ * 'null']`, which it unwraps to a nullable array), or — since JSON Schema does
+ * not require `type` beside `items` — `items` with no `type` at all. Every
+ * site that decides whether to materialize an array's item model must ask
+ * this same question, or the items reference a model nobody creates. The
+ * answer is `classifyInlineSchema`'s, asked of the schema with its nullable
+ * type list unwrapped the way `schemaToTypeRef` unwraps it first: a `$ref` is
+ * a reference whatever else it carries; a type list naming another type
+ * beside `array` is a union; and a schema that also composes — a `oneOf` /
+ * `anyOf` with a typing variant, or an `allOf` with a `$ref` member, a
+ * member with `properties` or a lone typing member — is that composition,
+ * `type: 'array'` or not, since it is read before `items` and the item
+ * extractor must not claim a variant's name first. An `allOf` or `oneOf` of
+ * bare limits (`[{ minItems: 1 }, { maxItems: 10 }]`) types nothing there and
+ * leaves the schema an array here. `items` is not required: a bare
+ * `type: 'array'` types nothing to `classifyInlineSchema` and is still an
+ * array (of unknown items) to `schemaToTypeRef`; a site that needs items
+ * checks for them. A plain boolean rather than a type guard, because a guard
+ * on a `SchemaObject` narrows the variable to `never` in the other branch.
+ */
+export function isArraySchema(schema: SchemaObject | undefined): boolean {
+  if (!schema) return false;
+  let bare = schema;
+  if (Array.isArray(schema.type)) {
+    const nonNull = schema.type.filter((t) => t !== 'null');
+    if (nonNull.length !== 1) return false;
+    bare = { ...schema, type: nonNull[0] };
+  }
+  const kind = classifyInlineSchema(bare);
+  return kind === 'array' || (kind === 'other' && bare.type === 'array');
 }
 
 /**
@@ -2198,8 +2235,10 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
 
     // Array items and map values are named like the field — or `<Field>Item` /
     // `<Field>Value` when a sibling takes the singular name — exactly as
-    // `schemaToTypeRef` references them (`elementContextName`).
-    if (kind === 'array' && fieldSchema.type === 'array' && fieldSchema.items?.properties) {
+    // `schemaToTypeRef` references them (`elementContextName`). An array is
+    // whatever `isArraySchema` says — `classifyInlineSchema`'s answer with the
+    // nullable type list unwrapped — so `items` with no `type` counts too.
+    if (isArraySchema(fieldSchema) && fieldSchema.items?.properties) {
       const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
       nestedModels.push(
         ...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items, schemas),

@@ -41,7 +41,7 @@ import {
   collapsedNullableBranch,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
-import { detectPagination } from './pagination.js';
+import { detectPagination, paginatedItemType } from './pagination.js';
 import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
 import type { ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
@@ -1453,7 +1453,7 @@ function buildOperation(
   const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
   let pagination: PaginationMeta | undefined;
   if (isPaginated) {
-    const itemType = responseItemType ?? (response.kind === 'array' ? response.items : response);
+    const itemType = responseItemType ?? paginatedItemType(response);
     pagination = {
       strategy: paginationFromParams?.strategy ?? 'cursor',
       param: paginationFromParams?.param ?? 'after',

@@ -4,10 +4,10 @@ import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
   buildFieldFromSchema,
-  classifyInlineSchema,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
+  isArraySchema,
   isInlineObjectSchema,
   collapsedNullableBranch,
 } from './schemas.js';
@@ -125,13 +125,14 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
     Object.assign(mergedProps, source);
   }
 
-  // Find array-typed properties and non-array companion properties
+  // Find array properties (typed, nullable, or `items` with no `type` —
+  // `isArraySchema`) and non-array companion properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (propSchema.type === 'array') {
+    if (isArraySchema(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -177,14 +178,28 @@ function extractListResponse(
   // The property's own text, as `buildFieldFromSchema` keeps it for every
   // companion beside it; an item schema's description belongs to the item.
   const dataDescription = dataProp?.description;
-  if (dataProp?.type === 'array' && dataProp.items) {
+  if (dataProp && isArraySchema(dataProp) && dataProp.items) {
     const items = dataProp.items;
+    const itemName = contextName.replace(/Response$/, '') + 'Item';
     if (items.$ref) {
       itemTypeRef = schemaToTypeRef(items, contextName);
     } else if (items.type === 'object' && items.properties) {
-      const itemName = contextName.replace(/Response$/, '') + 'Item';
       itemTypeRef = { kind: 'model', name: itemName };
       inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
+    } else {
+      // Every other item shape — a primitive, an inline enum, a `oneOf`, a
+      // nullable or untyped object, a nested array — is typed by
+      // `schemaToTypeRef` as a field named `<Operation>Item` under no parent,
+      // and whatever models it references are materialized by the field
+      // extractor under that same name, so the two agree by construction
+      // (the direct array path in `extractDirectResource` does the same).
+      itemTypeRef = schemaToTypeRef(items, itemName);
+      extractInlineModelsFromProperties(
+        { properties: { [itemName]: items } },
+        inlineModels,
+        undefined,
+        componentSchemas,
+      );
     }
   }
 
@@ -201,7 +216,15 @@ function extractListResponse(
   );
 
   return {
-    response: { kind: 'array', items: itemTypeRef },
+    // The data array's own nullability is the response's: a `data` declared
+    // `type: ['array', 'null']` (or OAS 3.0 `nullable: true`) means the list
+    // the SDK returns may be null, so the wrapper `schemaToTypeRef` would give
+    // the field stays on `response` — `envelopeFields` leaves `data` out, so
+    // nothing else records it — while `itemType` is still what an iterator
+    // yields (`paginatedItemType` unwraps the same wrapper).
+    response: dataProp
+      ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef })
+      : { kind: 'array', items: itemTypeRef },
     inlineModels,
     isPaginated: true,
     dataPath,
@@ -269,7 +292,7 @@ function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): 
       required: [...(earlier.required ?? []), ...(later.required ?? [])],
     };
   }
-  if (earlier.type === 'array' && later.type === 'array') {
+  if (isArraySchema(earlier) && isArraySchema(later)) {
     return { ...earlier, ...later, items: later.items ?? earlier.items };
   }
   return later;
@@ -543,28 +566,30 @@ function extractDirectResource(
     );
   }
 
-  // Array with inline object items — extract the item model. Which keyword
-  // types the schema is decided exactly as `schemaToTypeRef` decides it
-  // (`classifyInlineSchema`): `items` with no `type` is an array to it, so it
-  // must be one here too, or the reference it produces names an item model
-  // nobody creates (`array<ListThingsResponse>` with no `ListThingsResponse`);
-  // and `items` beside a `oneOf` / `anyOf` (a nullable array) or an `allOf`
-  // is not an array to it, so it must fall through to the path below, or the
-  // composition — the null — is lost.
-  if (classifyInlineSchema(schema) === 'array' && schema.items) {
+  // Array — `type: 'array'`, a nullable array (`type: ['array', 'null']`,
+  // OAS 3.0 `nullable: true`) or, since JSON Schema does not require `type`
+  // beside `items`, bare `items`: `isArraySchema`, which is what
+  // `classifyInlineSchema` — the one precedence `schemaToTypeRef` follows —
+  // answers once the nullable type list is unwrapped. So `items` with no
+  // `type` is an array here as it is there, or the reference it produces
+  // names an item model nobody creates (`array<ListThingsResponse>` with no
+  // `ListThingsResponse`); and `items` beside a `oneOf` / `anyOf` (a nullable
+  // array) or an `allOf` that types the schema is not, `type: 'array'` or
+  // not, so it falls through to the path below, or the composition — the
+  // null — is lost. Inline object items become `<Operation>Item`, with the
+  // nullable wrapper `schemaToTypeRef` would give the array. Anything else
+  // the items may reference — the inline object variants of an `items.oneOf`,
+  // the objects of a nested array or map — and `$ref` items, even with
+  // sibling `properties` beside the `$ref`, take the fall-through, which
+  // keeps the reference as `schemaToTypeRef` does and materializes the rest
+  // under the names it gives them.
+  if (isArraySchema(schema) && schema.items) {
     const items = schema.items;
-    if (items.$ref) {
-      return {
-        response: { kind: 'array', items: schemaToTypeRef(items, contextName) },
-        inlineModels,
-        isPaginated: false,
-      };
-    }
-    if (items.properties && (items.type === 'object' || !items.type)) {
+    if (!items.$ref && items.properties && (items.type === 'object' || !items.type)) {
       const itemName = contextName.replace(/Response$/, '') + 'Item';
       inlineModels.push(...extractInlineModel(itemName, items, componentSchemas));
       return {
-        response: { kind: 'array', items: { kind: 'model', name: itemName } },
+        response: nullableIf(schema, { kind: 'array', items: { kind: 'model', name: itemName } }),
         inlineModels,
         isPaginated: false,
       };
@@ -593,6 +618,19 @@ function extractDirectResource(
     inlineModels,
     isPaginated: false,
   };
+}
+
+/**
+ * Wrap `ref` in `nullable` when `schemaToTypeRef` would wrap the schema's
+ * own type: an OAS 3.1 type list naming `null` (`type: ['array', 'null']`)
+ * or an OAS 3.0 `nullable: true` beside a `type`. For the one place the
+ * response path builds an array TypeRef itself instead of delegating.
+ */
+function nullableIf(schema: SchemaObject, ref: TypeRef): TypeRef {
+  const nullable =
+    (Array.isArray(schema.type) && schema.type.includes('null')) ||
+    (schema.nullable === true && schema.type !== undefined);
+  return nullable ? { kind: 'nullable', inner: ref } : ref;
 }
 
 function deriveModelName(schema: SchemaObject, fallback: string): string {
