@@ -1,10 +1,5 @@
 import type { ApiSpec, Model, TypeRef, Service, Operation, Webhook } from '../ir/types.js';
-import {
-  walkTypeRef,
-  collectResponseHeaders,
-  collectFallbackResponseTypes,
-  collectWebhookTypeRefs,
-} from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes, collectWebhookTypeRefs } from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
@@ -158,10 +153,10 @@ export function collectReferencedNames(
         for (const field of op.pagination.envelopeFields ?? []) collectFromTypeRef(field.type);
       }
       for (const header of collectResponseHeaders(op)) collectFromTypeRef(header.type);
+      for (const { type } of collectResponseBodyTypes(op)) collectFromTypeRef(type);
       for (const err of op.errors) {
         if (err.type) collectFromTypeRef(err.type);
       }
-      for (const type of collectFallbackResponseTypes(op)) collectFromTypeRef(type);
       if (op.successResponses) {
         for (const sr of op.successResponses) {
           collectFromTypeRef(sr.type);

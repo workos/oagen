@@ -23,6 +23,7 @@ import {
   collectRequestBodyModels,
   collectResponseHeaders,
   collectFallbackResponseTypes,
+  collectResponseBodyTypes,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -609,6 +610,52 @@ describe('assignModelsToServices — pagination envelope fields', () => {
   });
 });
 
+describe('assignModelsToServices — response content types', () => {
+  it('assigns a model reached only through a secondary media type to that service', () => {
+    const models: Model[] = [
+      { name: 'Thing', fields: [] },
+      { name: 'ThingDocument', fields: [] },
+      { name: 'Problem', fields: [] },
+    ];
+    const thing = { kind: 'model' as const, name: 'Thing' };
+    const services = [
+      {
+        name: 'Things',
+        operations: [
+          {
+            name: 'getThing',
+            httpMethod: 'get' as const,
+            path: '/things/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: thing,
+            responseContentTypes: ['application/json', 'application/vnd.api+json'],
+            responseContents: [
+              { contentType: 'application/json', type: thing },
+              { contentType: 'application/vnd.api+json', type: { kind: 'model' as const, name: 'ThingDocument' } },
+            ],
+            errors: [
+              {
+                statusCode: 500,
+                contentTypes: ['application/problem+json'],
+                contents: [
+                  { contentType: 'application/problem+json', type: { kind: 'model' as const, name: 'Problem' } },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const map = assignModelsToServices(models, services);
+    expect(map.get('Thing')).toBe('Things');
+    expect(map.get('ThingDocument')).toBe('Things');
+    expect(map.get('Problem')).toBe('Things');
+  });
+});
+
 describe('assignModelsToServices — response headers', () => {
   it('assigns a model reached only through a response header to that service', () => {
     const models: Model[] = [
@@ -768,6 +815,68 @@ describe('collectFallbackResponseTypes', () => {
     expect(collectFallbackResponseTypes(baseOperation)).toEqual([]);
     expect(
       collectFallbackResponseTypes({ ...baseOperation, defaultResponse: {}, rangeResponses: [{ range: '1XX' }] }),
+    ).toEqual([]);
+  });
+});
+
+describe('collectResponseBodyTypes — default and range responses', () => {
+  const baseOperation = {
+    name: 'getDocument',
+    httpMethod: 'get' as const,
+    path: '/documents/{id}',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: { kind: 'primitive' as const, type: 'string' as const },
+    errors: [],
+    injectIdempotencyKey: false,
+  };
+
+  it('yields the fallback bodies after the secondary media types, each with the source its ref is validated under', () => {
+    const html: TypeRef = { kind: 'primitive', type: 'string' };
+    const apiError: TypeRef = { kind: 'model', name: 'ApiError' };
+    const yamlError: TypeRef = { kind: 'model', name: 'GetDocumentDefaultApplicationYamlResponse' };
+    const op: Operation = {
+      ...baseOperation,
+      responseContentTypes: ['application/json', 'text/html'],
+      responseContents: [
+        { contentType: 'application/json', type: baseOperation.response },
+        { contentType: 'text/html', type: html },
+      ],
+      // The entry for the media type `type` was read from shares its object and is not yielded again.
+      defaultResponse: {
+        type: apiError,
+        contentTypes: ['application/json', 'application/yaml'],
+        contents: [
+          { contentType: 'application/json', type: apiError },
+          { contentType: 'application/yaml', type: yamlError },
+        ],
+      },
+      rangeResponses: [
+        { range: '5XX', type: { kind: 'model', name: 'Outage' } },
+        { range: '2XX' },
+        { range: '4XX', type: { kind: 'array', items: { kind: 'model', name: 'Violation' } } },
+      ],
+    };
+    expect(collectResponseBodyTypes(op)).toEqual([
+      { type: html, source: 'contents.text/html' },
+      { type: yamlError, source: 'defaultResponse.contents.application/yaml' },
+      { type: apiError, source: 'defaultResponse' },
+      { type: { kind: 'model', name: 'Outage' }, source: 'rangeResponses.5XX' },
+      { type: { kind: 'array', items: { kind: 'model', name: 'Violation' } }, source: 'rangeResponses.4XX' },
+    ]);
+    // The same bodies `collectFallbackResponseTypes` yields, in its order.
+    expect(
+      collectResponseBodyTypes(op)
+        .slice(2)
+        .map((entry) => entry.type),
+    ).toEqual(collectFallbackResponseTypes(op));
+  });
+
+  it('yields nothing for an operation without fallback responses or secondary media types, or with bodiless fallbacks', () => {
+    expect(collectResponseBodyTypes(baseOperation)).toEqual([]);
+    expect(
+      collectResponseBodyTypes({ ...baseOperation, defaultResponse: {}, rangeResponses: [{ range: '1XX' }] }),
     ).toEqual([]);
   });
 });

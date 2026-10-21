@@ -103,9 +103,10 @@ A missing kind means an entire category of types won't generate correctly.
 - `successResponses` — Multiple 2xx response types
 - `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits)
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
+- `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
-- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape)
-- `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description`)
+- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
+- `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
 - `cookieParams` — Cookie parameter handling
 
 #### Parameter
@@ -155,7 +156,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -243,6 +244,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
 | `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
+| `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                      |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |

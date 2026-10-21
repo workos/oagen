@@ -153,8 +153,46 @@ export interface OperationModified {
   paginatedChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
+  /**
+   * True when a response entry gained or lost a media type, or a secondary
+   * media type's body type changed; `responseContentTypeChanges` says which.
+   */
+  responseContentTypesChanged: boolean;
+  responseContentTypeChanges: ResponseContentTypesChange[];
   /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
   fallbackResponsesChanged: boolean;
+  classification: 'additive' | 'breaking';
+}
+
+/**
+ * How one response entry's media types changed between two specs. Entries
+ * pair up by status code — 2xx entries from `successResponses`, the primary
+ * among them, errors from `errors` — so a primary that changes status still
+ * pairs with the entry of its code; a lone 2xx carries no code in the IR and
+ * is paired with the entry of the other spec that offers its media types,
+ * else with that spec's primary — reported with `statusCode` unset when it is
+ * the new spec's lone entry. The `default` and range responses pair by key
+ * and are reported with `fallback` set. A 2xx the old spec declared and the
+ * new does not is reported with its media types `removed`; one the new spec
+ * adds is no media-type change. Media types are compared as written and as
+ * sets: reordering them is no change, while a key that only gained a
+ * parameter is one removed and one added.
+ */
+export interface ResponseContentTypesChange {
+  statusCode?: number;
+  /** Set instead of `statusCode` for the `default` or a `1XX`–`5XX` range response, which carry no code. */
+  fallback?: 'default' | '1XX' | '2XX' | '3XX' | '4XX' | '5XX';
+  /** Media types the new spec declares and the old did not: callers gain a representation to ask for. */
+  added: string[];
+  /** Media types the old spec declared and the new does not: a representation callers could ask for is gone. */
+  removed: string[];
+  /**
+   * Media types declared by both whose body type changed, other than the one
+   * the entry's own `type` is read from, which `responseChanged` and
+   * `errorsChanged` already report.
+   */
+  retyped: string[];
+  /** `breaking` when anything was removed or retyped, else `additive`. */
   classification: 'additive' | 'breaking';
 }
 

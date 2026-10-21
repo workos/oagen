@@ -1,15 +1,16 @@
 import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef, Webhook } from '../ir/types.js';
-import { walkTypeRef, collectFallbackResponseTypes, collectWebhookTypeRefs } from '../ir/types.js';
+import { walkTypeRef, collectResponseBodyTypes, collectModelRefs, collectWebhookTypeRefs } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { STATUS_RANGE_LABELS } from './responses.js';
 
 /**
  * Promote the inline enums a model's fields declare to top-level enums. A
  * field enum is named from its model and field alone
- * (`ListPetsDefaultResponseStatus`), a name a component enum — or the same
- * field of another model — may already own with other values; such a field
- * is renamed to a distinct name before it is promoted (`…Status2`), the way
- * header and webhook enums are, rather than left pointing at the other
+ * (`GetReportResponseStatus`, `ListPetsDefaultResponseStatus`), a name a
+ * component enum — or the same field of another model — may already own with
+ * other values; such a field is renamed to a distinct name before it is
+ * promoted (`…Status2`), collision-aware like the operation pass below and the
+ * way header and webhook enums are, so the field never points at the other
  * values. A taken name with the same values is shared.
  */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
@@ -23,11 +24,37 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 
 /**
  * Collect inline enum definitions from operation parameters (query, path, header)
- * list-envelope companion fields, and response headers, and promote them to
- * top-level enums so emitters can generate typed enum files.
+ * list-envelope companion fields, response headers and secondary response
+ * bodies, and promote them to top-level enums so emitters can generate typed
+ * enum files.
+ *
+ * `models` lets the walk continue into the models a header or secondary body
+ * references — the ones the parser materialized for them, never a component
+ * (`componentNames`), whose enums the model pass owns — so an enum nested in
+ * such a model gets the same collision-aware treatment as one at the top: a
+ * name a component enum already owns with other values is renamed, not
+ * silently given the component's values.
  */
-export function collectInlineEnumsFromOperations(services: Service[], enums: Enum[]): void {
+export function collectInlineEnumsFromOperations(
+  services: Service[],
+  enums: Enum[],
+  models: readonly Model[] = [],
+  componentNames: ReadonlySet<string> = new Set(),
+): void {
   const enumNames = new Set(enums.map((e) => e.name));
+  const modelsByName = new Map(models.map((model) => [model.name, model]));
+  // Each materialized model is visited once, under the first qualifier that reaches it.
+  const visited = new Set<string>();
+  const collectThroughModels = (type: TypeRef, qualifier: string | undefined): void => {
+    collectDistinctEnums(type, qualifier, enums, enumNames);
+    for (const name of collectModelRefs(type)) {
+      if (visited.has(name) || componentNames.has(name)) continue;
+      visited.add(name);
+      const model = modelsByName.get(name);
+      if (!model) continue;
+      for (const field of model.fields) collectThroughModels(field.type, qualifier);
+    }
+  };
   for (const service of services) {
     for (const op of service.operations) {
       for (const param of [
@@ -46,14 +73,19 @@ export function collectInlineEnumsFromOperations(services: Service[], enums: Enu
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
-        for (const header of headers) collectDistinctEnums(header.type, qualifier, enums, enumNames);
+        for (const header of headers) collectThroughModels(header.type, qualifier);
       }
-      // A fallback body that is itself an inline enum, or an array of one, is
-      // typed by `schemaToTypeRef` like a parameter and reaches no model, so
-      // it is walked here; enums nested in a fallback's inline models are
-      // collected with every other model's. The body's name already carries
-      // its label (`ListPetsDefaultResponse`), so a clash is numbered.
-      for (const type of collectFallbackResponseTypes(op)) collectDistinctEnums(type, undefined, enums, enumNames);
+      // A body declared only for a secondary media type (`text/plain` next to
+      // `application/json`), or for a `default` or range response, is typed
+      // like a response body, so its inline enums are promoted the same way —
+      // a body that is itself an inline enum, or an array of one, reaches no
+      // model and is walked here; enums nested in its inline models are
+      // reached through them. Its name is already operation-qualified
+      // (`ListPetsDefaultResponse`); a clash with a different value set falls
+      // back to a numeric suffix.
+      for (const { type } of collectResponseBodyTypes(op)) {
+        collectThroughModels(type, undefined);
+      }
     }
   }
 }
@@ -106,15 +138,16 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
 }
 
 /**
- * Promote the inline enums under a type reference without letting a taken
- * name mislead. A response-header enum is named from the service and header
- * name alone, so `X-Policy` allowing `fast`/`slow` on a 200 and
- * `retry`/`stop` on a 429 would share one name and whichever was collected
- * first would silently win; a request parameter named like the header, or a
- * webhook parameter named like a component enum, collides the same way. When
- * the name is already taken by a different value set, the ref is renamed to
- * a distinct name before it is promoted. A taken name with the same values is
- * shared, as before.
+ * Promote the inline enums under a type reference — a response header's, a
+ * secondary media type's or fallback response's body, a webhook parameter's
+ * — without letting a taken name mislead. A response-header enum is named
+ * from the service and header name alone, so `X-Policy` allowing
+ * `fast`/`slow` on a 200 and `retry`/`stop` on a 429 would share one name
+ * and whichever was collected first would silently win; a request parameter
+ * named like the header, or a webhook parameter named like a component enum,
+ * collides the same way. When the name is already taken by a different value
+ * set, the ref is renamed to a distinct name before it is promoted. A taken
+ * name with the same values is shared, as before.
  */
 function collectDistinctEnums(
   ref: TypeRef,

@@ -19,6 +19,52 @@ function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   };
 }
 
+describe('specDerivedNames — response content types', () => {
+  it('counts a type reached only through a secondary media type as spec-derived', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Things',
+          operations: [
+            {
+              name: 'getThing',
+              httpMethod: 'get',
+              path: '/things/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'primitive', type: 'string' },
+              responseContentTypes: ['text/html', 'application/vnd.api+json'],
+              responseContents: [
+                { contentType: 'text/html', type: { kind: 'primitive', type: 'string' } },
+                { contentType: 'application/vnd.api+json', type: { kind: 'model', name: 'ThingDocument' } },
+              ],
+              errors: [
+                {
+                  statusCode: 500,
+                  contentTypes: ['application/problem+json'],
+                  contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+                },
+              ],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('ThingDocument')).toBe(true);
+    expect(names.has('Problem')).toBe(true);
+  });
+});
+
 describe('diffSurfaces', () => {
   it('returns 100% score for identical surfaces', () => {
     const surface = emptySurface({
