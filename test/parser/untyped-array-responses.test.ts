@@ -41,10 +41,20 @@ describe('isArraySchema', () => {
     expect(isArraySchema({ items: petItems, anyOf: shapeVariants.oneOf })).toBe(false);
     expect(isArraySchema({ items: petItems, allOf: [{ type: 'object', properties: {} }] })).toBe(false);
     expect(isArraySchema({ items: petItems, allOf: [{ $ref: '#/components/schemas/List' }] })).toBe(false);
+    expect(isArraySchema({ items: petItems, allOf: [{ type: 'string' }] })).toBe(false);
+    // A composition beside `type: 'array'` is read first too (`classifyInlineSchema`).
+    expect(
+      isArraySchema({ type: 'array', items: petItems, oneOf: [{ type: 'array', items: petItems }, { type: 'null' }] }),
+    ).toBe(false);
+    expect(isArraySchema({ type: 'array', items: petItems, anyOf: shapeVariants.oneOf })).toBe(false);
+    expect(isArraySchema({ type: 'array', items: petItems, allOf: [{ $ref: '#/components/schemas/List' }] })).toBe(
+      false,
+    );
     // An allOf of bare limits — one member or several — types nothing and
     // falls through to the array branch in schemaToTypeRef; so does a oneOf of them.
     expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }] })).toBe(true);
     expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }, { maxItems: 10 }] })).toBe(true);
+    expect(isArraySchema({ type: 'array', items: petItems, oneOf: [{ minItems: 1 }, { maxItems: 10 }] })).toBe(true);
     expect(isArraySchema(undefined)).toBe(false);
     expect(isArraySchema({})).toBe(false);
     expect(isArraySchema({ type: 'string' })).toBe(false);
@@ -131,6 +141,27 @@ describe('classifyAndExtractResponse — array response without type', () => {
     expect(
       classifyAndExtractResponse({ type: 'array', nullable: true, items: ref }, 'ListPetsResponse').response,
     ).toEqual(expected);
+  });
+
+  it('yields to a oneOf beside `type: array` too, so a nullable array composed that way keeps its null', () => {
+    // `{ type: 'array', items, oneOf: [{ type: 'array', items }, { type: 'null' }] }`
+    // is a union to `classifyInlineSchema` — a nullable array to
+    // `schemaToTypeRef` — whether or not `type: 'array'` is spelled out, so
+    // the array branch must not claim it; the fall-through keeps the null
+    // and creates the item model under the name the reference carries.
+    for (const type of ['array', undefined]) {
+      const result = classifyAndExtractResponse(
+        { ...(type && { type }), items: petItems, oneOf: [{ type: 'array', items: petItems }, { type: 'null' }] },
+        'ListPetsResponse',
+      );
+      expect(result.response, String(type)).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsResponse' } },
+      });
+      expect(result.inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+        ['ListPetsResponse', ['name']],
+      ]);
+    }
   });
 
   it('materializes the inline object variants of `items.oneOf`, typed or not', () => {
