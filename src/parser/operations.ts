@@ -43,6 +43,7 @@ import {
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { detectPagination } from './pagination.js';
 import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
+import type { ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
   materializeInlineSchema,
@@ -2822,8 +2823,8 @@ function mediaTypeToken(contentType: string): string {
 
 /**
  * A media type's essence — `type/subtype` without parameters, trimmed and
- * lower-cased — which is what decides how its body is typed. Only the
- * secondary typing reads it; the primary pick still matches keys as written.
+ * lower-cased — which is what decides how its body is typed (RFC 9110
+ * §8.3.1). The content keys themselves stay as written.
  */
 function mediaTypeEssence(contentType: string): string {
   return (contentType.split(';')[0] ?? '').trim().toLowerCase();
@@ -3057,6 +3058,11 @@ function extractResponses(
 
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
+  // Every 2xx body's classification, by status code. The models of all of
+  // them are kept — `successResponses` references each — while the paging
+  // fields are read from the status chosen as primary once every status code
+  // has been read.
+  const bodyResults = new Map<number, ResponseExtractionResult>();
   // Names the inline body a secondary media type declares: this stem, the
   // media type and the entry's role (`RenderPetCard` + `TextHtml` + `Response`).
   const contentModelBase = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
@@ -3081,49 +3087,50 @@ function extractResponses(
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
-      // The media type the fixed-order pick below reads `extractedType` from,
-      // so its `contents` entry can share that TypeRef instead of re-deriving it.
-      let primaryContentType: string | undefined;
-      const jsonContent = resp.content?.['application/json'];
-      if (jsonContent?.schema) {
-        primaryContentType = 'application/json';
-        const contextName = deriveResponseName(op, pathModelBaseName);
-        const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
-        extractedType = result.response;
-        // Keep track of inline models and pagination from the latest 2xx with a schema
-        inlineModels = result.inlineModels;
-        isPaginated = result.isPaginated;
-        dataPath = result.dataPath;
-        dataDescription = result.dataDescription;
-        itemType = result.itemType;
-        envelopeFields = result.envelopeFields;
-        envelopeCompanions = result.envelopeCompanions;
-      } else if (resp.content) {
+      // The body schema to classify: the JSON one when a JSON media type is
+      // declared (`application/json` by essence, then `+json`), else — past
+      // the binary and text media types typed below without a schema — the
+      // first other media type that declares one. Either way it goes through
+      // `classifyAndExtractResponse`, so its inline models are created and
+      // the response never references a model the parser did not emit.
+      const json = jsonResponseSchema(resp);
+      let bodySchema = json?.schema;
+      // The media type the fixed-order pick reads `extractedType` from, as
+      // written, so its `contents` entry can share that TypeRef instead of
+      // re-deriving it.
+      let primaryContentType = json?.contentType;
+      if (!bodySchema && resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
-        if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
+        // Media types are compared by essence: `application/pdf; foo=bar` is
+        // as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much
+        // a string as `text/plain`. The keys themselves stay as written.
+        const content = resp.content;
+        const keyWithEssence = (essence: string): string | undefined =>
+          Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
+        const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
+        const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+        if (binaryKey) {
           extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
-          primaryContentType = resp.content['application/octet-stream']
-            ? 'application/octet-stream'
-            : 'application/pdf';
-        } else if (
-          resp.content['text/plain'] ||
-          resp.content['text/html'] ||
-          resp.content['text/xml'] ||
-          resp.content['application/xml']
-        ) {
+          primaryContentType = binaryKey;
+        } else if (textKey) {
           extractedType = { kind: 'primitive', type: 'string' };
-          primaryContentType = TEXT_RESPONSE_MEDIA_TYPES.find((mediaType) => resp.content?.[mediaType]);
+          primaryContentType = textKey;
         } else {
-          // Try the first available content type's schema
-          const firstKey = Object.keys(resp.content)[0];
-          if (firstKey) {
-            primaryContentType = firstKey;
-            const firstContent = resp.content[firstKey];
-            if (firstContent?.schema) {
-              extractedType = schemaToTypeRef(firstContent.schema, deriveResponseName(op, pathModelBaseName));
-            }
+          // Try the first media type that declares a schema; when none does,
+          // the first declared is the primary and reads as unknown.
+          const entries = Object.entries(content);
+          const first = entries.find(([, media]) => media?.schema) ?? entries[0];
+          if (first) {
+            primaryContentType = first[0];
+            bodySchema = first[1]?.schema;
           }
         }
+      }
+      if (bodySchema) {
+        const contextName = deriveResponseName(op, pathModelBaseName);
+        const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
+        extractedType = result.response;
+        bodyResults.set(code, result);
       }
       const contents = extractResponseContents(
         resp.content,
@@ -3188,17 +3195,58 @@ function extractResponses(
   }
 
   // Primary response = lowest 2xx with a body schema, falling back to first 2xx
+  let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
     const primary =
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    primaryStatus = primary.statusCode;
     responseContentTypes = primary.contentTypes;
     responseContents = primary.contents;
     // The operation-level description is the primary response's — the same
     // entry `response` and `responseHeaders` come from.
     responseDescription = primary.description;
+  }
+
+  // The paging fields describe `response`, so they come from the primary's
+  // body — not from whichever 2xx body happened to be read last.
+  const primaryBody = primaryStatus === undefined ? undefined : bodyResults.get(primaryStatus);
+  if (primaryBody) {
+    isPaginated = primaryBody.isPaginated;
+    dataPath = primaryBody.dataPath;
+    dataDescription = primaryBody.dataDescription;
+    itemType = primaryBody.itemType;
+    envelopeFields = primaryBody.envelopeFields;
+    envelopeCompanions = primaryBody.envelopeCompanions;
+  }
+
+  // Keep the models of every 2xx body: `successResponses` references each of
+  // them, so keeping only one body's would leave the others dangling. Every
+  // status derives the same `<Op>Response` context name, so on a name clash
+  // the primary's definition — the one `response` points at — goes first and
+  // wins; the other bodies follow in status order.
+  // A dropped model whose shape differs from the kept one is warned about,
+  // since its status then points at a shape it did not declare.
+  const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
+    if (a === primaryStatus) return -1;
+    if (b === primaryStatus) return 1;
+    return a - b;
+  });
+  const keptByName = new Map<string, { model: Model; status: number }>();
+  for (const [status, result] of bodiesByPrimacy) {
+    for (const model of result.inlineModels) {
+      const kept = keptByName.get(model.name);
+      if (!kept) {
+        keptByName.set(model.name, { model, status });
+        inlineModels.push(model);
+      } else if (modelFingerprint(kept.model) !== modelFingerprint(model)) {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
+        );
+      }
+    }
   }
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
