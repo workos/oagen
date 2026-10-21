@@ -41,8 +41,9 @@ describe('isArraySchema', () => {
     expect(isArraySchema({ items: petItems, anyOf: shapeVariants.oneOf })).toBe(false);
     expect(isArraySchema({ items: petItems, allOf: [{ type: 'object', properties: {} }] })).toBe(false);
     expect(isArraySchema({ items: petItems, allOf: [{ $ref: '#/components/schemas/List' }] })).toBe(false);
-    expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }] })).toBe(false);
-    // An allOf of bare limits falls through to the array branch in schemaToTypeRef.
+    // An allOf of bare limits — one member or several — types nothing and
+    // falls through to the array branch in schemaToTypeRef; so does a oneOf of them.
+    expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }] })).toBe(true);
     expect(isArraySchema({ items: petItems, allOf: [{ minItems: 1 }, { maxItems: 10 }] })).toBe(true);
     expect(isArraySchema(undefined)).toBe(false);
     expect(isArraySchema({})).toBe(false);

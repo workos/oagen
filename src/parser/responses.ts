@@ -1,4 +1,4 @@
-import type { TypeRef, Model, Field } from '../ir/types.js';
+import type { TypeRef, Model, Field, StatusRange } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -45,6 +45,20 @@ export interface ResponseExtractionResult {
    */
   envelopeCompanions?: EnvelopeCompanion[];
 }
+
+/**
+ * The word that stands in for a range key wherever a status code would
+ * qualify a name: the inline body model of a `4XX` response is
+ * `<Op>ClientErrorResponse`, its header models and enums `…ClientError`.
+ * The key itself cannot be used — `toPascalCase('4XX')` is `4Xx`.
+ */
+export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
+  '1XX': 'Informational',
+  '2XX': 'Success',
+  '3XX': 'Redirect',
+  '4XX': 'ClientError',
+  '5XX': 'ServerError',
+};
 
 export function classifyAndExtractResponse(
   schema: SchemaObject,
@@ -546,17 +560,21 @@ function extractDirectResource(
 
   // Array — `type: 'array'`, a nullable array (`type: ['array', 'null']`,
   // OAS 3.0 `nullable: true`) or, since JSON Schema does not require `type`
-  // beside `items`, bare `items`: the one test `schemaToTypeRef` applies
-  // (`isArraySchema`), so the item model is extracted whenever the response
-  // is typed as an array. Inline object items become `<Operation>Item`, with
-  // the nullable wrapper `schemaToTypeRef` would give the array. Anything
-  // else the items may reference — the inline object variants of an
-  // `items.oneOf`, the objects of a nested array or map — is materialized by
-  // the field extractor, under the names the fall-through `schemaToTypeRef`
-  // gives them, exactly as the `oneOf` branch above does. `$ref` items name a
-  // component, even with sibling `properties` beside the `$ref`: they take
-  // the fall-through, which keeps the reference as `schemaToTypeRef` does,
-  // and the extractor leaves them alone.
+  // beside `items`, bare `items`: `isArraySchema`, which is what
+  // `classifyInlineSchema` — the one precedence `schemaToTypeRef` follows —
+  // answers once the nullable type list is unwrapped. So `items` with no
+  // `type` is an array here as it is there, or the reference it produces
+  // names an item model nobody creates (`array<ListThingsResponse>` with no
+  // `ListThingsResponse`); and `items` beside a `oneOf` / `anyOf` (a nullable
+  // array) or an `allOf` that types the schema is not, `type: 'array'` or
+  // not, so it falls through to the path below, or the composition — the
+  // null — is lost. Inline object items become `<Operation>Item`, with the
+  // nullable wrapper `schemaToTypeRef` would give the array. Anything else
+  // the items may reference — the inline object variants of an `items.oneOf`,
+  // the objects of a nested array or map — and `$ref` items, even with
+  // sibling `properties` beside the `$ref`, take the fall-through, which
+  // keeps the reference as `schemaToTypeRef` does and materializes the rest
+  // under the names it gives them.
   if (isArraySchema(schema) && schema.items) {
     const items = schema.items;
     if (!items.$ref && items.properties && (items.type === 'object' || !items.type)) {
@@ -568,15 +586,25 @@ function extractDirectResource(
         isPaginated: false,
       };
     }
-    extractInlineModelsFromProperties(
-      { properties: { [contextName]: schema } },
-      inlineModels,
-      undefined,
-      componentSchemas,
-    );
   }
 
-  // Non-object schema (primitive, array, union, etc.) — delegate to schemaToTypeRef
+  // Anything else is typed by schemaToTypeRef (primitive, union, map, array
+  // of unions, nullable object, …). Such a TypeRef can still reach an inline
+  // model — a map whose values are an inline object (`additionalProperties`),
+  // an array whose items are a union of inline objects, a nullable
+  // `type: ['object', 'null']` object, a map of arrays of objects — so
+  // materialize them the way the oneOf branch does: as a field of this name
+  // under no parent, which names every nested model exactly as the TypeRef
+  // references it. The oneOf branch may already have pushed some of them, so
+  // dedupe by name.
+  const nested: Model[] = [];
+  extractInlineModelsFromProperties({ properties: { [contextName]: schema } }, nested, undefined, componentSchemas);
+  const known = new Set(inlineModels.map((m) => m.name));
+  for (const model of nested) {
+    if (known.has(model.name)) continue;
+    known.add(model.name);
+    inlineModels.push(model);
+  }
   return {
     response: schemaToTypeRef(schema, contextName),
     inlineModels,
