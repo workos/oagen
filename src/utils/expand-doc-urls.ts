@@ -56,6 +56,8 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
         ...(op.responseDescription ? { responseDescription: expand(op.responseDescription) } : {}),
         ...(op.successResponses ? { successResponses: op.successResponses.map(expandResponse) } : {}),
         errors: op.errors.map(expandResponse),
+        ...(op.defaultResponse ? { defaultResponse: expandResponse(op.defaultResponse) } : {}),
+        ...(op.rangeResponses ? { rangeResponses: op.rangeResponses.map(expandResponse) } : {}),
         pathParams: op.pathParams.map((p) => ({ ...p, description: expand(p.description) })),
         queryParams: op.queryParams.map((p) => ({ ...p, description: expand(p.description) })),
         bodyOwnedQueryParams: op.bodyOwnedQueryParams?.map((p) => ({ ...p, description: expand(p.description) })),
