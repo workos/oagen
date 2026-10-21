@@ -139,8 +139,9 @@ interface ContentEntry {
   /**
    * The media type the entry's own `type` was read from: the content entry
    * that shares `type`'s very object (how the parser builds it), or, for an
-   * error, `application/json` — the only media type an error's `type` is ever
-   * read from. Never decided by structural equality, which a secondary body
+   * error that carries no lists, `application/json` — the only media type
+   * the parser leaves the lists off for when it is declared alone with a
+   * schema. Never decided by structural equality, which a secondary body
    * can coincidentally satisfy. Unset when no entry is the own one (a 3xx, or
    * a hand-built IR without that identity).
    */

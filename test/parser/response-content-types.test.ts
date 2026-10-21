@@ -203,8 +203,12 @@ describe('response content types', () => {
       });
       expect(fieldsOf(spec, 'GetReportApplicationVndApiJsonResponse')).toEqual(['data', 'links']);
       expect(fieldsOf(spec, 'GetReportApplicationVndApiJsonResponseLink')).toEqual(['self']);
-      // An error body is named for its role.
-      expect(fieldsOf(spec, 'RenderPetCardApplicationProblemJsonError')).toEqual(['title', 'detail']);
+      // An error body is named for its role. The +json body is the error's
+      // `type` (#235), named `Error<code>` like an inline application/json body
+      // and, like it, not materialized; only the secondary body is.
+      expect(findOp(spec, 'renderPetCard').errors[1].type).toEqual({ kind: 'model', name: 'Error500' });
+      expect(fieldsOf(spec, 'RenderPetCardApplicationProblemJsonError')).toBeUndefined();
+      expect(fieldsOf(spec, 'RenderPetCardApplicationYamlError')).toEqual(['message']);
       // Without an operationId the path names it, as it names the primary body.
       expect(findOp(spec, 'listAvatar').responseContents?.[3].type).toEqual({
         kind: 'model',
@@ -234,7 +238,7 @@ describe('response content types', () => {
         [
           "renderPetCard text/html",
           "renderPetCard text/html",
-          "renderPetCard application/problem+json",
+          "renderPetCard application/yaml",
           "listAvatar image/png",
           "listAvatar image/webp",
           "listAvatar application/vnd.pet+json",
@@ -322,16 +326,18 @@ describe('response content types', () => {
       expect(notFound.contents?.[0].type).toBe(notFound.type);
       expect(notFound.contents?.[1]).toEqual({ contentType: 'text/html', type: { kind: 'primitive', type: 'string' } });
 
-      // No application/json: `type` stays unset, the body is still typed.
+      // No application/json: `type` is read from the +json entry (#235), named
+      // like an inline application/json body, and that entry shares it. The
+      // lists stay, since `application/problem+json` is not the plain
+      // `application/json` a reader would otherwise assume.
       expect(problem.statusCode).toBe(500);
-      expect(problem.type).toBeUndefined();
-      expect(problem.contentTypes).toEqual(['application/problem+json']);
+      expect(problem.type).toEqual({ kind: 'model', name: 'Error500' });
+      expect(problem.contentTypes).toEqual(['application/problem+json', 'application/yaml']);
       expect(problem.contents).toEqual([
-        {
-          contentType: 'application/problem+json',
-          type: { kind: 'model', name: 'RenderPetCardApplicationProblemJsonError' },
-        },
+        { contentType: 'application/problem+json', type: problem.type },
+        { contentType: 'application/yaml', type: { kind: 'model', name: 'RenderPetCardApplicationYamlError' } },
       ]);
+      expect(problem.contents?.[0].type).toBe(problem.type);
     });
 
     it('leaves an inline application/json error body exactly as before: no new model, no new warning', async () => {

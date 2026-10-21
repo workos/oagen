@@ -1064,16 +1064,19 @@ export interface ErrorResponse {
   headers?: ResponseHeader[];
   /**
    * Media types declared under `content`, in document order and as written.
-   * `type` is by definition the `application/json` body, so the list is
-   * present only when it says something `type` does not: the error declares
-   * another media type, or a JSON body `type` could not be read from. An
-   * error that declares only `application/json` with a schema keeps its shape.
+   * `type` is by definition the JSON body (`application/json`, else the first
+   * `+json` media type), so the list is present only when it says something
+   * `type` does not: the error declares another media type, a JSON media type
+   * other than plain `application/json` (`application/problem+json` alone,
+   * `application/json; charset=utf-8`), or a JSON body `type` could not be
+   * read from. An error that declares only `application/json` with a schema
+   * keeps its shape.
    */
   contentTypes?: string[];
   /**
-   * One entry per `contentTypes` entry, in the same order. The entry for
-   * `application/json` carries the same TypeRef as `type` when `type` was
-   * read from it. Present only when `contentTypes` is.
+   * One entry per `contentTypes` entry, in the same order. The entry for the
+   * media type `type` was read from carries the same TypeRef as `type`.
+   * Present only when `contentTypes` is.
    */
   contents?: ResponseContent[];
   /**

@@ -3001,7 +3001,7 @@ function typeFallbackBody(
  * under as written: `application/json` first, else a `+json` media type
  * (`application/problem+json` is the usual shape of a `default` error),
  * matched by essence — parameters (`; charset=utf-8`) stripped, case folded.
- * Other media types type nothing, as they do for `errors`.
+ * Other media types type nothing, for an error entry as for a fallback.
  */
 function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
   const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
@@ -3158,20 +3158,25 @@ function extractResponses(
         ...contents,
       });
     } else if (code >= 400) {
-      const jsonContent = resp.content?.['application/json'];
-      const type = jsonContent?.schema ? schemaToTypeRef(jsonContent.schema, `Error${code}`) : undefined;
+      const json = jsonResponseSchema(resp);
+      const type = json ? schemaToTypeRef(json.schema, `Error${code}`) : undefined;
       const contents = extractResponseContents(
         resp.content,
-        type ? 'application/json' : undefined,
+        json?.contentType,
         type,
         { base: contentModelBase, suffix: 'Error', statusCode: code },
         ctx,
       );
-      // An error's `type` is its application/json body by definition, so the
-      // lists are kept only when they say something `type` does not: another
-      // media type, or a JSON body `type` could not be read from. The common
-      // lone `application/json` with a schema keeps its shape.
-      const beyondType = contents?.contents.some((entry) => entry.type !== type) ? contents : undefined;
+      // An error's `type` is its JSON body by definition — `application/json`,
+      // else a `+json` media type (`jsonResponseSchema`) — so the lists are kept
+      // only when they say something `type` does not: another media type, a
+      // JSON body `type` could not be read from, or a JSON media type that is
+      // not the plain `application/json` a reader would otherwise assume. The
+      // common lone `application/json` with a schema keeps its shape.
+      const beyondType =
+        contents && (json?.contentType !== 'application/json' || contents.contents.some((entry) => entry.type !== type))
+          ? contents
+          : undefined;
       errors.push({
         statusCode: code,
         type,
