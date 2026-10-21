@@ -4,6 +4,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
   buildFieldFromSchema,
+  classifyInlineSchema,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
@@ -542,11 +543,15 @@ function extractDirectResource(
     );
   }
 
-  // Array with inline object items — extract the item model. An `items`
-  // schema with no `type` is an array to `schemaToTypeRef`, so it must be one
-  // here too, or the reference it produces names an item model nobody
-  // creates (`array<ListThingsResponse>` with no `ListThingsResponse`).
-  if ((schema.type === 'array' || !schema.type) && schema.items) {
+  // Array with inline object items — extract the item model. Which keyword
+  // types the schema is decided exactly as `schemaToTypeRef` decides it
+  // (`classifyInlineSchema`): `items` with no `type` is an array to it, so it
+  // must be one here too, or the reference it produces names an item model
+  // nobody creates (`array<ListThingsResponse>` with no `ListThingsResponse`);
+  // and `items` beside a `oneOf` / `anyOf` (a nullable array) or an `allOf`
+  // is not an array to it, so it must fall through to the path below, or the
+  // composition — the null — is lost.
+  if (classifyInlineSchema(schema) === 'array' && schema.items) {
     const items = schema.items;
     if (items.$ref) {
       return {
