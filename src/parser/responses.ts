@@ -1,4 +1,4 @@
-import type { TypeRef, Model, Field } from '../ir/types.js';
+import type { TypeRef, Model, Field, StatusRange } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -44,6 +44,20 @@ export interface ResponseExtractionResult {
    */
   envelopeCompanions?: EnvelopeCompanion[];
 }
+
+/**
+ * The word that stands in for a range key wherever a status code would
+ * qualify a name: the inline body model of a `4XX` response is
+ * `<Op>ClientErrorResponse`, its header models and enums `…ClientError`.
+ * The key itself cannot be used — `toPascalCase('4XX')` is `4Xx`.
+ */
+export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
+  '1XX': 'Informational',
+  '2XX': 'Success',
+  '3XX': 'Redirect',
+  '4XX': 'ClientError',
+  '5XX': 'ServerError',
+};
 
 export function classifyAndExtractResponse(
   schema: SchemaObject,
