@@ -98,7 +98,7 @@ export function mediaTypeParameters(contentType: string): Array<[string, string]
 export function reparameterizedBodies(
   pairs: Array<[MediaTypeBody, MediaTypeBody]>,
 ): Array<[MediaTypeBody, MediaTypeBody]> {
-  return pairs.filter(([before, after]) => JSON.stringify(before.parameters) !== JSON.stringify(after.parameters));
+  return pairs.filter(([before, after]) => !sameParameters(before, after));
 }
 
 /** A reparameterized pair as a change reports it: both spellings, as written in their specs. */
@@ -120,36 +120,57 @@ export interface MediaTypeBodiesDiff {
  * `Text/HTML` is `text/html`, `application/problem+json; charset=utf-8` is
  * `application/problem+json` — without two keys of one essence declared side
  * by side (`application/json` beside `application/json; charset=utf-8`)
- * collapsing into one. A new body claims the old body spelled exactly as it
- * is, else the first old body of its essence that nothing claimed, in
- * document order. What is left on the new side was `added`; what is left on
- * the old side was `removed`. Every pair is in the new entry's order.
+ * collapsing into one. Bodies pair in a strict order of preference, each
+ * tier run over every new body before the next, so a later tier never takes
+ * an old body an earlier one would still name: (1) the old body spelled
+ * exactly the same; (2) one of the same essence with the same parameters
+ * other than `charset` (`mediaTypeParameters`), so `Application/YAML;
+ * version=1` is still `application/yaml; version=1` wherever it moved; (3)
+ * one of the same essence whose body is the same shape (`sameShape` through
+ * `shapes`), so a key that only edited a parameter finds its body; (4) one
+ * of the same essence, in document order. What is left on the new side was
+ * `added`; what is left on the old side was `removed`. Every pair is in the
+ * new entry's order.
  */
-export function pairMediaTypeBodies(oldBodies: MediaTypeBody[], newBodies: MediaTypeBody[]): MediaTypeBodiesDiff {
+export function pairMediaTypeBodies(
+  oldBodies: MediaTypeBody[],
+  newBodies: MediaTypeBody[],
+  shapes?: DocumentShapes,
+): MediaTypeBodiesDiff {
   const unclaimed = new Set(oldBodies);
-  const claim = (matches: (old: MediaTypeBody) => boolean): MediaTypeBody | undefined => {
-    for (const old of oldBodies) {
-      if (!unclaimed.has(old) || !matches(old)) continue;
-      unclaimed.delete(old);
-      return old;
+  const pairedTo = new Map<MediaTypeBody, MediaTypeBody>();
+  const tiers: Array<(before: MediaTypeBody, after: MediaTypeBody) => boolean> = [
+    (before, after) => before.mediaType === after.mediaType,
+    (before, after) => before.essence === after.essence && sameParameters(before, after),
+    (before, after) =>
+      before.essence === after.essence &&
+      before.type !== undefined &&
+      after.type !== undefined &&
+      sameShape(before.type, after.type, shapes),
+    (before, after) => before.essence === after.essence,
+  ];
+  for (const matches of tiers) {
+    for (const after of newBodies) {
+      if (pairedTo.has(after)) continue;
+      const before = oldBodies.find((candidate) => unclaimed.has(candidate) && matches(candidate, after));
+      if (!before) continue;
+      unclaimed.delete(before);
+      pairedTo.set(after, before);
     }
-    return undefined;
-  };
-  // Exact spellings claim first, whatever their position, so a respelled
-  // key never takes the old body an unchanged key still names.
-  const bySpelling = new Map<MediaTypeBody, MediaTypeBody>();
-  for (const body of newBodies) {
-    const old = claim((candidate) => candidate.mediaType === body.mediaType);
-    if (old) bySpelling.set(body, old);
   }
   const pairs: Array<[MediaTypeBody, MediaTypeBody]> = [];
   const added: MediaTypeBody[] = [];
-  for (const body of newBodies) {
-    const old = bySpelling.get(body) ?? claim((candidate) => candidate.essence === body.essence);
-    if (old) pairs.push([old, body]);
-    else added.push(body);
+  for (const after of newBodies) {
+    const before = pairedTo.get(after);
+    if (before) pairs.push([before, after]);
+    else added.push(after);
   }
   return { pairs, added, removed: oldBodies.filter((old) => unclaimed.has(old)) };
+}
+
+/** Whether two bodies declare the same parameters other than `charset`, as structured pairs. */
+function sameParameters(a: MediaTypeBody, b: MediaTypeBody): boolean {
+  return JSON.stringify(a.parameters) === JSON.stringify(b.parameters);
 }
 
 /**
@@ -213,7 +234,7 @@ export function diffRequestBodyContentTypes(
   if (!declaresBody(oldBody) || !declaresBody(newBody)) return undefined;
   const bodies = (body: RequestBodyMediaTypes): MediaTypeBody[] =>
     mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
-  const { pairs, added, removed } = pairMediaTypeBodies(bodies(oldBody), bodies(newBody));
+  const { pairs, added, removed } = pairMediaTypeBodies(bodies(oldBody), bodies(newBody), shapes);
   const retyped = retypedBodies(pairs, true, shapes);
   const reparameterized = reparameterizedBodies(pairs);
   if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) {
