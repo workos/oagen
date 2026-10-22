@@ -438,7 +438,9 @@ describe('response content types', () => {
       expect(operation.responseContents?.[1].type).toBe(operation.response);
     });
 
-    it('gives two parameterizations of one media type distinct models', () => {
+    it('gives two parameterizations of one media type distinct models, named from the essence', () => {
+      // Issue #279: the name fragment is the essence, so both keys take the same
+      // base name and the second, a different shape, steps to the next free name.
       const { operation, inlineModels } = singleOperation(
         getWithContent({
           'application/json': { schema: { $ref: '#/components/schemas/Thing' } },
@@ -452,12 +454,12 @@ describe('response content types', () => {
       );
       expect(operation.responseContents?.map((c) => c.type)).toEqual([
         { kind: 'model', name: 'Thing' },
-        { kind: 'model', name: 'ListThingsApplicationVndThingJsonVersion1Response' },
-        { kind: 'model', name: 'ListThingsApplicationVndThingJsonVersion2Response' },
+        { kind: 'model', name: 'ListThingsApplicationVndThingJsonResponse' },
+        { kind: 'model', name: 'ListThingsApplicationVndThingJsonResponse200' },
       ]);
       expect(inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
-        ['ListThingsApplicationVndThingJsonVersion1Response', ['a']],
-        ['ListThingsApplicationVndThingJsonVersion2Response', ['b']],
+        ['ListThingsApplicationVndThingJsonResponse', ['a']],
+        ['ListThingsApplicationVndThingJsonResponse200', ['b']],
       ]);
     });
 

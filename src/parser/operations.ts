@@ -9,6 +9,7 @@ import type {
   SuccessResponse,
   ResponseHeader,
   ResponseContent,
+  RequestBodyContent,
   DefaultResponse,
   RangeResponse,
   Model,
@@ -29,7 +30,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
+import { mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -925,9 +926,13 @@ function inferOperationName(
  * so a word is never repeated across a join:
  * `GET /companies/verification/{id}/verification-status` is
  * `getVerificationStatus`.
+ *
+ * `actions` false skips the first shape, for an operation that gave an
+ * action name up to another method on its path (demoteSamePathNames):
+ * `POST /pets/bulk-delete` is then `createBulkDelete`.
  */
-function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number): string {
-  const action = inferAction(method, path, apiRootLength);
+function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string {
+  const action = actions ? inferAction(method, path, apiRootLength) : null;
   if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
   const singleton = inferSingleton(path, apiRootLength);
   if (singleton) {
@@ -948,10 +953,10 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
  * so a non-null result always differs from the singular name.
  * disambiguateOperationNames falls back to it before a numeric suffix when
  * the singular name is an operationId's, or another path-named operation's
- * whose path differs only by that plural.
+ * whose path differs only by that plural. `actions` is fallbackOperationName's.
  */
-function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
-  if (inferAction(method, path, apiRootLength) || inferSingleton(path, apiRootLength)) return null;
+function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string | null {
+  if ((actions && inferAction(method, path, apiRootLength)) || inferSingleton(path, apiRootLength)) return null;
   const resource = inferResourceFromPath(path, apiRootLength, false);
   if (resource === null || resource === inferResourceFromPath(path, apiRootLength)) return null;
   return toCamelCase(`${inferVerb(method, path)}_${resource}`);
@@ -1000,6 +1005,22 @@ function inferVerb(method: HttpMethod, path: string): string {
 function methodVerbs(method: HttpMethod): string[] {
   const verbs = METHOD_VERBS[method];
   return verbs.item === verbs.collection ? [verbs.item] : [verbs.item, verbs.collection];
+}
+
+/**
+ * Whether the last segment of a path is a literal whose words include one of
+ * the method's own verbs (methodVerbs): `bulk-delete` for a DELETE, `list-all`
+ * for a GET, `update-password` for a PUT or PATCH, and not `bulk-delete` for
+ * a POST. Such a segment is the action for that method (inferAction) and
+ * keeps the action name when another method on the path would take it too
+ * (demoteSamePathNames).
+ */
+function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
+  const segments = pathSegments(path);
+  const last = segments[segments.length - 1];
+  if (last === undefined || last.startsWith('{')) return false;
+  const words = splitWords(last).map((w) => w.toLowerCase());
+  return methodVerbs(method).some((verb) => words.includes(verb));
 }
 
 /** Whether a path segment looks plural: singularizePathSegment would change it. */
@@ -1180,7 +1201,7 @@ function inferAction(
   const afterParam = segments.length >= 2 && segments[segments.length - 2].startsWith('{');
   const words = splitWords(last).map((w) => w.toLowerCase());
   const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
-  const ownVerb = methodVerbs(method).some((verb) => words.includes(verb));
+  const ownVerb = segmentCarriesVerb(method, path);
   const verbPhrase = !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
   if (!postAction && !ownVerb && !verbPhrase) return null;
 
@@ -1197,9 +1218,12 @@ function inferAction(
  * rewritten here. A name derived from the method and path (inferOperationName)
  * is only as unique as the path words it was built from, so when operations on
  * different paths share one, the path-named operations are qualified until
- * every path in the service has a name of its own. Same-name operations on
- * the same path (PUT + PATCH both "update") are left as-is since they
- * represent the same logical resource.
+ * every path in the service has a name of its own. Operations on one path
+ * share a name only when both are path-named and their methods take the same
+ * CRUD verb (PUT and PATCH both `update`); any other sharing on one path is
+ * resolved first (demoteSamePathNames), before the qualifiers below, since
+ * every consumer that keys a service's operations by name — the differ among
+ * them — would otherwise see one of the two.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1282,19 +1306,23 @@ function disambiguateOperationNames(
   };
   const byPath = (a: Operation, b: Operation) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
+  // One path first: the qualifiers below tell paths apart and leave a name
+  // shared on one path alone, so that sharing is settled before they run.
+  const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
+
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
       for (const op of group) {
         if (!pathNamed.has(op)) continue;
         const root = apiRootLengthOf(op);
-        rename(op, appendQualifier(op.name, inferResourceFromPath(qualifierPath(op, root), root)));
+        rename(op, appendQualifier(op.name, inferResourceFromPath(qualifierPath(op, root, !demoted.has(op)), root)));
       }
     },
     (group) => {
       for (const op of group) {
         if (!pathNamed.has(op)) continue;
         const root = apiRootLengthOf(op);
-        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root), root)));
+        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root, !demoted.has(op)), root)));
       }
     },
     (group) => {
@@ -1364,8 +1392,9 @@ function disambiguateOperationNames(
   const pluralOf = (op: Operation): string | null => {
     if (!pathNamed.has(op)) return null;
     const root = apiRootLengthOf(op);
-    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root)) return null;
-    return pluralFallbackName(op.httpMethod, op.path, root);
+    const actions = !demoted.has(op);
+    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root, actions)) return null;
+    return pluralFallbackName(op.httpMethod, op.path, root, actions);
   };
   for (const group of collidingGroups(operations)) {
     // Like every qualifier, only when it tells the group apart: beside an
@@ -1432,9 +1461,105 @@ function disambiguateOperationNames(
 }
 
 /**
+ * Give operations on one path distinct names when their methods take
+ * different CRUD verbs. Two operations on one path share a name only when
+ * both are path-named and their methods take the same verb (inferVerb): PUT
+ * and PATCH are both `update`, so `/pets/{id}` has one `updatePet` for the
+ * two, as it always has. Any other sharing hides one of the two from every
+ * consumer that keys a service's operations by name, such as the differ, and
+ * an action name is where it arises: `bulk-delete` is the action of a DELETE
+ * (its own verb) and of a POST (a CRUD verb last), so both would be
+ * `bulkDelete`.
+ *
+ * The name stays with one verb, and every path-named operation of another
+ * verb takes the name it has without the action rule (fallbackOperationName
+ * with `actions` false): `POST /pets/bulk-delete` beside a DELETE is
+ * `createBulkDelete`, and `POST /users/{id}/update-password` beside a PUT is
+ * the singleton `createUserUpdatePassword`. The verb that keeps the name: an
+ * operationId-named operation's, since that name is the author's and a
+ * path-named sibling steps aside whatever its verb; else the verb the segment
+ * carries (segmentCarriesVerb), `delete` for `bulk-delete`; else `create`,
+ * POST being the method an action is written on; else the verb of the first
+ * method in HTTP_METHODS order. When the name an operation falls back to is
+ * still held on the path by an operationId or by another verb — path-named
+ * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
+ * to drop — a numeric suffix free in the service is added, silently, as the
+ * numeric pass adds one (`updatePet2`). Two operationId-named operations on
+ * one path with one name are the document reusing an operationId: the first
+ * in HTTP_METHODS order keeps it and the rest are numbered with the warning
+ * the numeric pass gives that case. Paths are visited in lexical order and
+ * their operations in HTTP_METHODS order, so the result depends only on the
+ * document's paths and methods.
+ *
+ * Returns the path-named operations that gave an action name up, whose
+ * qualifiers and plural read their path as the shape they fell back to.
+ */
+function demoteSamePathNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  serviceName: string,
+  apiRootLengthOf: (op: Operation) => number,
+  rename: (op: Operation, name: string) => void,
+): Set<Operation> {
+  const demoted = new Set<Operation>();
+  const taken = new Set(operations.map((op) => op.name));
+  const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
+  const methodOrder = (a: Operation, b: Operation) =>
+    HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
+  // The verb that keeps a shared action name among path-named operations.
+  const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
+  const freeSuffixed = (base: string) => {
+    let n = 2;
+    while (taken.has(`${base}${n}`)) n++;
+    return `${base}${n}`;
+  };
+
+  const byPath = new Map<string, Operation[]>();
+  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
+  for (const path of [...byPath.keys()].sort()) {
+    const onPath = (byPath.get(path) ?? []).sort(methodOrder);
+    const byName = new Map<string, Operation[]>();
+    for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, sharing] of byName) {
+      if (sharing.length < 2) continue;
+      const explicit = sharing.filter((op) => !pathNamed.has(op));
+      for (const op of explicit.slice(1)) {
+        const next = freeSuffixed(name);
+        console.warn(
+          `[oagen] Warning: Operations ${explicit[0].httpMethod.toUpperCase()} ${explicit[0].path} and ` +
+            `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
+            `"${name}" from their operationId; the latter is renamed "${next}" — give each a distinct operationId`,
+        );
+        rename(op, next);
+        taken.add(next);
+      }
+      const keeper =
+        explicit.length > 0 ? null : [...sharing].sort((a, b) => claim(a) - claim(b) || methodOrder(a, b))[0];
+      const keptVerb = keeper === null ? null : verbOf(keeper);
+      for (const op of sharing) {
+        if (!pathNamed.has(op) || verbOf(op) === keptVerb) continue;
+        const base = fallbackOperationName(op.httpMethod, op.path, apiRootLengthOf(op), false);
+        // Still held on the path by an operationId or another verb? Number it.
+        const held = onPath.some(
+          (other) => other !== op && other.name === base && (!pathNamed.has(other) || verbOf(other) !== verbOf(op)),
+        );
+        const next = held ? freeSuffixed(base) : base;
+        if (next !== op.name) {
+          rename(op, next);
+          taken.add(next);
+        }
+        demoted.add(op);
+      }
+    }
+  }
+  return demoted;
+}
+
+/**
  * The groups of operations that share a name but not a path, in name order.
- * A name shared only by operations on one path (PUT + PATCH) is not a
- * collision and is excluded.
+ * A name shared only by operations on one path is not a collision and is
+ * excluded: after demoteSamePathNames such operations are path-named and
+ * their methods take one verb (PUT + PATCH).
  *
  * Name order, not document order: the numeric pass draws suffixed names from
  * one pool per service, and two groups can reach the same one (`listNotes` +
@@ -1516,11 +1641,12 @@ function sameNoun(a: string, b: string): boolean {
  * read as `/shop/rescue/status`, whose resource `Status` the name ends with,
  * so the same `Rescue` tells it from `/shop/pets/{id}/status` rather than
  * `Pet` coming back as `getPetStatusPet`. Every other operation is read
- * whole.
+ * whole, as is an action that gave its name up on its path
+ * (demoteSamePathNames; `actions` false), whose name is the next shape's.
  */
-function qualifierPath(op: Operation, apiRootLength: number): string {
+function qualifierPath(op: Operation, apiRootLength: number, actions = true): string {
   const segments = pathSegments(op.path);
-  if (inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
+  if (actions && inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
   if (inferSingleton(op.path, apiRootLength)) {
     const parent = itemParentIndex(segments, apiRootLength);
     return '/' + segments.filter((_, i) => i !== parent && i !== segments.length - 2).join('/');
@@ -1879,23 +2005,27 @@ function buildOperation(
         )
       : [];
 
+  // Names this operation's models in the shape registry, and qualifies a
+  // deferred model's name when one of them is taken across operations.
+  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
+
   const reqBodyModels: Model[] = [];
-  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
-    requestBodyObject,
-    op,
-    pathModelBaseName,
-    reqBodyModels,
+  const {
+    body: requestBody,
+    encoding: requestBodyEncoding,
+    contentType: requestBodyContentType,
+    contentTypes: requestBodyContentTypes,
+    contents: requestBodyContents,
+  } = extractRequestBody(requestBodyObject, op, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
+    deferred,
+    operationQualifier,
     componentSchemas,
-    opLabel,
-  );
+  });
   // Read off the resolved body so a `components/requestBodies` ref's flag
   // counts. Only `true` makes the body required: OpenAPI defaults the flag
   // to `false`, and a non-boolean value is not a declaration of requiredness.
   // Set exactly when a body is, so the two fields can be read together.
   const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
-  // Names this operation's models in the shape registry, and qualifies a
-  // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
 
   // The page parameter's first value is read from its schema as written, so a
   // `default`/`minimum` behind `allOf: [{ $ref }]` or a nullable wrapper —
@@ -2062,9 +2192,15 @@ function buildOperation(
     cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
     requestBody,
     requestBodyEncoding,
+    // The picked media type's essence, what an emitter sends as Content-Type;
+    // set exactly when the body is.
+    ...(requestBodyContentType && { requestBodyContentType }),
     // Added only when the operation has a body so bodiless operations keep
     // their shape.
     ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    // Every media type the body declares, present only when there is one —
+    // the request-side twin of `responseContentTypes` / `responseContents`.
+    ...(requestBodyContentTypes && { requestBodyContentTypes, requestBodyContents }),
     response,
     // Added only when present so operations without headers keep their shape.
     ...(responseHeaders && { responseHeaders }),
@@ -2450,10 +2586,31 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
   { matches: (essence) => essence === 'text/plain', encoding: 'text', schemaRequired: false },
 ];
 
-/** The content entry a request body is read from: the key as written, its wire encoding and its schema. */
+/** The wire encoding a media type implies by essence (`REQUEST_BODY_MEDIA_TYPES`); `undefined` for one the pick never reads. */
+function requestBodyEncodingOf(contentType: string): RequestBodyEncoding | undefined {
+  const essence = mediaTypeEssence(contentType);
+  return REQUEST_BODY_MEDIA_TYPES.find(({ matches }) => matches(essence))?.encoding;
+}
+
+/**
+ * The type of a request content entry that declares no schema, by media type
+ * essence: a binary string for `application/octet-stream`, a string for
+ * `text/plain` (`schemalessRequestBodyType`), and `unknown` for anything
+ * else — a JSON or form media type included, since the pick reads those only
+ * with a schema. How a secondary entry of `requestBodyContents` is typed, on
+ * an operation and on a webhook alike.
+ */
+export function schemalessRequestContentType(contentType: string): TypeRef {
+  const encoding = requestBodyEncodingOf(contentType);
+  return (encoding && schemalessRequestBodyType(encoding)) ?? { kind: 'primitive', type: 'unknown' };
+}
+
+/** The content entry a request body is read from: the key as written, its essence, its wire encoding and its schema. */
 export interface SelectedRequestBodyContent {
   /** The `content` key the body was read from, exactly as written (`application/json; charset=utf-8`). */
   contentType: string;
+  /** The essence of `contentType` (`application/json`): what an emitter sends as the `Content-Type` (`Operation.requestBodyContentType`). */
+  essence: string;
   encoding: RequestBodyEncoding;
   /** Absent only for a binary or text body that declares none. */
   schema?: SchemaObject;
@@ -2479,30 +2636,33 @@ export function selectRequestBodyContent(body: RequestBodyObject | undefined): S
     const match = entries.find(
       ([contentType, media]) => matches(mediaTypeEssence(contentType)) && (!schemaRequired || media?.schema),
     );
-    if (match) return { contentType: match[0], encoding, schema: match[1]?.schema };
+    if (match) {
+      return { contentType: match[0], essence: mediaTypeEssence(match[0]), encoding, schema: match[1]?.schema };
+    }
   }
   return undefined;
 }
 
 /**
- * Warn that a request body is dropped: it declares at least one media type
- * and `selectRequestBodyContent` reads none, so no `requestBody` is set.
- * Called once per operation (`extractRequestBody`) and once per webhook
- * (where its entry is built: a webhook is minted twice, so the mint itself
- * must not report), while the passes that re-read the pick for an operation
- * (the body-owned query names, the const prefixes, the body parameter
- * groups) stay silent — so a dropped body is reported once, and never
- * silently. A body with no `content`, or an empty map, declares nothing and
- * is not reported.
+ * Warn that a request body is not read as `requestBody`: it declares at
+ * least one media type and `selectRequestBodyContent` reads none, so
+ * `requestBody` and `requestBodyEncoding` stay unset and the body reaches an
+ * emitter through `requestBodyContents` alone. Called once per operation
+ * (`extractRequestBody`) and once per webhook (where its entry is built: a
+ * webhook is minted twice, so the mint itself must not report), while the
+ * passes that re-read the pick for an operation (the body-owned query names,
+ * the const prefixes, the body parameter groups) stay silent — so such a
+ * body is reported once, and never silently. A body with no `content`, or an
+ * empty map, declares nothing and is not reported.
  */
-export function warnDroppedRequestBody(body: RequestBodyObject | undefined, label: string): void {
+export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label: string): void {
   const declared = Object.keys(body?.content ?? {});
   if (declared.length === 0 || selectRequestBodyContent(body)) return;
   console.warn(
-    `[oagen] Warning: Request body of ${label} is dropped: none of its media types (${declared.join(', ')}) ` +
-      `is read. A body is read from application/json or a +json media type, multipart/form-data or ` +
-      `application/x-www-form-urlencoded when it declares a schema, and from application/octet-stream or ` +
-      `text/plain with or without one, parameters and case aside.`,
+    `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
+      `(${declared.join(', ')}) is one the parser reads — application/json or a +json media type, ` +
+      `multipart/form-data or application/x-www-form-urlencoded with a schema, application/octet-stream or ` +
+      `text/plain with or without one, parameters and case aside. It is carried in requestBodyContents only.`,
   );
 }
 
@@ -2579,6 +2739,58 @@ function collectBodyPropertyNames(
   return names;
 }
 
+/** What request body typing needs beyond the body: where deferred schemas go and how their names are qualified. */
+interface RequestTypingContext {
+  /** Collects every secondary-body schema, named after the operations loop (`resolveDeferredInlineTypes`). */
+  deferred: DeferredInlineType[];
+  /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
+  operationQualifier: string;
+  /** Lets inline models resolve `$ref` siblings and augmentations the way fields do. */
+  componentSchemas?: Record<string, SchemaObject>;
+}
+
+/** The request body an operation carries: the picked entry typed, and every declared media type with its type. */
+interface ExtractedRequestBody {
+  body?: TypeRef;
+  encoding?: RequestBodyEncoding;
+  /** The picked entry's essence (`Operation.requestBodyContentType`); set exactly when `body` is. */
+  contentType?: string;
+  contentTypes?: string[];
+  contents?: RequestBodyContent[];
+}
+
+/**
+ * The name an operation's inline request body is materialized under:
+ * `<Op>Request` from the `operationId` (`operationIdModelName`), else the
+ * path-derived prefix plus `Request` (see derivePathModelBaseName) so two
+ * operations without an `operationId` never share one inline body model —
+ * every operationId-less body used to be `RequestBody`, and only the largest
+ * survived deduplication, leaving every other operation pointing at a model
+ * with someone else's fields.
+ */
+function requestModelName(op: OperationObject | undefined, pathModelBaseName: string): string {
+  return op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
+}
+
+/**
+ * The stem a secondary request body's model is named from: the primary
+ * body's name without its `Request` suffix, followed by the media type and
+ * `Request` — `ReplaceWidgetTextCsvRequest` beside `ReplaceWidgetRequest` —
+ * the way a secondary response body's stem is the primary response's name
+ * without `Response`.
+ */
+function requestModelStem(op: OperationObject | undefined, pathModelBaseName: string): string {
+  return requestModelName(op, pathModelBaseName).replace(/Request$/, '');
+}
+
+/**
+ * Read an operation's request body: the content entry the pick chooses
+ * (`selectRequestBodyContent`) typed as `body` with its `encoding`, and every
+ * media type the body declares as `contentTypes` / `contents`, the picked
+ * entry sharing `body`'s TypeRef (`extractRequestBodyContents`). A body none
+ * of whose media types is read is reported once and carried in `contents`
+ * alone.
+ */
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
@@ -2586,28 +2798,112 @@ function extractRequestBody(
   inlineModels: Model[],
   componentSchemas: Record<string, SchemaObject> | undefined,
   opLabel: string,
-): { body?: TypeRef; encoding?: RequestBodyEncoding } {
+  ctx: RequestTypingContext,
+): ExtractedRequestBody {
   const selected = selectRequestBodyContent(body);
-  if (!selected) {
-    // No content, or no media type the parser reads: no body, reported once.
-    warnDroppedRequestBody(body, opLabel);
-    return {};
-  }
-  const { encoding } = selected;
+  if (!selected) warnUnreadRequestBody(body, opLabel);
+  const primary = selected ? typeRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas) : {};
+  const contents = extractRequestBodyContents(
+    body?.content,
+    selected?.contentType,
+    primary.body,
+    requestModelStem(op, pathModelBaseName),
+    ctx,
+  );
+  return { ...primary, ...contents };
+}
+
+/**
+ * Read a request body's `content` map into the media types it declares — in
+ * document order and verbatim, parameters and vendor suffixes included — with
+ * a type for each, as `extractResponseContents` reads a response's. The entry
+ * for `primaryContentType` (the one the pick read `primaryType` from) carries
+ * that very TypeRef; every other entry goes through
+ * `typeSecondaryRequestContent`. `undefined` when the body declares no media
+ * type at all, so the caller leaves both keys off.
+ */
+function extractRequestBodyContents(
+  content: Record<string, { schema?: SchemaObject }> | undefined,
+  primaryContentType: string | undefined,
+  primaryType: TypeRef | undefined,
+  stem: string,
+  ctx: RequestTypingContext,
+): { contentTypes: string[]; contents: RequestBodyContent[] } | undefined {
+  if (!content) return undefined;
+  const contentTypes = Object.keys(content);
+  if (contentTypes.length === 0) return undefined;
+  const contents = contentTypes.map((contentType) => {
+    const entry: RequestBodyContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+    entry.type =
+      primaryType !== undefined && contentType === primaryContentType
+        ? primaryType
+        : typeSecondaryRequestContent(contentType, content[contentType]?.schema, stem, ctx, entry);
+    return entry;
+  });
+  return { contentTypes, contents };
+}
+
+/**
+ * Type a media type the request body pick did not choose, as it would be
+ * typed were it the only one declared: from its schema when it has one — an
+ * inline object materialized as `<Op><MediaType>Request`
+ * (`ReplaceWidgetTextCsvRequest`), named once every primary model is known
+ * (`resolveDeferredInlineTypes`), so the schema is deferred and the
+ * placeholder returned here is filled in then — else as
+ * `schemalessRequestContentType` types it.
+ */
+function typeSecondaryRequestContent(
+  contentType: string,
+  schema: SchemaObject | undefined,
+  stem: string,
+  ctx: RequestTypingContext,
+  target: RequestBodyContent,
+): TypeRef {
+  if (!schema) return schemalessRequestContentType(contentType);
+  ctx.deferred.push({
+    kind: 'request',
+    schema,
+    // Named from the media type's essence (`mediaTypeNameFragment`), so two
+    // spellings of one media type derive one name and the second steps to
+    // the next free one through the registry.
+    name: `${stem}${mediaTypeNameFragment(contentType)}Request`,
+    operationQualifier: ctx.operationQualifier,
+    componentSchemas: ctx.componentSchemas,
+    targets: [target],
+  });
+  return target.type;
+}
+
+/**
+ * The picked content entry typed as `Operation.requestBody`, with its
+ * encoding and its essence (`Operation.requestBodyContentType`), and its
+ * inline models pushed to `inlineModels`.
+ */
+function typeRequestBody(
+  selected: SelectedRequestBodyContent,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  inlineModels: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): { body?: TypeRef; encoding?: RequestBodyEncoding; contentType?: string } {
+  const typed = typePickedRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas);
+  return typed ? { body: typed, encoding: selected.encoding, contentType: selected.essence } : {};
+}
+
+/** The picked content entry's type: a primitive for a schema-less binary or text body, else typed from its schema. */
+function typePickedRequestBody(
+  selected: SelectedRequestBodyContent,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  inlineModels: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): TypeRef | undefined {
   let schema = selected.schema;
 
-  if (!schema) {
-    // Only a binary or text pick comes without a schema; it is a primitive.
-    const primitive = schemalessRequestBodyType(encoding);
-    return primitive ? { body: primitive, encoding } : {};
-  }
+  // Only a binary or text pick comes without a schema; it is a primitive.
+  if (!schema) return schemalessRequestBodyType(selected.encoding);
 
-  // Without an operationId, name the body from the operation's path-derived
-  // prefix (see derivePathModelBaseName) so two operations don't share one
-  // inline body model. Every operationId-less body used to be `RequestBody`,
-  // and only the largest survived deduplication — every other operation was
-  // left pointing at a model with someone else's fields.
-  const contextName = op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
+  const contextName = requestModelName(op, pathModelBaseName);
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
@@ -2644,7 +2940,7 @@ function extractRequestBody(
     // schemas are handled in extractInlineModelsFromSchemas — otherwise the
     // generated body model references a model that never gets generated.
     extractInlineModelsFromProperties(schema, inlineModels, contextName, componentSchemas);
-    return { body: { kind: 'model', name: contextName }, encoding };
+    return { kind: 'model', name: contextName };
   }
 
   // If the request body is a oneOf, extract each variant as an inline model
@@ -2755,8 +3051,7 @@ function extractRequestBody(
           }
         : {}),
     };
-    const body = hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
-    return { body, encoding };
+    return hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
   }
 
   // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
@@ -2773,7 +3068,7 @@ function extractRequestBody(
     undefined,
     componentSchemas,
   );
-  return { body: schemaToTypeRef(schema, contextName), encoding };
+  return schemaToTypeRef(schema, contextName);
 }
 
 /**
@@ -2974,16 +3269,17 @@ type ModelShapeRegistry = InlineModelRegistry;
  * then the target carries a placeholder.
  */
 interface DeferredInlineType {
-  kind: 'header' | 'content' | 'fallback' | 'error';
+  kind: 'header' | 'content' | 'request' | 'fallback' | 'error';
   schema: SchemaObject;
   /**
    * The bare name the models derive from: the header name, the response stem
-   * + media type + role, a fallback body's `<Op><Label>Response` or an error
-   * body's `<Op>Error<code>`.
+   * + media type + role, a secondary request body's `<Op><MediaType>Request`,
+   * a fallback body's `<Op><Label>Response` or an error body's
+   * `<Op>Error<code>`.
    */
   name: string;
-  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
-  statusCode: number | string;
+  /** A status code, or the label of a fallback response (`Default`, `ClientError`); a request body has none. */
+  statusCode?: number | string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
   /** Qualifies a header's names (`Documents` + `X-Meta` → `DocumentsXMeta`); a body has none. */
@@ -3025,22 +3321,24 @@ interface ResponseTypingContext {
 }
 
 /**
- * Name and materialize every deferred header, secondary-body, fallback-body
- * and error-body schema, now that every primary model is known. The registry
- * holds the component models first (with the inline models their fields
- * mint), then every inline model the operations minted — request bodies,
- * primary response bodies with their nested objects and union variants,
- * envelope companions — so no deferred schema can take one of their names
- * for a different shape, whichever operation minted it; each resolved
- * schema's own models join it in turn, in document order (path order, then
- * the response keys as written; a response's headers before its error body
- * and its secondary bodies, a fallback's body before its headers), so the
- * first owner of a name keeps it. The sites that derive from one bare name
- * — one kind, parent and name: the same header on several status codes or
- * operations, one media type's body on several status codes — share a
- * record of the stems they settled on, so a later one shares an identical
- * shape under whichever name the earlier took (`materializeInlineSchema`).
- * Returns the models materialized, having set each target's `type`.
+ * Name and materialize every deferred header, secondary request-body,
+ * secondary response-body, fallback-body and error-body schema, now that
+ * every primary model is known. The registry holds the component models
+ * first (with the inline models their fields mint), then every inline model
+ * the operations minted — request bodies, primary response bodies with their
+ * nested objects and union variants, envelope companions — so no deferred
+ * schema can take one of their names for a different shape, whichever
+ * operation minted it; each resolved schema's own models join it in turn, in
+ * document order (path order, then an operation's secondary request bodies
+ * in content order, then the response keys as written; a response's headers
+ * before its error body and its secondary bodies, a fallback's body before
+ * its headers), so the first owner of a name keeps it. The sites that derive
+ * from one bare name — one kind, parent and name: the same header on several
+ * status codes or operations, one media type's body on several status codes
+ * — share a record of the stems they settled on and the renames made under
+ * them, so a later one shares an identical shape under whichever name the
+ * earlier took (`materializeInlineSchema`). Returns the models materialized,
+ * having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -3142,6 +3440,8 @@ function attachSharedDeferredRefs(
  *   content   1. the bare name                `RenderPetCardTextHtmlResponse`
  *             2. the status code              `RenderPetCardTextHtmlResponse201`
  *             3. a numeric suffix             `…Response2`, `…Response3`, …
+ *   request   1. the bare name                `ReplaceWidgetTextCsvRequest`
+ *             2. a numeric suffix             `ReplaceWidgetTextCsvRequest2`, `…3`, …
  *   fallback  1. the bare name                `ListPetsDefaultResponse`
  *             2. a numeric suffix             `ListPetsDefaultResponse2`, `…3`, …
  *   error     1. the bare name                `GetPetError404`
@@ -3196,7 +3496,7 @@ function materializeDeferredType(
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
-  const { name, statusCode, operationQualifier } = item;
+  const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
   const byOperation = `${operationQualifier}${name}`;
   const byBoth = `${operationQualifier}${name}${statusCode}`;
@@ -3216,6 +3516,7 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
       };
     case 'content':
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
+    case 'request':
     case 'fallback':
       return (index) => (index === 0 ? name : numbered(index - 1));
     case 'error':
@@ -3884,26 +4185,13 @@ function typeSecondaryContent(
   ctx.deferred.push({
     kind: 'content',
     schema,
-    name: `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`,
+    name: `${naming.base}${mediaTypeNameFragment(contentType)}${naming.suffix}`,
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
   });
   return target.type;
-}
-
-/**
- * The PascalCase token that qualifies an inline model minted for a secondary
- * media type: `text/html` → `TextHtml`, `application/vnd.api+json` →
- * `ApplicationVndApiJson`. Parameters are part of it (`application/json;
- * charset=utf-8` → `ApplicationJsonCharsetUtf8`) so two parameterizations of
- * one type never share a model, and a wildcard segment reads as `Any`
- * (`application/*` → `ApplicationAny`) since the caser would drop the `*`.
- */
-function mediaTypeToken(contentType: string): string {
-  const token = toPascalCase(contentType.split('*').join('Any'));
-  return token.length > 0 ? token : 'Content';
 }
 
 /**

@@ -287,3 +287,83 @@ describe('diffOperations — response media types are compared by essence (issue
     expect(diffOperations('Pets', [lone], [withAdded200])).toEqual([]);
   });
 });
+
+describe('parser to differ — a secondary inline body under a respelled key (Greptile round 1)', () => {
+  /** `getReport`: a `Report` JSON primary plus one secondary YAML inline object, under the given key and schema. */
+  const report = (yamlKey: string, yamlProperties: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'Reports', version: '1' },
+    paths: {
+      '/report': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+                [yamlKey]: { schema: { type: 'object', properties: yamlProperties } },
+              },
+            },
+          },
+        },
+      },
+    },
+    components: { schemas: { Report: { type: 'object', properties: { id: { type: 'string' } } } } },
+  });
+  const diffDocuments = async (before: Record<string, unknown>, after: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-279-yaml-'));
+    try {
+      const oldPath = join(dir, 'old.json');
+      const newPath = join(dir, 'new.json');
+      writeFileSync(oldPath, JSON.stringify(before));
+      writeFileSync(newPath, JSON.stringify(after));
+      return diffSpecs(await parseSpec(oldPath), await parseSpec(newPath));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const title = { title: { type: 'string' } };
+
+  it('reports no change when only the key respells itself: the model is named from the essence on both sides', async () => {
+    const { changes, summary } = await diffDocuments(
+      report('application/yaml', title),
+      report('application/yaml; charset=utf-8', title),
+    );
+    expect(changes).toEqual([]);
+    expect(summary.breaking).toBe(0);
+  });
+
+  it('still reports a schema change under a respelled key: the model is modified, and the body is not retyped', async () => {
+    const { changes } = await diffDocuments(
+      report('application/yaml', title),
+      report('application/yaml; charset=utf-8', { ...title, summary: { type: 'string' } }),
+    );
+    // The model keeps its name, so the differ sees one modified model — not
+    // a model removed and another added, and not a retyped media type.
+    expect(changes.map((c) => c.kind)).toEqual(['model-modified']);
+    expect(changes[0]).toMatchObject({
+      kind: 'model-modified',
+      name: 'GetReportApplicationYamlResponse',
+      classification: 'additive',
+    });
+  });
+
+  it('reports a body retyped under a respelled key when its type really changed', async () => {
+    const before = report('application/yaml', title);
+    const after = report('application/yaml; charset=utf-8', title);
+    // The YAML body now points at the component instead of an inline object.
+    after.paths['/report'].get.responses['200'].content['application/yaml; charset=utf-8'] = {
+      schema: { $ref: '#/components/schemas/Report' },
+    } as never;
+    const { changes } = await diffDocuments(before, after);
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-removed', 'operation-modified']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/yaml; charset=utf-8'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+});
