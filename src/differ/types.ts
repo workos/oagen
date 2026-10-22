@@ -284,8 +284,8 @@ export interface OperationModified {
    * under. An SDK built for the old spec keeps serializing and labelling the
    * body as that spec said, so the change is breaking when the new spec no
    * longer accepts that representation — the media type the old body was
-   * read from is gone from `requestBodyContentTypes`, or its type changed
-   * (`application/json` where the server now reads only
+   * read from is gone from `requestBodyContentTypes`, or its shape changed,
+   * compared as `retyped` is (`application/json` where the server now reads only
    * `application/x-www-form-urlencoded`) — and additive when it still does,
    * as when a media type the parser prefers is added beside it
    * (`application/json` added beside a kept
@@ -424,14 +424,17 @@ export interface OperationModified {
  * `type/subtype`, case folded, parameters stripped (`mediaTypeEssence`, the
  * rule the parser types a body by) — and order aside: reordering them is no
  * change, and neither is a key that only changed case (`Text/HTML`) or
- * gained, lost or respelled a parameter (`application/problem+json;
- * charset=utf-8`). Each media type is reported as written in the spec that
- * declares it (`retyped` lists the new spec's spelling). Two keys of one
+ * gained, lost or respelled `charset` (`application/problem+json;
+ * charset=utf-8`); a pair whose other parameters differ is
+ * `reparameterized`, additive. Each media type is reported as written in
+ * the spec that declares it (`retyped` lists the new spec's spelling). Two keys of one
  * essence declared side by side (`application/json` beside
- * `application/json; charset=utf-8`) stay two media types: each pairs with
- * the key spelled the same way on the other side, else with the other
- * side's next unpaired key of its essence, and one left over is `added` or
- * `removed`.
+ * `application/json; charset=utf-8`) stay two media types: each pairs, in
+ * this order of preference, with the key spelled the same way on the other
+ * side, else one of its essence with the same parameters other than
+ * `charset`, else one of its essence whose body is the same shape, else the
+ * other side's next unpaired key of its essence; one left over is `added`
+ * or `removed`.
  */
 export interface ResponseContentTypesChange {
   statusCode?: number;
@@ -442,11 +445,25 @@ export interface ResponseContentTypesChange {
   /** Media types the old spec declared and the new does not: a representation callers could ask for is gone. */
   removed: string[];
   /**
-   * Media types declared by both whose body type changed, other than the one
-   * the entry's own `type` is read from, which `responseChanged` and
-   * `errorsChanged` already report.
+   * Media types declared by both whose body's shape changed — two model
+   * refs are compared field by field through the two specs' models, nested
+   * models and enums included, so a model that was only renamed (a
+   * parameter edit on a key declared beside another spelling of its essence
+   * renames the model the parser mints for it) is no retype and surfaces as
+   * `model-removed` + `model-added` instead — other than the one the entry's
+   * own `type` is read from, which `responseChanged` and `errorsChanged`
+   * already report.
    */
   retyped: string[];
+  /**
+   * Media types declared by both whose parameters other than `charset`
+   * differ (`application/pdf; version=1.7` → `; version=2.0`), both
+   * spellings as written: the body is typed the same, but the parameter
+   * may select another representation, so the change is kept visible.
+   * Additive. Case, whitespace, parameter order and `charset` are not
+   * differences.
+   */
+  reparameterized: Array<{ from: string; to: string }>;
   /** `breaking` when anything was removed or retyped, else `additive`. */
   classification: 'additive' | 'breaking';
 }
@@ -473,10 +490,24 @@ export interface RequestBodyContentTypesChange {
   /** Media types the old spec declared and the new does not: a representation the caller could send is gone. */
   removed: string[];
   /**
-   * Media types declared by both whose body type changed, other than the
-   * one `requestBody` is read from, which `requestBodyChanged` reports.
+   * Media types declared by both whose body's shape changed — two model
+   * refs are compared field by field through the two specs' models, nested
+   * models and enums included, so a model that was only renamed (a
+   * parameter edit on a key declared beside another spelling of its essence
+   * renames the model the parser mints for it) is no retype and surfaces as
+   * `model-removed` + `model-added` instead — other than the one
+   * `requestBody` is read from, which `requestBodyChanged` reports.
    */
   retyped: string[];
+  /**
+   * Media types declared by both whose parameters other than `charset`
+   * differ (`application/vnd.pets+json; version=1` → `; version=2`), both
+   * spellings as written: the body is typed the same, but the parameter
+   * may select another representation, so the change is kept visible.
+   * Additive on either side. Case, whitespace, parameter order and
+   * `charset` are not differences.
+   */
+  reparameterized: Array<{ from: string; to: string }>;
   /**
    * From the caller's side on an operation: `breaking` when anything was
    * removed or retyped, else `additive`. From the receiver's side on a
@@ -533,8 +564,8 @@ export interface WebhookModified {
    * `encoding json → form-urlencoded`): the encoding on each side, old →
    * new, as an `operation-modified` change carries them. Breaking when the
    * representation the sender now uses — the media type the new payload is
-   * read from, with its type — is not one the old spec declared with that
-   * type, so the handler decodes a wire format it never saw; additive when
+   * read from, with its shape — is not one the old spec declared with that
+   * shape, so the handler decodes a wire format it never saw; additive when
    * the old spec already declared it. A payload without media-type lists
    * reads as breaking.
    */
