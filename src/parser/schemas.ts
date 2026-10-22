@@ -1500,7 +1500,13 @@ export function isArraySchema(schema: SchemaObject | undefined): boolean {
  *     1-based position among the non-null variants, as a named union's
  *     non-object variants are (`memberContext`): the nested union's variants
  *     become `ReqShapeVariant2`, `BReqShapeVariant2`, an enum beside an object
- *     variant `ReqShapeVariant2`;
+ *     variant `ReqShapeVariant2`. Only context-dependent names take part in
+ *     the claim check: a nested title-mapped union (`nameInlineVariants`:
+ *     every variant titled and pinning the same const) mints its titles,
+ *     `A` and `B`, under every context alike, so it keeps the field's
+ *     context — it is in the map, so the extractor builds `A` and `B` — and
+ *     steps only for a variant of its own that fell back to a
+ *     context-qualified name (`AReqShape` when `A` is already taken);
  *   - a variant that mints nothing under the field's context (a primitive, an
  *     `allOf` of `$ref`s alone) keeps the field's context and is not in the map.
  *
@@ -1576,8 +1582,14 @@ export function nonObjectVariantContexts(
         [],
       ).context;
     } else {
+      // A variant that mints nothing (a primitive, an `allOf` of `$ref`s
+      // alone) needs no entry. One that mints only context-free names — a
+      // nested title-mapped union, whose variants are `A` and `B` under
+      // every context — needs one, so the extractor builds those models, but
+      // never a step: no context could move such a name, and a sibling
+      // shares or reserves it by shape (`reservedInlineNames`) instead.
+      if (mintedInlineNameEntries(contextName, member, parentModelName).length === 0) continue;
       const own = dependentNames(contextName);
-      if (own.length === 0) continue;
       const stepped = `${contextName}_variant_${position}`;
       const under = dependentNames(stepped);
       context = unclaimed(own)
