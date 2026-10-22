@@ -12,7 +12,13 @@ import { resolveServerUrl } from '../ir/server-url.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 import { diffServers } from './servers.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
-import { classifyParamChange, deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
+import {
+  classifyParamChange,
+  deprecationDetails,
+  deprecationFlip,
+  requestBodyEncodingShift,
+  tagsShift,
+} from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
@@ -73,13 +79,18 @@ export function diffOperations(
     const paramChanges = diffParams(oldOp, newOp);
     const responseChanged = !typeRefsEqual(oldOp.response, newOp.response);
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
-    // Only while both sides carry a body: a body appearing or disappearing is
-    // already `requestBodyChanged`. An absent flag reads as optional, as it
-    // does in OpenAPI.
+    // The required flag and the encoding are compared only while both sides
+    // carry a body: a body appearing or disappearing is already
+    // `requestBodyChanged`, and the parser sets both beside the body, so
+    // they go with it.
+    const bothCarryBody = !!oldOp.requestBody && !!newOp.requestBody;
+    // An absent flag reads as optional, as it does in OpenAPI.
     const requestBodyRequiredChanged =
-      !!oldOp.requestBody &&
-      !!newOp.requestBody &&
-      (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
+      bothCarryBody && (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
+    // The wire format the SDK serializes the body as, read through the
+    // function `diffWebhooks` reads a payload's encoding with.
+    const encoding = bothCarryBody ? requestBodyEncodingShift(oldOp, newOp) : undefined;
+    const requestBodyEncodingChanged = encoding !== undefined;
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
     const paginatedChanged = !!oldOp.pagination !== !!newOp.pagination;
@@ -131,6 +142,7 @@ export function diffOperations(
       responseChanged ||
       requestBodyChanged ||
       requestBodyRequiredChanged ||
+      requestBodyEncodingChanged ||
       httpMethodChanged ||
       pathChanged ||
       paginatedChanged ||
@@ -185,6 +197,10 @@ export function diffOperations(
         responseChanged ||
         requestBodyBreaking ||
         requestBodyRequiredBreaking ||
+        // requestBodyEncoding: breaking either way — an SDK built for the old
+        // spec serializes and labels the body as that spec said, which the
+        // server no longer reads.
+        requestBodyEncodingChanged ||
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
@@ -211,6 +227,8 @@ export function diffOperations(
         responseChanged,
         requestBodyChanged,
         requestBodyRequiredChanged,
+        requestBodyEncodingChanged,
+        ...encoding,
         httpMethodChanged,
         pathChanged,
         paginatedChanged,

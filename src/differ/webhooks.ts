@@ -1,6 +1,13 @@
 import type { Parameter, Webhook } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
-import { deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
+import {
+  deprecationDetails,
+  deprecationFlip,
+  requestBodyEncodingDetails,
+  requestBodyEncodingShift,
+  tagsShift,
+  type RequestBodyEncodingShift,
+} from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
@@ -90,6 +97,7 @@ export function diffWebhooks(
       httpMethod: newWebhook.httpMethod,
       paramChanges,
       requestBodyChanged: body.changes.length > 0,
+      ...body.encoding,
       responsesChanged: responses.changes.length > 0,
       deprecatedChanged,
       ...deprecation,
@@ -110,10 +118,16 @@ export function diffWebhooks(
  *
  * - type changed, gained or lost: breaking — it is the handler's parameter type.
  * - encoding changed: breaking — the handler decodes a different wire format.
+ *   Read through `requestBodyEncodingShift`, the function `diffOperations`
+ *   reads an operation's body encoding with, and carried as `encoding`
+ *   beside the `details` string so the change can report both sides.
  * - required → optional: breaking — a handler that assumed a body may get none.
  * - optional → required: additive — the body is now always there.
  */
-function diffWebhookBody(oldWebhook: Webhook, newWebhook: Webhook): { changes: string[]; breaking: boolean } {
+function diffWebhookBody(
+  oldWebhook: Webhook,
+  newWebhook: Webhook,
+): { changes: string[]; breaking: boolean; encoding?: RequestBodyEncodingShift } {
   const changes: string[] = [];
   let breaking = false;
 
@@ -125,10 +139,9 @@ function diffWebhookBody(oldWebhook: Webhook, newWebhook: Webhook): { changes: s
     breaking = true;
   }
 
-  const oldEncoding = oldWebhook.requestBodyEncoding ?? '<none>';
-  const newEncoding = newWebhook.requestBodyEncoding ?? '<none>';
-  if (oldEncoding !== newEncoding) {
-    changes.push(`encoding ${oldEncoding} → ${newEncoding}`);
+  const encoding = requestBodyEncodingShift(oldWebhook, newWebhook);
+  if (encoding) {
+    changes.push(requestBodyEncodingDetails(encoding));
     breaking = true;
   }
 
@@ -139,7 +152,7 @@ function diffWebhookBody(oldWebhook: Webhook, newWebhook: Webhook): { changes: s
     if (!isRequired) breaking = true;
   }
 
-  return { changes, breaking };
+  return { changes, breaking, ...(encoding ? { encoding } : {}) };
 }
 
 /**
