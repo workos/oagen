@@ -44,7 +44,8 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
 } from './schemas.js';
-import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs } from '../ir/types.js';
+import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
   detectPagination,
   derivePageStart,
@@ -65,7 +66,7 @@ import {
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
-import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
+import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 
 export interface PathItem {
@@ -321,6 +322,14 @@ export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delet
 export interface OperationExtractionResult {
   services: Service[];
   inlineModels: Model[];
+  /**
+   * Where the operations' inline models came from — one bundle per response
+   * and per request body that produced any — so a merge pass can rename a
+   * copy that must not share its name and repoint exactly that operation's
+   * references. List-envelope companions are not bundled:
+   * `resolveEnvelopeCompanionNames` settles their names once and for all.
+   */
+  inlineModelBundles: InlineModelBundle[];
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -346,7 +355,7 @@ export function extractOperations(
   openapiVersion?: string,
   operationHints?: Record<string, OperationHint>,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [] };
+  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
 
   // OAS 3.0 ignores properties beside a `$ref`; 3.1 lets a sibling
   // `description` override the referenced response's. Unknown is read as 3.1.
@@ -380,7 +389,10 @@ export function extractOperations(
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
+  const inlineModelBundles: InlineModelBundle[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
+  /** The PascalCase operation name each companion was lifted under, to qualify it should a merge pass rename it. */
+  const companionQualifiers = new Map<EnvelopeCompanion, string>();
   // Service name each tagged operation was grouped under, keyed by operation
   // identity. The path-prefix split below moves operations between services,
   // so this is how a split-off service is traced back to the tag it came from.
@@ -423,6 +435,7 @@ export function extractOperations(
       const {
         operation,
         inlineModels: opModels,
+        inlineModelBundles: opBundles,
         envelopeCompanions: opCompanions,
         operationQualifier,
       } = buildOperation(
@@ -450,7 +463,11 @@ export function extractOperations(
       );
       inlineModels.push(...opModels);
       for (const model of opModels) operationOf.set(model, operationQualifier);
-      if (opCompanions) envelopeCompanions.push(...opCompanions);
+      inlineModelBundles.push(...opBundles);
+      if (opCompanions) {
+        envelopeCompanions.push(...opCompanions);
+        for (const companion of opCompanions) companionQualifiers.set(companion, toPascalCase(operation.name));
+      }
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
@@ -467,7 +484,17 @@ export function extractOperations(
   // titled `ListMetadata` steps around the companion a primary response's
   // `list_metadata` becomes, instead of the later merge keeping whichever has
   // more fields under one name.
-  inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+  const companionFolds = new Map<EnvelopeCompanion, EnvelopeCompanion>();
+  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels, companionFolds);
+  inlineModels.push(...companionModels);
+  // Each companion that kept its models is a site of its own, owning its
+  // envelope field and the envelope field of every operation whose copy
+  // folded onto it, so a merge pass that must rename one of its models (a
+  // deprecated companion named like a live component field's model, say)
+  // repoints every operation sharing it and nothing else.
+  inlineModelBundles.push(
+    ...companionBundles(envelopeCompanions, companionModels, companionFolds, companionQualifiers),
+  );
 
   // Headers, secondary bodies, fallback bodies and error bodies are named
   // last, in document order, against every name above — the component models,
@@ -475,13 +502,24 @@ export function extractOperations(
   // map's values; not among `componentModels`, see parseSpec), every request
   // body, primary response and companion model — so none of them takes a name
   // one of those owns, whichever comes first in the document.
-  inlineModels.push(
-    ...resolveDeferredInlineTypes(
-      deferred,
-      [...(componentModels ?? []), ...(componentFieldModels ?? [])],
-      inlineModels,
-      operationOf,
-    ),
+  const deferredTypes = resolveDeferredInlineTypes(
+    deferred,
+    [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+    inlineModels,
+    operationOf,
+  );
+  inlineModels.push(...deferredTypes.models);
+  // Each deferred schema is a site of its own (the references it wrote, the
+  // models it minted), and a reference it wrote by sharing another site's
+  // model — the registry matched the shape of a primary body's model or a
+  // companion's — joins that site's roots, so a merge pass that renames the
+  // model (a deprecated copy named like a live one) repoints the `default`
+  // response or header that shares it along with the site's own references.
+  inlineModelBundles.push(...deferredTypes.bundles);
+  attachSharedDeferredRefs(
+    deferredTypes.bundles,
+    inlineModelBundles,
+    new Set([...(componentModels ?? []), ...(componentFieldModels ?? [])].map((model) => model.name)),
   );
 
   // The API root each operation's path sits under, for every step below: none
@@ -541,7 +579,7 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels };
+  return { services, inlineModels, inlineModelBundles };
 }
 
 /**
@@ -1529,6 +1567,7 @@ function buildOperation(
 ): {
   operation: Operation;
   inlineModels: Model[];
+  inlineModelBundles: InlineModelBundle[];
   envelopeCompanions?: EnvelopeCompanion[];
   /** What the shape registry records as the owner of this operation's models (see `headerOperationQualifier`). */
   operationQualifier: string;
@@ -1661,7 +1700,7 @@ function buildOperation(
     errors,
     defaultResponse,
     rangeResponses,
-    inlineModels,
+    inlineModels: responseModels,
     isPaginated,
     dataPath: responseDataPath,
     dataDescription: responseDataDescription,
@@ -1693,7 +1732,7 @@ function buildOperation(
       componentModels,
     },
   );
-  inlineModels.push(...reqBodyModels);
+  const inlineModels = [...responseModels, ...reqBodyModels];
 
   // An explicit `dataPath` that does not reach an array cannot type the
   // iterator's items, so the whole override falls back to detection, as
@@ -1762,54 +1801,84 @@ function buildOperation(
   // its own field nor leaks into the description as a blank first paragraph.
   const summary = presentText(op.summary);
 
-  return {
-    operation: {
-      name: operationName,
-      // Keep the summary on its own so emitters can tell it apart from the
-      // description; the key is omitted (not set to undefined) when absent.
-      ...(summary !== undefined ? { summary } : {}),
-      description: buildDescription(summary, op.description),
-      // Same conditional shape as `summary`: present only when the document
-      // declares a usable link, absent (not undefined) otherwise.
-      ...externalDocsEntry(op.externalDocs),
-      httpMethod: method,
-      path,
-      // Present only when the operation's effective servers differ from the
-      // document's (see operationServers); absent, not undefined, otherwise.
-      ...(servers && { servers }),
-      pathParams,
-      queryParams,
-      bodyOwnedQueryParams: bodyOwnedQueryParams.length > 0 ? bodyOwnedQueryParams : undefined,
-      headerParams,
-      cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
-      requestBody,
-      requestBodyEncoding,
-      // Added only when the operation has a body so bodiless operations keep
-      // their shape.
-      ...(requestBodyRequired !== undefined && { requestBodyRequired }),
-      response,
-      // Added only when present so operations without headers keep their shape.
-      ...(responseHeaders && { responseHeaders }),
-      ...(responseContentTypes && { responseContentTypes, responseContents }),
-      // Likewise only when the primary response declares a description.
-      ...(responseDescription && { responseDescription }),
-      successResponses,
-      errors,
-      // Added only when the document declares them so operations without
-      // fallback responses keep their shape.
-      ...(defaultResponse && { defaultResponse }),
-      ...(rangeResponses && { rangeResponses }),
-      pagination,
-      injectIdempotencyKey: hasIdempotencyHeader,
-      deprecated: op.deprecated || undefined,
-      async: op['x-oagen-async'],
-      security,
-      parameterGroups,
-    },
-    inlineModels,
-    envelopeCompanions,
-    operationQualifier,
+  const operation: Operation = {
+    name: operationName,
+    // Keep the summary on its own so emitters can tell it apart from the
+    // description; the key is omitted (not set to undefined) when absent.
+    ...(summary !== undefined ? { summary } : {}),
+    description: buildDescription(summary, op.description),
+    // Same conditional shape as `summary`: present only when the document
+    // declares a usable link, absent (not undefined) otherwise.
+    ...externalDocsEntry(op.externalDocs),
+    httpMethod: method,
+    path,
+    // Present only when the operation's effective servers differ from the
+    // document's (see operationServers); absent, not undefined, otherwise.
+    ...(servers && { servers }),
+    pathParams,
+    queryParams,
+    bodyOwnedQueryParams: bodyOwnedQueryParams.length > 0 ? bodyOwnedQueryParams : undefined,
+    headerParams,
+    cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
+    requestBody,
+    requestBodyEncoding,
+    // Added only when the operation has a body so bodiless operations keep
+    // their shape.
+    ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    response,
+    // Added only when present so operations without headers keep their shape.
+    ...(responseHeaders && { responseHeaders }),
+    ...(responseContentTypes && { responseContentTypes, responseContents }),
+    // Likewise only when the primary response declares a description.
+    ...(responseDescription && { responseDescription }),
+    successResponses,
+    errors,
+    // Added only when the document declares them so operations without
+    // fallback responses keep their shape.
+    ...(defaultResponse && { defaultResponse }),
+    ...(rangeResponses && { rangeResponses }),
+    pagination,
+    injectIdempotencyKey: hasIdempotencyHeader,
+    deprecated: op.deprecated === true || undefined,
+    async: op['x-oagen-async'],
+    security,
+    parameterGroups,
   };
+
+  // Where the models came from, so a merge pass that must rename one — a
+  // deprecated response named like a live one, say — can qualify it by this
+  // operation and repoint only this operation's references: the response
+  // bundle owns the success bodies, the list envelope and the response
+  // headers; the request bundle owns the body. Qualified as a header model or
+  // list-envelope companion is (`GetLegacyWidgetWidget`).
+  const qualifier = toPascalCase(operationName);
+  const inlineModelBundles: InlineModelBundle[] = [];
+  if (responseModels.length > 0) {
+    inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
+  }
+  if (reqBodyModels.length > 0 && requestBody) {
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+  }
+
+  return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
+}
+
+/**
+ * The type references an operation's responses own: the primary and every
+ * alternate success body, the list envelope's fields and item type, and
+ * every response header. Error bodies are left out: a `$ref` body names a
+ * component, which a rename never touches, and an inline one is typed
+ * through the deferred registry, where it is a site of its own
+ * (`resolveDeferredInlineTypes`), so a rename reaches it from there.
+ */
+function responseTypeRefs(op: Operation): TypeRef[] {
+  return [
+    op.response,
+    ...(op.successResponses ?? []).map((r) => r.type),
+    ...(op.pagination?.envelopeFields ?? []).map((f) => f.type),
+    ...(op.pagination ? [op.pagination.itemType] : []),
+    ...collectResponseHeaders(op).map((h) => h.type),
+  ];
 }
 
 /**
@@ -1903,7 +1972,8 @@ export function extractParams(
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
         description: firstDescription(p.description, p.schema?.description, refTarget?.description),
-        deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
+        deprecated:
+          p.deprecated === true || p.schema?.deprecated === true || refTarget?.deprecated === true || undefined,
         ...(externalDocs ? { externalDocs } : {}),
         default: p.schema?.default ?? refTarget?.default,
         example,
@@ -2571,7 +2641,7 @@ function resolveDeferredInlineTypes(
   componentModels: readonly Model[],
   inlineModels: readonly Model[],
   operationOf: ReadonlyMap<Model, string>,
-): Model[] {
+): { models: Model[]; bundles: InlineModelBundle[] } {
   const registry: ModelShapeRegistry = new Map();
   for (const model of componentModels) {
     if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
@@ -2581,11 +2651,51 @@ function resolveDeferredInlineTypes(
     registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
   }
   const models: Model[] = [];
+  const bundles: InlineModelBundle[] = [];
   for (const item of deferred) {
+    const minted = models.length;
     const type = materializeDeferredType(item, registry, models);
     for (const target of item.targets) target.type = type;
+    // The one TypeRef every target shares is the site's root; the models
+    // minted for it are the site's own (a shape that shared another site's
+    // model minted nothing here, see `attachSharedDeferredRefs`).
+    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
   }
-  return models;
+  return { models, bundles };
+}
+
+/**
+ * Give each reference a deferred schema wrote by sharing another site's model
+ * to that site. A deferred shape identical to a name's owner — a primary
+ * body's model, a companion's, an earlier deferred model — takes the name and
+ * mints nothing, so its reference is not among the owner's roots, and a merge
+ * pass that renames the owner (a deprecated copy named like a live one,
+ * `separateDeprecatedCopies`) would leave the `default` response or header on
+ * the old name, which the live copy then takes. The first site to mint a
+ * name owns it, as the registry decided; the references the deferred site's
+ * roots and its own models' fields make to that name are added to the
+ * owner's roots, so they are repointed with the owner's own. A component is
+ * never renamed, so a reference to one is left alone.
+ */
+function attachSharedDeferredRefs(
+  deferredBundles: readonly InlineModelBundle[],
+  bundles: readonly InlineModelBundle[],
+  componentNames: ReadonlySet<string>,
+): void {
+  const siteOf = new Map<string, InlineModelBundle>();
+  for (const bundle of bundles) {
+    for (const model of bundle.models) if (!siteOf.has(model.name)) siteOf.set(model.name, bundle);
+  }
+  for (const bundle of deferredBundles) {
+    const refs = [...bundle.roots, ...bundle.models.flatMap((model) => collectModelTypeRefs(model))];
+    for (const ref of refs) {
+      for (const name of collectModelRefs(ref)) {
+        if (componentNames.has(name)) continue;
+        const site = siteOf.get(name);
+        if (site && site !== bundle && !site.roots.includes(ref)) site.roots.push(ref);
+      }
+    }
+  }
 }
 
 /**
@@ -2724,7 +2834,7 @@ function extractResponseHeaders(
       type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
-      deprecated: header.deprecated || undefined,
+      deprecated: header.deprecated === true || undefined,
       // The header schema's own link — a Header Object has none — read from
       // whichever of `schema` and `content` types the header, as the type is.
       ...externalDocsEntry(schema?.externalDocs),

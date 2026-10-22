@@ -1,4 +1,14 @@
-import type { Model, Enum, EnumValue, EnumRef, ExternalDocs, Field, TypeRef, Constraints } from '../ir/types.js';
+import type {
+  Model,
+  ModelRef,
+  Enum,
+  EnumValue,
+  EnumRef,
+  ExternalDocs,
+  Field,
+  TypeRef,
+  Constraints,
+} from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import {
   toPascalCase,
@@ -313,10 +323,12 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
 /**
  * `{ deprecated: true }` when `schema` says so, `{}` otherwise — spread into
  * a Model or Enum so the key stays absent rather than present-but-false. Read
- * the way `Field.deprecated` is: only the schema's own top-level keyword.
+ * the way `Field.deprecated` is: only the schema's own top-level keyword, and
+ * only the literal `true` — `deprecated: "yes"` is not a declaration, as it
+ * is not on a field, parameter, operation or header.
  */
 export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } {
-  return schema.deprecated ? { deprecated: true } : {};
+  return schema.deprecated === true ? { deprecated: true } : {};
 }
 
 /**
@@ -419,7 +431,7 @@ export function collapsedNullableBranch(schema: SchemaObject): SchemaObject | un
  */
 export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const result: SchemaObject = { ...inner, ...deprecatedEntry(wrapper) };
-  if (!wrapper.deprecated) delete result.deprecated;
+  if (wrapper.deprecated !== true) delete result.deprecated;
   return result;
 }
 
@@ -593,6 +605,9 @@ export function extractSchemas(
   // below (including the collision probe) can tell a real component key from
   // a name oagen synthesised.
   activeComponentSchemaKeys = new Set(Object.keys(schemas));
+  // A new document: the references an `allOf` merge inherits from a
+  // component's property (`inheritedModelRefsOf`) are recorded per document.
+  resetInheritedModelRefs();
 
   // Build collision-safe transform if provided. The transform is probed with
   // the same (cleaned, raw) pair resolveSchemaName() will hand it, so a
@@ -1602,7 +1617,7 @@ export function buildFieldFromSchema(
     ...externalDocsEntry(fieldSchema.externalDocs),
     readOnly: fieldSchema.readOnly || undefined,
     writeOnly: fieldSchema.writeOnly || undefined,
-    deprecated: fieldSchema.deprecated || undefined,
+    deprecated: fieldSchema.deprecated === true || undefined,
     default: fieldSchema.default,
     example,
     // Only materialise the key when there is something to carry so existing
@@ -2931,6 +2946,22 @@ function elementContext(
     : elementContextName(contextName, kind, siblingProperties, parentModelName, elementSchema);
 }
 
+/**
+ * Every `ModelRef` built from a `$ref` — an explicit reference to a component
+ * schema, as opposed to one minted for an inline object. The two kinds carry
+ * the same `{ kind: 'model', name }` shape, so the identity is kept here: a
+ * pass that renames an inline model repoints the references minted for it and
+ * must leave an explicit reference to a same-named component as written
+ * (`isComponentModelRef`). The set is keyed by object identity and every
+ * pass between building and emitting mutates refs in place, so it holds.
+ */
+const componentModelRefs = new WeakSet<ModelRef>();
+
+/** Whether `ref` was built from a `$ref` to a component schema rather than minted for an inline object. */
+export function isComponentModelRef(ref: ModelRef): boolean {
+  return componentModelRefs.has(ref);
+}
+
 export function schemaToTypeRef(
   schema: SchemaObject,
   contextName?: string,
@@ -2959,8 +2990,11 @@ export function schemaToTypeRef(
       return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
     // Likewise a named union with a `null` variant: the variant is not a
-    // member of the model, so the reference carries the nullability.
-    const modelRef: TypeRef = { kind: 'model', name: resolved };
+    // member of the model, so the reference carries the nullability. The
+    // model reference itself is recorded as a component's (`componentModelRefs`)
+    // whether or not it is wrapped.
+    const modelRef: ModelRef = { kind: 'model', name: resolved };
+    componentModelRefs.add(modelRef);
     return activeNullableUnionSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
   }
 
@@ -3379,6 +3413,7 @@ import {
   mintedInlineNames,
   qualifyInlineModelName,
   reservedInlineNames,
+  resetInheritedModelRefs,
   schemaShapeKey,
 } from './inline-models.js';
 

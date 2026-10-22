@@ -17,13 +17,15 @@ import { STATUS_RANGE_LABELS } from './responses.js';
  * other values; such a field is renamed to a distinct name before it is
  * promoted (`…Status2`), collision-aware like the operation pass below and the
  * way header and webhook enums are, so the field never points at the other
- * values. A taken name with the same values is shared.
+ * values. A taken name with the same values is shared. The distinct name is
+ * also never one of `models`' (see `distinctEnumName`).
  */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
+  const modelNames = new Set(models.map((model) => model.name));
   for (const model of models) {
     for (const ref of collectModelTypeRefs(model)) {
-      collectDistinctEnums(ref, undefined, enums, enumNames);
+      collectDistinctEnums(ref, undefined, enums, enumNames, modelNames);
     }
   }
 }
@@ -49,7 +51,9 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  * (`componentNames`), whose enums the model pass owns — so an enum nested in
  * such a model gets the same collision-aware treatment as one at the top: a
  * name a component enum already owns with other values is renamed, not
- * silently given the component's values.
+ * silently given the component's values. It is also the set of names a
+ * renamed enum must step around (`distinctEnumName`), so pass every model of
+ * the document, not only the ones to walk into.
  */
 export function collectInlineEnumsFromOperations(
   services: Service[],
@@ -59,10 +63,11 @@ export function collectInlineEnumsFromOperations(
 ): void {
   const enumNames = new Set(enums.map((e) => e.name));
   const modelsByName = new Map(models.map((model) => [model.name, model]));
+  const modelNames = new Set(modelsByName.keys());
   // Each materialized model is visited once, under the first qualifier that reaches it.
   const visited = new Set<string>();
   const collectThroughModels = (type: TypeRef, qualifier: string | undefined): void => {
-    collectDistinctEnums(type, qualifier, enums, enumNames);
+    collectDistinctEnums(type, qualifier, enums, enumNames, modelNames);
     for (const name of collectModelRefs(type)) {
       if (visited.has(name) || componentNames.has(name)) continue;
       visited.add(name);
@@ -80,7 +85,7 @@ export function collectInlineEnumsFromOperations(
         ...op.headerParams,
         ...(op.cookieParams ?? []),
       ]) {
-        collectDistinctEnums(param.type, undefined, enums, enumNames);
+        collectDistinctEnums(param.type, undefined, enums, enumNames, modelNames);
       }
       // The iterator's item type is reached through `response` when detection
       // unwrapped the data array, but an explicit `dataPath` can type it from
@@ -92,7 +97,7 @@ export function collectInlineEnumsFromOperations(
       // like a body's, so an enum nested in one is reached the same way.
       if (op.pagination) collectThroughModels(op.pagination.itemType, undefined);
       for (const field of op.pagination?.envelopeFields ?? []) {
-        collectDistinctEnums(field.type, undefined, enums, enumNames);
+        collectDistinctEnums(field.type, undefined, enums, enumNames, modelNames);
       }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at
@@ -109,7 +114,7 @@ export function collectInlineEnumsFromOperations(
       // nested in an error body's model is collected with every other
       // model's (`collectInlineEnumsFromModels`).
       for (const error of op.errors) {
-        if (error.type) collectDistinctEnums(error.type, 'Body', enums, enumNames);
+        if (error.type) collectDistinctEnums(error.type, 'Body', enums, enumNames, modelNames);
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`), or for a `default` or range response, is typed
@@ -133,15 +138,23 @@ export function collectInlineEnumsFromOperations(
  * is not silently shared (the webhook's reference would otherwise point at
  * an unrelated enum's values) but renamed to a distinct one before it is
  * promoted (`PetAdoptedXSource2`); a taken name with the same values is
- * shared. The parser's stem reservation keeps such a clash from arising
- * through `parseSpec`; this guards the IR for any caller. A payload model's
- * field enums are reached through `spec.models` by
+ * shared, and the distinct name is never one of `models`'
+ * (`distinctEnumName`). The parser's stem reservation keeps such a clash from
+ * arising through `parseSpec`; this guards the IR for any caller. A payload
+ * model's field enums are reached through `spec.models` by
  * `collectInlineEnumsFromModels`, since the model is materialized there.
  */
-export function collectInlineEnumsFromWebhooks(webhooks: Webhook[], enums: Enum[]): void {
+export function collectInlineEnumsFromWebhooks(
+  webhooks: Webhook[],
+  enums: Enum[],
+  models: readonly Model[] = [],
+): void {
   const enumNames = new Set(enums.map((e) => e.name));
+  const modelNames = new Set(models.map((model) => model.name));
   for (const webhook of webhooks) {
-    for (const ref of collectWebhookTypeRefs(webhook)) collectDistinctEnums(ref, undefined, enums, enumNames);
+    for (const ref of collectWebhookTypeRefs(webhook)) {
+      collectDistinctEnums(ref, undefined, enums, enumNames, modelNames);
+    }
   }
 }
 
@@ -184,20 +197,22 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
  * named like the header, or a webhook parameter named like a component enum,
  * collides the same way. When the name is already taken by a different value
  * set, the ref is renamed to a distinct name before it is promoted. A taken
- * name with the same values is shared, as before.
+ * name with the same values is shared, as before. `modelNames` are the names
+ * the distinct name must also step around.
  */
 function collectDistinctEnums(
   ref: TypeRef,
   qualifier: string | undefined,
   enums: Enum[],
   enumNames: Set<string>,
+  modelNames: ReadonlySet<string>,
 ): void {
   walkTypeRef(ref, {
     enum: (ref) => {
       if (!ref.values) return;
       const existing = enums.find((e) => e.name === ref.name);
       if (existing && !sameEnumValues(existing, ref.values)) {
-        ref.name = distinctEnumName(ref.name, ref.values, qualifier, enums);
+        ref.name = distinctEnumName(ref.name, ref.values, qualifier, enums, modelNames);
       }
       collectInlineEnumFromRef(ref, enums, enumNames);
     },
@@ -212,18 +227,27 @@ function sameEnumValues(existing: Enum, values: (string | number)[]): boolean {
 }
 
 /**
- * The first name not taken by a different value set: the base qualified by
- * the status code (`DocumentsXPolicy429`), then numeric suffixes
- * (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...). Deterministic for a given
- * spec, since it depends only on declaration order.
+ * The first name not taken by a different value set, nor by a model: the
+ * base qualified by the status code (`DocumentsXPolicy429`), then numeric
+ * suffixes (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...). Deterministic for
+ * a given spec, since it depends only on declaration order. The collectors
+ * run after every model is named, and the merge passes mint against every
+ * enum name an `EnumRef` carries (`reservedTypeNames`) — but not against the
+ * names chosen here, so this is the side that steps around the other: a
+ * model a merge pass qualified to `GetLegacyWidgetWidget2`, because a
+ * component enum owns `GetLegacyWidgetWidget`, sends a query enum of that
+ * name with other members on to `GetLegacyWidgetWidget3`, and the IR never
+ * declares a model and an enum under one name.
  */
 function distinctEnumName(
   base: string,
   values: (string | number)[],
   qualifier: string | undefined,
   enums: Enum[],
+  modelNames: ReadonlySet<string>,
 ): string {
   const isUsable = (name: string): boolean => {
+    if (modelNames.has(name)) return false;
     const taken = enums.find((e) => e.name === name);
     return !taken || sameEnumValues(taken, values);
   };

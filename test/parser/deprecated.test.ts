@@ -442,7 +442,7 @@ describe('collapseJsonSuffixModels – deprecated', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const merged = collapseJsonSuffixModels(models, []);
-      expect(merged.map((m) => m.name)).toEqual(['Widget', 'Gadget']);
+      expect(merged.map((m) => m.name)).toEqual(['Widget', 'Gadget', 'GadgetJson']);
       expect(merged.find((m) => m.name === 'Widget')).not.toHaveProperty('deprecated');
       expect(merged.find((m) => m.name === 'Gadget')).toMatchObject({ deprecated: true });
     } finally {
@@ -1273,14 +1273,16 @@ describe('parseSpec – deprecated', () => {
           warn.mockClear();
           const spec = await parseSpec(await writeSpec(`${order}.json`, specDoc({ Widget: component }, paths)));
           const warnings = warn.mock.calls.map(([m]) => String(m));
-          // The component keeps its own flag under the response's fields, and
-          // both operations still resolve to it — nothing dangles.
+          // The component keeps its own flag and its own fields; the response,
+          // which disagrees on the flag, takes an operation-qualified name of
+          // its own (issue #260), and both operations resolve — nothing dangles.
           expect(shapes(spec.models), label).toEqual({
-            Widget: { deprecated: componentFlag ? true : undefined, fields: ['object', 'k', 'extra'] },
+            Widget: { deprecated: componentFlag ? true : undefined, fields: ['object', 'k'] },
+            GetLegacyWidgetWidget: { deprecated: responseFlag ? true : undefined, fields: ['object', 'k', 'extra'] },
           });
           const ops = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
           expect(ops.getWidget?.response, label).toEqual({ kind: 'model', name: 'Widget' });
-          expect(ops.getLegacyWidget?.response, label).toEqual({ kind: 'model', name: 'Widget' });
+          expect(ops.getLegacyWidget?.response, label).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
           expect(
             warnings.filter((w) => w.includes('Unresolved model reference')),
             label,
@@ -1288,7 +1290,7 @@ describe('parseSpec – deprecated', () => {
           expect(
             warnings.filter((w) => w.includes("keeping the component's flag")),
             label,
-          ).toHaveLength(1);
+          ).toHaveLength(0);
           results.push(flags(spec.models));
         }
         expect(results[0]).toEqual(results[1]);
@@ -1421,12 +1423,13 @@ describe('parseSpec – deprecated', () => {
 
     // The reviewer's case: deprecated with optional `k`, live with required
     // `k`, both named `Widget` from the shared const. Not interchangeable, so
-    // the merge keeps whichever came first — exactly as before — and the
-    // deprecated endpoint never starts promising `k`.
+    // the live definition owns `Widget` in either order and the deprecated
+    // one is qualified by its operation (issue #260) — the deprecated
+    // endpoint never starts promising `k`.
     const legacyOptional = response('getLegacy', widget({ deprecated: true }));
     const liveRequired = response('getLive', widget({ required: ['k'] }));
     expect(await parse('differ-legacy-first', { '/legacy': legacyOptional, '/live': liveRequired })).toEqual([
-      { deprecated: true, kRequired: false },
+      { deprecated: undefined, kRequired: true },
     ]);
     expect(await parse('differ-live-first', { '/live': liveRequired, '/legacy': legacyOptional })).toEqual([
       { deprecated: undefined, kRequired: true },

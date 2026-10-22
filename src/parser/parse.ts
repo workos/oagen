@@ -9,11 +9,15 @@ import {
   resolveSchemaName,
 } from './schemas.js';
 import { extractOperations } from './operations.js';
+import type { FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
+  fieldInlineModelBundles,
+  reservedTypeNames,
+  type InlineModelNaming,
 } from './normalize-inline-models.js';
 import {
   collectInlineEnumsFromModels,
@@ -131,11 +135,15 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // map's values or a nested object a component field mints (`ReportDetail`)
   // is not among `models`, and a titled fallback variant would otherwise take
   // its name and the field merge below drop the component's definition.
+  // Each field's site is recorded too, so a merge pass that must rename one
+  // of these models can repoint exactly the references that mint it.
+  const fieldInlineModelGroups: FieldInlineModelGroup[] = [];
   const fieldInlineModels = extractInlineModelsFromSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    fieldInlineModelGroups,
   );
 
-  const { services, inlineModels } = extractOperations(
+  const { services, inlineModels, inlineModelBundles } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
@@ -171,7 +179,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
-  const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels]);
   // Resolved while the transform is still active so the names match the
   // models'; lets the merge tell a clash with a component schema from one
   // between two inline models.
@@ -179,12 +186,35 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
   );
   clearSchemaNameTransform();
-  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames);
+
+  // Every name in play — component models and enums, every inline model of
+  // either pass, and every inline enum the collectors below will lift — so a
+  // copy a merge pass must rename (a deprecated response named like a live
+  // one) takes a name nothing else has or will have, in either pass.
+  const naming: InlineModelNaming = {
+    bundles: [...inlineModelBundles],
+    reserved: reservedTypeNames(
+      models,
+      enums,
+      [...inlineModels, ...webhookInlineModels],
+      fieldInlineModels,
+      services,
+      webhooks,
+    ),
+  };
+  const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
+  // The field models' sites, resolved now that the response merge may have
+  // replaced a component's fields.
+  naming.bundles.push(...fieldInlineModelBundles(fieldInlineModelGroups, responseNormalizedModels));
+  const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);
+  // Each collector steps a renamed enum around every model name as well as
+  // every enum's, so the merge passes above (which mint against every enum
+  // name an `EnumRef` carries) and the collectors never meet on one name.
   collectInlineEnumsFromModels(finalModels, enums);
   collectInlineEnumsFromOperations(services, enums, finalModels, componentNames);
-  collectInlineEnumsFromWebhooks(webhooks, enums);
+  collectInlineEnumsFromWebhooks(webhooks, enums, finalModels);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
