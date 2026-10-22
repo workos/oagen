@@ -1264,3 +1264,107 @@ describe('round 3: a model is built exactly when the reading names one', () => {
     expect(results.map((m) => [m.name, m.fields.length])).toEqual([['HolderPet', 0]]);
   });
 });
+
+describe('round 4: every shape under a discriminated variant is built as the field extractor builds it', () => {
+  /** The reported shape: a `$ref` augmented by a `oneOf` member, as array items or map values. */
+  const refPlusVariant: SchemaObject = {
+    allOf: [{ $ref: '#/components/schemas/Base' }, { oneOf: [{ properties: { x: { type: 'string' } } }] }],
+  };
+  const eventWithData = (data: SchemaObject): SchemaObject => ({
+    allOf: [
+      { type: 'object', properties: { id: { type: 'string' }, event: { type: 'string' } }, required: ['id', 'event'] },
+      {
+        oneOf: [
+          {
+            type: 'object',
+            properties: { event: { type: 'string', const: 'node.created' }, data },
+            required: ['event', 'data'],
+          },
+          {
+            type: 'object',
+            properties: {
+              event: { type: 'string', const: 'node.deleted' },
+              data: { type: 'object', properties: { id: { type: 'string' } } },
+            },
+            required: ['event', 'data'],
+          },
+        ],
+      },
+    ],
+  });
+  const withEvent = (data: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/events': {
+        get: { operationId: 'getEvent', responses: { '200': jsonResponse({ $ref: '#/components/schemas/Event' }) } },
+      },
+    },
+    components: {
+      schemas: {
+        Base: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+        Event: eventWithData(data),
+      },
+    },
+  });
+
+  it('builds the merged model array items and map values reference, nested two deep', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent({
+        type: 'object',
+        properties: {
+          items: { type: 'array', items: refPlusVariant },
+          byKey: { type: 'object', additionalProperties: refPlusVariant },
+          deeper: {
+            type: 'object',
+            properties: { items: { type: 'array', items: refPlusVariant } },
+          },
+        },
+      }),
+    );
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual([
+      'items?: array',
+      'byKey?: map',
+      'deeper?: NodeCreatedDataDeeper',
+    ]);
+    const typeOf = (name: string) => models['NodeCreatedData']?.fields.find((f) => f.name === name)?.type;
+    expect(typeOf('items')).toEqual({ kind: 'array', items: model('NodeCreatedDataItem') });
+    expect(typeOf('byKey')).toEqual({ kind: 'map', valueType: model('NodeCreatedDataByKey') });
+    expect(fieldsOf(models['NodeCreatedDataItem'])).toEqual(['a: string', 'x?: string']);
+    expect(fieldsOf(models['NodeCreatedDataByKey'])).toEqual(['a: string', 'x?: string']);
+    expect(fieldsOf(models['NodeCreatedDataDeeper'])).toEqual(['items?: array']);
+    expect(fieldsOf(models['NodeCreatedDataDeeperItem'])).toEqual(['a: string', 'x?: string']);
+    expectSound(ir, ['Base', 'Event']);
+  });
+
+  it('builds the merged model a union variant and an untyped nested object reference', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent({
+        type: 'object',
+        properties: {
+          owner: { oneOf: [{ type: 'string' }, refPlusVariant] },
+          // No `type`: still an inline object, as `schemaToTypeRef` types it.
+          plain: { properties: { y: { type: 'string' } } },
+          nullableItems: { type: ['array', 'null'], items: { oneOf: [refPlusVariant, { type: 'null' }] } },
+        },
+      }),
+    );
+    const models = modelsByName(ir);
+    const typeOf = (name: string) => models['NodeCreatedData']?.fields.find((f) => f.name === name)?.type;
+    expect(typeOf('owner')).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [str, model('NodeCreatedDataOwner')],
+    });
+    expect(fieldsOf(models['NodeCreatedDataOwner'])).toEqual(['a: string', 'x?: string']);
+    expect(typeOf('plain')).toEqual(model('NodeCreatedDataPlain'));
+    expect(fieldsOf(models['NodeCreatedDataPlain'])).toEqual(['y?: string']);
+    expect(typeOf('nullableItems')).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'nullable', inner: model('NodeCreatedDataNullableItem') } },
+    });
+    expect(fieldsOf(models['NodeCreatedDataNullableItem'])).toEqual(['a: string', 'x?: string']);
+    expectSound(ir, ['Base', 'Event']);
+  });
+});
