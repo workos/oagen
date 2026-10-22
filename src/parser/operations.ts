@@ -884,29 +884,28 @@ function splitTaggedServices(
   serviceMap: Map<string, Operation[]>,
   tagServiceByOperation: ReadonlyMap<Operation, string>,
 ): void {
-  // The grouping before any split, read in full before the map is changed.
-  const grouped = Array.from(serviceMap);
-  const resolved = new Map<Operation, string>();
-  for (const [serviceName, operations] of grouped) {
+  const plan = new Map<string, ServiceSplit>();
+  for (const [serviceName, operations] of serviceMap) {
     const segmentServices = new Set<string>();
     for (const op of operations) {
       if (tagServiceByOperation.has(op)) segmentServices.add(splitSegmentService(op, serviceName));
     }
-    for (const op of operations) {
-      resolved.set(op, resolveServiceName(op, serviceName, tagServiceByOperation.has(op), segmentServices));
-    }
-  }
-  // A part that joins a service listed later lands in that service's array,
-  // which is read below with the operations already resolved to it.
-  for (const [serviceName, operations] of grouped) {
     const parts = new Map<string, Operation[]>();
     for (const op of operations) {
-      const name = resolved.get(op) ?? serviceName;
+      const name = resolveServiceName(op, serviceName, tagServiceByOperation.has(op), segmentServices);
       const part = parts.get(name) ?? [];
       part.push(op);
       parts.set(name, part);
     }
+    plan.set(serviceName, { operations, own: operations.length, parts });
+  }
+  for (const [serviceName, { operations, own, parts }] of plan) {
     if (parts.size <= 1) continue;
+    // Parts of services split before this one that joined it were appended to
+    // its array after the plan was read. They resolved to this service's name,
+    // so they stay in the part that keeps it instead of going with the array.
+    const joined = operations.slice(own);
+    if (joined.length > 0) parts.set(serviceName, [...(parts.get(serviceName) ?? []), ...joined]);
     serviceMap.delete(serviceName);
     for (const [name, ops] of parts) {
       const existing = serviceMap.get(name) ?? [];
@@ -914,6 +913,16 @@ function splitTaggedServices(
       serviceMap.set(name, existing);
     }
   }
+}
+
+/** One service's split, planned from the grouping before any service is split (see splitTaggedServices). */
+interface ServiceSplit {
+  /** The service's operations: the array `serviceMap` holds, which parts of services split earlier may join. */
+  operations: Operation[];
+  /** How many of `operations` the plan was read from; any beyond them joined since. */
+  own: number;
+  /** The service each operation moves to, with its operations in document order; one entry when nothing moves. */
+  parts: Map<string, Operation[]>;
 }
 
 /**
