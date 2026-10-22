@@ -2837,7 +2837,7 @@ function extractRequestBodyContents(
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
-        : typeSecondaryRequestContent(contentType, content[contentType]?.schema, stem, ctx, entry);
+        : typeSecondaryRequestContent(contentType, content[contentType]?.schema, stem, ctx, entry, contentTypes);
     return entry;
   });
   return { contentTypes, contents };
@@ -2858,15 +2858,17 @@ function typeSecondaryRequestContent(
   stem: string,
   ctx: RequestTypingContext,
   target: RequestBodyContent,
+  siblings: readonly string[],
 ): TypeRef {
   if (!schema) return schemalessRequestContentType(contentType);
   ctx.deferred.push({
     kind: 'request',
     schema,
-    // Named from the media type's essence (`mediaTypeNameFragment`), so two
-    // spellings of one media type derive one name and the second steps to
-    // the next free one through the registry.
-    name: `${stem}${mediaTypeNameFragment(contentType)}Request`,
+    // Named from the media type's essence among the body's content keys
+    // (`mediaTypeNameFragment`), so a key keeps its name however it is
+    // spelled and two spellings of one essence side by side are told apart
+    // by their parameters, whatever their order.
+    name: `${stem}${mediaTypeNameFragment(contentType, siblings)}Request`,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
@@ -4147,7 +4149,7 @@ function extractResponseContents(
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
-        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry);
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry, contentTypes);
     return entry;
   });
   return { contentTypes, contents };
@@ -4161,10 +4163,13 @@ function extractResponseContents(
  * and one without a schema is `unknown`. The one addition is that an inline
  * object under such a media type is materialized — the primary pick's
  * `...Response` name belongs to the primary body, so this one is named after
- * its media type as well: `RenderPetCardTextHtmlResponse`. That naming waits
- * for every primary model (`resolveDeferredInlineTypes`), so a schema is
- * deferred and `target.type` — returned here as a placeholder — filled in
- * then.
+ * its media type as well: `RenderPetCardTextHtmlResponse`, from the media
+ * type's essence among its `siblings` (the response's content keys), so a
+ * key keeps its model name however it is spelled and two spellings of one
+ * essence side by side are told apart by their parameters
+ * (`mediaTypeNameFragment`). That naming waits for every primary model
+ * (`resolveDeferredInlineTypes`), so a schema is deferred and `target.type`
+ * — returned here as a placeholder — filled in then.
  */
 function typeSecondaryContent(
   contentType: string,
@@ -4172,6 +4177,7 @@ function typeSecondaryContent(
   naming: ContentModelNaming,
   ctx: ResponseTypingContext,
   target: ResponseContent,
+  siblings: readonly string[],
 ): TypeRef {
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
@@ -4185,7 +4191,7 @@ function typeSecondaryContent(
   ctx.deferred.push({
     kind: 'content',
     schema,
-    name: `${naming.base}${mediaTypeNameFragment(contentType)}${naming.suffix}`,
+    name: `${naming.base}${mediaTypeNameFragment(contentType, siblings)}${naming.suffix}`,
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,

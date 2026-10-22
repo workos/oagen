@@ -366,4 +366,82 @@ describe('parser to differ — a secondary inline body under a respelled key (Gr
       classification: 'breaking',
     });
   });
+
+  it('reports no change when two spellings of one essence only swap places: each keeps the model its parameters name (Greptile round 2)', async () => {
+    const twoYaml = (keys: [string, string]) => {
+      const bodies: Record<string, unknown> = {
+        'application/yaml': { schema: { type: 'object', properties: title } },
+        'application/yaml; charset=utf-8': { schema: { type: 'object', properties: { summary: { type: 'string' } } } },
+      };
+      const content: Record<string, unknown> = {
+        'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      };
+      for (const key of keys) content[key] = bodies[key];
+      const doc = report('application/yaml', title);
+      doc.paths['/report'].get.responses['200'].content = content as never;
+      return doc;
+    };
+    const { changes } = await diffDocuments(
+      twoYaml(['application/yaml', 'application/yaml; charset=utf-8']),
+      twoYaml(['application/yaml; charset=utf-8', 'application/yaml']),
+    );
+    expect(changes).toEqual([]);
+  });
+});
+
+describe('pairing a lone 2xx: the entry spelled as it is wins over one that only matches by essence (Greptile round 2)', () => {
+  const reportModel: TypeRef = { kind: 'model', name: 'Report' };
+  const oldYaml: TypeRef = { kind: 'model', name: 'OldYaml' };
+  const newYaml: TypeRef = { kind: 'model', name: 'NewYaml' };
+  /** A lone `201`: JSON `Report` and `application/yaml` → `OldYaml`. */
+  const lone201 = card(
+    [
+      ['application/json', reportModel],
+      ['application/yaml', oldYaml],
+    ],
+    { name: 'getReport', response: reportModel },
+  );
+  /** That `201` unchanged, beside a `200` with the same JSON body and `application/yaml; version=2` → `NewYaml`. */
+  const added200 = (): Operation => {
+    const two = contents([
+      ['application/json', reportModel],
+      ['application/yaml; version=2', newYaml],
+    ]);
+    const one = contents([
+      ['application/json', reportModel],
+      ['application/yaml', oldYaml],
+    ]);
+    return card([], {
+      name: 'getReport',
+      response: reportModel,
+      responseContentTypes: two.map((c) => c.contentType),
+      responseContents: two,
+      successResponses: [
+        { statusCode: 200, type: reportModel, contentTypes: two.map((c) => c.contentType), contents: two },
+        { statusCode: 201, type: reportModel, contentTypes: one.map((c) => c.contentType), contents: one },
+      ],
+    });
+  };
+
+  it('pairs the lone 201 with the unchanged 201, not with the added 200 that matches it by essence', () => {
+    expect(diffOperations('Reports', [lone201], [added200()])).toEqual([]);
+  });
+
+  it('pairs a new lone 201 with the old 201 and reports the removed 200 with its formats, not a retype', () => {
+    expect(diffOperations('Reports', [added200()], [lone201])).toMatchObject([
+      {
+        responseChanged: false,
+        responseContentTypeChanges: [
+          {
+            statusCode: 200,
+            added: [],
+            removed: ['application/json', 'application/yaml; version=2'],
+            retyped: [],
+            classification: 'breaking',
+          },
+        ],
+        classification: 'breaking',
+      },
+    ]);
+  });
 });

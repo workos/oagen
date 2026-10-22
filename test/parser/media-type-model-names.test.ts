@@ -62,6 +62,26 @@ describe('mediaTypeNameFragment', () => {
     expect(mediaTypeNameFragment('*/*')).toBe('AnyAny');
     expect(mediaTypeNameFragment('')).toBe('Content');
   });
+
+  it('appends a key’s own parameters only when another key of its essence sits beside it, whatever the order', () => {
+    const siblings = ['application/json', 'application/yaml', 'application/yaml; charset=utf-8'];
+    expect(mediaTypeNameFragment('application/yaml', siblings)).toBe('ApplicationYaml');
+    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', siblings)).toBe('ApplicationYamlCharsetUtf8');
+    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', [...siblings].reverse())).toBe(
+      'ApplicationYamlCharsetUtf8',
+    );
+    // Alone among its essence, a parameterized key keeps the bare name.
+    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', ['application/json'])).toBe('ApplicationYaml');
+    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', ['application/yaml; charset=utf-8'])).toBe(
+      'ApplicationYaml',
+    );
+    // Parameter case is folded; two parameterized spellings each carry their own.
+    const versions = ['application/vnd.thing+json; version=1', 'application/vnd.thing+json; Version=2'];
+    expect(mediaTypeNameFragment(versions[0], versions)).toBe('ApplicationVndThingJsonVersion1');
+    expect(mediaTypeNameFragment(versions[1], versions)).toBe('ApplicationVndThingJsonVersion2');
+    // Case-only siblings carry no parameters to tell them apart.
+    expect(mediaTypeNameFragment('Application/YAML', ['application/yaml', 'Application/YAML'])).toBe('ApplicationYaml');
+  });
 });
 
 describe('inline models for secondary media types are named by essence (issue #279, Greptile round 1)', () => {
@@ -80,34 +100,51 @@ describe('inline models for secondary media types are named by essence (issue #2
     ]);
   });
 
-  it('keeps two spellings of one essence side by side apart: equal shapes share the model, different shapes step to the next free name (the status-code-qualified one first)', async () => {
-    const same = await parseDocument(
-      document({
-        'application/yaml': { schema: obj({ title: str }) },
-        'application/yaml; charset=utf-8': { schema: obj({ title: str }) },
-      }),
+  it('tells two spellings of one essence side by side apart by their parameters, whatever their order (Greptile round 2)', async () => {
+    const yaml = { schema: obj({ title: str }) };
+    const yamlCharset = { schema: obj({ summary: str }) };
+    const inOrder = await parseDocument(
+      document({ 'application/yaml': yaml, 'application/yaml; charset=utf-8': yamlCharset }),
     );
-    expect(secondaryTypes(same)).toEqual([
+    const reversed = await parseDocument(
+      document({ 'application/yaml; charset=utf-8': yamlCharset, 'application/yaml': yaml }),
+    );
+    expect(secondaryTypes(inOrder)).toEqual([
       { kind: 'model', name: 'GetReportApplicationYamlResponse' },
+      { kind: 'model', name: 'GetReportApplicationYamlCharsetUtf8Response' },
+    ]);
+    expect(secondaryTypes(reversed)).toEqual([
+      { kind: 'model', name: 'GetReportApplicationYamlCharsetUtf8Response' },
       { kind: 'model', name: 'GetReportApplicationYamlResponse' },
     ]);
-    expect(same.models.filter((m) => m.name.startsWith('GetReportApplicationYaml'))).toHaveLength(1);
+    for (const spec of [inOrder, reversed]) {
+      expect(fieldsOf(spec, 'GetReportApplicationYamlResponse')).toEqual(['title']);
+      expect(fieldsOf(spec, 'GetReportApplicationYamlCharsetUtf8Response')).toEqual(['summary']);
+      // Every model minted for a secondary body is referenced, and every reference resolves.
+      const minted = spec.models.filter((m) => m.name !== 'Report').map((m) => m.name);
+      const referenced = secondaryTypes(spec).map((t) => (t.kind === 'model' ? t.name : ''));
+      expect(minted.sort()).toEqual([...new Set(referenced)].sort());
+    }
 
-    const different = await parseDocument(
+    // Equal shapes under two spellings are two models too: each key's name is its own.
+    const same = await parseDocument(document({ 'application/yaml': yaml, 'application/yaml; charset=utf-8': yaml }));
+    expect(secondaryTypes(same)).toEqual([
+      { kind: 'model', name: 'GetReportApplicationYamlResponse' },
+      { kind: 'model', name: 'GetReportApplicationYamlCharsetUtf8Response' },
+    ]);
+  });
+
+  it('leaves two keys that differ only in case to the registry: the second steps to the status-code-qualified name', async () => {
+    const spec = await parseDocument(
       document({
         'application/yaml': { schema: obj({ title: str }) },
-        'application/yaml; charset=utf-8': { schema: obj({ summary: str }) },
+        'Application/YAML': { schema: obj({ summary: str }) },
       }),
     );
-    const [first, second] = secondaryTypes(different);
-    expect(first).toEqual({ kind: 'model', name: 'GetReportApplicationYamlResponse' });
-    // A taken name is re-derived with the status code first, then numbered — the registry's usual path.
-    expect(second).toEqual({ kind: 'model', name: 'GetReportApplicationYamlResponse200' });
-    expect(fieldsOf(different, 'GetReportApplicationYamlResponse')).toEqual(['title']);
-    expect(fieldsOf(different, 'GetReportApplicationYamlResponse200')).toEqual(['summary']);
-    // Every model minted for a secondary body is referenced, and every reference resolves.
-    const minted = different.models.filter((m) => m.name !== 'Report').map((m) => m.name);
-    const referenced = secondaryTypes(different).map((t) => (t.kind === 'model' ? t.name : ''));
-    expect(minted.sort()).toEqual([...new Set(referenced)].sort());
+    expect(secondaryTypes(spec)).toEqual([
+      { kind: 'model', name: 'GetReportApplicationYamlResponse' },
+      { kind: 'model', name: 'GetReportApplicationYamlResponse200' },
+    ]);
+    expect(fieldsOf(spec, 'GetReportApplicationYamlResponse200')).toEqual(['summary']);
   });
 });

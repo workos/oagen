@@ -473,21 +473,26 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
 }
 
 /**
- * The 2xx entry among `others` that offers exactly `lone`'s media types — by
- * essence, order aside, so `Text/HTML` + `application/pdf` still offers
- * `application/pdf` + `text/html` — the primary when it does, if any.
+ * The 2xx entry among `others` that offers exactly `lone`'s media types,
+ * order aside: one spelled the same way first, else one that offers them by
+ * essence (`Text/HTML` + `application/pdf` still offers `application/pdf` +
+ * `text/html`) — the primary among those, if any.
  */
 function survivingEntry(lone: ContentEntry, others: ContentEntry[]): ContentEntry | undefined {
-  const offered = essenceSignature(lone);
-  const sameMediaTypes = others.filter(
-    (entry) => (entry.isPrimary || entry.key.startsWith('success:')) && essenceSignature(entry) === offered,
-  );
+  const candidates = others.filter((entry) => entry.isPrimary || entry.key.startsWith('success:'));
+  // The entry spelled exactly as the lone one is the response it still is,
+  // before any that only matches by essence: a `200` added beside an
+  // unchanged `201` with `application/yaml; version=2` where the `201` has
+  // `application/yaml` must not take the `201`'s place.
+  const exact = candidates.filter((entry) => signature(entry, 'mediaType') === signature(lone, 'mediaType'));
+  const byEssence = candidates.filter((entry) => signature(entry, 'essence') === signature(lone, 'essence'));
+  const sameMediaTypes = exact.length > 0 ? exact : byEssence;
   return sameMediaTypes.find((entry) => entry.isPrimary) ?? sameMediaTypes[0];
 }
 
-/** An entry's media types as the multiset of their essences, so two entries offering the same ones compare equal. */
-function essenceSignature(entry: ContentEntry): string {
-  return JSON.stringify(entry.bodies.map((body) => body.essence).sort());
+/** An entry's media types as a multiset of their spellings or of their essences, order aside. */
+function signature(entry: ContentEntry, by: 'mediaType' | 'essence'): string {
+  return JSON.stringify(entry.bodies.map((body) => body[by]).sort());
 }
 
 function requestBodiesEqual(a: Operation['requestBody'], b: Operation['requestBody']): boolean {

@@ -643,13 +643,16 @@ function mintPayload(
   for (const contentType of contentTypes) {
     const schema = content[contentType]?.schema;
     // A secondary entry's property is named from the media type's essence
-    // (`mediaTypeNameFragment`), so two spellings of one media type derive
-    // one name; the second is left to the model merge, as for operations.
+    // among the body's content keys (`mediaTypeNameFragment`), so a key keeps
+    // its name however it is spelled and two spellings of one essence side
+    // by side are told apart by their parameters, whatever their order.
     const type =
       selected && contentType === selected.contentType && minted.ref
         ? minted.ref
         : schema
-          ? absorb(mintSchema(schema, `${mediaTypeNameFragment(contentType)}Payload`, stem, componentSchemas))
+          ? absorb(
+              mintSchema(schema, `${mediaTypeNameFragment(contentType, contentTypes)}Payload`, stem, componentSchemas),
+            )
           : schemalessRequestContentType(contentType);
     minted.contents.push({ contentType, type });
   }
