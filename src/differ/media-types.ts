@@ -259,30 +259,38 @@ function requestBodyBodies(body: RequestBodyMediaTypes): MediaTypeBody[] {
 }
 
 /**
- * Whether the representation `requestBody` is read from in `from` — the
- * media type it was read from, with its shape — is one `to` declares with
- * an unchanged shape: paired by essence as `diffRequestBodyContentTypes`
- * pairs the two sides (`pairMediaTypeBodies`), the shapes compared as a
- * retype is (`sameShape` through `shapes`, the two documents' named types;
- * by name alone without them). This decides whether an encoding shift
- * (`requestBodyEncodingShift`) breaks a side of the wire: for an operation,
- * whether the representation the old SDK sends (`from` the old spec) is
- * still accepted by the new spec (`to`); for a webhook, whether the
- * representation the sender now uses (`from` the new spec) is one the old
- * handler (`to`) already decoded. `false` when `from` marks no own body —
- * no media-type lists, or none read as `requestBody` — so a hand-built IR
- * without lists keeps the breaking reading.
+ * Whether the representation one side's `requestBody` is read from — the
+ * media type, with its shape — is one the other side declares with an
+ * unchanged shape. Which side's is judged from `side`, as
+ * `diffRequestBodyContentTypes` is: for the caller (an operation), the old
+ * spec's own body must still be declared by the new spec, since an SDK
+ * built for the old spec keeps sending it; for the receiver (a webhook),
+ * the new spec's own body must already have been declared by the old spec,
+ * since the handler built for it decodes only what it declared. The two
+ * sides are always paired old against new (`pairMediaTypeBodies`, exactly
+ * as the media-type diff pairs them) and compared old against new
+ * (`sameShape` through `shapes`, the two documents' named types; by name
+ * alone without them), so the documents are never looked up the wrong way
+ * round for either side. This decides whether an encoding shift
+ * (`requestBodyEncodingShift`) breaks that side of the wire. `false` when
+ * the judged side marks no own body — no media-type lists, or none read as
+ * `requestBody` — so a hand-built IR without lists keeps the breaking
+ * reading.
  */
 export function ownRepresentationKept(
-  from: RequestBodyMediaTypes,
-  to: RequestBodyMediaTypes,
+  oldBody: RequestBodyMediaTypes,
+  newBody: RequestBodyMediaTypes,
+  side: RequestBodySide,
   shapes?: DocumentShapes,
 ): boolean {
-  const fromBodies = requestBodyBodies(from);
-  const own = fromBodies.find((body) => body.own);
+  const oldBodies = requestBodyBodies(oldBody);
+  const newBodies = requestBodyBodies(newBody);
+  const own = (side === 'caller' ? oldBodies : newBodies).find((body) => body.own);
   if (!own?.type) return false;
-  const counterpart = pairMediaTypeBodies(fromBodies, requestBodyBodies(to), shapes).pairs.find(
-    ([body]) => body === own,
-  )?.[1];
-  return counterpart?.type !== undefined && sameShape(own.type, counterpart.type, shapes);
+  const pair = pairMediaTypeBodies(oldBodies, newBodies, shapes).pairs.find(
+    ([before, after]) => (side === 'caller' ? before : after) === own,
+  );
+  if (!pair) return false;
+  const [before, after] = pair;
+  return before.type !== undefined && after.type !== undefined && sameShape(before.type, after.type, shapes);
 }
