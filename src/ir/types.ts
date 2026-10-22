@@ -212,8 +212,9 @@ export interface Operation {
    * The `summary` alone: the OpenAPI operation's own, or — when the operation
    * declares none with non-whitespace content — the `summary` of the Path
    * Item it sits on, which OpenAPI applies to every operation on that path.
-   * Present only when one of the two has content; an empty or whitespace-only
-   * summary is treated as absent at either level. Read this to use the
+   * Present only when one of the two has content; a summary that is not a
+   * string, or is empty or whitespace-only, is treated as absent at either
+   * level. Read this to use the
    * summary as a one-line label; `description` below still carries the
    * combined form, so emitters that only print `description` are unchanged.
    */
@@ -223,8 +224,9 @@ export interface Operation {
    * each read as `summary` above is: the operation's own, else the Path
    * Item's, field by field. When both have content, this is
    * `summary + "\n\n" + description`; when only one has content (or both are
-   * identical), this is that one. An empty or whitespace-only value is
-   * treated as absent, and text with content is kept verbatim. The parts are
+   * identical), this is that one. A value that is not a string, or is empty
+   * or whitespace-only, is treated as absent, and text with content is kept
+   * verbatim. The parts are
    * not separable from this field alone — use `summary` for that.
    */
   description?: string;
@@ -284,6 +286,20 @@ export interface Operation {
    * then the default.
    */
   response: TypeRef;
+  /**
+   * The status code of the response `response` was read from — the primary
+   * success response chosen as described there: `200`; `201` when an untyped
+   * `200` yielded to a typed `201`; `302` for a lone redirect; a POST's lone
+   * `200`. Present exactly when the operation declares at least one 2xx or
+   * 3xx response, and absent when it declares none (only `default`, a range,
+   * 4xx/5xx codes, an empty `responses` map or no `responses` key) — the
+   * case where `response` is `unknown`. When `successResponses` is set, this
+   * equals the `statusCode` of the entry `response` was taken from. Read it
+   * to check or document the status an operation succeeds with instead of
+   * guessing one from the HTTP method; the differ does not key or compare
+   * by it.
+   */
+  responseStatusCode?: number;
   /**
    * Headers the primary success response declares (the one `response` is the
    * body of). Present only when the spec declares at least one. Each entry of
@@ -372,10 +388,11 @@ export interface Operation {
   async?: boolean;
   /**
    * The operation's `tags`, in document order, with every entry that is not
-   * a non-empty string dropped. Present only when at least one remains. The
-   * parser has already named the service from the document's first tag
-   * entry; this list is kept so an emitter can group or document the method
-   * by every tag.
+   * a non-empty string dropped and a repeated entry folded onto its first
+   * occurrence. Present only when at least one remains. The parser names the
+   * service from `tags[0]` — the first usable entry — so the two never
+   * disagree; the list is kept so an emitter can group or document the
+   * method by every tag.
    */
   tags?: string[];
   /**

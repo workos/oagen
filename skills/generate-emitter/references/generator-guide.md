@@ -148,6 +148,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`unknown` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
   - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag
+  - `responseStatusCode?` — the status code of the primary response (`200`, `201`, a lone `302`), present exactly when the operation declares at least one 2xx or 3xx response
   - `responseContentTypes?`, `responseContents?` — the media types the primary response declares, as written and in document order, with a `TypeRef` per media type (the entry `response` was read from shares its `TypeRef`); present only when it declares at least one, so an `Accept` header or a per-format decoder can be offered
   - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`, `contentTypes?`, `contents?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
   - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; the two lists only when they say something `type` does not)
