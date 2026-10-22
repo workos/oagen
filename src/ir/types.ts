@@ -719,11 +719,13 @@ export interface Parameter {
    * The parameter schema's type. An inline object schema (a `deepObject`
    * query parameter, say), or an array, map, union or nullable wrapper
    * holding one, references a model the parser creates for it, named from
-   * the service and parameter (`PetsFilter`) and qualified by location or
-   * operation when that name already belongs to another shape (see "Response
-   * Headers" in docs/architecture/ir-types.md); a webhook's is named under
-   * the webhook's stem. A primitive, a `$ref`, an inline enum or an array of
-   * either is typed as written.
+   * the service and parameter (`PetsFilter`; a header's name lower-cased
+   * first, so `X-RateLimit-Meta` and `x-ratelimit-meta` both reference
+   * `PetsXRatelimitMeta`) and qualified by location or operation when that
+   * name already belongs to another shape (see "Response Headers" in
+   * docs/architecture/ir-types.md); a webhook's is named under the webhook's
+   * stem. A primitive, a `$ref`, an inline enum (named the same way) or an
+   * array of either is typed as written.
    */
   type: TypeRef;
   required: boolean;

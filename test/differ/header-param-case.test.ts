@@ -176,6 +176,73 @@ describe("diffSpecs – the issue's documents (#295)", () => {
   });
 });
 
+describe('diffSpecs – headers with inline enum and object schemas, respelled (#295, review round 1)', () => {
+  it('keeps every minted type where it was, so the only change is the spelling', async () => {
+    const [before, after] = await Promise.all([
+      parseSpec(resolve(fixtures, 'header-param-case-inline-before.json')),
+      parseSpec(resolve(fixtures, 'header-param-case-inline-after.json')),
+    ]);
+    // The names derive from the lower-cased header name on both sides.
+    const minted = (spec: ApiSpec) => [...spec.models.map((m) => m.name), ...spec.enums.map((e) => e.name)].sort();
+    expect(minted(before)).toEqual(minted(after));
+    expect(minted(after)).toEqual([
+      'PetAdoptedPayload',
+      'PetAdoptedXPetMeta',
+      'PetAdoptedXPetSignatureAlgo',
+      'PetsXPetMeta',
+      'PetsXPetOrigin',
+      'PetsXRatelimitPolicy',
+      'PetsXRatelimitScope',
+    ]);
+
+    const diff = diffSpecs(before, after);
+    // Used to be `param-type-changed` (breaking) beside `enum-removed` / `enum-added`
+    // and `model-removed` / `model-added` for every header: exit 2 for a header
+    // whose accepted values had not changed.
+    expect(diff.changes.map((change) => change.kind)).toEqual(['operation-modified', 'webhook-modified']);
+    expect(
+      diff.changes.map((change) =>
+        change.kind === 'operation-modified' || change.kind === 'webhook-modified' ? change.paramChanges : [],
+      ),
+    ).toEqual([
+      [
+        {
+          ...renamed,
+          paramName: 'x-ratelimit-policy',
+          oldName: 'X-RateLimit-Policy',
+          newName: 'x-ratelimit-policy',
+          details: 'name X-RateLimit-Policy → x-ratelimit-policy',
+        },
+        {
+          ...renamed,
+          paramName: 'x-pet-meta',
+          oldName: 'X-Pet-Meta',
+          newName: 'x-pet-meta',
+          details: 'name X-Pet-Meta → x-pet-meta',
+        },
+      ],
+      [
+        {
+          ...renamed,
+          paramName: 'x-pet-signature-algo',
+          oldName: 'X-Pet-Signature-Algo',
+          newName: 'x-pet-signature-algo',
+          details: 'name X-Pet-Signature-Algo → x-pet-signature-algo',
+        },
+        {
+          ...renamed,
+          paramName: 'x-pet-meta',
+          oldName: 'X-Pet-Meta',
+          newName: 'x-pet-meta',
+          details: 'name X-Pet-Meta → x-pet-meta',
+        },
+      ],
+    ]);
+    // `oagen diff` exits 1, not 2.
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 2, breaking: 0, additive: 2, behaviorChanges: 0 });
+  });
+});
+
 describe('diffOperations – a header parameter whose name changed case alone', () => {
   const before = listPets([param('X-Pet-Token')]);
 

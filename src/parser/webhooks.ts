@@ -11,7 +11,7 @@ import type {
   WebhookResponse,
 } from '../ir/types.js';
 import { collectResponseHeaders, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
-import { parameterKey } from '../ir/parameter-key.js';
+import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
@@ -712,9 +712,12 @@ function mintParameter(
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): MintedSchema & { property: string } {
   let previous: MintedSchema | undefined;
+  // The name the models derive from is the one `extractParams` typed the
+  // parameter under — a header's lower-cased (`foldParameterName`) — so the
+  // reference and the models agree, and neither moves with the header's case.
+  const name = foldParameterName(param.in, param.name);
   for (let attempt = 0; ; attempt++) {
-    const property =
-      attempt === 0 ? param.name : attempt === 1 ? `${param.in}_${param.name}` : `${param.in}_${param.name}_${attempt}`;
+    const property = attempt === 0 ? name : attempt === 1 ? `${param.in}_${name}` : `${param.in}_${name}_${attempt}`;
     const minted = mintSchema(schema, property, parent, componentSchemas);
     const free = [...minted.names].every((name) => !taken.has(name));
     const stuck = previous !== undefined && sameNames(previous.names, minted.names);

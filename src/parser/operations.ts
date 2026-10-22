@@ -22,7 +22,7 @@ import type {
 } from '../ir/types.js';
 import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
 import { serverListsEqual, serversBeyondDefault } from '../ir/server-url.js';
-import { foldHeaderName, parameterKey } from '../ir/parameter-key.js';
+import { foldHeaderName, foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -2458,7 +2458,7 @@ function responseTypeRefs(op: Operation): TypeRef[] {
 
 /**
  * The qualifier that tells one operation's header models from another's
- * (`materializeDeferredType`'s `byOperation` candidate), and that the shape
+ * (`deferredNamingStem`'s `byOperationName` candidate), and that the shape
  * registry records as the owner of its models. An `operationId` names the
  * operation. A path-named operation uses the path-derived stem its request
  * and response models are built from, so the model name depends only on the
@@ -2584,8 +2584,16 @@ export function extractParams(
       const externalDocs = readExternalDocs(p.schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
       return {
         name: p.name,
+        // Typed under the name the parameter is compared by (`foldParameterName`:
+        // a header's lower-cased), so the inline enum or model its schema mints
+        // keeps its name when the header's case changes (#295); `name` above
+        // stays as written.
         type: p.schema
-          ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+          ? schemaToTypeRef(
+              p.schema,
+              foldParameterName(p.in, p.name),
+              operationContext ? toPascalCase(operationContext) : undefined,
+            )
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
         description: firstDescription(p.description, p.schema?.description, refTarget?.description),
@@ -3783,22 +3791,25 @@ function materializeDeferredType(
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
   const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
-  const byOperation = `${operationQualifier}${name}`;
-  const byBoth = `${operationQualifier}${name}${statusCode}`;
   const numbered = (index: number): string => `${name}${index + 2}`;
   switch (item.kind) {
-    case 'header':
+    case 'header': {
       // Decide the preference between candidates 2 and 3 from the bare
       // name's owners: a clash within this operation reads best by status
       // code, one with a component, a primary body or another operation by
-      // operation name.
+      // operation name. Joined with `_`, as a parameter's are, since the
+      // bare name is the lower-cased header name (`ListDocuments_x-meta` →
+      // `ListDocumentsXMeta`, not `ListDocumentsxMeta`).
+      const byOperationName = `${operationQualifier}_${name}`;
+      const byOperationAndStatus = `${operationQualifier}_${name}${statusCode}`;
       return (index, firstClashOwners) => {
         const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
         const candidates = withinOperation
-          ? [name, byStatus, byOperation, byBoth]
-          : [name, byOperation, byStatus, byBoth];
+          ? [name, byStatus, byOperationName, byOperationAndStatus]
+          : [name, byOperationName, byStatus, byOperationAndStatus];
         return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
       };
+    }
     case 'content':
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
     case 'request':
@@ -3862,9 +3873,13 @@ function deferParameterModels(
   raw.forEach((param, index) => {
     const target = typed[index];
     if (!param.schema || !target) return;
+    // The name the models derive from is the one `extractParams` typed the
+    // parameter under — a header's lower-cased (`foldParameterName`) — so the
+    // reference and the model agree, and neither moves with the header's case.
+    const name = foldParameterName(location, param.name);
     const trial: Model[] = [];
     extractInlineModelsFromProperties(
-      { properties: { [param.name]: param.schema } },
+      { properties: { [name]: param.schema } },
       trial,
       parentName,
       ctx.componentSchemas,
@@ -3873,7 +3888,7 @@ function deferParameterModels(
     ctx.deferred.push({
       kind: 'param',
       schema: param.schema,
-      name: param.name,
+      name,
       statusCode: location,
       operationQualifier: ctx.operationQualifier,
       parentName,
@@ -3946,10 +3961,13 @@ function extractResponseHeaders(
       ...externalDocsEntry(schema?.externalDocs),
     };
     if (schema) {
+      // Named from the lower-cased header name, as a header parameter's inline
+      // type is, so the model or enum a header mints keeps its name when the
+      // header's case changes; `entry.name` stays as written.
       ctx.deferred.push({
         kind: 'header',
         schema,
-        name,
+        name: folded,
         statusCode,
         operationQualifier: ctx.operationQualifier,
         parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
