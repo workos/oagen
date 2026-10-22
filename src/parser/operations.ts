@@ -966,12 +966,21 @@ const METHOD_VERBS: Record<HttpMethod, { readonly item: string; readonly collect
 };
 
 /**
- * The verbs a path segment with no parameter before it is read as an action
- * phrase by (inferAction): the CRUD verbs of METHOD_VERBS. `options` and
- * `trace` are left out, since `/settings/display-options` names a
- * collection.
+ * The verbs a POST on a literal with no parameter before it is read as an
+ * action phrase by, when one of them is the segment's last word
+ * (inferAction): the CRUD verbs of METHOD_VERBS. `options` and `trace` are
+ * left out, since `/settings/display-options` names a collection.
  */
 const CRUD_VERBS: ReadonlySet<string> = new Set(['get', 'list', 'create', 'update', 'delete', 'check']);
+
+/**
+ * The verbs that count as a method's own only as the first word of a segment
+ * (segmentCarriesVerb): `list-all` and `check-health` do something, while as
+ * a later word `list` and `check` name a thing — `wish-list`, `allow-list`,
+ * `health-check`. Every other verb counts in any position: `bulk-delete`,
+ * `batch-get`, `force-update`, `auto-create`.
+ */
+const LEADING_ONLY_VERBS: ReadonlySet<string> = new Set(['list', 'check']);
 
 /**
  * Infer the CRUD verb from the HTTP method and the path shape (METHOD_VERBS):
@@ -998,8 +1007,10 @@ function methodVerbs(method: HttpMethod): string[] {
 /**
  * Whether the last segment of a path is a literal whose words include one of
  * the method's own verbs (methodVerbs): `bulk-delete` for a DELETE, `list-all`
- * for a GET, `update-password` for a PUT or PATCH, and not `bulk-delete` for
- * a POST. Such a segment is the action for that method (inferAction) and
+ * and `batch-get` for a GET, `update-password` for a PUT or PATCH, and not
+ * `bulk-delete` for a POST. `list` and `check` count only as the first word
+ * (LEADING_ONLY_VERBS), so `wish-list`, `allow-list` and `health-check` carry
+ * no verb. Such a segment is the action for that method (inferAction) and
  * keeps the action name when another method on the path would take it too
  * (demoteSamePathNames).
  */
@@ -1008,7 +1019,7 @@ function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
   const last = segments[segments.length - 1];
   if (last === undefined || last.startsWith('{')) return false;
   const words = splitWords(last).map((w) => w.toLowerCase());
-  return methodVerbs(method).some((verb) => words.includes(verb));
+  return methodVerbs(method).some((verb) => (LEADING_ONLY_VERBS.has(verb) ? words[0] === verb : words.includes(verb)));
 }
 
 /** Whether a path segment looks plural: singularizePathSegment would change it. */
@@ -1149,17 +1160,21 @@ function inferSingleton(path: string, apiRootLength = 0): { parent: string | nul
  *     ending in `s` after the parameter is a nested collection to create into
  *     (`/orgs/{id}/api_keys`) or a singleton of the item (`/orders/{id}/status`,
  *     see inferSingleton), and keeps `create`;
- *   - for any method, a literal whose words include the method's own verb
- *     (methodVerbs), which the name would otherwise repeat: `bulk-delete` on
- *     a DELETE, `list-all` on a GET, `update-password` on a PUT after a
- *     parameter. After a parameter, a literal that carries another method's
- *     verb is a singleton: `GET /users/{id}/last-update` is
- *     `getUserLastUpdate`;
- *   - a literal with no parameter before it whose last word is any CRUD verb
- *     (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`.
- *     Such a literal is otherwise read as a collection (`/pets/search` is
- *     `createSearch`), which would make it `createBulkDelete`. The last word
- *     only, so `/pets/delete-candidates` stays a collection.
+ *   - for any method, a literal that carries the method's own verb
+ *     (segmentCarriesVerb), which the name would otherwise repeat:
+ *     `bulk-delete` on a DELETE, `list-all` on a GET, `update-password` on a
+ *     PUT after a parameter. A literal that carries another method's verb is
+ *     not: after a parameter it is a singleton, `GET /users/{id}/last-update`
+ *     is `getUserLastUpdate`, and before none it is a collection,
+ *     `GET /pets/update` is `listUpdate` and `GET /pets/last-update` is
+ *     `listLastUpdate`;
+ *   - a POST on a literal with no parameter before it whose last word is any
+ *     CRUD verb (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`,
+ *     `POST /v1/pets:batchGet`. Such a literal is otherwise read as a
+ *     collection (`/pets/search` is `createSearch`), which would make it
+ *     `createBulkDelete`. The last word only, so `/pets/delete-candidates`
+ *     stays a collection, and a POST only, since a verb that is not the
+ *     method's own is not what the method does.
  *
  * The verb is the segment itself. The resource is the singular parent
  * (inferItemParent) when the segment follows a parameter — `adopt` + `Pet` —
@@ -1190,7 +1205,7 @@ function inferAction(
   const words = splitWords(last).map((w) => w.toLowerCase());
   const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
   const ownVerb = segmentCarriesVerb(method, path);
-  const verbPhrase = !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
+  const verbPhrase = method === 'post' && !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
   if (!postAction && !ownVerb && !verbPhrase) return null;
 
   const resource = afterParam
@@ -1211,7 +1226,10 @@ function inferAction(
  * CRUD verb (PUT and PATCH both `update`); any other sharing on one path is
  * resolved first (demoteSamePathNames), before the qualifiers below, since
  * every consumer that keys a service's operations by name — the differ among
- * them — would otherwise see one of the two.
+ * them — would otherwise see one of the two. An action that shares a name
+ * with a path-named operation of another shape yields next
+ * (yieldActionNames), so `update` stays with `PUT /pets/{id}` and
+ * `POST /pets/update` is `updatePets`.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1297,6 +1315,9 @@ function disambiguateOperationNames(
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
   const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
+  // Then an action beside a CRUD or singleton operation of its name: the
+  // plain name stays with the latter, which the qualifiers would rename.
+  for (const op of yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, rename)) demoted.add(op);
 
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
@@ -1466,9 +1487,11 @@ function disambiguateOperationNames(
  * the singleton `createUserUpdatePassword`. The verb that keeps the name: an
  * operationId-named operation's, since that name is the author's and a
  * path-named sibling steps aside whatever its verb; else the verb the segment
- * carries (segmentCarriesVerb), `delete` for `bulk-delete`; else `create`,
- * POST being the method an action is written on; else the verb of the first
- * method in HTTP_METHODS order. When the name an operation falls back to is
+ * carries (segmentCarriesVerb), `delete` for `bulk-delete`, the first
+ * method's in HTTP_METHODS order when it carries two; else `create`, POST
+ * being the only other method an action is read on (inferAction); else, for
+ * a shared name that is no action (PUT and PATCH `updatePet`), the verb of
+ * the first method in HTTP_METHODS order. When the name an operation falls back to is
  * still held on the path by an operationId or by another verb — path-named
  * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
  * to drop — a numeric suffix free in the service is added, silently, as the
@@ -1541,6 +1564,58 @@ function demoteSamePathNames(
     }
   }
   return demoted;
+}
+
+/**
+ * Keep the plain CRUD name with the CRUD operation when an action takes it.
+ * `POST /pets/update` is the action `update` — its collection `pets` is the
+ * service segment, which a name leaves off — and so is `PUT /pets/{id}`. Left
+ * to the qualifiers, the pair would be told apart by `By<Param>`, which
+ * renames the PUT to `updateById`, and code calling `update` would then
+ * reach `POST /pets/update`. So before the qualifiers run, a path-named
+ * action that shares its name with a path-named operation of another shape —
+ * a CRUD operation or a singleton, for which inferAction is null, a demoted
+ * action among them — is renamed alone. It takes back the collection it
+ * dropped, the service noun of the path the action segment sits on
+ * (inferServiceNoun of qualifierPath): `updatePets`, `createPets` for
+ * `POST /pets/create` beside `POST /pets`, `listAllPets` for
+ * `GET /pets/list-all` beside `GET /pets/all`. When that adds nothing —
+ * the name already ends with it (`POST /store/pets/{id}/create` is
+ * `createPet`, as `POST /store/pets/{id}` is) or there is none
+ * (`POST /store/pets/update` is `updatePets`, as `PUT /store/pets` is) — it
+ * takes the name it has without the action rule (`createPetCreate`,
+ * `createUpdate`) and is read from then on
+ * as that shape, like a demoted action (demoteSamePathNames). An action
+ * beside an operationId of its name is left to the numeric pass
+ * (`adoptPet2`), and two actions of one name to the qualifiers
+ * (`adoptPetRescue`). Groups come in name order and the renames depend only
+ * on each operation's own path, so the result is deterministic. Returns the
+ * operations that fell back to their non-action name.
+ */
+function yieldActionNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  demoted: ReadonlySet<Operation>,
+  apiRootLengthOf: (op: Operation) => number,
+  rename: (op: Operation, name: string) => void,
+): Operation[] {
+  const fellBack: Operation[] = [];
+  const isAction = (op: Operation) =>
+    pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
+  for (const group of collidingGroups(operations)) {
+    if (!group.some((op) => pathNamed.has(op) && !isAction(op))) continue;
+    for (const op of group.filter(isAction)) {
+      const root = apiRootLengthOf(op);
+      const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
+      if (qualified !== op.name) {
+        rename(op, qualified);
+      } else {
+        rename(op, fallbackOperationName(op.httpMethod, op.path, root, false));
+        fellBack.push(op);
+      }
+    }
+  }
+  return fellBack;
 }
 
 /**
