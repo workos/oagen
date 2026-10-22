@@ -1,5 +1,5 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
-import { resolveServerUrl, serversBeyondDefault } from '../ir/server-url.js';
+import { isDefaultServerSet, resolveServerUrl, serversBeyondDefault } from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
 /**
@@ -31,7 +31,11 @@ import type { Change, ServerVariableChange } from './types.js';
  * reported between two such documents, and a document that moves from any of
  * them to a named host gains that host as additive, with no `server-removed`
  * for `/`. `oldBaseUrl` and `newBaseUrl` still carry `ApiSpec.baseUrl` as
- * the parser set it, `/` included.
+ * the parser set it, `/` included. The default is read off `baseUrl` and
+ * `servers` together (`isDefaultServerSet`): a `baseUrl` that names a host
+ * with no `servers` beside it — an IR built by hand, which the parser never
+ * produces — is compared as written, so a host change there is still a
+ * `base-url-changed`.
  */
 export function diffServers(
   oldSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
@@ -41,10 +45,12 @@ export function diffServers(
 
   const oldServers = serversBeyondDefault(oldSpec.servers);
   const newServers = serversBeyondDefault(newSpec.servers);
-  // A document with only the default server has no default host: its
-  // `baseUrl` (`''` or `/`) compares as `''`.
-  const oldBaseUrl = oldServers.length > 0 ? oldSpec.baseUrl : '';
-  const newBaseUrl = newServers.length > 0 ? newSpec.baseUrl : '';
+  // A document at OpenAPI's default has no default host: the `baseUrl` the
+  // parser sets for it (`''` without servers, `/` with `/` written out)
+  // compares as `''`. Any other `baseUrl` is compared as written, even with
+  // no `servers` beside it.
+  const oldBaseUrl = isDefaultServerSet(oldSpec) ? '' : oldSpec.baseUrl;
+  const newBaseUrl = isDefaultServerSet(newSpec) ? '' : newSpec.baseUrl;
 
   if (oldBaseUrl !== newBaseUrl) {
     changes.push({
