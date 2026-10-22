@@ -203,7 +203,11 @@ export function singularize(word: string): string {
  * → `area` and `tokens` → `token` are the common readings), plurals of `-ia`
  * nouns (`utopias` is kept as it is, so that `alias` is), plurals of
  * `-u`/`-i` nouns (`menus`, `apis` are kept as they are) and acronyms (`sms`
- * → `sm`).
+ * → `sm`). These limits reach every segment the parser singularises — the
+ * resource of an item operation, a deeper segment a path parameter follows
+ * and the service noun a name restores — so `/messages/sms/{smsId}/attachments`
+ * contributes `Sm` and `/design/canvas/{id}/layers/{layerId}` contributes
+ * `Canva` to a qualified name.
  */
 export function singularizePathSegment(segment: string): string {
   const lower = segment.toLowerCase();
