@@ -2857,7 +2857,10 @@ function resolveComponentResponseModelNames(
     let name = base;
     let minted = mintedUnder(name);
     let previous: string[] | undefined;
-    for (let n = 2; n < 100; n++) {
+    // Unbounded on purpose: `taken` is finite and every step is a new
+    // numbered stem, so a free one is always reached; only a clash the stem
+    // does not reach (`stuck`) ends the search without one.
+    for (let n = 2; ; n++) {
       const clashing = [name, ...minted].filter((candidate) => taken.has(candidate));
       if (clashing.length === 0) break;
       const stuck =
