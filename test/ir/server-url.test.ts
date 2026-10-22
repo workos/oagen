@@ -234,6 +234,7 @@ describe('normalizeServerUrl', () => {
       'https://{region}.api.example.com/{version}',
     );
     expect(normalizeServerUrl('https://{Region}.api.example.com')).toBe('https://{Region}.api.example.com/');
+    expect(normalizeServerUrl('https://{region}.API.example.com/')).toBe('https://{region}.api.example.com/');
     expect(normalizeServerUrl('https://{Region}.api.example.com')).not.toBe(
       normalizeServerUrl('https://{region}.api.example.com'),
     );
@@ -248,8 +249,26 @@ describe('normalizeServerUrl', () => {
   });
 
   it('keeps a port written as a placeholder, and drops no port after a placeholder scheme', () => {
-    expect(normalizeServerUrl('https://api.example.com:{port}')).toBe('https://api.example.com:{port}/');
+    expect(normalizeServerUrl('https://api.example.com:{port}')).toBe('https://api.example.com:{port}');
     expect(normalizeServerUrl('{scheme}://api.example.com:443')).toBe('{scheme}://api.example.com:443/');
+  });
+
+  it('adds no `/` after an authority that ends in a placeholder, which may supply the path itself (Greptile)', () => {
+    // `basePath` defaulting to `/v1` makes these resolve to `/v1` and `/v1/`.
+    expect(normalizeServerUrl('https://api.example.com{basePath}')).toBe('https://api.example.com{basePath}');
+    expect(normalizeServerUrl('https://api.example.com{basePath}/')).toBe('https://api.example.com{basePath}/');
+    expect(normalizeServerUrl('https://api.example.com{basePath}')).not.toBe(
+      normalizeServerUrl('https://api.example.com{basePath}/'),
+    );
+    expect(normalizeServerUrl('https://{host}')).toBe('https://{host}');
+    expect(normalizeServerUrl('https://API.example.com:{port}?x=1')).toBe('https://api.example.com:{port}?x=1');
+    // Literal host text after the placeholder means it cannot be a path, so
+    // the usual rule applies.
+    expect(normalizeServerUrl('https://{region}.api.example.com')).toBe('https://{region}.api.example.com/');
+    expect(normalizeServerUrl('https://{host}:8443')).toBe('https://{host}:8443/');
+    // A bare literal authority, and one under a placeholder scheme, still get `/`.
+    expectSame('https://api.example.com/', ['https://api.example.com', 'https://api.example.com/']);
+    expectSame('{scheme}://api.example.com/', ['{scheme}://api.example.com', '{scheme}://api.example.com/']);
   });
 
   it('treats an unclosed brace, an empty `{}` and a reopened brace as literal text, like resolveServerUrl', () => {

@@ -218,6 +218,38 @@ paths:
     expect(warnings()).toEqual([]);
   });
 
+  it('keeps an override whose only difference is a `/` after a placeholder that supplies the path (Greptile)', async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+servers:
+  - url: https://api.example.com{basePath}
+    variables:
+      basePath: { default: /v1 }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: https://api.example.com{basePath}/
+          variables:
+            basePath: { default: /v1 }
+      ${ok}
+`);
+
+    // The document resolves to `/v1`, the operation to `/v1/`: a different server.
+    expect(operation(ir, 'listNotes').servers).toEqual([
+      {
+        url: 'https://api.example.com{basePath}/',
+        description: undefined,
+        variables: { basePath: { default: '/v1' } },
+      },
+    ]);
+    expect(resolveServerUrl(operation(ir, 'listNotes').servers![0]).url).toBe('https://api.example.com/v1/');
+    expect(ir.baseUrl).toBe('https://api.example.com/v1');
+    expect(warnings()).toEqual([]);
+  });
+
   it('treats a different description, variable or order as a different list', async () => {
     const ir = await parseYaml(`
 openapi: '3.1.0'
