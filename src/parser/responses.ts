@@ -93,6 +93,45 @@ export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
   '5XX': 'ServerError',
 };
 
+/**
+ * What a Responses Object key names. OpenAPI defines four kinds of key:
+ * `default`; an HTTP status code, exactly three digits in 100–599; a range,
+ * `1XX`–`5XX` in either case; and an `x-` specification extension. The
+ * whole key decides, never a numeric prefix: `6XX`, `4XXX`, `20X`, `600`,
+ * `099` and `200 ` are `unrecognized`, like `error` or `Default`.
+ */
+export type ResponseKey =
+  | { kind: 'status'; code: number }
+  | { kind: 'range'; range: StatusRange }
+  | { kind: 'default' }
+  | { kind: 'extension' }
+  | { kind: 'unrecognized' };
+
+/**
+ * Classify a Responses Object key. Every reader of a Responses Object —
+ * an operation's responses, the const prefixes it reserves, a webhook's
+ * responses — goes through here, so a key is a status code in one place or
+ * in none.
+ */
+export function classifyResponseKey(key: string): ResponseKey {
+  if (key === 'default') return { kind: 'default' };
+  if (key.startsWith('x-')) return { kind: 'extension' };
+  if (/^[1-5]\d{2}$/.test(key)) return { kind: 'status', code: Number(key) };
+  if (/^[1-5]XX$/i.test(key)) return { kind: 'range', range: key.toUpperCase() as StatusRange };
+  return { kind: 'unrecognized' };
+}
+
+/**
+ * Warn about a Responses Object key OpenAPI does not define, which the
+ * caller then ignores rather than drops silently. `label` names the
+ * operation or webhook the key sits on.
+ */
+export function warnUnrecognizedResponseKey(key: string, label: string): void {
+  console.warn(
+    `[oagen] Warning: Ignoring response key "${key}" on ${label}: not a status code (three digits, 100–599), a 1XX–5XX range, or "default"`,
+  );
+}
+
 export function classifyAndExtractResponse(
   schema: SchemaObject,
   contextName: string,

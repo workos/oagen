@@ -2639,7 +2639,10 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     ).toEqual({
       'GET /orgs/teams/members': 'listMembersTeams',
       'GET /orgs/{orgId}/teams/members': 'listMembersTeamsByOrgId',
-      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersTeamsByOrgIdByTeamId',
+      // `teams/{teamId}` addresses one team, so its deeper context is the
+      // singular `Team` (#268), which no longer collides with the other two;
+      // the parameters are never reached for it.
+      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersTeam',
     });
   });
 
@@ -3008,8 +3011,8 @@ describe('extractOperations – path-named services skip the API root (issue #20
     expect(layout(rooted).map((line) => line.replace(' /api/v1/', ' /'))).toEqual(layout(bare));
     expect(layout(rooted)).toMatchInlineSnapshot(`
       [
-        "Admin.listDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
-        "Admin.listDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
+        "Admin.listDocumentTypesBillingCompany GET /api/v1/admin/billing/companies/{id}/document_types",
+        "Admin.listDocumentTypesSupportCompany GET /api/v1/admin/support/companies/{id}/document_types",
         "Core.listPermissionsAuth GET /api/v1/core/auth/permissions",
         "Core.listPermissionsGlobal GET /api/v1/core/global/permissions",
         "Documents.delete DELETE /api/v1/documents/{id}",
@@ -3054,5 +3057,26 @@ describe('extractOperations – path-named services skip the API root (issue #20
       'Notes GET /api/note_templates',
       'Notes GET /api/notes',
     ]);
+  });
+});
+
+describe('extractOperations – Operation.tags (issue #273)', () => {
+  const responses = { '200': { description: 'ok' } };
+  const operation = (op: Record<string, unknown>) =>
+    extractOperations({ '/pets': { get: { operationId: 'listPets', responses, ...op } } }).services[0].operations[0];
+
+  it('carries every tag in document order, as a webhook does', () => {
+    expect(operation({ tags: ['Pets', 'Store'] }).tags).toEqual(['Pets', 'Store']);
+  });
+
+  it('drops entries that are not non-empty strings and keeps the rest', () => {
+    expect(operation({ tags: ['Pets', '', 3, null, 'Store'] }).tags).toEqual(['Pets', 'Store']);
+  });
+
+  it('omits the key when the operation declares no usable tag', () => {
+    expect(operation({})).not.toHaveProperty('tags');
+    expect(operation({ tags: [] })).not.toHaveProperty('tags');
+    expect(operation({ tags: ['', 3] })).not.toHaveProperty('tags');
+    expect(operation({ tags: 'Pets' })).not.toHaveProperty('tags');
   });
 });

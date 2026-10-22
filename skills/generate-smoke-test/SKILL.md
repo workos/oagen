@@ -23,7 +23,7 @@ It imports shared infrastructure from `@workos/oagen/smoke` and implements langu
 
 Read and understand these files before writing any code:
 
-1. **`@workos/oagen/smoke`** (exported from `{oagen}/scripts/smoke/shared.ts`) — `parseSpec()`, `planOperations()`, `generatePayload()` / `generateCamelPayload()`, `generateQueryParams()` / `generateCamelQueryParams()`, `IdRegistry`, `getExpectedStatusCodes()` / `isUnexpectedStatus()`, `resolvePath()`, `CapturedExchange`, `SmokeResults`
+1. **`@workos/oagen/smoke`** (exported from `{oagen}/scripts/smoke/shared.ts`) — `parseSpec()`, `planOperations()`, `generatePayload()` / `generateCamelPayload()`, `generateQueryParams()` / `generateCamelQueryParams()`, `IdRegistry`, `isUnexpectedStatus()` / `getExpectedStatuses()` / `coversStatus()` / `formatExpectedStatuses()` / `getExpectedStatusCodes()` (the first three read every response kind the IR carries: explicit codes, `1XX`–`5XX` ranges and `default`; the last lists explicit codes only), `resolvePath()`, `CapturedExchange`, `SmokeResults`
 
 2. **Existing smoke scripts (read via subagent)** — Use the `Agent` tool with `subagent_type: Explore` to study the closest existing smoke script. This keeps ~630+ lines of reference source out of the main context:
 

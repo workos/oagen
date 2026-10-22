@@ -18,7 +18,8 @@ import {
   parseCliArgs,
   loadSmokeConfig,
   IdRegistry,
-  getExpectedStatusCodes,
+  formatExpectedStatuses,
+  getExpectedStatuses,
   isUnexpectedStatus,
   type CapturedExchange,
   type SmokeResults,
@@ -147,8 +148,10 @@ async function main() {
           exchange.error = `HTTP ${response.status}`;
         }
         if (unexpected) {
+          const expected = getExpectedStatuses(op);
           exchange.unexpectedStatus = true;
-          exchange.expectedStatusCodes = getExpectedStatusCodes(op);
+          exchange.expectedStatusCodes = expected.codes;
+          exchange.expectedStatuses = expected;
         }
 
         exchanges.push(exchange);
@@ -230,7 +233,10 @@ async function main() {
   if (unexpectedCount > 0) {
     console.log('\nUnexpected status codes:');
     for (const e of exchanges.filter((e) => e.unexpectedStatus)) {
-      console.log(`  ${e.operationId}: got ${e.response.status}, expected ${e.expectedStatusCodes?.join('/')}`);
+      const expected = e.expectedStatuses
+        ? formatExpectedStatuses(e.expectedStatuses)
+        : e.expectedStatusCodes?.join('/');
+      console.log(`  ${e.operationId}: got ${e.response.status}, expected ${expected}`);
     }
   }
   console.log('Written to smoke-results-raw.json');

@@ -9,6 +9,7 @@ import type {
   Service,
   TypeRef,
 } from '../ir/types.js';
+import { enumValueShapeKey } from './enum-members.js';
 import { unionShapeKey } from './union-shape.js';
 
 /**
@@ -353,16 +354,16 @@ function fingerprintType(
       // the same type for wrapper-sharing purposes. The value's primitive type
       // is part of the fingerprint (as it is for `literal`): the IR keeps
       // numeric `5` and string `"5"` distinct, and so do the emitters, so two
-      // enums that stringify alike are still different types.
+      // enums that stringify alike are still different types. So is each
+      // value's deprecation (`enumValueShapeKey`): a copy that deprecates a
+      // value the other does not is a different type, as a deprecated model
+      // is from a live one.
       //
       // Sorted, like model fields and group members above: declaration order of
       // enum values does not change which values the member accepts, so two
       // inline enums listing one set in different orders must keep sharing a
       // wrapper rather than renaming an already-published type apart.
-      return `e<${e.values
-        .map((v) => `${typeof v.value}:${String(v.value)}`)
-        .sort()
-        .join(',')}>`;
+      return `e<${e.values.map(enumValueShapeKey).sort().join(',')}>`;
     }
     case 'model': {
       const m = modelMap.get(ref.name);

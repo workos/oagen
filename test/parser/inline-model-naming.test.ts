@@ -404,6 +404,40 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps the plain name on POST /pets/{id}/adopt and hashes the custom method POST /pets/{id}:adopt (issue #269)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
+    const colon = { post: { ...fooBar.post, parameters: idParam } };
+    const slash = { post: { ...fooSlashBar.post, parameters: idParam } };
+
+    // A custom method flattens to the prefix of its slash form.
+    expect(derivePathBasedName('/pets/{id}:adopt', 'post', 'Request')).toBe('PetsByIdAdoptPostRequest');
+    expect(derivePathBasedName('/pets/{id}:adopt', 'post', 'Request')).toBe(
+      derivePathBasedName('/pets/{id}/adopt', 'post', 'Request'),
+    );
+
+    const names = await namesInBothOrders([
+      ['/pets/{id}:adopt', colon],
+      ['/pets/{id}/adopt', slash],
+    ]);
+    expect(names).toMatchInlineSnapshot(`
+      {
+        "/pets/{id}/adopt": [
+          "PetsByIdAdoptPostRequest",
+          "PetsByIdAdoptPostResponse",
+        ],
+        "/pets/{id}:adopt": [
+          "PetsByIdAdopt535CffPostRequest",
+          "PetsByIdAdopt535CffPostResponse",
+        ],
+      }
+    `);
+    expect(names['/pets/{id}/adopt']).toEqual(['PetsByIdAdoptPostRequest', 'PetsByIdAdoptPostResponse']);
+    expect(names['/pets/{id}:adopt'][0]).not.toBe('PetsByIdAdoptPostRequest');
+    expect(names['/pets/{id}:adopt'][1]).not.toBe('PetsByIdAdoptPostResponse');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('only disambiguates the colliding method: GET /foo-bar keeps its plain name next to the POST collision', async () => {
     const { ops } = await parseInline(
       api({

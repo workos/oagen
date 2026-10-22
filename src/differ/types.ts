@@ -1,3 +1,5 @@
+import type { SecurityRequirementSet } from '../ir/types.js';
+
 export interface DiffReport {
   oldVersion: string;
   newVersion: string;
@@ -5,8 +7,9 @@ export interface DiffReport {
   /**
    * Cross-cutting events that a type signature does not show: a parameter
    * default changing observable runtime behavior for callers who never set it
-   * explicitly (breaking), or an IR node becoming or ceasing to be deprecated
-   * (additive). Surfaced separately so PR-description and changelog tooling
+   * explicitly (breaking), an IR node becoming or ceasing to be deprecated
+   * (additive), or the security requirements a request must satisfy changing
+   * (either). Surfaced separately so PR-description and changelog tooling
    * can call them out even when the shapes in `changes` are otherwise
    * unchanged. Every entry here mirrors a flag or nested entry on a change in
    * `changes`, so the totals in `summary` count each event once.
@@ -22,7 +25,7 @@ export interface DiffReport {
   };
 }
 
-export type BehaviorChange = ParamDefaultChanged | DeprecatedChanged;
+export type BehaviorChange = ParamDefaultChanged | DeprecatedChanged | SecurityChanged;
 
 export interface ParamDefaultChanged {
   kind: 'param-default-changed';
@@ -82,6 +85,29 @@ export type DeprecatedNode =
       paramLocation: 'path' | 'query' | 'header' | 'cookie';
     };
 
+/**
+ * The security requirements a node's requests must satisfy changed. Mirrors
+ * the document-level `security-changed` change (`node: 'document'`) and the
+ * `securityChanged` flag on an `operation-modified` or `webhook-modified`
+ * change, copying `oldSecurity`/`newSecurity` from it. The classification is
+ * the security change's own — `classifySecurityChange` on the two lists,
+ * read from the caller's side for an operation and from the receiver's side
+ * for a webhook, and for the document as `DocumentSecurityChanged` says — not
+ * the owning change's, which may be breaking for another reason.
+ */
+export type SecurityChanged = {
+  kind: 'security-changed';
+  oldSecurity: SecurityRequirementSet[];
+  newSecurity: SecurityRequirementSet[];
+  classification: 'additive' | 'breaking';
+} & SecurityNode;
+
+/** Which node a `security-changed` entry is about, named the way the owning change names it. */
+export type SecurityNode =
+  | { node: 'document' }
+  | { node: 'operation'; serviceName: string; operationName: string }
+  | { node: 'webhook'; name: string; httpMethod: string };
+
 export type Change =
   | ModelAdded
   | ModelRemoved
@@ -98,6 +124,7 @@ export type Change =
   | ServerAdded
   | ServerRemoved
   | ServerModified
+  | DocumentSecurityChanged
   | WebhookAdded
   | WebhookRemoved
   | WebhookModified;
@@ -295,6 +322,33 @@ export interface OperationModified {
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
   /**
+   * The security requirements the operation's requests must satisfy changed.
+   * Each side is `op.security ?? ` that document's `security` (`diffSpecs`
+   * supplies them), `[]` when neither declares any; the two lists are
+   * compared as sets of alternatives, each a set of schemes with scopes as
+   * sets, so order and repetition do not count. Absent on both sides is
+   * unchanged: the operation inherits twice, and a moved document default is
+   * the document-level `security-changed` change's to report. Breaking when
+   * a request built for the old list no longer satisfies the new one — a
+   * scheme or scope it now has to carry, an alternative it could use that is
+   * gone, an anonymous alternative withdrawn; additive when every old
+   * alternative still passes — a new alternative, a scope or scheme no longer
+   * needed, authentication made optional.
+   */
+  securityChanged: boolean;
+  /** Present exactly when `securityChanged`: the effective requirements on each side, old → new. */
+  oldSecurity?: SecurityRequirementSet[];
+  newSecurity?: SecurityRequirementSet[];
+  /**
+   * The operation's `tags` differ, compared in document order (an absent key
+   * is an empty list). Always additive: tags group and document a method and
+   * change nothing a caller compiles against.
+   */
+  tagsChanged: boolean;
+  /** Present exactly when `tagsChanged`: the lists on each side, old → new, `[]` for none. */
+  oldTags?: string[];
+  newTags?: string[];
+  /**
    * True when a response entry gained or lost a media type, or a secondary
    * media type's body type changed; `responseContentTypeChanges` says which.
    */
@@ -373,7 +427,10 @@ export interface WebhookRemoved {
  * `diffWebhookParams`). Every `ParamChange` carries its `paramLocation`,
  * since a header and a query parameter may share a name. A parameter's
  * `deprecated` flipping is a `param-deprecated-changed` entry there, as on
- * an operation.
+ * an operation. The security the request carries is read from the
+ * receiver's side too: a credential the sender stops presenting, or an
+ * alternative it may now present that the handler never checked for, is
+ * breaking.
  */
 export interface WebhookModified {
   kind: 'webhook-modified';
@@ -393,6 +450,26 @@ export interface WebhookModified {
   /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
+  /**
+   * The security the request carries changed. Each side is
+   * `webhook.security ?? ` that document's `security`, `[]` when neither
+   * declares any, compared as on an operation (sets of alternatives; absent
+   * on both sides is unchanged). Breaking when what the sender may now
+   * present no longer carries what the handler checked for — a scheme it
+   * stops presenting, an alternative it may now use that the old list never
+   * offered; additive when every new alternative still carries some old one
+   * — a credential the sender starts carrying beside the old ones, an
+   * alternative withdrawn.
+   */
+  securityChanged: boolean;
+  /** Present exactly when `securityChanged`: the effective requirements on each side, old → new. */
+  oldSecurity?: SecurityRequirementSet[];
+  newSecurity?: SecurityRequirementSet[];
+  /** The webhook's `tags` differ, compared in document order. Always additive, as on an operation. */
+  tagsChanged: boolean;
+  /** Present exactly when `tagsChanged`: the lists on each side, old → new, `[]` for none. */
+  oldTags?: string[];
+  newTags?: string[];
   /** What changed about the body or the accepted responses, e.g. `payload type changed; accepted response 200 removed`. */
   details?: string;
   classification: 'additive' | 'breaking';
@@ -498,4 +575,28 @@ export interface ServerVariableChange {
   /** For `variable-enum-value-added` / `variable-enum-value-removed`: the value. */
   value?: string;
   details?: string;
+}
+
+/**
+ * `ApiSpec.security` — the default every operation and webhook that declares
+ * no `security` of its own inherits — differs between the two documents,
+ * compared as sets of alternatives (order and repetition do not count; `[]`
+ * and an undeclared list both mean no authentication). Reported once per
+ * diff: an operation or webhook that inherits on both sides is not reported
+ * again for it, while one that declares its own list on either side is
+ * compared on what it actually requires (`securityChanged`).
+ */
+export interface DocumentSecurityChanged {
+  kind: 'security-changed';
+  /** The old document's list; `[]` when it declared none. */
+  oldSecurity: SecurityRequirementSet[];
+  /** The new document's list; `[]` when it declares none. */
+  newSecurity: SecurityRequirementSet[];
+  /**
+   * Read from the caller's side, as for an operation: breaking when a
+   * request built for the old list no longer satisfies the new one. When a
+   * webhook in either document inherits the default, read from the
+   * receiver's side as well, and breaking if either side breaks.
+   */
+  classification: 'additive' | 'breaking';
 }
