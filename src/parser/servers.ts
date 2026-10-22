@@ -25,6 +25,13 @@ export interface ExtractedServers {
  * `resolveServerUrl`, which fills each `{name}` with the variable's `default`
  * (OpenAPI requires one). The list itself is normalised by
  * `extractServerList`, the same way a Path Item's or an Operation's is.
+ *
+ * A document that writes OpenAPI's default server out (`servers: [{ url:
+ * '/' }]`) is carried as written — `servers: [{ url: '/' }]`, `baseUrl: '/'`
+ * — while one that declares none has `servers` absent and `baseUrl: ''`. The
+ * two mean the same thing, and everywhere server lists are compared
+ * (`Operation.servers`, the differ) they are read as one through
+ * `serversBeyondDefault` in `ir/server-url.ts` (#291).
  */
 export function extractServers(rawServers: unknown): ExtractedServers {
   const servers = extractServerList(rawServers, 'the document');

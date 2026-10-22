@@ -569,4 +569,194 @@ paths:
       expect(services[0].operations[0].servers).toEqual([{ url: 'https://pets.example.com' }]);
     });
   });
+
+  describe("OpenAPI's default server (issue #291)", () => {
+    it("leaves the key absent when an operation writes `/` out under a document without servers (the issue's comment)", async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+      ${ok}
+`);
+
+      expect(ir.baseUrl).toBe('');
+      expect(ir.servers).toBeUndefined();
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('leaves the key absent under `servers: []`, and for a Path Item that writes `/` out', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+servers: []
+paths:
+  /notes:
+    servers:
+      - url: /
+    get:
+      operationId: listNotes
+      ${ok}
+`);
+
+      expect(ir.baseUrl).toBe('');
+      expect(ir.servers).toBeUndefined();
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('does not carry a description on `/`: the default server has none', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+          description: Same origin
+      ${ok}
+`);
+
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('leaves the key absent when both the document and the operation write `/` out', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+servers:
+  - url: /
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+      ${ok}
+`);
+
+      // The document's own list is carried as written.
+      expect(ir.baseUrl).toBe('/');
+      expect(ir.servers).toEqual([{ url: '/' }]);
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('keeps `/` under a document that names a host', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+servers:
+  - url: https://api.example.com
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+      ${ok}
+`);
+
+      expect(ir.baseUrl).toBe('https://api.example.com');
+      expect(operation(ir, 'listNotes').servers).toEqual([{ url: '/' }]);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('keeps a named host under a document that writes `/` out', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+servers:
+  - url: /
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: https://notes.example.com
+      ${ok}
+`);
+
+      expect(ir.baseUrl).toBe('/');
+      expect(operation(ir, 'listNotes').servers).toEqual([{ url: 'https://notes.example.com' }]);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('keeps `/` with a variable under a document without servers: a variable is not the default', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+          variables:
+            port: { default: '443' }
+      ${ok}
+`);
+
+      expect(operation(ir, 'listNotes').servers).toEqual([{ url: '/', variables: { port: { default: '443' } } }]);
+      expect(warnings()).toEqual([]);
+    });
+
+    describe('through extractOperations', () => {
+      const paths = {
+        '/notes': {
+          servers: [{ url: '/' }],
+          get: { operationId: 'listNotes', responses: { '204': { description: 'ok' } } },
+        },
+      };
+
+      it('treats a Path Item that writes `/` out under no document servers as inheriting', () => {
+        const { services } = extractOperations(paths as never);
+        expect('servers' in services[0].operations[0]).toBe(false);
+      });
+
+      it('treats a Path Item that writes `/` out under a document that writes `/` out as inheriting', () => {
+        const { services } = extractOperations(
+          paths as never,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined, // componentResponses
+          undefined, // componentFieldModels
+          [{ url: '/' }],
+        );
+        expect('servers' in services[0].operations[0]).toBe(false);
+      });
+
+      it('keeps a Path Item that writes `/` out under a document that names a host', () => {
+        const { services } = extractOperations(
+          paths as never,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined, // componentResponses
+          undefined, // componentFieldModels
+          [{ url: 'https://api.example.com' }],
+        );
+        expect(services[0].operations[0].servers).toEqual([{ url: '/' }]);
+      });
+    });
+  });
 });

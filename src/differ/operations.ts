@@ -26,7 +26,8 @@ import { classifySecurityChange, securityShift, type DocumentSecurity } from './
  * The two documents' `servers`, so `diffOperations` can resolve what an
  * operation is actually served from (`op.servers ?? document servers`).
  * `diffSpecs` supplies it; a direct caller may leave it out, in which case an
- * operation that inherits is compared as having no servers at all.
+ * operation that inherits is compared as having no servers at all — which is
+ * OpenAPI's default, `/`, and the same thing (#291).
  */
 export interface DocumentServers {
   old: ServerEntry[] | undefined;
@@ -279,7 +280,11 @@ function endOfIterationEqual(
  * carry that distinction. Descriptions on a server or a variable, enum order,
  * a repeated enum value and position do not count there, so they do not here;
  * neither does a URL spelling `normalizeServerUrl` folds (scheme and host
- * case, a default port, a bare authority's `/`).
+ * case, a default port, a bare authority's `/`). Neither does the spelling of
+ * OpenAPI's default server (#291): a list that is empty and one that is `/`
+ * alone without variables are the same list there, so an operation served
+ * from `/` written out and one served from a document that declares nothing
+ * are served from the same place.
  */
 function effectiveServersChanged(oldServers: ServerEntry[], newServers: ServerEntry[]): boolean {
   return diffServers(asDocument(oldServers), asDocument(newServers)).length > 0;
