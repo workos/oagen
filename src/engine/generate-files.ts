@@ -1,5 +1,11 @@
-import type { ApiSpec, Model, TypeRef, Service, Operation } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs } from '../ir/types.js';
+import type { ApiSpec, Model, TypeRef, Service, Operation, Webhook } from '../ir/types.js';
+import {
+  walkTypeRef,
+  collectResponseHeaders,
+  collectModelTypeRefs,
+  collectResponseBodyTypes,
+  collectWebhookTypeRefs,
+} from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
@@ -116,7 +122,7 @@ export function aggregateSurfaceServices(spec: ApiSpec, ctx: EmitterContext): Se
 export function collectReferencedNames(
   services: Service[],
   models: Model[],
-  opts: { preserveAllDiscriminated?: boolean } = {},
+  opts: { preserveAllDiscriminated?: boolean; webhooks?: Webhook[] } = {},
 ): { models: Set<string>; enums: Set<string> } {
   // Default: preserve EVERY discriminated/event model as public surface (full
   // emission). Strict mode (`preserveAllDiscriminated: false`, used to compute a
@@ -153,6 +159,7 @@ export function collectReferencedNames(
         for (const field of op.pagination.envelopeFields ?? []) collectFromTypeRef(field.type);
       }
       for (const header of collectResponseHeaders(op)) collectFromTypeRef(header.type);
+      for (const { type } of collectResponseBodyTypes(op)) collectFromTypeRef(type);
       for (const err of op.errors) {
         if (err.type) collectFromTypeRef(err.type);
       }
@@ -162,6 +169,13 @@ export function collectReferencedNames(
         }
       }
     }
+  }
+
+  // A webhook payload or header type is public surface an emitter hands the
+  // user, so it seeds reachability like an operation's types; without this a
+  // model referenced only by a webhook would be pruned as an orphan.
+  for (const webhook of opts.webhooks ?? []) {
+    for (const ref of collectWebhookTypeRefs(webhook)) collectFromTypeRef(ref);
   }
 
   // Preserve discriminated models as public SDK types even when no operation
@@ -253,8 +267,11 @@ export function generateAllFiles(spec: ApiSpec, emitter: Emitter, ctx: EmitterCo
   // models reachable from the in-surface services; otherwise an out-of-scope,
   // never-generated service's discriminated models (e.g. AgentRegistration*)
   // would still be force-included and emit orphaned converters/variants.
+  // Webhooks are not a service, so no scope selects or excludes them: their
+  // payload models are in surface in every run, exactly as in a full one.
   const referenced = collectReferencedNames(surfaceServices, spec.models, {
     preserveAllDiscriminated: !scoped,
+    webhooks: spec.webhooks,
   });
   const reachableModels = spec.models.filter((m) => referenced.models.has(m.name));
   const reachableEnums = spec.enums.filter((e) => referenced.enums.has(e.name));

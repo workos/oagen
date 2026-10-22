@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes } from '../ir/types.js';
 
 export function validateModelRefs(spec: ApiSpec): void {
   const knownNames = new Set<string>();
@@ -38,6 +38,17 @@ export function validateModelRefs(spec: ApiSpec): void {
       for (const header of collectResponseHeaders(op)) {
         walkRef(header.type, `${service.name}.${op.name}.headers.${header.name}`);
       }
+      for (const { type, source } of collectResponseBodyTypes(op)) {
+        walkRef(type, `${service.name}.${op.name}.${source}`);
+      }
     }
+  }
+
+  for (const webhook of spec.webhooks ?? []) {
+    const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
+    for (const p of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
+      walkRef(p.type, `${context}.${p.name}`);
+    }
+    if (webhook.requestBody) walkRef(webhook.requestBody, `${context}.requestBody`);
   }
 }
