@@ -88,31 +88,36 @@ A missing kind means an entire category of types won't generate correctly.
 #### ApiSpec
 
 - `description` — API-level description for the root client class doc comment
+- `externalDocs` — The document's link to fuller documentation (`url`, optional `description`), for a `@see`-style doc tag
 - `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults)
 - `webhooks` — Requests the API sends to its users (OpenAPI 3.1 `webhooks`), each with a payload type and the headers it carries
 
 #### Service
 
 - `description` — Service-level description for resource class doc comment
+- `externalDocs` — The tag's link, for the resource class doc comment
 
 #### Operation
 
 - `description` — Method-level description
-- `deprecated` — Deprecation marker on methods
+- `externalDocs` — The operation's link, for the method doc comment
+- `deprecated` — Deprecation marker on methods (the Operation Object's own keyword)
 - `async` — Async operation marker
-- `successResponses` — Multiple 2xx response types
-- `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits)
+- `successResponses` — Every declared 2xx and 3xx response, set when there is more than one; a 3xx entry's `type` is `unknown`
+- `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits); each carries `description`, `deprecated` and `externalDocs`
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
 - `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
 - `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
 - `cookieParams` — Cookie parameter handling
+- `servers` — Operation-level servers (own, else the Path Item's), present only when they differ from `ApiSpec.servers`; a request goes to `op.servers ?? spec.servers`
 
 #### Parameter
 
 - `description` — Parameter description content
-- `deprecated` — Deprecated marker on params
+- `externalDocs` — The parameter schema's link (falls back to its `$ref` target), for the param doc tag
+- `deprecated` — Deprecated marker on params (first truthy of the parameter object, its inline `schema`, then the `$ref`'d component schema)
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or argument checks
@@ -121,24 +126,33 @@ A missing kind means an entire category of types won't generate correctly.
 #### Model
 
 - `description` — Model-level doc comment
+- `externalDocs` — The schema's link, for the model doc comment (an `Enum` carries one the same way, component or lifted inline)
+- `deprecated` — Deprecation marker on models (the schema's own top-level keyword, normalized to a literal `true`; never an `allOf` member's)
 - `typeParams` — Generic type parameters
 - `constraints` — Object-level limits (`minProperties`, `maxProperties`, `dependentRequired`)
 
 #### Field
 
 - `description` — Field-level doc comment
+- `externalDocs` — The field schema's own link (a `$ref` sibling's included), for the field doc comment
 - `readOnly` — Read-only annotation (language-appropriate: `readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, etc.)
 - `writeOnly` — Write-only annotation
-- `deprecated` — Deprecation marker on fields
+- `deprecated` — Deprecation marker on fields (the property schema's own keyword, a `$ref` sibling included; the referenced model keeps its own)
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `examples` — Every example value (the list `example` is drawn from)
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or value checks
 
+#### Enum
+
+- `default` — The schema's `default:` value, for a default-value annotation
+- `externalDocs` — Link to external documentation, for a `@see`-style tag
+- `deprecated` — Deprecation marker on enums (the component enum schema's own keyword, normalized to a literal `true`)
+
 #### EnumValue
 
 - `description` — Enum value doc comment
-- `deprecated` — Deprecation marker on enum values
+- `deprecated` — Deprecation marker on enum values (declared in the IR; the parser does not set it today, so it only arrives from an overlay or plugin)
 
 ## Step 3: Read Emitter Generators
 
@@ -156,7 +170,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -242,12 +256,17 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
 | `ApiSpec.webhooks`           | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                      |
 | `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
-| `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
+| `Operation.successResponses` | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                        |
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                      |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
+| `Operation.servers`          | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                 |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
+| `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Service` and `ApiSpec` carry the same |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
+| `Model.deprecated`           | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                     |
+| `Enum.deprecated`            | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                        |
+| `Enum.default`               | Document the enum's default value                                                                                                               |
 | `Parameter.default`          | Document default value                                                                                                                          |
 | `Parameter.example`          | Document example value                                                                                                                          |
 | `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                     |
