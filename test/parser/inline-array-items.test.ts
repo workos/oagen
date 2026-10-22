@@ -171,6 +171,8 @@ function expectSound(spec: ApiSpec, components: readonly string[] = []): void {
   expect(dangling).toEqual([]);
   const orphans = [...models, ...enums].filter((name) => !reached.has(name) && !components.includes(name));
   expect(orphans).toEqual([]);
+  // No name is both a model's and an enum's.
+  expect([...models].filter((name) => enums.has(name))).toEqual([]);
 }
 
 describe('the issue, verbatim', () => {
@@ -671,6 +673,230 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
     expect(fieldsOf(spec, 'CircleDrawingMarker')).toEqual(['color', 'kind', 'radius']);
     expect(warnings).toEqual([]);
     expectSound(spec, ['Drawing', 'Pet']);
+  });
+});
+
+describe('review round 1', () => {
+  const list = (operationId: string, parameters: unknown[], extra: Record<string, unknown> = {}) => ({
+    get: { operationId, parameters, responses: ok(Pet), ...extra },
+  });
+
+  it('a parameter model never takes the name of a component enum or of an enum another parameter lifts', async () => {
+    const { spec, warnings } = await parse(
+      'enum-names',
+      specDoc(
+        {
+          // A component enum `PetsFilter` owns the bare name: the object parameter steps to the operation-qualified one.
+          '/pets': list('listPets', [
+            { name: 'filter', in: 'query', schema: obj({ name: str }) },
+            // `kind` is an inline enum here, lifted as `PetsKind` …
+            { name: 'kind', in: 'query', schema: { type: 'string', enum: ['cat', 'dog'] } },
+          ]),
+          // … and an object on this operation, which therefore cannot be `PetsKind`.
+          '/pets/search': list('searchPets', [{ name: 'kind', in: 'query', schema: obj({ species: str }) }]),
+        },
+        { Pet: pet, PetsFilter: { type: 'string', enum: ['open', 'closed'] } },
+      ),
+    );
+    const ops = opsOf(spec);
+    expect(show(ops.listPets.queryParams[0].type)).toBe('PetsListPetsFilter');
+    expect(show(ops.listPets.queryParams[1].type)).toBe('PetsKind');
+    expect(show(ops.searchPets.queryParams[0].type)).toBe('PetsSearchPetsKind');
+    expect(fieldsOf(spec, 'PetsListPetsFilter')).toEqual(['name']);
+    expect(fieldsOf(spec, 'PetsSearchPetsKind')).toEqual(['species']);
+    expect(spec.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+      ['PetsFilter', ['open', 'closed']],
+      ['PetsKind', ['cat', 'dog']],
+    ]);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Pet', 'PetsFilter']);
+  });
+
+  it('a response header keeps its name; a header parameter of the same name takes the location-qualified one', async () => {
+    const { spec, warnings } = await parse(
+      'header-vs-param',
+      specDoc(
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'X-Meta', in: 'header', schema: obj({ a: str }) }],
+              responses: {
+                '200': { description: 'ok', ...json(Pet), headers: { 'X-Meta': { schema: obj({ b: str }) } } },
+              },
+            },
+          },
+        },
+        { Pet: pet },
+      ),
+    );
+    const op = opsOf(spec).listPets;
+    expect(show(op.responseHeaders![0].type)).toBe('PetsXMeta');
+    expect(show(op.headerParams[0].type)).toBe('PetsHeaderXMeta');
+    expect(fieldsOf(spec, 'PetsXMeta')).toEqual(['b']);
+    expect(fieldsOf(spec, 'PetsHeaderXMeta')).toEqual(['a']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Pet']);
+  });
+
+  it("an own `kind` enum beside an allOf member's plain `kind` stays the enum at every site", async () => {
+    const kindEnum: SchemaObject = { type: 'string', enum: ['cat', 'dog'] };
+    const schema = obj({ kind: kindEnum, id: str }, { allOf: [{ $ref: '#/components/schemas/Base' }] });
+    const { spec, warnings } = await parse(
+      'own-first',
+      specDoc(
+        {
+          '/things': {
+            post: { operationId: 'createThing', requestBody: json(schema), responses: ok(schema) },
+            get: { operationId: 'listThings', responses: ok({ type: 'array', items: schema }) },
+          },
+        },
+        { Base: obj({ kind: str, name: str }), Holder: obj({ thing: schema }) },
+      ),
+    );
+    const ops = opsOf(spec);
+    for (const name of ['CreateThingResponse', 'ListThingsItem', 'CreateThingRequest', 'HolderThing']) {
+      const model = modelOf(spec, name);
+      expect(
+        model.fields.map((f) => [f.name, show(f.type)]),
+        name,
+      ).toEqual([
+        ['kind', `${name}Kind`],
+        ['id', 'string'],
+        ['name', 'string'],
+      ]);
+    }
+    expect(show(ops.createThing.response)).toBe('CreateThingResponse');
+    expect(show(ops.listThings.response)).toBe('ListThingsItem[]');
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Base', 'Holder']);
+  });
+
+  it('merges two allOf declarations of a nullable data array into the array that is read, in either order', () => {
+    const nullable = (items: SchemaObject | undefined) => ({
+      oneOf: [{ type: 'array', ...(items && { items }) }, { type: 'null' }],
+    });
+    const plain = (items: SchemaObject | undefined, extra: SchemaObject = {}) => ({
+      type: 'array',
+      ...(items && { items }),
+      ...extra,
+    });
+    const envelope = (first: SchemaObject, second: SchemaObject) => ({
+      allOf: [
+        obj({ data: first, list_metadata: obj({ after: str }) }),
+        { type: 'object', properties: { data: second } },
+      ],
+    });
+    const petList: TypeRef = {
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } },
+    };
+    const cases: Array<[string, SchemaObject, SchemaObject, TypeRef]> = [
+      // Nullable first: the later `items: pet` narrows the earlier `items: {}`.
+      ['nullable first', nullable({}), plain(pet), petList],
+      // Nullable last: the later `items: {}` narrows nothing, so the earlier `pet` stays.
+      ['nullable last', plain(pet), nullable({}), petList],
+      // A later declaration that narrows wins whichever side is nullable.
+      [
+        'nullable last, narrowed',
+        plain(pet),
+        nullable(note),
+        { ...petList, inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } } },
+      ],
+      // Limits alone never change the items.
+      ['limits only', nullable(pet), plain(undefined, { minItems: 1 }), petList],
+      ['typed limits only', plain(pet), { type: ['array', 'null'], minItems: 1 }, petList],
+    ];
+    for (const [label, first, second, response] of cases) {
+      const result = classifyAndExtractResponse(envelope(first, second), 'ListPetsResponse');
+      expect(result.isPaginated, label).toBe(true);
+      expect(result.response, label).toEqual(response);
+      expect(result.itemType, label).toEqual({ kind: 'model', name: 'ListPetsItem' });
+      const fields = result.inlineModels.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name);
+      expect(fields, label).toEqual(label === 'nullable last, narrowed' ? ['text'] : ['name']);
+    }
+    // Neither side nullable: a plain array, the later items winning.
+    const plainResult = classifyAndExtractResponse(envelope(plain({}), plain(pet)), 'ListPetsResponse');
+    expect(plainResult.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } });
+  });
+
+  it("reports the variants a body cannot carry its properties into, under the body's name, for both body paths", async () => {
+    const mixed = obj({ id: str }, { oneOf: [Pet, note] });
+    const { spec, warnings } = await parse(
+      'body-warnings',
+      specDoc(
+        {
+          '/things': {
+            post: { operationId: 'createThing', requestBody: json(mixed), responses: ok(mixed) },
+          },
+        },
+        { Pet: pet },
+      ),
+    );
+    const op = opsOf(spec).createThing;
+    expect(show(op.requestBody!)).toBe('(Pet | CreateThingRequest)');
+    expect(show(op.response)).toBe('(Pet | CreateThingResponse)');
+    expect(fieldsOf(spec, 'CreateThingRequest')).toEqual(['id', 'text']);
+    expect(fieldsOf(spec, 'CreateThingResponse')).toEqual(['id', 'text']);
+    expect(warnings).toEqual([
+      '[oagen] Warning: `properties` beside `oneOf` are carried into its inline object variants only; variant 1 is typed as written, without them (context: CreateThingRequest)',
+      '[oagen] Warning: `properties` beside `oneOf` are carried into its inline object variants only; variant 1 is typed as written, without them (context: CreateThingResponse)',
+    ]);
+    expectSound(spec, ['Pet']);
+  });
+
+  it('types a nullable request body of any spelling as a field would, its inline items named from the body', async () => {
+    const bodies: Record<string, SchemaObject> = {
+      typeList: { type: ['array', 'null'], items: pet },
+      nullableFlag: { type: 'array', nullable: true, items: pet },
+      oneOfArray: { oneOf: [{ items: pet }, { type: 'null' }] },
+      anyOfArray: { anyOf: [{ type: 'array', items: pet }, { type: 'null' }] },
+      oneOfRef: { oneOf: [Pet, { type: 'null' }] },
+      oneOfString: { oneOf: [str, { type: 'null' }] },
+      oneOfObject: { oneOf: [pet, { type: 'null' }] },
+    };
+    const { spec, warnings } = await parse(
+      'nullable-bodies',
+      specDoc(
+        Object.fromEntries(
+          Object.entries(bodies).map(([name, schema]) => [
+            `/${name}`,
+            {
+              post: {
+                operationId: `create${name[0].toUpperCase()}${name.slice(1)}`,
+                requestBody: json(schema),
+                responses: ok(Pet),
+              },
+            },
+          ]),
+        ),
+        { Pet: pet },
+      ),
+    );
+    const ops = opsOf(spec);
+    expect(Object.fromEntries(Object.entries(ops).map(([name, op]) => [name, show(op.requestBody!)]))).toEqual({
+      createTypeList: 'CreateTypeListRequest[] | null',
+      createNullableFlag: 'CreateNullableFlagRequest[] | null',
+      createOneOfArray: 'CreateOneOfArrayRequest[] | null',
+      createAnyOfArray: 'CreateAnyOfArrayRequest[] | null',
+      createOneOfRef: 'Pet | null',
+      createOneOfString: 'string | null',
+      // A lone inline object branch stays with the body's `oneOf` branch,
+      // which names it from a const it may pin (`PasswordCreateTokenRequest`)
+      // and keeps the union around it, as before.
+      createOneOfObject: '(CreateOneOfObjectRequest) | null',
+    });
+    for (const name of [
+      'CreateTypeListRequest',
+      'CreateNullableFlagRequest',
+      'CreateOneOfArrayRequest',
+      'CreateAnyOfArrayRequest',
+      'CreateOneOfObjectRequest',
+    ]) {
+      expect(fieldsOf(spec, name), name).toEqual(['name']);
+    }
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Pet']);
   });
 });
 

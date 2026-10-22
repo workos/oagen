@@ -165,6 +165,43 @@ describe('a numeric suffix on a name that ends in a digit (#289)', () => {
     }
   });
 
+  it('spells the number the same way on one path: a path-named PATCH beside operationId updateTop10 is updateTop10No2', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // demoteSamePathNames numbers a path-named operation whose CRUD name an
+      // operationId holds on the same path, silently, through the same
+      // function as the numeric pass across paths: the PATCH on
+      // `/store/top10/{id}` is `updateTop10`, the name the PUT's operationId
+      // holds, and it ends in a digit.
+      expect(
+        names({ '/store/top10/{id}': { put: param('id', { operationId: 'updateTop10' }), patch: param('id') } }),
+      ).toEqual({
+        'PUT /store/top10/{id}': 'Store.updateTop10',
+        'PATCH /store/top10/{id}': 'Store.updateTop10No2',
+      });
+      expect(warn).not.toHaveBeenCalled();
+      // An operationId the document reuses on one path is numbered the same
+      // way, with the warning naming the new spelling.
+      expect(
+        names({
+          '/store/top10/{id}': {
+            put: param('id', { operationId: 'updateTop10' }),
+            patch: param('id', { operationId: 'updateTop10' }),
+          },
+        }),
+      ).toEqual({
+        'PUT /store/top10/{id}': 'Store.updateTop10',
+        'PATCH /store/top10/{id}': 'Store.updateTop10No2',
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(
+        /both take the name "updateTop10" from their operationId; the latter is renamed "updateTop10No2"/,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('leaves the bare number on a name that ends in a letter', () => {
     // `/notes` beside `/api/v1/notes` differ only by the root: `list` and
     // `list2`, exactly as before.
