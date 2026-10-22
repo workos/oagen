@@ -113,12 +113,13 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `name` — PascalCase enum name
   - `values` — `EnumValue[]`
   - `default?` — the schema's `default:` value (`string | number`)
-  - `externalDocs?` — the component enum schema's link, when usable; inline enums carry none
+  - `externalDocs?` — the enum schema's link, when usable: a component enum's own, or the inline schema's an enum was lifted from
   - `deprecated?` — present and `true` when the component enum schema says `deprecated: true`
 - Each `EnumValue` has:
   - `name` — UPPER_SNAKE_CASE display name
   - `value` — the spec's value, `string | number` (numeric enums keep numbers)
-  - `description?`, `deprecated?`
+  - `description?` — the value's own documentation: a `oneOf`-of-`const` member's `description`, else its `x-enum-descriptions` / `x-enumDescriptions` entry; absent otherwise
+  - `deprecated?` — present and `true` when the value's `const` member says `deprecated: true` (a plain `enum:` list never sets it); emit the language's deprecation marker on that member
 - Output: One file per enum, using the exact enum pattern from the design doc
 
 ---

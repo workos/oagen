@@ -809,10 +809,29 @@ export interface Enum {
   deprecated?: boolean;
 }
 
+/**
+ * One member of an enum. An enum schema is an `enum:` list or a
+ * `oneOf`/`anyOf` whose every non-null variant is a string `const` schema
+ * (the OAS 3.1 spelling that documents values one by one); both give one
+ * `EnumValue` per member, in document order.
+ */
 export interface EnumValue {
+  /** UPPER_SNAKE_CASE form of `value`. */
   name: string;
+  /** The value as written; a number stays a number. */
   value: string | number;
+  /**
+   * The value's own documentation: a `const` member's `description`, else
+   * the entry for the value in the enum schema's `x-enum-descriptions` /
+   * `x-enumDescriptions` extension. Present only when that text has
+   * non-whitespace content; absent otherwise.
+   */
   description?: string;
+  /**
+   * Present, and `true`, when the value's `const` member says
+   * `deprecated: true`; absent otherwise. An `enum:` list has no per-value
+   * keyword, so its values never carry it.
+   */
   deprecated?: boolean;
 }
 
