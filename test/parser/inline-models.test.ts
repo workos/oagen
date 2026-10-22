@@ -4609,7 +4609,7 @@ describe('a title two unions give different shapes at different depths of one ro
       }
     });
 
-    it('warns when the name is taken by a model that is not a union variant', () => {
+    it('warns when the name is taken by an ordinary model of another shape', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         const results: Model[] = [{ name: 'Circle', description: undefined, fields: [] }];
@@ -4618,6 +4618,76 @@ describe('a title two unions give different shapes at different depths of one ro
         expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
           '[oagen] Warning: Inline model "Circle" is minted twice with different shapes under Drawing (fields: (no fields) | kind, radius) — keeping the first; the second union\'s reference resolves to it',
         ]);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // An ordinary object `Drawing.circle` and a variant titled `Drawing circle`
+    // under `Drawing.marker.shape` both name `DrawingCircle` (Greptile round 3).
+    const circleObject = (fields: Record<string, SchemaObject>): SchemaObject =>
+      obj({ kind: { const: 'circle' }, ...fields });
+    const titledDrawingCircle = (fields: Record<string, SchemaObject>): SchemaObject => ({
+      oneOf: [obj({ kind: { const: 'circle' }, ...fields }, { title: 'Drawing circle' }), square({ side: n })],
+    });
+
+    it('shares an ordinary model of the identical shape silently, however it was built (Greptile round 3)', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const results: Model[] = [];
+        extractInlineModelsFromProperties({ properties: { circle: circleObject({ radius: n }) } }, results, 'Drawing');
+        extractInlineModelsFromProperties(
+          { properties: { marker: obj({ shape: titledDrawingCircle({ radius: n }) }) } },
+          results,
+          'Drawing',
+        );
+        expect(results.map((m) => m.name)).toEqual(['DrawingCircle', 'DrawingMarker', 'Square']);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('through parseSpec: one `DrawingCircle` and no warning for the identical shape, in either order', async () => {
+      for (const properties of [
+        { circle: circleObject({ radius: n }), marker: obj({ shape: titledDrawingCircle({ radius: n }) }) },
+        { marker: obj({ shape: titledDrawingCircle({ radius: n }) }), circle: circleObject({ radius: n }) },
+      ]) {
+        const ir = await parseWithoutWarnings(
+          doc({ paths: {}, components: { schemas: { Drawing: obj(properties) } } }),
+        );
+        const types = fieldTypesByModel(ir.models);
+        expect(types['Drawing']).toEqual({ circle: model('DrawingCircle'), marker: model('DrawingMarker') });
+        expect(types['DrawingMarker']).toEqual({ shape: unionOf('DrawingCircle', 'Square') });
+        expect(types['DrawingCircle']).toEqual({ ...kind('circle'), radius: num });
+        expect(modelNames(ir)).toEqual(['Drawing', 'DrawingCircle', 'DrawingMarker', 'Square']);
+        expectConsistent(ir, ['Drawing']);
+      }
+    });
+
+    it('through parseSpec: the warning, and the first model kept, when the ordinary shape differs', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const ir = await parseTempSpec(
+          doc({
+            paths: {},
+            components: {
+              schemas: {
+                Drawing: obj({
+                  circle: circleObject({ radius: n }),
+                  marker: obj({ shape: titledDrawingCircle({ diameter: n }) }),
+                }),
+              },
+            },
+          }),
+        );
+        expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+          '[oagen] Warning: Inline model "DrawingCircle" is minted twice with different shapes under DrawingMarker (fields: kind, radius | kind, diameter) — keeping the first; the second union\'s reference resolves to it',
+        ]);
+        const types = fieldTypesByModel(ir.models);
+        expect(types['DrawingCircle']).toEqual({ ...kind('circle'), radius: num });
+        expect(types['DrawingMarker']).toEqual({ shape: unionOf('DrawingCircle', 'Square') });
+        expect(modelNames(ir)).toEqual(['Drawing', 'DrawingCircle', 'DrawingMarker', 'Square']);
       } finally {
         warnSpy.mockRestore();
       }

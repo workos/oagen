@@ -22,6 +22,7 @@ import {
   variantMemberSchemas,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
+import { shapeWithEnumFlags } from './enum-members.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -296,6 +297,59 @@ export function schemaShapeKey(schema: SchemaObject): string {
     return out;
   };
   return JSON.stringify(schemaKey(schema));
+}
+
+/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
+/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+
+/**
+ * Shape of a model, independent of field order, name and documentation:
+ * every field's name, type, requiredness, limits, default and access flags,
+ * plus the model's own limits, type parameters, variants and discriminator.
+ * Types are read through `shapeWithEnumFlags`, so an inline enum's per-value
+ * deprecation counts as its values do. Two schemas share a model only when
+ * this agrees, so a body that repeats another's fields with a different
+ * `minLength` or `minProperties`, or an enum member deprecated on one side
+ * only, keeps its own model and its own limits. `schemaShapeKey` is the same
+ * question asked of a schema before any model is built; this is asked of the
+ * models, so two built by different paths (an ordinary object and a union
+ * variant) compare the same way (`warnOnVariantNameClash`, the shape
+ * registry in `materializeInlineSchema`, the response merge).
+ */
+export function modelFingerprint(model: Model): string {
+  const fields = model.fields
+    .map(
+      (field) =>
+        `${field.name}:${stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) })}`,
+    )
+    .sort()
+    .join('|');
+  const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
+  if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
+  return `${fields}#${stableStringify(rest)}`;
+}
+
+/** The entries of `value` whose key is not in `keys` and whose value is set. */
+function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
+  );
+}
+
+/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
 }
 
 /**
@@ -1087,11 +1141,10 @@ export function extractInlineModelsFromProperties(
             // roots read into one list), and the union's reference will
             // resolve to the model that keeps the name, so say so rather
             // than drop the variant silently.
-            warnOnVariantNameClash(existing, variant, variantName, parentName);
+            warnOnVariantNameClash(existing, variant, variantName, parentName, componentSchemas);
             continue;
           }
           const model = buildInlineModel(variantName, variant, componentSchemas);
-          variantShapeKeys.set(model, schemaShapeKey(variant));
           existingByName.set(variantName, model);
           results.push(model);
           extractInlineModelsFromProperties(variant, results, variantName, componentSchemas);
@@ -1142,33 +1195,31 @@ export function extractInlineModelsFromProperties(
 }
 
 /**
- * The shape (`schemaShapeKey`) of the variant schema each union variant model
- * in a results list was built from, so a later variant that takes the same
- * name can be told shared (identical shape) from clashing. Keyed by model
- * identity: the list is the extractor's own, read before any pass copies a
- * model, and an entry drops out with its model.
- */
-const variantShapeKeys = new WeakMap<Model, string>();
-
-/**
  * Warn when a union variant named `variantName` finds a model of that name
  * already in the results list and the two are not the same shape: the
  * variant is not extracted, and the union's reference resolves to the model
- * that keeps the name. Silent for the identical shape, which the naming
- * rules share by design. Once per variant, since each is visited once.
+ * that keeps the name. The comparison is between the models themselves —
+ * the one in the list, however it was built (an ordinary object, an `allOf`
+ * merge, a variant), and the one the variant would have produced — by
+ * `modelFingerprint`, the shape every clash check in the parser reads, so an
+ * ordinary object of exactly the variant's shape shares the name silently,
+ * as a sibling variant of the identical shape does. Once per variant, since
+ * each is visited once.
  */
 function warnOnVariantNameClash(
   existing: Model,
   variant: SchemaObject,
   variantName: string,
   parentName: string | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
 ): void {
-  if (variantShapeKeys.get(existing) === schemaShapeKey(variant)) return;
-  const fieldList = (names: string[]): string => names.join(', ') || '(no fields)';
+  const candidate = buildInlineModel(variantName, variant, componentSchemas);
+  if (modelFingerprint(existing) === modelFingerprint(candidate)) return;
+  const fieldList = (model: Model): string => model.fields.map((f) => f.name).join(', ') || '(no fields)';
   const site = parentName ? ` under ${parentName}` : '';
   console.warn(
     `[oagen] Warning: Inline model "${variantName}" is minted twice with different shapes${site} ` +
-      `(fields: ${fieldList(existing.fields.map((f) => f.name))} | ${fieldList(Object.keys(variant.properties ?? {}))}) ` +
+      `(fields: ${fieldList(existing)} | ${fieldList(candidate)}) ` +
       `— keeping the first; the second union's reference resolves to it`,
   );
 }

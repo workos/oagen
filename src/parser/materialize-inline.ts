@@ -15,8 +15,12 @@ import { walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
-import { extractInlineModelsFromProperties, qualifyInlineModelName } from './inline-models.js';
-import { shapeWithEnumFlags } from './enum-members.js';
+import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
+
+// The model-shape fingerprint lives beside the schema-shape key in
+// inline-models.ts, where the extractor compares models too; re-exported here
+// for the registry's readers.
+export { modelFingerprint };
 
 /**
  * Spec-wide record of every model name an inline model must not silently
@@ -32,55 +36,6 @@ export type InlineModelRegistry = Map<string, InlineModelOwner>;
 export interface InlineModelOwner {
   fingerprint: string;
   operation?: string;
-}
-
-/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
-/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
-
-/**
- * Shape of a model, independent of field order, name and documentation:
- * every field's name, type, requiredness, limits, default and access flags,
- * plus the model's own limits, type parameters, variants and discriminator.
- * Types are read through `shapeWithEnumFlags`, so an inline enum's per-value
- * deprecation counts as its values do. Two schemas share a model only when
- * this agrees, so a body that repeats another's fields with a different
- * `minLength` or `minProperties`, or an enum member deprecated on one side
- * only, keeps its own model and its own limits.
- */
-export function modelFingerprint(model: Model): string {
-  const fields = model.fields
-    .map(
-      (field) =>
-        `${field.name}:${stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) })}`,
-    )
-    .sort()
-    .join('|');
-  const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
-  if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
-  return `${fields}#${stableStringify(rest)}`;
-}
-
-/** The entries of `value` whose key is not in `keys` and whose value is set. */
-function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
-  );
-}
-
-/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    const entries = Object.keys(record)
-      .filter((key) => record[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
-    return `{${entries.join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'undefined';
 }
 
 /** Record every model of `models` the registry does not know yet as owned by `operation`; the first owner keeps a name. */
