@@ -20,7 +20,7 @@ import type {
   ExternalDocs,
   ServerEntry,
 } from '../ir/types.js';
-import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
+import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
@@ -473,6 +473,11 @@ export function extractOperations(
   reserveEnumNames(registry, reservedEnumNames);
 
   for (const [path, pathItem] of Object.entries(paths)) {
+    // Everything read at path-item level — `parameters`, `servers`, and the
+    // `summary`/`description` an operation falls back to — comes from this one
+    // object. The bundler keeps internal refs (`dereference: false`), so a Path
+    // Item written as a `$ref` is not resolved here yet (issue #300); when it
+    // is, the resolved item must replace `pathItem` for all of these to apply.
     const pathLevelParams = pathItem.parameters ?? [];
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,
@@ -483,7 +488,10 @@ export function extractOperations(
       const op = pathItem[method];
       if (!op) continue;
 
-      const tag = op.tags?.[0];
+      // The first usable tag — `Operation.tags[0]`, read by the same helper —
+      // so the service and the list the IR carries never disagree, and an
+      // entry that is not a string (`42`) never reaches PascalCasing.
+      const tag = extractTags(op.tags)?.[0];
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
@@ -790,10 +798,10 @@ function pathRootLength(segments: readonly string[]): number {
 function documentApiRoot(paths: Record<string, PathItem>): string[] {
   const contributions: string[][] = [];
   for (const [path, pathItem] of Object.entries(paths)) {
-    // Same truthiness check as inferServiceName: a first tag names the service.
+    // Same read as the service naming above: a first usable tag names the service.
     const hasUntaggedOperation = HTTP_METHODS.some((method) => {
       const op = pathItem[method];
-      return Boolean(op) && !op?.tags?.[0];
+      return Boolean(op) && extractTags(op?.tags) === undefined;
     });
     if (!hasUntaggedOperation) continue;
     const segments = pathSegments(path);
@@ -842,22 +850,30 @@ function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
 }
 
 /**
- * Index of the segment a path-named service takes its name from. Under an
- * API root it is the first literal segment after the root, so `/v1/notes` and
- * `/v1/{teamId}/notes` both name `Notes`; when nothing literal follows the
- * root, the first segment, so `/api` and `/api/{id}` name `Api` as they
- * always did rather than `Default`. The fallback operation name skips the
- * same segment (see inferResourceFromPath), so it is never echoed as
- * `Api.getApi`.
+ * Index of the segment a path-named service takes its name from, among the
+ * segments readPath reads. Under an API root it is the first literal segment
+ * after the root, so `/v1/notes` and `/v1/{teamId}/notes` both name `Notes`;
+ * when nothing literal follows the root, the first segment, so `/api` and
+ * `/api/{id}` name `Api` as they always did rather than `Default`. The
+ * fallback operation name skips the same segment (see inferResourceFromPath),
+ * so it is never echoed as `Api.getApi`.
+ *
+ * The verb of a custom method is not a resource and never names a service:
+ * `/v1/{name}:cancel` stays in `V1` beside `/v1/{name}`, and `/api/v1:reset`
+ * lands in `Api`, where the slash-written `/v1/{name}/cancel` names
+ * `Cancel`. The resource it is written on is still found first when there is
+ * one, so `/v1/pets:batchGet` names `Pets` like `/v1/pets`.
  *
  * Without a root (`apiRootLength` of 0: a root-less document, a path outside
  * the root, or a tagged operation) it is always the first segment, parameter
  * or not, so every such operation is named exactly as before this rule
  * existed: an untagged `/{tenant}/users` stays `Default.listUsers`.
  */
-function serviceSegmentIndex(segments: readonly string[], apiRootLength: number): number {
+function serviceSegmentIndex(path: string, apiRootLength: number): number {
   if (apiRootLength === 0) return 0;
-  const index = segments.findIndex((segment, i) => i >= apiRootLength && !segment.startsWith('{'));
+  const index = readPath(path).findIndex(
+    (segment, i) => i >= apiRootLength && !segment.text.startsWith('{') && !segment.customMethod,
+  );
   return index === -1 ? 0 : index;
 }
 
@@ -871,6 +887,8 @@ function serviceSegmentIndex(segments: readonly string[], apiRootLength: number)
  * When nothing literal follows the root — the path is the root itself, or
  * only parameters come next — the first segment names the service as it
  * always did, so `/api` and `/api/{id}` land in `Api` rather than in `Default`.
+ * The verb of a custom method is read past (see serviceSegmentIndex), so
+ * `/v1/{name}:cancel` lands in `V1` as well.
  */
 function inferServiceName(path: string, tag: string | undefined, apiRootLength: number): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
@@ -878,8 +896,7 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   if (tag) {
     return toPascalCase(tag);
   }
-  const segments = pathSegments(path);
-  const first = segments[serviceSegmentIndex(segments, apiRootLength)] ?? 'Default';
+  const first = pathSegments(path)[serviceSegmentIndex(path, apiRootLength)] ?? 'Default';
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
@@ -1116,12 +1133,21 @@ const METHOD_VERBS: Record<HttpMethod, { readonly item: string; readonly collect
 };
 
 /**
- * The verbs a path segment with no parameter before it is read as an action
- * phrase by (inferAction): the CRUD verbs of METHOD_VERBS. `options` and
- * `trace` are left out, since `/settings/display-options` names a
- * collection.
+ * The verbs a POST on a literal with no parameter before it is read as an
+ * action phrase by, when one of them is the segment's last word
+ * (inferAction): the CRUD verbs of METHOD_VERBS. `options` and `trace` are
+ * left out, since `/settings/display-options` names a collection.
  */
 const CRUD_VERBS: ReadonlySet<string> = new Set(['get', 'list', 'create', 'update', 'delete', 'check']);
+
+/**
+ * The verbs that count as a method's own only as the first word of a segment
+ * (segmentCarriesVerb): `list-all` and `check-health` do something, while as
+ * a later word `list` and `check` name a thing — `wish-list`, `allow-list`,
+ * `health-check`. Every other verb counts in any position: `bulk-delete`,
+ * `batch-get`, `force-update`, `auto-create`.
+ */
+const LEADING_ONLY_VERBS: ReadonlySet<string> = new Set(['list', 'check']);
 
 /**
  * Infer the CRUD verb from the HTTP method and the path shape (METHOD_VERBS):
@@ -1148,8 +1174,10 @@ function methodVerbs(method: HttpMethod): string[] {
 /**
  * Whether the last segment of a path is a literal whose words include one of
  * the method's own verbs (methodVerbs): `bulk-delete` for a DELETE, `list-all`
- * for a GET, `update-password` for a PUT or PATCH, and not `bulk-delete` for
- * a POST. Such a segment is the action for that method (inferAction) and
+ * and `batch-get` for a GET, `update-password` for a PUT or PATCH, and not
+ * `bulk-delete` for a POST. `list` and `check` count only as the first word
+ * (LEADING_ONLY_VERBS), so `wish-list`, `allow-list` and `health-check` carry
+ * no verb. Such a segment is the action for that method (inferAction) and
  * keeps the action name when another method on the path would take it too
  * (demoteSamePathNames).
  */
@@ -1158,7 +1186,7 @@ function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
   const last = segments[segments.length - 1];
   if (last === undefined || last.startsWith('{')) return false;
   const words = splitWords(last).map((w) => w.toLowerCase());
-  return methodVerbs(method).some((verb) => words.includes(verb));
+  return methodVerbs(method).some((verb) => (LEADING_ONLY_VERBS.has(verb) ? words[0] === verb : words.includes(verb)));
 }
 
 /** Whether a path segment looks plural: singularizePathSegment would change it. */
@@ -1238,7 +1266,7 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
   // later segment that spells the same word names a resource of its own:
   // /teams/{id}/teams in Teams is listTeams, the teams under one team, and
   // never the bare `list` that reads as the service collection.
-  if (resourceIndex === serviceSegmentIndex(segments, apiRootLength)) return null;
+  if (resourceIndex === serviceSegmentIndex(path, apiRootLength)) return null;
 
   return toPascalCase(singularItem ? pathSegmentNoun(segments, resourceIndex) : segments[resourceIndex]);
 }
@@ -1303,17 +1331,21 @@ function inferSingleton(path: string, apiRootLength = 0): { parent: string | nul
  *     ending in `s` after the parameter is a nested collection to create into
  *     (`/orgs/{id}/api_keys`) or a singleton of the item (`/orders/{id}/status`,
  *     see inferSingleton), and keeps `create`;
- *   - for any method, a literal whose words include the method's own verb
- *     (methodVerbs), which the name would otherwise repeat: `bulk-delete` on
- *     a DELETE, `list-all` on a GET, `update-password` on a PUT after a
- *     parameter. After a parameter, a literal that carries another method's
- *     verb is a singleton: `GET /users/{id}/last-update` is
- *     `getUserLastUpdate`;
- *   - a literal with no parameter before it whose last word is any CRUD verb
- *     (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`.
- *     Such a literal is otherwise read as a collection (`/pets/search` is
- *     `createSearch`), which would make it `createBulkDelete`. The last word
- *     only, so `/pets/delete-candidates` stays a collection.
+ *   - for any method, a literal that carries the method's own verb
+ *     (segmentCarriesVerb), which the name would otherwise repeat:
+ *     `bulk-delete` on a DELETE, `list-all` on a GET, `update-password` on a
+ *     PUT after a parameter. A literal that carries another method's verb is
+ *     not: after a parameter it is a singleton, `GET /users/{id}/last-update`
+ *     is `getUserLastUpdate`, and before none it is a collection,
+ *     `GET /pets/update` is `listUpdate` and `GET /pets/last-update` is
+ *     `listLastUpdate`;
+ *   - a POST on a literal with no parameter before it whose last word is any
+ *     CRUD verb (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`,
+ *     `POST /v1/pets:batchGet`. Such a literal is otherwise read as a
+ *     collection (`/pets/search` is `createSearch`), which would make it
+ *     `createBulkDelete`. The last word only, so `/pets/delete-candidates`
+ *     stays a collection, and a POST only, since a verb that is not the
+ *     method's own is not what the method does.
  *
  * The verb is the segment itself. The resource is the singular parent
  * (inferItemParent) when the segment follows a parameter — `adopt` + `Pet` —
@@ -1344,7 +1376,7 @@ function inferAction(
   const words = splitWords(last).map((w) => w.toLowerCase());
   const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
   const ownVerb = segmentCarriesVerb(method, path);
-  const verbPhrase = !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
+  const verbPhrase = method === 'post' && !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
   if (!postAction && !ownVerb && !verbPhrase) return null;
 
   const resource = afterParam
@@ -1365,7 +1397,10 @@ function inferAction(
  * CRUD verb (PUT and PATCH both `update`); any other sharing on one path is
  * resolved first (demoteSamePathNames), before the qualifiers below, since
  * every consumer that keys a service's operations by name — the differ among
- * them — would otherwise see one of the two.
+ * them — would otherwise see one of the two. An action that shares a name
+ * with a path-named operation of another shape yields next
+ * (yieldActionNames), so `update` stays with `PUT /pets/{id}` and
+ * `POST /pets/update` is `updatePets`.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1380,10 +1415,11 @@ function inferAction(
  * the one before, and every pass — the qualifiers, the plural and nothing
  * else — goes through one rule, qualifyGroup: a pass renames a group's
  * path-named members only when the names it proposes tell the group apart,
- * compared as noun phrases (nounKey), so a qualifier the colliding paths all
- * carry — `Teams` in `/org/teams/members` and `/org/teams/{teamId}/members`,
- * whether it comes out as `Teams` or `Team` — is never added, and the next
- * pass tells them apart: `listMembers` and `listMembersByTeamId`; a proposal
+ * and a context two paths write alike is spelled alike for both (see the
+ * deeper-context qualifier), so a qualifier the colliding paths all carry —
+ * `Teams` in `/org/teams/members` and `/org/teams/{teamId}/members`, written
+ * once, singular after `{teamId}` — is never added, and the next pass tells
+ * them apart: `listMembers` and `listMembersByTeamId`; a proposal
  * another operation already has is not taken, so a pass never hands a member
  * a name another operation had with the number then landing on it
  * (`/org/members/archived` beside `/org/archived_members` is never
@@ -1410,7 +1446,14 @@ function inferAction(
  *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
  *      `GET /users/{id}/factors` → `listFactorsLegacy`, and
  *      `GET /store/cats/{id}/toys/{toyId}` next to
- *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`;
+ *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`.
+ *      A path whose singular spelling would take the name of an operation
+ *      outside the group, or of another path in the group that the
+ *      spelling as written sets apart, keeps the segments as written, the
+ *      plural being what tells them apart: `/store/pets/{id}/toys/{toyId}`
+ *      next to `/store/pet/{id}/toys/{toyId}` → `getToyPets` and
+ *      `getToyPet`, and `/store/cats/{id}/toys/{toyId}` next to
+ *      `operationId: getToyCat` → `getToyCats`;
  *   3. `By<Param>` for each path parameter the colliding paths do not all
  *      share, in path order, when those are what tell the paths apart:
  *      `GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes
@@ -1438,16 +1481,16 @@ function inferAction(
  *      outside the group has it. The plural still says which collection is
  *      read, and it is the name every SDK generated from such a document
  *      already exposes, where a number says nothing. Like the qualifiers
- *      above it runs only when it tells the group apart, the plural compared
- *      as written since its number is the point: an operationId-named
+ *      above it runs only when it tells the group apart: an operationId-named
  *      operation, an action, a singleton and a name a qualifier has already
  *      extended have no plural, so any member that has one differs from
  *      them, while a group whose members would all take the same plural
  *      (`/store/Pets/{id}` beside `/store/pets/{id}`) goes straight to the
  *      suffix, since `getPets` beside `getPet` would say nothing about
- *      which is which. Beside an operationId's `getPet` those two take
- *      `getPets` together and the suffix lands on it, `getPets2`, a variant
- *      of its twin rather than of the operationId;
+ *      which is which. Members that share a plural some other member does
+ *      not take it together and are numbered on it: beside `/store/pet/{id}`
+ *      or an operationId's `getPet`, those two are `getPets` and `getPets2`,
+ *      each a variant of its twin rather than of the operationId;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), when no pass above
  *      has a free name that tells the group apart, so an emitter never
  *      sees two methods with one name in one class. A name that already
@@ -1484,13 +1527,21 @@ function disambiguateOperationNames(
     const root = apiRootLengthOf(op);
     return inferResourceFromPath(op.path, root) ?? inferServiceNoun(op.path, root);
   };
+  /** The names every operation of the service outside `group` has right now, operationIds included. */
+  const namesOutside = (group: Operation[]): ReadonlySet<string> => {
+    const members = new Set(group);
+    return new Set(operations.filter((op) => !members.has(op)).map((op) => op.name));
+  };
   /** One pass on one group, through the rule every pass shares (qualifyGroup). */
-  const qualify = (group: Operation[], proposal: (op: Operation) => string, key: (name: string) => string) =>
-    qualifyGroup(group, operations, pathNamed, nounOf, proposal, key, rename);
+  const qualify = (group: Operation[], proposal: (op: Operation) => string) =>
+    qualifyGroup(group, operations, pathNamed, nounOf, proposal, rename);
 
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
   const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
+  // Then an action beside a CRUD or singleton operation of its name: the
+  // plain name stays with the latter, which the qualifiers would rename.
+  for (const op of yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, rename)) demoted.add(op);
 
   // Each qualifier, given the group, is the word or words a path-named
   // member would add to its name: `null` or `''` when its path has none.
@@ -1513,9 +1564,56 @@ function disambiguateOperationNames(
       const held = operations.some((other) => !group.includes(other) && pathNamed.has(other) && other.name === name);
       return held && nameIsFree(group, operations, pathNamed, nounOf, op, name) ? noun : null;
     },
-    () => (op) => {
-      const root = apiRootLengthOf(op);
-      return inferDeeperContext(qualifierPath(op, root, !demoted.has(op)), root);
+    (group) => {
+      // Singular, like the resource of an item operation, unless that
+      // spelling gives a path the name of an operation outside the group or
+      // of another path in the group whose spelling as written differs: the
+      // plural is then what tells them apart, so the path takes its context
+      // as written. `/store/pets/{id}/toys/{toyId}` beside
+      // `/store/pet/{id}/toys/{toyId}` is `getToyPets` and `getToyPet`, and
+      // `/store/cats/{id}/toys/{toyId}` beside `operationId: getToyCat` is
+      // `getToyCats`. As written, too, when another path in the group
+      // writes the same words but singularises them differently — `teams`
+      // in `/org/teams/members` and in `/org/teams/{teamId}/members` — so
+      // one spelling in the paths is one spelling in the names, `Teams` for
+      // both, which tells nothing apart (qualifyGroup) and leaves the
+      // parameters to do it: `listMembers` and `listMembersByTeamId`, never
+      // `listMembersTeams` beside `listMembersTeam` (issue #288). Two paths
+      // whose contexts agree in both spellings (`/orgs/teams/{id}/members`
+      // and `/orgs/{orgId}/teams/{id}/members`) stay singular and go on to
+      // the parameters together. Both spellings are read before any member
+      // is renamed, so the outcome does not depend on document order.
+      const outside = namesOutside(group);
+      const spelled = new Map(
+        group
+          .filter((op) => pathNamed.has(op))
+          .map((op) => {
+            const root = apiRootLengthOf(op);
+            const path = qualifierPath(op, root, !demoted.has(op));
+            return [
+              op,
+              {
+                singular: inferDeeperContext(path, root),
+                written: inferDeeperContext(path, root, false),
+                singularName: appendQualifier(op.name, inferDeeperContext(path, root)),
+                writtenName: appendQualifier(op.name, inferDeeperContext(path, root, false)),
+              },
+            ] as const;
+          }),
+      );
+      return (op) => {
+        const own = spelled.get(op);
+        if (own === undefined) return null;
+        const asWritten =
+          own.writtenName !== own.singularName &&
+          (outside.has(own.singularName) ||
+            [...spelled].some(
+              ([other, spelling]) =>
+                other.path !== op.path &&
+                (spelling.singularName === own.singularName) !== (spelling.writtenName === own.writtenName),
+            ));
+        return asWritten ? own.written : own.singular;
+      };
     },
     (group) => {
       // Parameters only help when they differ between the colliding paths,
@@ -1558,7 +1656,7 @@ function disambiguateOperationNames(
   for (const qualifier of qualifiers) {
     for (const group of collidingGroups(operations)) {
       const words = qualifier(group);
-      qualify(group, (op) => appendQualifier(op.name, words(op)), nounKey);
+      qualify(group, (op) => appendQualifier(op.name, words(op)));
     }
   }
 
@@ -1577,11 +1675,18 @@ function disambiguateOperationNames(
     return pluralFallbackName(op.httpMethod, op.path, root, actions);
   };
   for (const group of collidingGroups(operations)) {
-    qualify(
-      group,
-      (op) => pluralOf(op) ?? op.name,
-      (name) => name,
-    );
+    // Like every qualifier, only when it tells the group apart: beside an
+    // operationId, which has no plural, or beside a path that spells the
+    // resource singular (`/store/pet/{id}`). Members that would all take the
+    // same plural are left to the numeric suffix. A plural is blocked only by
+    // a name outside the group (`operationId: getPets`); members that share
+    // one some other member does not (`/store/Pets/{id}` and
+    // `/store/pets/{id}` beside `/store/pet/{id}`) take it together and are
+    // numbered below, `getPets` and `getPets2` — the names such a document
+    // produced before item resources were singularised. Two groups never
+    // share a plural: it is the group's singular name with the resource as
+    // written, so one plural means one singular name, and one group.
+    qualify(group, (op) => pluralOf(op) ?? op.name);
   }
 
   const taken = new Set(operations.map((op) => op.name));
@@ -1641,9 +1746,11 @@ function disambiguateOperationNames(
  * the singleton `createUserUpdatePassword`. The verb that keeps the name: an
  * operationId-named operation's, since that name is the author's and a
  * path-named sibling steps aside whatever its verb; else the verb the segment
- * carries (segmentCarriesVerb), `delete` for `bulk-delete`; else `create`,
- * POST being the method an action is written on; else the verb of the first
- * method in HTTP_METHODS order. When the name an operation falls back to is
+ * carries (segmentCarriesVerb), `delete` for `bulk-delete`, the first
+ * method's in HTTP_METHODS order when it carries two; else `create`, POST
+ * being the only other method an action is read on (inferAction); else, for
+ * a shared name that is no action (PUT and PATCH `updatePet`), the verb of
+ * the first method in HTTP_METHODS order. When the name an operation falls back to is
  * still held on the path by an operationId or by another verb — path-named
  * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
  * to drop — a numeric suffix free in the service is added, silently, as the
@@ -1721,6 +1828,58 @@ function demoteSamePathNames(
 }
 
 /**
+ * Keep the plain CRUD name with the CRUD operation when an action takes it.
+ * `POST /pets/update` is the action `update` — its collection `pets` is the
+ * service segment, which a name leaves off — and so is `PUT /pets/{id}`. Left
+ * to the qualifiers, the pair would be told apart by `By<Param>`, which
+ * renames the PUT to `updateById`, and code calling `update` would then
+ * reach `POST /pets/update`. So before the qualifiers run, a path-named
+ * action that shares its name with a path-named operation of another shape —
+ * a CRUD operation or a singleton, for which inferAction is null, a demoted
+ * action among them — is renamed alone. It takes back the collection it
+ * dropped, the service noun of the path the action segment sits on
+ * (inferServiceNoun of qualifierPath): `updatePets`, `createPets` for
+ * `POST /pets/create` beside `POST /pets`, `listAllPets` for
+ * `GET /pets/list-all` beside `GET /pets/all`. When that adds nothing —
+ * the name already ends with it (`POST /store/pets/{id}/create` is
+ * `createPet`, as `POST /store/pets/{id}` is) or there is none
+ * (`POST /store/pets/update` is `updatePets`, as `PUT /store/pets` is) — it
+ * takes the name it has without the action rule (`createPetCreate`,
+ * `createUpdate`) and is read from then on
+ * as that shape, like a demoted action (demoteSamePathNames). An action
+ * beside an operationId of its name is left to the numeric pass
+ * (`adoptPet2`), and two actions of one name to the qualifiers
+ * (`adoptPetRescue`). Groups come in name order and the renames depend only
+ * on each operation's own path, so the result is deterministic. Returns the
+ * operations that fell back to their non-action name.
+ */
+function yieldActionNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  demoted: ReadonlySet<Operation>,
+  apiRootLengthOf: (op: Operation) => number,
+  rename: (op: Operation, name: string) => void,
+): Operation[] {
+  const fellBack: Operation[] = [];
+  const isAction = (op: Operation) =>
+    pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
+  for (const group of collidingGroups(operations)) {
+    if (!group.some((op) => pathNamed.has(op) && !isAction(op))) continue;
+    for (const op of group.filter(isAction)) {
+      const root = apiRootLengthOf(op);
+      const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
+      if (qualified !== op.name) {
+        rename(op, qualified);
+      } else {
+        rename(op, fallbackOperationName(op.httpMethod, op.path, root, false));
+        fellBack.push(op);
+      }
+    }
+  }
+  return fellBack;
+}
+
+/**
  * The groups of operations that share a name but not a path, in name order.
  * A name shared only by operations on one path is not a collision and is
  * excluded: after demoteSamePathNames such operations are path-named and
@@ -1757,33 +1916,31 @@ function comparePaths(a: Operation, b: Operation): number {
  * tells the group apart, and only names no operation outside the group has.
  * An operationId-named member is never renamed and stands at its own name.
  *
- * `proposal` is the name a path-named member would take. `key` is how two
- * proposals are compared: a qualifier pass compares them as noun phrases
- * (nounKey), so `listMembersTeams` and `listMembersTeam`, the proposals for
- * `/org/teams/members` and `/org/teams/{teamId}/members`, say the same thing;
- * the plural pass compares them as written, since the plural's number is the
- * point. Three rules follow, each on this one place:
+ * `proposal` is the name a path-named member would take, compared as
+ * written: a pass that must not part two paths on a word's number alone
+ * spells it alike for both before proposing (the deeper context of
+ * `/org/teams/members` and `/org/teams/{teamId}/members` is `Teams` for
+ * both, never `Teams` beside `Team`), and a pass whose number is the point
+ * (the plural, `getPets` beside `getPet`) proposes it as it is. Three rules
+ * follow, each on this one place:
  *
- *   - The pass is skipped for the group when every proposal says the same
- *     thing. A qualifier the colliding paths all carry — `Teams` above,
- *     whether it comes out as `Teams` or `Team` — would move the collision
- *     further from the plain name and tell nothing apart; the next pass
- *     (`ByTeamId`) is what does.
- *   - A proposal an operation outside the group already has is not taken: the
- *     member keeps its name for this pass and the next pass is tried, so
- *     `/org/members/archived` beside `/org/archived_members`, whose name is
- *     `listArchivedMembers`, is never `listArchivedMembers2`, which reads as a
- *     variant of a path it is unrelated to; a number is for when no pass is
- *     left. Its colliding twin `/org/teams/archived` still takes
- *     `listArchivedTeams`, and `listArchived` is then its own.
- *   - Members whose proposals say the same thing stay one group for the next
- *     pass: they take one spelling, the first of their proposals in path order
- *     that is free, so `/orgs/{orgId}/groups/members` and
+ *   - The pass is skipped for the group when every proposal is one name. A
+ *     qualifier the colliding paths all carry — `Teams` above — would move
+ *     the collision further from the plain name and tell nothing apart; the
+ *     next pass (`ByTeamId`) is what does.
+ *   - A proposal an operation outside the group already has is not taken
+ *     (nameIsFree): the member keeps its name for this pass and the next pass
+ *     is tried, so `/org/members/archived` beside `/org/archived_members`,
+ *     whose name is `listArchivedMembers`, is never `listArchivedMembers2`,
+ *     which reads as a variant of a path it is unrelated to; a number is for
+ *     when no pass is left. Its colliding twin `/org/teams/archived` still
+ *     takes `listArchivedTeams`, and `listArchived` is then its own.
+ *   - Members with one proposal stay one group for the next pass: they take
+ *     it together — `/orgs/{orgId}/groups/members` and
  *     `/orgs/{orgId}/groups/{groupId}/members` beside `/orgs/teams/members`
- *     are `listMembersGroups` both, told apart next by `ByGroupId`, rather
- *     than `listMembersGroups` beside `listMembersGroup`, which differ by a
- *     number alone. Members on one path (PUT + PATCH) share a name by the
- *     same rule.
+ *     are `listMembersGroups` both, told apart next by `ByGroupId` — and are
+ *     numbered on it when nothing after tells them apart. Members on one path
+ *     (PUT + PATCH) share a name by the same rule.
  *
  * Which names are taken is read when the group is reached, so groups a pass
  * served earlier — in name order (collidingGroups) — hold their new names
@@ -1795,23 +1952,19 @@ function qualifyGroup(
   pathNamed: ReadonlySet<Operation>,
   nounOf: (op: Operation) => string | null,
   proposal: (op: Operation) => string,
-  key: (name: string) => string,
   rename: (op: Operation, name: string) => void,
 ): void {
   const proposals = new Map(group.map((op) => [op, pathNamed.has(op) ? proposal(op) : op.name]));
   const clusters = new Map<string, Operation[]>();
   for (const op of [...group].sort(comparePaths)) {
-    const k = key(proposals.get(op) ?? op.name);
-    clusters.set(k, [...(clusters.get(k) ?? []), op]);
+    const name = proposals.get(op) ?? op.name;
+    clusters.set(name, [...(clusters.get(name) ?? []), op]);
   }
   if (clusters.size <= 1) return;
-  for (const members of clusters.values()) {
-    const spelling = members
-      .map((op) => proposals.get(op) ?? op.name)
-      .find((name, i) => nameIsFree(group, operations, pathNamed, nounOf, members[i], name));
-    if (spelling === undefined) continue;
+  for (const [name, members] of clusters) {
+    if (!members.every((op) => nameIsFree(group, operations, pathNamed, nounOf, op, name))) continue;
     for (const op of members) {
-      if (pathNamed.has(op)) rename(op, spelling);
+      if (pathNamed.has(op)) rename(op, name);
     }
   }
 }
@@ -1819,7 +1972,7 @@ function qualifyGroup(
 /**
  * Whether `name` is free for `op`, a member of `group`: no operation outside
  * the group has it, or every operation that has it is path-named and names
- * the noun `op` names (`nounOf`, compared as nounKey compares) — the nested
+ * the noun `op` names (`nounOf`, compared as sameNoun compares) — the nested
  * collection of the service's own word, `/notes/{noteId}/notes` as
  * `listNotes` beside `/notes`. Such a name the member takes and joins the
  * group of, and the passes after tell the two apart by what does differ
@@ -1841,22 +1994,8 @@ function nameIsFree(
   return operations.every((other) => {
     if (group.includes(other) || other.name !== name) return true;
     const otherNoun = pathNamed.has(other) ? nounOf(other) : null;
-    return noun !== null && otherNoun !== null && nounKey(otherNoun) === nounKey(noun);
+    return noun !== null && otherNoun !== null && sameNoun(otherNoun.toLowerCase(), noun.toLowerCase());
   });
-}
-
-/**
- * A name as the noun phrase it says: its words on the camelCase boundary,
- * lowercase and each in its singular form (singularizePathSegment, the
- * stem sameNoun compares by), so two names that differ only in a word's
- * number — `listMembersTeams` and `listMembersTeam` — read the same. How a
- * qualifier pass decides whether two proposals tell their operations apart
- * (qualifyGroup).
- */
-function nounKey(name: string): string {
-  return splitWords(name)
-    .map((word) => singularizePathSegment(word.toLowerCase()))
-    .join(' ');
 }
 
 /**
@@ -1994,7 +2133,7 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
   const segments = pathSegments(path);
   let last = segments.length - 1;
   while (last >= apiRootLength && segments[last].startsWith('{')) last--;
-  if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
+  if (last < apiRootLength || last !== serviceSegmentIndex(path, apiRootLength)) return null;
   return toPascalCase(pathSegmentNoun(segments, last));
 }
 
@@ -2019,12 +2158,17 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
  * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
  * left out along with the service segment that follows it, so
  * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
+ * `singularItem` false keeps every segment as the path spells it (`Pets` for
+ * `/store/pets/{id}/toys/{toyId}`), for the qualifier that falls back to the
+ * plural when the singular does not tell two paths apart (see
+ * disambiguateOperationNames). The stemmer's limits reach every segment it
+ * singularises: `/messages/sms/{smsId}/attachments` contributes "Sm".
  */
-function inferDeeperContext(path: string, apiRootLength = 0): string | null {
+function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true): string | null {
   const segments = pathSegments(path);
   const nouns: string[] = [];
   for (let i = apiRootLength; i < segments.length; i++) {
-    if (!segments[i].startsWith('{')) nouns.push(pathSegmentNoun(segments, i));
+    if (!segments[i].startsWith('{')) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
   }
   // Skip first (service) and last (already used) — use the middle ones
   if (nouns.length >= 3) {
@@ -2381,6 +2525,7 @@ function buildOperation(
     responseContentTypes,
     responseContents,
     responseDescription,
+    responseStatusCode,
     successResponses,
     errors,
     defaultResponse,
@@ -2513,6 +2658,9 @@ function buildOperation(
     ...(responseContentTypes && { responseContentTypes, responseContents }),
     // Likewise only when the primary response declares a description.
     ...(responseDescription && { responseDescription }),
+    // And only when a 2xx or 3xx response is declared at all, so the status
+    // code is present exactly when `response` was read from one.
+    ...(responseStatusCode !== undefined && { responseStatusCode }),
     successResponses,
     errors,
     // Added only when the document declares them so operations without
@@ -2608,9 +2756,10 @@ export interface OperationDocs {
  * Item's `summary` and `description` as applying to every operation on it.
  * The two fields fall back one by one, so an operation with a `summary` of
  * its own and no `description` shows its own `summary` over the Path Item's
- * `description`. Text with content wins at either level and blank text
- * counts as absent at either level (`presentText`), so `summary: ""` on the
- * operation still takes the Path Item's. Either field is `undefined` when
+ * `description`. Text with content wins at either level; a value that is not
+ * a string, or is blank, counts as absent at either level (`presentText`), so
+ * `summary: ""` on the operation still takes the Path Item's. Either field is
+ * `undefined` when
  * neither level gives it; the caller decides whether the key is then omitted
  * (`Webhook`) or present (`Operation.description`).
  */
@@ -2643,12 +2792,17 @@ export function presentText(text: string | undefined): string | undefined {
 /**
  * An operation's `tags` as the IR carries them, on an `Operation` and on a
  * `Webhook` alike: the list in document order with every entry that is not a
- * non-empty string dropped, or `undefined` when nothing remains (or the
- * keyword is not a list), so the key is omitted rather than set to `[]`.
+ * non-empty string dropped and a repeated entry folded onto its first
+ * occurrence, or `undefined` when nothing remains (or the keyword is not a
+ * list), so the key is omitted rather than set to `[]`. The service an
+ * operation is grouped under is named from `[0]` of this same list.
  */
 export function extractTags(tags: unknown): string[] | undefined {
   if (!Array.isArray(tags)) return undefined;
-  const kept = tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '');
+  const kept: string[] = [];
+  for (const tag of tags) {
+    if (typeof tag === 'string' && tag !== '' && !kept.includes(tag)) kept.push(tag);
+  }
   return kept.length > 0 ? kept : undefined;
 }
 
@@ -4205,7 +4359,7 @@ function resolvePathModelBaseNames(
  */
 function canonicalPath(rawPaths: Iterable<string>): string | undefined {
   let best: string | undefined;
-  let bestScore: [number, number] | undefined;
+  let bestScore: PathDeviation | undefined;
   let tied = false;
   for (const path of rawPaths) {
     const score = pathDeviation(path);
@@ -4221,28 +4375,35 @@ function canonicalPath(rawPaths: Iterable<string>): string | undefined {
   return tied ? undefined : best;
 }
 
+/** See pathDeviation. */
+type PathDeviation = [trailingSlash: number, customMethods: number, irregularSegments: number];
+
 /**
  * How far a raw path's spelling is from the plain prefix it flattens to:
- * `[trailing slash, segments other than a bare parameter with any character
- * outside a-z0-9]`, compared lexicographically. `/notes` scores [0, 0] and
- * `/notes/` [1, 0]; `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
- * The raw URL segments are read here, not pathSegments: a custom method is
- * spelled with a colon the plain form does without, so `/pets/{id}:adopt`
- * scores [0, 1] and `/pets/{id}/adopt`, which flattens to the same prefix,
- * keeps the plain name.
+ * `[trailing slash, custom methods written after a colon, literal segments
+ * with any character outside a-z0-9]`, compared lexicographically. `/notes`
+ * scores [0, 0, 0] and `/notes/` [1, 0, 0]; `/notes/{id}` scores [0, 0, 0]
+ * and `/notes/by-id` [0, 0, 1]. A custom method is counted on its own rather
+ * than as an irregular segment, so the slash form wins whatever the verb's
+ * spelling: `/pets/{id}:adopt` scores [0, 1, 0] against `/pets/{id}/adopt`
+ * at [0, 0, 0], and `/pets/{id}:batchAdopt` [0, 1, 1] against
+ * `/pets/{id}/batchAdopt` at [0, 0, 1]. A parameter segment is never
+ * irregular, whatever follows its braces, so a path without a colon scores
+ * as it did before custom methods were read: `/tags/{tag}.json` and
+ * `/tags/{tag}/json` still tie.
  */
-function pathDeviation(rawPath: string): [number, number] {
+function pathDeviation(rawPath: string): PathDeviation {
   const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
-  const isBareParam = (segment: string) => segment.startsWith('{') && segment.endsWith('}');
-  const irregularSegments = rawPath
-    .split('/')
-    .filter(Boolean)
-    .filter((segment) => !isBareParam(segment) && /[^a-z0-9]/.test(segment)).length;
-  return [trailingSlash, irregularSegments];
+  const segments = readPath(rawPath);
+  const customMethods = segments.filter((segment) => segment.customMethod).length;
+  const irregularSegments = segments.filter(
+    (segment) => !segment.text.startsWith('{') && /[^a-z0-9]/.test(segment.text),
+  ).length;
+  return [trailingSlash, customMethods, irregularSegments];
 }
 
-function compareDeviation(a: [number, number], b: [number, number]): number {
-  return a[0] - b[0] || a[1] - b[1];
+function compareDeviation(a: PathDeviation, b: PathDeviation): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
 /** The first six hex characters of the SHA-1 of a raw path. */
@@ -4930,6 +5091,8 @@ function extractResponses(
   responseContentTypes?: string[];
   responseContents?: ResponseContent[];
   responseDescription?: string;
+  /** The status code of the entry `response` was read from; undefined when no 2xx/3xx is declared. */
+  responseStatusCode?: number;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   /** The `default` response, when the operation declares one. */
@@ -5260,6 +5423,7 @@ function extractResponses(
     responseContentTypes,
     responseContents,
     responseDescription,
+    responseStatusCode: primaryStatus,
     successResponses,
     errors,
     defaultResponse: fallback.defaultResponse,
