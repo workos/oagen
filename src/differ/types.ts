@@ -329,12 +329,16 @@ export interface OperationModified {
    * the document-level diff uses: matched on `url` template plus variables
    * (names, defaults, enum values as a set), ignoring position, descriptions
    * and enum order — except that a reorder that moves the first entry's
-   * resolved URL counts, as `base-url-changed` does for the document. Absent
-   * on both sides is unchanged: the operation inherits twice, and a moved
-   * document is the document-level diff's to report. So a document that moves
-   * to where an operation already pointed is not a change to that operation.
-   * OpenAPI's default server is one list however it is spelled (#291): no
-   * servers and `/` alone without variables are served from the same place.
+   * resolved URL counts, as `base-url-changed` does for the document. URLs
+   * are compared through `normalizeServerUrl`, so a scheme or host that only
+   * changed case, a default port written or dropped, or a `/` added after a
+   * bare authority is no change. Absent on both sides is unchanged: the
+   * operation inherits twice, and a moved document is the document-level
+   * diff's to report. So a document that moves to where an operation already
+   * pointed is not a change to that operation. OpenAPI's default server is
+   * one list however it is spelled (#291): no servers and `/` alone —
+   * description and variables aside, since `/` references no variable — are
+   * served from the same place.
    */
   serversChanged: boolean;
   /**
@@ -558,16 +562,20 @@ export interface ParamChange {
  * requests somewhere else. Reported once per diff whatever moved it: a
  * changed `servers[0]` template (also a `server-removed` plus a
  * `server-added`), a changed variable default (also a `server-modified`), a
- * reordered list, or a `servers` list that appeared or disappeared. A
- * document that declares no server and one whose only server is `/` without
- * variables both have OpenAPI's default server and no default host, so
- * nothing is reported between them (#291).
+ * reordered list, or a `servers` list that appeared or disappeared. The two
+ * URLs are compared through `normalizeServerUrl` (RFC 3986: scheme and host
+ * case, a default or empty port, a bare authority's `/`, percent-encoding
+ * case), so a `baseUrl` that only changed in one of those ways is not
+ * reported; both are carried as written. A document that declares no server
+ * and one whose only server is `/` without variables both have OpenAPI's
+ * default server and no default host, so nothing is reported between them
+ * (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** `''` when the old document declared no server; `/` when it wrote OpenAPI's default out, which means the same. */
+  /** As written in the old document; `''` when it declared no server, `/` when it wrote OpenAPI's default out, which means the same. */
   oldBaseUrl: string;
-  /** `''` when the new document declares no server; `/` when it writes OpenAPI's default out, which means the same. */
+  /** As written in the new document; `''` when it declares no server, `/` when it writes OpenAPI's default out, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
@@ -579,31 +587,45 @@ export interface BaseUrlChanged {
 
 export interface ServerAdded {
   kind: 'server-added';
-  /** The URL template as written in the document, placeholders included. */
+  /** The URL template as written in the new document, placeholders included. */
   url: string;
   classification: 'additive';
 }
 
 export interface ServerRemoved {
   kind: 'server-removed';
-  /** The URL template as written in the document, placeholders included. */
+  /** The URL template as written in the old document, placeholders included. */
   url: string;
   classification: 'breaking';
 }
 
 /**
- * A server present in both documents — matched on its `url` template,
+ * A server present in both documents — matched on its `url` template through
+ * `normalizeServerUrl`, so a template that only changed scheme or host case,
+ * a default port or a bare authority's `/` is the same server;
  * position-independent; a template declared more than once is matched as a
- * multiset, see `diffServers` — whose variables changed. A changed template is
- * a `server-removed` plus a `server-added` instead.
+ * multiset, see `diffServers` — whose variables changed. A changed template
+ * is a `server-removed` plus a `server-added` instead.
  */
 export interface ServerModified {
   kind: 'server-modified';
+  /** The URL template as written in the new document, placeholders included. */
   url: string;
   variableChanges: ServerVariableChange[];
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * One variable of a `server-modified` server, matched by name. A variable
+ * added, an enum lifted (`variable-enum-removed`) and an enum value added are
+ * additive for any variable. The other four kinds — the variable removed, its
+ * default changed, an enum appearing, an enum value removed — are breaking
+ * when the server's `url` template references the variable (its `{name}` is
+ * in the template, so the resolved URL a caller built on moves) and additive
+ * when it does not: a variable the template never references cannot reach
+ * any resolved URL, so nothing a caller relied on is taken away. In that
+ * additive case `details` says so.
+ */
 export interface ServerVariableChange {
   kind:
     | 'variable-added'
@@ -621,6 +643,13 @@ export interface ServerVariableChange {
   newDefault?: string;
   /** For `variable-enum-value-added` / `variable-enum-value-removed`: the value. */
   value?: string;
+  /**
+   * What changed, in words, for `variable-default-changed`,
+   * `variable-enum-added` and `variable-enum-removed`. For a variable the
+   * template never references, every change that would otherwise be breaking
+   * also carries (appended after `; ` when there is other text) `{name} is
+   * not in the URL template, so no resolved URL moves`.
+   */
   details?: string;
 }
 

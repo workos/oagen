@@ -3113,18 +3113,23 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * inherits `ApiSpec.servers` — nothing usable is declared at either level
  * (`servers: []` and all-unusable entries included, since `extractServerList`
  * already reads both as undeclared), or the winning list restates the
- * document's. Precedence is applied before the comparison, so an operation
- * that restates the document's servers under a Path Item that diverges
- * inherits, not the Path Item's.
+ * document's — a restatement whose URLs differ only in scheme or host case,
+ * a default port or a `/` after a bare authority included, since
+ * `serverListsEqual` compares URLs through `normalizeServerUrl`. Precedence
+ * is applied before the comparison, so an operation that restates the
+ * document's servers under a Path Item that diverges inherits, not the Path
+ * Item's.
  *
  * Both lists go through `serversBeyondDefault` before they are compared, so
  * OpenAPI's default server is one thing however it is spelled (#291): a
  * document without `servers` (or with `servers: []`) and one whose only
- * server is `/` without variables both compare as an empty list. An operation
- * or Path Item that writes `/` out under a document that declares nothing
- * therefore inherits — the entry's description included, since the default
- * server has none — and any other usable list under such a document is kept,
- * as `/` is under a document that names a host.
+ * server is `/` both compare as an empty list, the entry's description and
+ * variables aside (the default server has neither, and `/` references no
+ * variable, so one declared on it changes nothing — #292). An operation or
+ * Path Item that writes `/` out under a document that declares nothing
+ * therefore inherits — description and variables included — and any other
+ * usable list under such a document is kept, as `/` is under a document that
+ * names a host.
  */
 function operationServers(
   own: ServerEntry[] | undefined,

@@ -181,6 +181,43 @@ paths:
     expect(warnings()).toEqual([]);
   });
 
+  it("leaves the key absent when the declared list restates the document servers in another spelling (issue #293's comment)", async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+servers:
+  - url: https://api.example.com
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: https://API.example.com
+      ${ok}
+  /pets:
+    servers:
+      - url: HTTPS://api.example.com:443/
+    get:
+      operationId: listPets
+      ${ok}
+  /tags:
+    get:
+      operationId: listTags
+      servers:
+        - url: https://api.example.com/V1
+      ${ok}
+`);
+
+    // The issue's comment: `https://API.example.com` restates `https://api.example.com`.
+    expect('servers' in operation(ir, 'listNotes')).toBe(false);
+    expect('servers' in operation(ir, 'listPets')).toBe(false);
+    // The path is case-sensitive, so `/V1` is a different server, kept as written.
+    expect(operation(ir, 'listTags').servers).toEqual([{ url: 'https://api.example.com/V1', description: undefined }]);
+    expect(ir.servers).toEqual([{ url: 'https://api.example.com', description: undefined }]);
+    expect(ir.baseUrl).toBe('https://api.example.com');
+    expect(warnings()).toEqual([]);
+  });
+
   it('treats a different description, variable or order as a different list', async () => {
     const ir = await parseYaml(`
 openapi: '3.1.0'
@@ -653,7 +690,7 @@ paths:
       expect(warnings()).toEqual([]);
     });
 
-    it('keeps `/` with a variable under a document without servers: a variable is not the default', async () => {
+    it('treats `/` with a variable under a document without servers as inheriting: `/` references none (#292)', async () => {
       const ir = await parseYaml(`
 openapi: 3.1.0
 info: { title: repro, version: '1' }
@@ -668,7 +705,9 @@ paths:
       ${ok}
 `);
 
-      expect(operation(ir, 'listNotes').servers).toEqual([{ url: '/', variables: { port: { default: '443' } } }]);
+      // The variable is kept where the document's own list is carried; on an
+      // operation it would only restate the default, so the key stays absent.
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
       expect(warnings()).toEqual([]);
     });
 
