@@ -222,7 +222,7 @@ Mostly static code with namespace interpolation. Required error types:
 
 Configuration class/module with: `api_key`, `base_url`, `max_retries`, `timeout`. Environment variable default for API key.
 
-- `base_url` defaults to `spec.baseUrl` — the first `servers` entry with each variable's `default` filled in (`https://eu.api.example.com/v1`, never the `{region}` template) — and stays overridable by the caller.
+- `base_url` defaults to `spec.baseUrl` — the first `servers` entry with each variable's `default` filled in (`https://eu.api.example.com/v1`) — and stays overridable by the caller. A variable with no usable `default`, or one the entry never declares, keeps its `{region}` placeholder in `spec.baseUrl` (the parser warns), so do not treat the string as always resolved: `resolveServerUrl(entry).unresolved` lists the variables still missing, and an emitter that finds any should surface the template rather than ship it as a working default address.
 - When `spec.servers` has more than one entry, or an entry declares `variables`, expose the choice (named constants, or an environment/region picker) instead of only the default. Each entry keeps its `url` template, `description` and `variables` (`default`, `enum`, `description`); `resolveServerUrl(entry)` from `@workos/oagen` fills the defaults exactly as the parser produced `baseUrl`, so do not re-implement the template substitution. `check-emitter-parity` reports `ApiSpec.servers` as a gap when an emitter never reads it.
 
 ---
