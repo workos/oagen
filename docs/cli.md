@@ -25,6 +25,8 @@ oagen generate --spec openapi.yml --lang node --output ./sdk --namespace Acme
 
 Compare two OpenAPI specs and output a diff report as JSON. Use this to review what changed before regenerating.
 
+An `operation-modified` change carries `serversChanged` (breaking) when the servers the operation is actually served from — its own `servers`, else the document's — changed: the two lists are matched on URL template and variables, ignoring descriptions, enum order and position, except that a reorder that moves the first entry's resolved URL counts. An operation that inherits the document's servers on both sides is not reported here even when the document's own list moved.
+
 ```bash
 oagen diff --old v1.yml --new v2.yml
 ```
@@ -35,6 +37,44 @@ oagen diff --old v1.yml --new v2.yml
 | `--new <path>` | Yes      | Path to the new/current spec  |
 
 **Exit codes:** 0 = no changes, 1 = additive or modified changes, 2 = breaking changes.
+
+### Change kinds
+
+Every entry in `changes` carries a `kind` and a `classification` (`additive` or `breaking`). A `-modified` change also lists what changed inside it and is breaking when any of those is.
+
+| `kind`               | Classification                                          | Fields                                                                                                                                                         |
+| -------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base-url-changed`   | breaking; additive when the old spec declared no server | `oldBaseUrl`, `newBaseUrl` (`''` for no server)                                                                                                                |
+| `server-added`       | additive                                                | `url` (the template as written)                                                                                                                                |
+| `server-removed`     | breaking                                                | `url`                                                                                                                                                          |
+| `server-modified`    | from `variableChanges`                                  | `url`, `variableChanges[]`                                                                                                                                     |
+| `model-added`        | additive                                                | `name`                                                                                                                                                         |
+| `model-removed`      | breaking                                                | `name`                                                                                                                                                         |
+| `model-modified`     | from `fieldChanges`                                     | `name`, `fieldChanges[]`                                                                                                                                       |
+| `enum-added`         | additive                                                | `name`                                                                                                                                                         |
+| `enum-removed`       | breaking                                                | `name`                                                                                                                                                         |
+| `enum-modified`      | from `valueChanges`                                     | `name`, `valueChanges[]`                                                                                                                                       |
+| `service-added`      | additive                                                | `name`                                                                                                                                                         |
+| `service-removed`    | breaking                                                | `name`                                                                                                                                                         |
+| `operation-added`    | additive                                                | `serviceName`, `operationName`                                                                                                                                 |
+| `operation-removed`  | breaking                                                | `serviceName`, `operationName`                                                                                                                                 |
+| `operation-modified` | from `paramChanges` and the `…Changed` flags            | `serviceName`, `operationName`, `paramChanges[]`, `responseChanged`, `requestBodyChanged`, `pathChanged`, … (see `OperationModified` in `src/differ/types.ts`) |
+
+**Servers.** `baseUrl` is `servers[0]` with its variables' defaults filled in, so `base-url-changed` is reported once whenever that resolved host differs: alongside whichever server change moved it, and on its own when the list was only reordered. Servers are matched on their `url` template, independent of position, so a changed template is a `server-removed` plus a `server-added`. A template declared more than once is matched as a multiset: its old and new entries pair up by the strongest signal available, each pass taking the first unmatched candidate in declaration order — identical variables first (so a reordered list, or one whose duplicates are unchanged, reports nothing), then the same variable defaults, then the same resolved URL, then position — and the surplus on either side is a `server-added` or a `server-removed`. Within a matched server, `variableChanges` lists each variable by name; descriptions are not compared.
+
+| `variableChanges[].kind`      | Classification | Meaning                                                      |
+| ----------------------------- | -------------- | ------------------------------------------------------------ |
+| `variable-added`              | additive       | A client can now pick it                                     |
+| `variable-removed`            | breaking       | A client can no longer pick it                               |
+| `variable-default-changed`    | breaking       | The server's resolved URL moves (`oldDefault`, `newDefault`) |
+| `variable-enum-added`         | breaking       | Any value was accepted; now only the listed ones are         |
+| `variable-enum-removed`       | additive       | The restriction is lifted                                    |
+| `variable-enum-value-added`   | additive       | `value` can now be picked                                    |
+| `variable-enum-value-removed` | breaking       | `value` can no longer be picked                              |
+
+**Deprecation.** A node becoming deprecated, or no longer being deprecated, is reported and is additive in either direction (nothing a caller compiles against changes): `deprecatedChanged: true` on an `operation-modified`, `model-modified`, `enum-modified` or `webhook-modified` change, with `oldDeprecated`/`newDeprecated` beside it, and a `param-deprecated-changed`, `field-deprecated-changed` or `value-deprecated-changed` entry — carrying the same two values and `details` reading `live → deprecated` or `deprecated → live` — in that change's `paramChanges` (an operation's or a webhook's), `fieldChanges` or `valueChanges`. A change whose only content is the flag is still reported (so the command exits 1), and a breaking change on the same node keeps the change breaking. Only `true` counts as deprecated: `false` and an absent key are the same thing. Each flip is also mirrored into `behaviorChanges` as a `deprecated-changed` entry naming the node (`operation`, `parameter`, `model`, `field`, `enum`, `enum-value`, `webhook` or `webhook-parameter`) and copying `oldDeprecated`/`newDeprecated` from the change, beside the `param-default-changed` entries that were already collected there.
+
+**Parameters.** Parameters are matched by location and name — OpenAPI allows a path `id` beside a query `id` on one operation — and every `paramChanges` entry carries `paramLocation` (`path`, `query` or `header` on an operation; `header`, `query` or `cookie` on a webhook) to say which one it is about.
 
 ## `oagen extract`
 
