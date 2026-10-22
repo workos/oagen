@@ -1,4 +1,4 @@
-import type { ApiSpec, ServerEntry, ServerVariable } from './types.js';
+import type { ServerEntry, ServerVariable } from './types.js';
 
 /** Outcome of filling a server URL template with its variables' defaults. */
 export interface ResolvedServerUrl {
@@ -114,54 +114,59 @@ function serverVariablesEqual(a: ServerVariable, b: ServerVariable): boolean {
 const DEFAULT_SERVER_URL = '/';
 
 /**
- * Whether a server list means OpenAPI's default server.
+ * Whether a server entry is OpenAPI's default server: its `url` is `/` and
+ * it declares no variables (`variables` absent or empty, by own key). Its
+ * `description` does not count: the default server has none, and a
+ * description changes nothing about where a request goes. An entry at `/`
+ * that declares a variable is a knob a caller can set, and a template that
+ * merely resolves to `/` is a template; neither is the default server.
+ */
+export function isDefaultServerEntry(server: ServerEntry): boolean {
+  return server.url === DEFAULT_SERVER_URL && Object.keys(server.variables ?? {}).length === 0;
+}
+
+/**
+ * Whether a server list means OpenAPI's default server. OpenAPI gives a
+ * document with no `servers`, or `servers: []`, a single server at `/`; a
+ * document that writes that server out declares nothing beyond it, and
+ * neither does one that writes it out twice. So `undefined`, an empty list,
+ * and a list whose every entry is the default by `isDefaultServerEntry` are
+ * all the default. A list with any other entry is not, wherever `/` sits in
+ * it, because position decides the default host.
  *
- * OpenAPI gives a document with no `servers`, or `servers: []`, a single
- * server with `url: '/'`; a document that writes that server out declares
- * nothing beyond it. So `undefined`, an empty list, and a list of exactly one
- * entry whose `url` is `/` and which declares no variables (`variables`
- * absent or empty, by own key) are all the default. The entry's `description`
- * does not count: the default server has none, and a description changes
- * nothing about where a request goes. A `/` entry that declares a variable, a
- * template that merely resolves to `/`, and `/` listed beside another server
- * are not the default.
- *
- * The parser (`Operation.servers`) and the differ (`server-added`,
- * `server-removed`, `serversChanged`) read lists through
- * `serversBeyondDefault`, and `base-url-changed` reads `baseUrl` and
- * `servers` together through `isDefaultServerSet`, so the three spellings of
- * the default compare equal everywhere server lists are compared (#291).
+ * The parser asks this of an operation's list and the document's: both at
+ * the default means the operation inherits (`Operation.servers`, #291).
  */
 export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
-  if (!servers || servers.length === 0) return true;
-  if (servers.length !== 1) return false;
-  const [only] = servers;
-  return only.url === DEFAULT_SERVER_URL && Object.keys(only.variables ?? {}).length === 0;
+  return !servers || servers.every(isDefaultServerEntry);
 }
 
 /**
- * The servers a list declares beyond OpenAPI's default: `servers` itself
- * (the same array, not a copy) when it is not the default by
- * `isDefaultServerList`, else an empty list. A document without `servers`,
- * one with `servers: []`, and one whose only server is `/` without variables
- * all come out as `[]`, which is how the parser and the differ compare them
- * as one thing.
+ * The servers a list declares beyond OpenAPI's default: its entries that are
+ * not the default server by `isDefaultServerEntry`, in order — the list
+ * itself (the same array, not a copy) when none is, an empty list when
+ * every one is. The differ matches servers on this, so a `/` entry is never
+ * reported as added or removed, whether it stands alone or beside a named
+ * host: a document without `servers`, one with `servers: []`, and one whose
+ * only server is `/` all come out as `[]`, and `[/, host]` as `[host]`.
  */
 export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
-  return servers && !isDefaultServerList(servers) ? servers : [];
+  if (!servers) return [];
+  const beyond = servers.filter((server) => !isDefaultServerEntry(server));
+  return beyond.length === servers.length ? servers : beyond;
 }
 
 /**
- * Whether a document's `servers` and `baseUrl` together mean OpenAPI's
- * default server: the list is the default by `isDefaultServerList` and
- * `baseUrl` is what the parser sets for such a list — `''` when the
- * document declares no server, `/` when it writes the default out. Both
- * fields are read because `ApiSpec` does not tie them: an IR built by hand
- * may name a host in `baseUrl` with no `servers` beside it, and that host is
- * not the default — the differ compares it as written and reports it when
- * it moves. The parser never produces that shape (`baseUrl` is always
- * `servers[0]` resolved, or `''`).
+ * A document's default address beyond OpenAPI's default: `''` when
+ * `baseUrl` is `''` (the parser's value for a document with no server) or
+ * `/` (the resolved address of the default server, written out or not),
+ * else `baseUrl` as given. The differ compares `base-url-changed` on this,
+ * so the three spellings of the default share one address and a document
+ * whose first server merely resolves to `/` has not moved from it. Any other
+ * `baseUrl` — a host, or `/v1` — is compared as written, even with no
+ * `servers` beside it (an IR built by hand, which the parser never
+ * produces).
  */
-export function isDefaultServerSet(spec: Pick<ApiSpec, 'baseUrl' | 'servers'>): boolean {
-  return isDefaultServerList(spec.servers) && (spec.baseUrl === '' || spec.baseUrl === DEFAULT_SERVER_URL);
+export function baseUrlBeyondDefault(baseUrl: string): string {
+  return baseUrl === DEFAULT_SERVER_URL ? '' : baseUrl;
 }

@@ -1,57 +1,84 @@
 import { describe, expect, it } from 'vitest';
-import { isDefaultServerList, isDefaultServerSet, serversBeyondDefault } from '../../src/ir/server-url.js';
+import {
+  baseUrlBeyondDefault,
+  isDefaultServerEntry,
+  isDefaultServerList,
+  serversBeyondDefault,
+} from '../../src/ir/server-url.js';
 import type { ServerEntry } from '../../src/ir/types.js';
 
 /**
- * Covers `isDefaultServerList` and `serversBeyondDefault` (issue #291): the
- * three spellings of OpenAPI's default server — no `servers`, `servers: []`
- * and `servers: [{ url: '/' }]` — read as one thing wherever the parser or
- * the differ compares server lists.
+ * Covers the default-server helpers (issue #291): the three spellings of
+ * OpenAPI's default server — no `servers`, `servers: []` and
+ * `servers: [{ url: '/' }]` — read as one thing wherever the parser or the
+ * differ compares server lists, and `/` is the same address as `''`.
  */
-describe('isDefaultServerList', () => {
-  const root: ServerEntry = { url: '/' };
-  const staging: ServerEntry = { url: 'https://staging.api.example.com' };
+const root: ServerEntry = { url: '/' };
+const staging: ServerEntry = { url: 'https://staging.api.example.com' };
+const rootWithVariable: ServerEntry = { url: '/', variables: { port: { default: '443' } } };
+const rootTemplate: ServerEntry = { url: '{root}', variables: { root: { default: '/' } } };
 
+describe('isDefaultServerEntry', () => {
+  it('is true for `/` without variables', () => {
+    expect(isDefaultServerEntry(root)).toBe(true);
+  });
+
+  it('ignores the description', () => {
+    expect(isDefaultServerEntry({ url: '/', description: 'Same origin' })).toBe(true);
+    expect(isDefaultServerEntry({ url: '/', description: undefined })).toBe(true);
+  });
+
+  it('treats an empty `variables` object like none', () => {
+    expect(isDefaultServerEntry({ url: '/', variables: {} })).toBe(true);
+  });
+
+  it('is false for `/` with a variable: a knob a caller can set', () => {
+    expect(isDefaultServerEntry(rootWithVariable)).toBe(false);
+  });
+
+  it('counts a variable named like an Object.prototype member as declared', () => {
+    const variables = Object.fromEntries([['__proto__', { default: 'x' }]]);
+    expect(Object.hasOwn(variables, '__proto__')).toBe(true);
+    expect(isDefaultServerEntry({ url: '/', variables })).toBe(false);
+  });
+
+  it('is false for a template that merely resolves to `/`', () => {
+    expect(isDefaultServerEntry(rootTemplate)).toBe(false);
+  });
+
+  it('is false for any other URL', () => {
+    expect(isDefaultServerEntry(staging)).toBe(false);
+    expect(isDefaultServerEntry({ url: '/v1' })).toBe(false);
+    expect(isDefaultServerEntry({ url: '//' })).toBe(false);
+    expect(isDefaultServerEntry({ url: ' /' })).toBe(false);
+  });
+});
+
+describe('isDefaultServerList', () => {
   it('is true for no list, an empty list, and `/` alone', () => {
     expect(isDefaultServerList(undefined)).toBe(true);
     expect(isDefaultServerList([])).toBe(true);
     expect(isDefaultServerList([root])).toBe(true);
   });
 
-  it('ignores the description of the `/` entry', () => {
-    expect(isDefaultServerList([{ url: '/', description: 'Same origin' }])).toBe(true);
-    expect(isDefaultServerList([{ url: '/', description: undefined }])).toBe(true);
+  it('is true for `/` written out more than once', () => {
+    expect(isDefaultServerList([root, root])).toBe(true);
+    expect(isDefaultServerList([root, { url: '/', description: 'Same origin' }])).toBe(true);
   });
 
-  it('treats an empty `variables` object like none', () => {
-    expect(isDefaultServerList([{ url: '/', variables: {} }])).toBe(true);
-  });
-
-  it('is false for `/` with a variable: a knob a caller can set', () => {
-    expect(isDefaultServerList([{ url: '/', variables: { port: { default: '443' } } }])).toBe(false);
-  });
-
-  it('counts a variable named like an Object.prototype member as declared', () => {
-    const variables = Object.fromEntries([['__proto__', { default: 'x' }]]);
-    expect(Object.hasOwn(variables, '__proto__')).toBe(true);
-    expect(isDefaultServerList([{ url: '/', variables }])).toBe(false);
-  });
-
-  it('is false for a template that merely resolves to `/`', () => {
-    expect(isDefaultServerList([{ url: '{root}', variables: { root: { default: '/' } } }])).toBe(false);
-  });
-
-  it('is false for `/` beside another server, in either position, or declared twice', () => {
+  it('is false for `/` beside another server, in either position', () => {
     expect(isDefaultServerList([root, staging])).toBe(false);
     expect(isDefaultServerList([staging, root])).toBe(false);
-    expect(isDefaultServerList([root, root])).toBe(false);
   });
 
-  it('is false for any other single URL', () => {
+  it('is false for `/` with a variable or a template that resolves to `/`', () => {
+    expect(isDefaultServerList([rootWithVariable])).toBe(false);
+    expect(isDefaultServerList([rootTemplate])).toBe(false);
+  });
+
+  it('is false for any other list', () => {
     expect(isDefaultServerList([staging])).toBe(false);
     expect(isDefaultServerList([{ url: '/v1' }])).toBe(false);
-    expect(isDefaultServerList([{ url: '//' }])).toBe(false);
-    expect(isDefaultServerList([{ url: ' /' }])).toBe(false);
   });
 });
 
@@ -59,49 +86,37 @@ describe('serversBeyondDefault', () => {
   it('is an empty list for every spelling of the default', () => {
     expect(serversBeyondDefault(undefined)).toEqual([]);
     expect(serversBeyondDefault([])).toEqual([]);
-    expect(serversBeyondDefault([{ url: '/' }])).toEqual([]);
+    expect(serversBeyondDefault([root])).toEqual([]);
     expect(serversBeyondDefault([{ url: '/', description: 'Same origin' }])).toEqual([]);
+    expect(serversBeyondDefault([root, root])).toEqual([]);
   });
 
-  it('is the list itself, not a copy, for anything else', () => {
-    const staging: ServerEntry[] = [{ url: 'https://staging.api.example.com' }];
-    expect(serversBeyondDefault(staging)).toBe(staging);
+  it('leaves `/` out wherever it sits and keeps the rest in order', () => {
+    expect(serversBeyondDefault([root, staging])).toEqual([staging]);
+    expect(serversBeyondDefault([staging, root])).toEqual([staging]);
+    expect(serversBeyondDefault([root, staging, root, rootTemplate])).toEqual([staging, rootTemplate]);
+  });
 
-    const rootWithVariable: ServerEntry[] = [{ url: '/', variables: { port: { default: '443' } } }];
-    expect(serversBeyondDefault(rootWithVariable)).toBe(rootWithVariable);
-
-    const rootBesideHost: ServerEntry[] = [{ url: '/' }, ...staging];
-    expect(serversBeyondDefault(rootBesideHost)).toBe(rootBesideHost);
+  it('is the list itself, not a copy, when nothing is left out', () => {
+    const list = [staging];
+    expect(serversBeyondDefault(list)).toBe(list);
+    const withKnob = [rootWithVariable];
+    expect(serversBeyondDefault(withKnob)).toBe(withKnob);
+    const template = [rootTemplate];
+    expect(serversBeyondDefault(template)).toBe(template);
   });
 });
 
-describe('isDefaultServerSet', () => {
-  const host = 'https://api.example.com';
-
-  it('is true for the shapes the parser gives a document at the default', () => {
-    expect(isDefaultServerSet({ baseUrl: '', servers: undefined })).toBe(true);
-    expect(isDefaultServerSet({ baseUrl: '', servers: [] })).toBe(true);
-    expect(isDefaultServerSet({ baseUrl: '/', servers: [{ url: '/' }] })).toBe(true);
-    expect(isDefaultServerSet({ baseUrl: '/', servers: [{ url: '/', description: 'Same origin' }] })).toBe(true);
+describe('baseUrlBeyondDefault', () => {
+  it("reads `''` and `/` as one address, `''`", () => {
+    expect(baseUrlBeyondDefault('')).toBe('');
+    expect(baseUrlBeyondDefault('/')).toBe('');
   });
 
-  it('is true for a hand-built pairing of the two default values', () => {
-    expect(isDefaultServerSet({ baseUrl: '/', servers: undefined })).toBe(true);
-    expect(isDefaultServerSet({ baseUrl: '', servers: [{ url: '/' }] })).toBe(true);
-  });
-
-  it('is false when baseUrl names a host, with or without servers beside it', () => {
-    expect(isDefaultServerSet({ baseUrl: host, servers: undefined })).toBe(false);
-    expect(isDefaultServerSet({ baseUrl: host, servers: [] })).toBe(false);
-    expect(isDefaultServerSet({ baseUrl: host, servers: [{ url: host }] })).toBe(false);
-    expect(isDefaultServerSet({ baseUrl: '/v1', servers: undefined })).toBe(false);
-  });
-
-  it('is false when the list is not the default, whatever baseUrl says', () => {
-    expect(isDefaultServerSet({ baseUrl: '/', servers: [{ url: '/' }, { url: host }] })).toBe(false);
-    expect(
-      isDefaultServerSet({ baseUrl: '/', servers: [{ url: '{root}', variables: { root: { default: '/' } } }] }),
-    ).toBe(false);
-    expect(isDefaultServerSet({ baseUrl: '', servers: [{ url: host }] })).toBe(false);
+  it('leaves any other address as written', () => {
+    expect(baseUrlBeyondDefault('https://api.example.com')).toBe('https://api.example.com');
+    expect(baseUrlBeyondDefault('/v1')).toBe('/v1');
+    expect(baseUrlBeyondDefault('//')).toBe('//');
+    expect(baseUrlBeyondDefault(' /')).toBe(' /');
   });
 });

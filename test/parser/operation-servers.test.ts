@@ -653,6 +653,45 @@ paths:
       expect(warnings()).toEqual([]);
     });
 
+    it('keeps a named host alone under a document that lists `/` before it: position decides the default host', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+servers:
+  - url: /
+  - url: https://notes.example.com
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: https://notes.example.com
+      ${ok}
+`);
+
+      expect(ir.baseUrl).toBe('/');
+      expect(operation(ir, 'listNotes').servers).toEqual([{ url: 'https://notes.example.com' }]);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('leaves the key absent when the operation writes `/` out twice under a document without servers', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+        - url: /
+      ${ok}
+`);
+
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
+      expect(warnings()).toEqual([]);
+    });
+
     it('keeps `/` with a variable under a document without servers: a variable is not the default', async () => {
       const ir = await parseYaml(`
 openapi: 3.1.0

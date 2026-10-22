@@ -612,20 +612,20 @@ export interface ParamChange {
  * requests somewhere else. Reported once per diff whatever moved it: a
  * changed `servers[0]` template (also a `server-removed` plus a
  * `server-added`), a changed variable default (also a `server-modified`), a
- * reordered list, or a `servers` list that appeared or disappeared. A
- * document that declares no server and one whose only server is `/` without
- * variables both have OpenAPI's default server and no default host, so
- * nothing is reported between them (#291).
+ * reordered list, or a `servers` list that appeared or disappeared. The
+ * comparison reads `''` and `/` as one address — OpenAPI's default, whether
+ * the document declares no server, writes `/` out, or resolves its first
+ * server to `/` — so nothing is reported between those (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** `''` when the old document declared no server; `/` when it wrote OpenAPI's default out, which means the same. */
+  /** `''` when the old document declared no server; `/` when its first server resolved to `/`, which means the same. */
   oldBaseUrl: string;
-  /** `''` when the new document declares no server; `/` when it writes OpenAPI's default out, which means the same. */
+  /** `''` when the new document declares no server; `/` when its first server resolves to `/`, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
-   * document declared no server, or only `/`: every existing caller had to
+   * document's default address was `''` or `/`: every existing caller had to
    * name a host themselves and still can.
    */
   classification: 'additive' | 'breaking';
