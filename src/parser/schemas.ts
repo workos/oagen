@@ -3429,17 +3429,15 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    // An `allOf` field is merged by `mergeAllOfMembers`, as everywhere else
-    // (`$ref` members resolved, nested `allOf` members and the inline object
-    // variants of a `oneOf`/`anyOf` member read in), and the merged shape is
-    // extracted under the field's nested name, every property typed under it.
+    // An `allOf` field is built by `materializeMergedAllOf`, exactly as the
+    // field extractor builds the same field anywhere else: `$ref` members
+    // resolved, nested `allOf` members and the inline object variants of a
+    // `oneOf`/`anyOf` member read in, inherited properties typed as their
+    // component types them and not read into again (so a component that
+    // extends itself through a field terminates), the model's own properties
+    // materialized under the field's nested name.
     if (kind === 'allOf' && composed.allOf) {
-      const merged = mergeAllOfMembers(composed, schemas);
-      if (merged.properties.length > 0) {
-        nestedModels.push(
-          ...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), mergedObjectSchema(merged), schemas),
-        );
-      }
+      materializeMergedAllOf(qualifyNestedInlineName(name, fieldName), composed, nestedModels, schemas);
     }
 
     const unionVariants = kind === 'union' ? (composed.oneOf ?? composed.anyOf) : undefined;
@@ -4030,8 +4028,7 @@ import {
   isInlineAllOfMember,
   mapValueSchema,
   markContestedTitles,
-  mergeAllOfMembers,
-  mergedObjectSchema,
+  materializeMergedAllOf,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
