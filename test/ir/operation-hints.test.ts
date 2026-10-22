@@ -3,6 +3,7 @@ import {
   deriveMethodName,
   findResolvedMethodCollisions,
   pathSegments,
+  readPath,
   resolveMountTarget,
   resolveOperations,
 } from '../../src/ir/operation-hints.js';
@@ -62,6 +63,17 @@ describe('pathSegments (issue #269)', () => {
     expect(pathSegments('/{a:b}')).toEqual(['{a:b}']);
     expect(pathSegments('//pets/:x/')).toEqual(['pets', 'x']);
     expect(pathSegments('/')).toEqual([]);
+  });
+
+  it('marks the verb of a custom method, and nothing else, through readPath', () => {
+    expect(readPath('/pets/{petId}:adopt')).toEqual([
+      { text: 'pets', customMethod: false },
+      { text: '{petId}', customMethod: false },
+      { text: 'adopt', customMethod: true },
+    ]);
+    expect(readPath('/pets:batchGet').map((s) => s.customMethod)).toEqual([false, true]);
+    expect(readPath('/pets/{petId}/adopt').map((s) => s.customMethod)).toEqual([false, false, false]);
+    expect(readPath('/{a:b}')).toEqual([{ text: '{a:b}', customMethod: false }]);
   });
 });
 
