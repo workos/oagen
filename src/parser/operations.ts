@@ -337,17 +337,19 @@ export function extractOperations(
   // for every such operation is decided up front (see resolvePathModelBaseNames).
   // The model name each component response's inline body takes, decided once
   // for every operation that returns it (see resolveComponentResponseModelNames).
-  const componentResponseModelNames = resolveComponentResponseModelNames(componentResponses, [
-    ...(componentModels ?? []),
-    ...(componentFieldModels ?? []),
-  ]);
+  const componentResponseNaming = resolveComponentResponseModelNames(
+    componentResponses,
+    [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+    componentSchemas,
+  );
+  const componentResponseModelNames = new Map(
+    [...componentResponseNaming].map(([componentName, naming]) => [componentName, naming.name]),
+  );
   const pathModelBaseNames = resolvePathModelBaseNames(
     paths,
     componentModels,
     componentRequestBodies,
-    componentResponses,
-    componentResponseModelNames,
-    componentSchemas,
+    componentResponseNaming,
   );
   // An API root the untagged paths sit under (`/api`, `/v1`) tells the
   // services apart no better than nothing, so untagged operations skip it
@@ -2562,9 +2564,7 @@ function resolvePathModelBaseNames(
   paths: Record<string, PathItem>,
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
-  componentResponses?: Record<string, Record<string, unknown>>,
-  componentResponseModelNames: ReadonlyMap<string, string> = new Map(),
-  componentSchemas?: Record<string, SchemaObject>,
+  componentResponseNaming: ReadonlyMap<string, ComponentResponseNaming> = new Map(),
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -2582,29 +2582,14 @@ function resolvePathModelBaseNames(
   // extends the component's (`GET /owner/card/response/address` →
   // `OwnerCardResponseAddressGet`) starts with none of the stems above, yet
   // its `…Response` is exactly such a nested name, and the later merge would
-  // keep one shape for both. The names are read by the extractor the
+  // keep one shape for both. The names are the ones
+  // `resolveComponentResponseModelNames` read with the extractor the
   // operation will use, under the same context name, so they agree by
-  // construction, under whatever media type the body is declared (the same
-  // fixed-order pick, `primaryBodySchema`); a chain of refs is followed to the
-  // body silently, since the operation declaring the ref warns when it reads it.
-  for (const [componentName, modelName] of componentResponseModelNames) {
-    const component = componentResponses?.[componentName];
-    if (!component) continue;
+  // construction.
+  for (const [componentName, naming] of componentResponseNaming) {
     reservedNames.add(componentResponseModelBase(componentName));
-    const resolved = resolveResponseRef<ResponseObject>(
-      component as ResponseObject | ReferenceObject,
-      componentResponses,
-      `components/responses/${componentName}`,
-      'override',
-      'silent',
-    );
-    const { schema } = primaryBodySchema(resolved);
-    if (!schema) continue;
-    const body = classifyAndExtractResponse(schema, modelName, componentSchemas);
-    for (const model of body.inlineModels) reservedNames.add(model.name);
-    for (const companion of body.envelopeCompanions ?? []) {
-      for (const model of companion.models) reservedNames.add(model.name);
-    }
+    reservedNames.add(naming.name);
+    for (const name of naming.minted) reservedNames.add(name);
   }
 
   for (const [path, pathItem] of Object.entries(paths)) {
@@ -2832,18 +2817,34 @@ function componentResponseModelName(componentName: string): string {
   return cleanSchemaName(base.endsWith('Response') ? base : base + 'Response');
 }
 
+/** What a component response's inline body is named, and every model name it mints under that name. */
+interface ComponentResponseNaming {
+  name: string;
+  /** The root model and everything nested under it, envelope companions included; empty for a body without a schema. */
+  minted: readonly string[];
+}
+
 /**
  * The model name each component response's inline body is shared under,
  * decided once for the document: `componentResponseModelName`, stepped to the
- * first free numbered form (`OwnerCardResponse2`, `…3`) when a component
- * schema (or a model a component field mints) already owns the name, or when
- * another component response derives it — `OwnerCard` beside a schema
- * `OwnerCardResponse`, or beside a component response `OwnerCardResponse`.
- * A shared name of another shape would otherwise be folded by the later
- * merge, which compares field names, onto a model with other field types,
- * silently; and naming such a body per operation instead would hand two
- * shared bodies of one operation (`OwnerCard` at 200, `NewOwner` at 201) the
- * same `<Op>Response`. A component already named like its derived name
+ * first numbered form (`OwnerCardResponse2`, `…3`) under which neither it nor
+ * any model the body mints — a nested object (`OwnerCardResponse2Detail`),
+ * array items, union variants, envelope companions — is a name a component
+ * schema (or a model a component field mints) or an earlier component
+ * response already owns: `OwnerCard` beside a schema `OwnerCardResponse`, or
+ * beside a schema `OwnerCardResponse2Detail`, or beside a component response
+ * `OwnerCardResponse`. A shared name of another shape would otherwise be
+ * folded by the later merge, which compares field names, onto a model with
+ * other field types, silently; and naming such a body per operation instead
+ * would hand two shared bodies of one operation (`OwnerCard` at 200,
+ * `NewOwner` at 201) the same `<Op>Response`. The names are read with the
+ * extractor the operation will use, under the candidate name, so the whole
+ * body moves together and the reference and the models agree by
+ * construction; a chain of refs is followed to the body silently, since the
+ * operation declaring the ref reports a bad one when it reads it. A clash the
+ * stem does not reach — a titled variant, named the same under any stem —
+ * stops the stepping, and the merge passes settle it as for any operation
+ * body. A component already named like its derived name
  * (`OwnerCardResponse` → `OwnerCardResponse`) keeps it ahead of one that
  * only derives it; the rest are decided in document order, so the outcome
  * never depends on which operation is read first. Every component ends up in
@@ -2852,20 +2853,65 @@ function componentResponseModelName(componentName: string): string {
 function resolveComponentResponseModelNames(
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   takenModels: readonly Model[],
-): ReadonlyMap<string, string> {
+  componentSchemas?: Record<string, SchemaObject>,
+): ReadonlyMap<string, ComponentResponseNaming> {
   const taken = new Set(takenModels.map((model) => model.name));
   const componentNames = Object.keys(componentResponses ?? {});
   const exact = componentNames.filter((name) => componentResponseModelName(name) === name);
   const ordered = [...exact, ...componentNames.filter((name) => !exact.includes(name))];
-  const names = new Map<string, string>();
+  const names = new Map<string, ComponentResponseNaming>();
   for (const componentName of ordered) {
+    const schema = componentResponseBodySchema(componentName, componentResponses ?? {});
+    const mintedUnder = (name: string): string[] => (schema ? bodyModelNames(schema, name, componentSchemas) : []);
     const base = componentResponseModelName(componentName);
     let name = base;
-    for (let n = 2; taken.has(name); n++) name = `${base}${n}`;
+    let minted = mintedUnder(name);
+    let previous: string[] | undefined;
+    for (let n = 2; n < 100; n++) {
+      const clashing = [name, ...minted].filter((candidate) => taken.has(candidate));
+      if (clashing.length === 0) break;
+      const stuck =
+        previous !== undefined && clashing.length === previous.length && clashing.every((c) => previous!.includes(c));
+      if (stuck) break;
+      previous = clashing;
+      name = `${base}${n}`;
+      minted = mintedUnder(name);
+    }
     taken.add(name);
-    names.set(componentName, name);
+    for (const minted_ of minted) taken.add(minted_);
+    names.set(componentName, { name, minted });
   }
   return names;
+}
+
+/** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */
+function componentResponseBodySchema(
+  componentName: string,
+  componentResponses: Record<string, Record<string, unknown>>,
+): SchemaObject | undefined {
+  const component = componentResponses[componentName];
+  if (!component) return undefined;
+  const resolved = resolveResponseRef<ResponseObject>(
+    component as ResponseObject | ReferenceObject,
+    componentResponses,
+    `components/responses/${componentName}`,
+    'override',
+    'silent',
+  );
+  return primaryBodySchema(resolved).schema;
+}
+
+/** Every model name a response body mints under `contextName`: the extractor's models and its envelope companions'. */
+function bodyModelNames(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): string[] {
+  const body = classifyAndExtractResponse(schema, contextName, componentSchemas);
+  return [
+    ...body.inlineModels.map((model) => model.name),
+    ...(body.envelopeCompanions ?? []).flatMap((companion) => companion.models.map((model) => model.name)),
+  ];
 }
 
 /**
