@@ -118,9 +118,10 @@ export function diffWebhooks(
  * - optional → required: additive — the body is now always there.
  * - media types changed, both sides declaring a payload: one the sender can
  *   newly use, or whose body changed type, is breaking — the handler must
- *   decode it; one it can no longer use is additive. Compared by essence as
- *   an operation's are (`diffRequestBodyContentTypes`), and carried
- *   structured as `mediaTypes` beside the `details` strings.
+ *   decode it; one it can no longer use, or one that only changed a
+ *   parameter other than `charset`, is additive. Compared by essence as an
+ *   operation's are (`diffRequestBodyContentTypes`), and carried structured
+ *   as `mediaTypes` beside the `details` strings.
  */
 function diffWebhookBody(
   oldWebhook: Webhook,
@@ -158,6 +159,7 @@ function diffWebhookBody(
       list.length > 0 ? [`payload media type${list.length > 1 ? 's' : ''} ${list.join(', ')} ${what}`] : [];
     changes.push(...said('added', mediaTypes.added), ...said('removed', mediaTypes.removed));
     changes.push(...said('retyped', mediaTypes.retyped));
+    changes.push(...mediaTypes.reparameterized.map(({ from, to }) => `payload media type ${from} → ${to}`));
     if (mediaTypes.classification === 'breaking') breaking = true;
   }
 

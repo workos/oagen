@@ -330,13 +330,41 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
     });
   const row = { row: { type: 'string' } };
 
-  it('reports only the renamed model when a parameter edit on a sibling-distinguished key leaves the schema as it was (Greptile round 3)', async () => {
+  it('reports the renamed model and the reparameterized key, not a retype, when a parameter edit on a sibling-distinguished key leaves the schema as it was (Greptile round 3)', async () => {
     const { changes } = await diffDocuments(versioned(1, row), versioned(3, row));
-    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed']);
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed', 'operation-modified']);
     expect(changes).toContainEqual({
       kind: 'model-removed',
       name: 'CreatePetTextCsvVersion1Request',
       classification: 'breaking',
+    });
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      requestBodyChanged: false,
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: [],
+        retyped: [],
+        reparameterized: [{ from: 'text/csv; version=1', to: 'text/csv; version=3' }],
+        classification: 'additive',
+      },
+      classification: 'additive',
+    });
+  });
+
+  it('reports a changed version parameter on the body callers send as reparameterized, additive (issue author review)', () => {
+    const v1 = createPet([['application/vnd.pets+json; version=1', request]]);
+    const v2 = createPet([['application/vnd.pets+json; version=2', request]]);
+    expect(modified(v1, v2)).toMatchObject({
+      requestBodyChanged: false,
+      requestBodyContentTypesChanged: true,
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: [],
+        retyped: [],
+        reparameterized: [{ from: 'application/vnd.pets+json; version=1', to: 'application/vnd.pets+json; version=2' }],
+        classification: 'additive',
+      },
+      classification: 'additive',
     });
   });
 
@@ -392,6 +420,35 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
   it('reports the rename through the models diff only', () => {
     const { changes } = diffSpecs(spec('OldNote', note('OldNote')), spec('NewNote', note('NewNote')));
     expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed']);
+  });
+
+  it('reports a payload whose media type only changed a parameter other than charset as reparameterized, additive', () => {
+    const respelled: Webhook = {
+      ...hook('OldNote'),
+      requestBodyContentTypes: ['application/json; charset=utf-8', 'text/plain; format=flowed'],
+      requestBodyContents: contents([
+        ['application/json; charset=utf-8', event],
+        ['text/plain; format=flowed', { kind: 'model', name: 'OldNote' }],
+      ]),
+    };
+    const { changes } = diffSpecs(spec('OldNote', note('OldNote')), {
+      ...spec('OldNote', note('OldNote')),
+      webhooks: [respelled],
+    });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'webhook-modified',
+      requestBodyChanged: true,
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: [],
+        retyped: [],
+        reparameterized: [{ from: 'text/plain', to: 'text/plain; format=flowed' }],
+        classification: 'additive',
+      },
+      details: 'payload media type text/plain → text/plain; format=flowed',
+      classification: 'additive',
+    });
   });
 
   it('reports a payload whose shape changed as retyped, breaking', () => {
