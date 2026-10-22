@@ -367,7 +367,7 @@ describe('fallback operation names (issue #210)', () => {
     ]);
   });
 
-  it('never needs the plural for two fallbacks: their paths tell them apart', () => {
+  it('keeps the singular for two fallbacks whose resources differ: their paths tell them apart', () => {
     expect(
       names({
         '/store/pets/{id}': { get: item('id') },
@@ -469,5 +469,254 @@ describe('fallback operation names (issue #210)', () => {
     const { services } = extractOperations(paths, (id) => `${id}_v2`);
     const transformed = services.flatMap((s) => s.operations).map((o) => o.name);
     expect(transformed.sort()).toEqual(['createAdoption_v2', 'fetchPets_v2']);
+  });
+});
+
+/**
+ * Issue #268: two path-named operations whose paths differ only by a plural
+ * got a number instead of the plural, a plural segment between the service
+ * and the resource stayed plural when it qualified a name, and `aliases` and
+ * `analyses` stemmed to `aliase` and `analyse`.
+ */
+describe('plural path names (issue #268)', () => {
+  const json = {
+    responses: { '200': { description: 'ok', content: { 'application/json': { schema: { type: 'string' } } } } },
+  };
+  /** The issue's operations: tagged `Store`, `200` with a JSON string. */
+  const tagged = (...params: string[]) => ({
+    ...json,
+    tags: ['Store'],
+    parameters: params.map((name) => ({ name, in: 'path' as const, required: true, schema: { type: 'string' } })),
+  });
+  /** The issue's own print-out: one entry per service, `name: METHOD /path` per operation. */
+  const services = (paths: Record<string, Partial<Record<Method, unknown>>>) =>
+    extractOperations(paths as Parameters<typeof extractOperations>[0]).services.map(({ name, operations }) => ({
+      name,
+      operations: operations.map((op) => `${op.name}: ${op.httpMethod.toUpperCase()} ${op.path}`),
+    }));
+
+  it('names the issue repro: the plural kept, a singular parent in the deeper context', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const repro = {
+        '/store/pets/{id}': { get: tagged('id') },
+        '/store/pet/{id}': { get: tagged('id') },
+        '/store/cats/{id}/toys/{toyId}': { get: tagged('id', 'toyId'), delete: tagged('id', 'toyId') },
+        '/store/dogs/{id}/toys/{toyId}': { get: tagged('id', 'toyId'), delete: tagged('id', 'toyId') },
+      };
+      expect(services(repro)).toEqual([
+        {
+          name: 'Store',
+          operations: [
+            'getPets: GET /store/pets/{id}',
+            'getPet: GET /store/pet/{id}',
+            'getToyCat: GET /store/cats/{id}/toys/{toyId}',
+            'deleteToyCat: DELETE /store/cats/{id}/toys/{toyId}',
+            'getToyDog: GET /store/dogs/{id}/toys/{toyId}',
+            'deleteToyDog: DELETE /store/dogs/{id}/toys/{toyId}',
+          ],
+        },
+      ]);
+      // The same names whatever the document order.
+      const reversed = Object.fromEntries(Object.entries(repro).reverse());
+      expect(names(reversed)).toEqual(names(repro));
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the plural of statuses beside status, and stems aliases and analyses', () => {
+    expect(
+      names({
+        '/org/statuses/{id}': { get: item('id') },
+        '/org/status/{id}': { get: item('id') },
+        '/org/aliases/{id}': { get: item('id') },
+        '/org/analyses/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getAlias                     GET    /org/aliases/{id}',
+      'getAnalysis                  GET    /org/analyses/{id}',
+      'getStatus                    GET    /org/status/{id}',
+      'getStatuses                  GET    /org/statuses/{id}',
+    ]);
+  });
+
+  it('shares the plural between PUT and PATCH beside the singular path', () => {
+    expect(
+      names({
+        '/store/pets/{id}': { put: item('id'), patch: item('id') },
+        '/store/pet/{id}': { put: item('id') },
+      }),
+    ).toEqual([
+      'updatePet                    PUT    /store/pet/{id}',
+      'updatePets                   PATCH  /store/pets/{id}',
+      'updatePets                   PUT    /store/pets/{id}',
+    ]);
+  });
+
+  it('numbers members that would all take the same plural: it would say nothing about which is which', () => {
+    // `/store/Pets/{id}` and `/store/pets/{id}` flatten to the same words and
+    // the same plural; the lexically first path keeps the plain name, as in
+    // every numeric pass.
+    expect(
+      names({
+        '/store/pets/{id}': { get: item('id') },
+        '/store/Pets/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPet                       GET    /store/Pets/{id}',
+      'getPet2                      GET    /store/pets/{id}',
+    ]);
+  });
+
+  it('gives the plural to the plural path when an operationId joins the pair, and numbers the singular path', () => {
+    expect(
+      names({
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/pets/{id}': { get: item('id') },
+        '/store/pet/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPet                       GET    /store/featured/{id}',
+      'getPet2                      GET    /store/pet/{id}',
+      'getPets                      GET    /store/pets/{id}',
+    ]);
+  });
+
+  it('falls back to a numeric suffix for the pair when the plural is taken', () => {
+    expect(
+      names({
+        '/store/all/{id}': { get: { ...item('id'), operationId: 'getPets' } },
+        '/store/pets/{id}': { get: item('id') },
+        '/store/pet/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPets                      GET    /store/all/{id}',
+      'getPet                       GET    /store/pet/{id}',
+      'getPet2                      GET    /store/pets/{id}',
+    ]);
+  });
+
+  it('singularises a deeper segment only when a parameter follows it, and keeps the rest as written', () => {
+    // `cats` in `/store/cats/toys/{toyId}` addresses no one cat, so it stays
+    // plural, exactly as a collection resource does; `legacy` is not plural.
+    expect(
+      names({
+        '/store/cats/toys/{toyId}': { get: item('toyId') },
+        '/store/dogs/toys/{toyId}': { get: item('toyId') },
+        '/users/{id}/legacy/factors': { get: item('id') },
+        '/users/{id}/factors': { get: item('id') },
+      }),
+    ).toEqual([
+      'getToyCats                   GET    /store/cats/toys/{toyId}',
+      'getToyDogs                   GET    /store/dogs/toys/{toyId}',
+      'listFactors                  GET    /users/{id}/factors',
+      'listFactorsLegacy            GET    /users/{id}/legacy/factors',
+    ]);
+  });
+
+  it('does not repeat the resource in the other number, and still appends every parameter in path order', () => {
+    // The deeper context of `/orgs/notes/{id}/notes` is `Note`, the noun the
+    // name already ends with, so it is absorbed and the parameter decides.
+    expect(
+      names({
+        '/orgs/notes': { get: ok },
+        '/orgs/notes/{id}/notes': { get: item('id') },
+      }),
+    ).toEqual([
+      'listNotes                    GET    /orgs/notes',
+      'listNotesById                GET    /orgs/notes/{id}/notes',
+    ]);
+    // With no deeper context to tell them apart, one `By<Param>` per
+    // parameter of its own, in path order.
+    expect(
+      names({
+        '/orgs/members': { get: ok },
+        '/orgs/{orgId}/{teamId}/members': { get: item('orgId') },
+      }),
+    ).toEqual([
+      'listMembers                  GET    /orgs/members',
+      'listMembersByOrgIdByTeamId   GET    /orgs/{orgId}/{teamId}/members',
+    ]);
+  });
+
+  it('singularises the service noun restored to an item operation', () => {
+    // `/api/notes/{noteId}` would read `Note` were `notes` not the service
+    // segment, so that is the noun restored beside `operationId: get`; the
+    // collection `/api/notes` beside `operationId: list` keeps `Notes`.
+    expect(
+      names({
+        '/api/notes/{noteId}': { get: item('noteId') },
+        '/api/{teamId}/notes/{noteId}': { get: { ...item('teamId'), operationId: 'get' } },
+        '/api/notes': { get: json },
+        '/api/{teamId}/notes': { get: { ...item('teamId'), operationId: 'list' } },
+      }),
+    ).toEqual([
+      'listNotes                    GET    /api/notes',
+      'getNote                      GET    /api/notes/{noteId}',
+      'list                         GET    /api/{teamId}/notes',
+      'get                          GET    /api/{teamId}/notes/{noteId}',
+    ]);
+  });
+});
+
+/**
+ * Custom-method paths (issue #269): an action written after a colon on the
+ * segment it acts on, `/pets/{petId}:adopt`, is named exactly like the same
+ * action written with a slash. Every reading of the path splits the segment
+ * the same way, so the verb never lands inside a `By<Param>` qualifier.
+ */
+describe('custom-method paths (issue #269)', () => {
+  const json = {
+    responses: { '200': { description: 'ok', content: { 'application/json': { schema: { type: 'string' } } } } },
+  };
+  const jsonItem = (name: string) => ({ ...json, ...idParam(name) });
+
+  it('names the issue repro: a custom method on an item is the verb plus its singular parent', () => {
+    const result = names({
+      '/v1/pets/{petId}:adopt': { post: jsonItem('petId') },
+      '/v1/pets/{petId}:archive': { post: jsonItem('petId') },
+      '/v1/pets/{petId}/feed': { post: jsonItem('petId') },
+    });
+    expect(result).toMatchInlineSnapshot(`
+      [
+        "feedPet                      POST   /v1/pets/{petId}/feed",
+        "adoptPet                     POST   /v1/pets/{petId}:adopt",
+        "archivePet                   POST   /v1/pets/{petId}:archive",
+      ]
+    `);
+  });
+
+  it('names a tagged custom method on an item the same way, keeping the service segment as the parent', () => {
+    expect(names({ '/pets/{petId}:adopt': { post: { ...jsonItem('petId'), tags: ['pets'] } } })).toEqual([
+      'adoptPet                     POST   /pets/{petId}:adopt',
+    ]);
+  });
+
+  it('names the service from the collection a custom method is written on, and reads it like the slash form', () => {
+    const paths = { '/v1/pets:batchGet': { post: json }, '/v1/pets': { get: json } };
+    const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
+    expect(services.map((s) => s.name)).toEqual(['Pets']);
+    expect(names(paths)).toEqual([
+      'list                         GET    /v1/pets',
+      'createBatchGet               POST   /v1/pets:batchGet',
+    ]);
+  });
+
+  it('qualifies by the parameter alone, never by the verb written after it', () => {
+    expect(names({ '/pets/{petId}:history': { get: jsonItem('petId') }, '/pets/history': { get: json } })).toEqual([
+      'listHistory                  GET    /pets/history',
+      'listHistoryByPetId           GET    /pets/{petId}:history',
+    ]);
+  });
+
+  it('reads a custom method and its slash form as the same words', () => {
+    expect(
+      names({ '/pets/{petId}:adopt': { post: jsonItem('petId') }, '/pets/{petId}/adopt': { post: jsonItem('petId') } }),
+    ).toEqual([
+      'adoptPet                     POST   /pets/{petId}/adopt',
+      'adoptPet2                    POST   /pets/{petId}:adopt',
+    ]);
   });
 });
