@@ -140,6 +140,15 @@ export type {
   WebhookRemoved,
   WebhookModified,
   ParamChange,
+  BehaviorChange,
+  ParamDefaultChanged,
+  DeprecatedChanged,
+  DeprecatedNode,
+  BaseUrlChanged,
+  ServerAdded,
+  ServerRemoved,
+  ServerModified,
+  ServerVariableChange,
 } from './differ/types.js';
 
 // Core parse + generate
