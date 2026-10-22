@@ -1448,7 +1448,7 @@ export interface ErrorResponse {
  * A 3xx entry's `type` is always `unknown`. A 2xx body that is itself an
  * inline enum, or an array of one, is promoted to `spec.enums` as
  * `<Op>Response`; every entry derives that same name, so a second body with
- * other members is qualified with its status code (`CreatePetResponse202`),
+ * other members is qualified with its status code (`CheckPetKindResponse202`),
  * while identical members share one enum.
  */
 export interface SuccessResponse {

@@ -627,3 +627,76 @@ describe('an inline enum never takes a name a model owns', () => {
     expectSound(ir, ['SetMoodRequest', 'SetMoodRequest2']);
   });
 });
+
+// The stepped-name reuse in `distinctEnumName` (identical members share a
+// digit-qualified name the stem already stepped to, before a new one is
+// minted) applies wherever a status code qualifies a name, so response
+// headers share across status codes exactly as bodies do — the enum twin of
+// the rule #331 gives identical inline models. A header enum that used to be
+// minted per status code (`PetsXPolicy503`, `PetsXPolicyDefault`) is no
+// longer, so an SDK regenerated from such a spec loses that type (noted as
+// breaking in the PR).
+describe('identical members on another status code share the stepped name, headers included', () => {
+  const policy = (values: string[]) => ({ 'X-Policy': { schema: en(values) } });
+  const headerOf = (entry: { headers?: Array<{ type: TypeRef }> } | undefined): string | undefined =>
+    ref(entry?.headers?.[0].type);
+
+  it('a 503 header with the members the 429 header stepped to shares `…429`; `…503` is never minted', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({
+          '200': { description: 'kind', ...json(str), headers: policy(['fast', 'slow']) },
+          '429': { description: 'slow down', headers: policy(['retry', 'stop']) },
+          '503': { description: 'down', headers: policy(['retry', 'stop']) },
+        }),
+      ),
+    );
+    const op = operation(ir, 'getPetKind');
+    expect(ref(op.responseHeaders?.[0].type)).toBe('enum PetsXPolicy');
+    expect(op.errors.map((error) => `${error.statusCode}: ${headerOf(error)}`)).toEqual([
+      '429: enum PetsXPolicy429',
+      '503: enum PetsXPolicy429',
+    ]);
+    expect(enumNames(ir)).toEqual(['PetsXPolicy', 'PetsXPolicy429']);
+    expect(enumValues(ir, 'PetsXPolicy')).toEqual(['fast', 'slow']);
+    expect(enumValues(ir, 'PetsXPolicy429')).toEqual(['retry', 'stop']);
+    expectSound(ir);
+  });
+
+  it("a default response's header with those members shares `…429` too; `…Default` is never minted", async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({
+          '200': { description: 'kind', ...json(str), headers: policy(['fast', 'slow']) },
+          '429': { description: 'slow down', headers: policy(['retry', 'stop']) },
+          default: { description: 'anything else', headers: policy(['retry', 'stop']) },
+        }),
+      ),
+    );
+    const op = operation(ir, 'getPetKind');
+    expect(headerOf(op.errors[0])).toBe('enum PetsXPolicy429');
+    expect(headerOf(op.defaultResponse)).toBe('enum PetsXPolicy429');
+    expect(enumNames(ir)).toEqual(['PetsXPolicy', 'PetsXPolicy429']);
+    expectSound(ir);
+  });
+
+  it('a header whose members no stepped name holds still takes its own status code', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({
+          '200': { description: 'kind', ...json(str), headers: policy(['fast', 'slow']) },
+          '429': { description: 'slow down', headers: policy(['retry', 'stop']) },
+          '503': { description: 'down', headers: policy(['wait', 'queue']) },
+        }),
+      ),
+    );
+    const op = operation(ir, 'getPetKind');
+    expect(op.errors.map((error) => `${error.statusCode}: ${headerOf(error)}`)).toEqual([
+      '429: enum PetsXPolicy429',
+      '503: enum PetsXPolicy503',
+    ]);
+    expect(enumNames(ir)).toEqual(['PetsXPolicy', 'PetsXPolicy429', 'PetsXPolicy503']);
+    expect(enumValues(ir, 'PetsXPolicy503')).toEqual(['wait', 'queue']);
+    expectSound(ir);
+  });
+});
