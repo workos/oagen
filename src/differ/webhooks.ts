@@ -1,5 +1,6 @@
 import type { Parameter, Webhook } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
+import { deprecationDetails, deprecationFlip } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
 /**
@@ -42,7 +43,18 @@ export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Ch
     const paramChanges = diffWebhookParams(oldWebhook, newWebhook);
     const body = diffWebhookBody(oldWebhook, newWebhook);
     const responses = diffWebhookResponses(oldWebhook, newWebhook);
-    if (paramChanges.length === 0 && body.changes.length === 0 && responses.changes.length === 0) continue;
+    // Additive either way: the handler's signature is unchanged, but a
+    // changelog has to say it, so a flipped flag alone is a change.
+    const deprecation = deprecationFlip(oldWebhook, newWebhook);
+    const deprecatedChanged = deprecation !== undefined;
+    if (
+      paramChanges.length === 0 &&
+      body.changes.length === 0 &&
+      responses.changes.length === 0 &&
+      !deprecatedChanged
+    ) {
+      continue;
+    }
 
     const hasBreaking =
       body.breaking || responses.breaking || paramChanges.some((pc) => pc.classification === 'breaking');
@@ -54,6 +66,8 @@ export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Ch
       paramChanges,
       requestBodyChanged: body.changes.length > 0,
       responsesChanged: responses.changes.length > 0,
+      deprecatedChanged,
+      ...deprecation,
       ...(details.length > 0 ? { details: details.join('; ') } : {}),
       classification: hasBreaking ? 'breaking' : 'additive',
     });
@@ -131,6 +145,8 @@ function diffWebhookResponses(oldWebhook: Webhook, newWebhook: Webhook): { chang
  *   required → optional: breaking (code that assumed presence breaks).
  * - default changed: additive with details, as the receiver sets no defaults;
  *   kept visible because it may still change what the receiver observes.
+ * - deprecated flipped: additive either way, as on an operation's parameter —
+ *   the value is still carried with the same type and requiredness.
  */
 function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChange[] {
   const changes: ParamChange[] = [];
@@ -190,6 +206,18 @@ function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChang
         newDefault,
         paramLocation: loc,
         details: `default ${oldDefault ?? '<unset>'} → ${newDefault ?? '<unset>'}`,
+      });
+    }
+
+    const deprecation = deprecationFlip(oldParam, newParam);
+    if (deprecation) {
+      changes.push({
+        kind: 'param-deprecated-changed',
+        paramName: name,
+        classification: 'additive',
+        paramLocation: loc,
+        ...deprecation,
+        details: deprecationDetails(deprecation.newDeprecated),
       });
     }
   }

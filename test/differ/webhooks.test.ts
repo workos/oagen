@@ -70,6 +70,7 @@ describe('diffSpecs — webhooks', () => {
         paramChanges: [],
         requestBodyChanged: false,
         responsesChanged: true,
+        deprecatedChanged: false,
         details: 'accepted response 200 removed; accepted response 202 added',
         classification: 'breaking',
       },
@@ -102,6 +103,7 @@ describe('diffSpecs — webhooks', () => {
         paramChanges: [],
         requestBodyChanged: true,
         responsesChanged: false,
+        deprecatedChanged: false,
         details: 'payload type changed',
         classification: 'breaking',
       },
@@ -181,6 +183,7 @@ describe('diffSpecs — webhooks', () => {
         ],
         requestBodyChanged: false,
         responsesChanged: false,
+        deprecatedChanged: false,
         classification: 'breaking',
       },
     ]);
@@ -292,6 +295,7 @@ describe('buildDirectionIndex — webhooks', () => {
       {
         kind: 'model-modified',
         name: 'AdoptionEvent',
+        deprecatedChanged: false,
         fieldChanges: [
           {
             kind: 'field-added',
