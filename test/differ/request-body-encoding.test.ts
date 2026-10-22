@@ -255,6 +255,14 @@ describe('parseSpec to diffSpecs — the issue #290 repro', () => {
         requestBodyEncodingChanged: true,
         oldRequestBodyEncoding: 'json',
         newRequestBodyEncoding: encoding,
+        // The media types callers may send change with it: JSON gone, the form one new.
+        requestBodyContentTypesChanged: true,
+        requestBodyContentTypeChange: {
+          added: [mediaType],
+          removed: ['application/json'],
+          retyped: [],
+          classification: 'breaking',
+        },
         classification: 'breaking',
       });
       expect(changes[1]).toMatchObject({
@@ -264,12 +272,41 @@ describe('parseSpec to diffSpecs — the issue #290 repro', () => {
         requestBodyChanged: true,
         oldRequestBodyEncoding: 'json',
         newRequestBodyEncoding: encoding,
+        requestBodyContentTypeChange: {
+          added: [mediaType],
+          removed: ['application/json'],
+          retyped: [],
+          classification: 'breaking',
+        },
         details: expect.stringContaining(`encoding json → ${encoding}`),
         classification: 'breaking',
       });
       expect(summary).toMatchObject({ modified: 2, breaking: 2, additive: 0, behaviorChanges: 0 });
     },
   );
+
+  it('reports a media type changing essence within one encoding as requestBodyContentTypesChanged alone', async () => {
+    const [oldSpec, newSpec] = await parseDocuments(document('application/json'), document('application/vnd.api+json'));
+    expect(newSpec.services[0].operations[0].requestBodyEncoding).toBe('json');
+
+    const { changes } = diffSpecs(oldSpec, newSpec);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'createPet',
+      requestBodyChanged: false,
+      requestBodyEncodingChanged: false,
+      requestBodyContentTypesChanged: true,
+      requestBodyContentTypeChange: {
+        added: ['application/vnd.api+json'],
+        removed: ['application/json'],
+        retyped: [],
+        classification: 'breaking',
+      },
+      classification: 'breaking',
+    });
+    expect(changes[0]).not.toHaveProperty('oldRequestBodyEncoding');
+    expect(changes[0]).not.toHaveProperty('newRequestBodyEncoding');
+  });
 
   it('reports nothing when both documents declare the body the same way', async () => {
     const [oldSpec, newSpec] = await parseDocuments(document('application/json'), document('application/json'));

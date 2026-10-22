@@ -13,6 +13,8 @@ export type {
   ResponseHeader,
   ResponseContent,
   ResponseBodyType,
+  RequestBodyContent,
+  RequestBodyType,
   DefaultResponse,
   RangeResponse,
   StatusRange,
@@ -57,6 +59,8 @@ export {
   collectRequestBodyModels,
   collectResponseHeaders,
   collectResponseBodyTypes,
+  collectAlternateRequestBodyContents,
+  collectRequestBodyTypes,
   collectFallbackResponseTypes,
   collectWebhookTypeRefs,
 } from './ir/types.js';
@@ -153,15 +157,20 @@ export type {
   WebhookRemoved,
   WebhookModified,
   ParamChange,
+  RequestBodyContentTypesChange,
+  ResponseContentTypesChange,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,
   DeprecatedNode,
+  SecurityChanged,
+  SecurityNode,
   BaseUrlChanged,
   ServerAdded,
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  DocumentSecurityChanged,
 } from './differ/types.js';
 
 // Core parse + generate
