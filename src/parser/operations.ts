@@ -340,6 +340,7 @@ export function extractOperations(
     componentModels,
     componentRequestBodies,
     componentResponses,
+    componentSchemas,
   );
   // An API root the untagged paths sit under (`/api`, `/v1`) tells the
   // services apart no better than nothing, so untagged operations skip it
@@ -2536,6 +2537,7 @@ function resolvePathModelBaseNames(
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentResponses?: Record<string, Record<string, unknown>>,
+  componentSchemas?: Record<string, SchemaObject>,
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -2547,9 +2549,32 @@ function resolvePathModelBaseNames(
   }
   // A shared response names its inline body after the component, not the
   // operation (see componentResponseModelName), so its stem is reserved like
-  // an operationId's.
-  for (const componentName of Object.keys(componentResponses ?? {})) {
+  // an operationId's — and so is every name that body mints, the model and
+  // everything nested under it (`OwnerCardResponseAddressGetResponse` for an
+  // `address_get_response` object in `OwnerCard`): a path stem that merely
+  // extends the component's (`GET /owner/card/response/address` →
+  // `OwnerCardResponseAddressGet`) starts with none of the stems above, yet
+  // its `…Response` is exactly such a nested name, and the later merge would
+  // keep one shape for both. The names are read by the extractor the
+  // operation will use, under the same context name, so they agree by
+  // construction; a chain of refs is followed to the body silently, since the
+  // operation declaring the ref warns when it reads it.
+  for (const [componentName, component] of Object.entries(componentResponses ?? {})) {
     reservedNames.add(componentResponseModelBase(componentName));
+    const resolved = resolveResponseRef<ResponseObject>(
+      component as ResponseObject | ReferenceObject,
+      componentResponses,
+      `components/responses/${componentName}`,
+      'override',
+      'silent',
+    );
+    const json = jsonResponseSchema(resolved);
+    if (!json) continue;
+    const body = classifyAndExtractResponse(json.schema, componentResponseModelName(componentName), componentSchemas);
+    for (const model of body.inlineModels) reservedNames.add(model.name);
+    for (const companion of body.envelopeCompanions ?? []) {
+      for (const model of companion.models) reservedNames.add(model.name);
+    }
   }
 
   for (const [path, pathItem] of Object.entries(paths)) {

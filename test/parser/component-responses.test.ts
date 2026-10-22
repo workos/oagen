@@ -398,6 +398,55 @@ describe('responses written as $ref into components/responses (issue #234)', () 
       const op = singleOperation(unnamedGetOwner, { responses: { PetFound: petFound } });
       expect(op.response).toEqual({ kind: 'model', name: 'OwnerGetResponse' });
     });
+
+    // Greptile, after the merge with main: a path stem that extends the
+    // component's stem starts with no reserved stem, yet its `…Response` is a
+    // name the component body mints for a nested object.
+    const addressCard = {
+      description: 'An owner card',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: { address_get_response: { type: 'object', properties: { street: { type: 'string' } } } },
+          },
+        },
+      },
+    };
+    const cardOwner = get('getOwner', { '200': { $ref: '#/components/responses/OwnerCard' } }, '/owners/{ownerId}');
+    const unnamedAddress = {
+      '/owner/card/response/address': {
+        get: {
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { type: 'object', properties: { line1: { type: 'string' } } } },
+              },
+            },
+          },
+        },
+      },
+    };
+    it.each([
+      ['component first', { ...cardOwner, ...unnamedAddress }],
+      ['path first', { ...unnamedAddress, ...cardOwner }],
+    ])('reserves the names the component body mints, not only its stem (%s)', (_order, paths) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { services, inlineModels } = extract(paths, { responses: { OwnerCard: addressCard } });
+      const byPath = new Map(services.flatMap((s) => s.operations).map((op) => [op.path, op.response]));
+      expect(byPath.get('/owners/{ownerId}')).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
+      const nested = inlineModels.filter((m) => m.name === 'OwnerCardResponseAddressGetResponse');
+      expect(nested).toHaveLength(1);
+      expect(nested[0].fields.map((f) => f.name)).toEqual(['street']);
+      const pathDerived = byPath.get('/owner/card/response/address') as { kind: string; name: string };
+      expect(pathDerived.kind).toBe('model');
+      expect(pathDerived.name).not.toBe('OwnerCardResponseAddressGetResponse');
+      const own = inlineModels.filter((m) => m.name === pathDerived.name);
+      expect(own).toHaveLength(1);
+      expect(own[0].fields.map((f) => f.name)).toEqual(['line1']);
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   describe('an operation returning different shared bodies at two success codes', () => {
