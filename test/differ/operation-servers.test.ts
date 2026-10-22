@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { resolve } from 'node:path';
 import { diffOperations, type DocumentServers } from '../../src/differ/operations.js';
 import { diffServices } from '../../src/differ/services.js';
 import { diffSpecs } from '../../src/differ/diff.js';
-import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import { parseSpec } from '../../src/parser/parse.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { Change } from '../../src/differ/types.js';
 import type { ApiSpec, Operation, ServerEntry } from '../../src/ir/types.js';
 
@@ -247,6 +250,53 @@ describe('diffOperations – servers (issue #251)', () => {
       });
     });
 
+    it('ignores a scheme or host that only changed case, a default port and a `/` after a bare authority (issue #293)', () => {
+      const notes: ServerEntry[] = [{ url: 'https://notes.example.com' }];
+      for (const url of [
+        'https://NOTES.example.com',
+        'HTTPS://notes.example.com',
+        'https://notes.example.com:443',
+        'https://notes.example.com/',
+      ]) {
+        expect(
+          diffOperations('Pets', [withServers(notes)], [withServers([{ url }])], documents(api, api)),
+          url,
+        ).toEqual([]);
+      }
+      // An override that restates the new document's server in another case
+      // is where the operation was already served from.
+      expect(
+        diffOperations(
+          'Pets',
+          [withServers()],
+          [withServers([{ url: 'https://API.example.com' }])],
+          documents(api, api),
+        ),
+      ).toEqual([]);
+      // A lost override while the document moved to the same host in another
+      // spelling: the operation is served from the same place as before.
+      expect(
+        diffOperations(
+          'Pets',
+          [withServers(notes)],
+          [withServers()],
+          documents(api, [{ url: 'https://NOTES.example.com:443/' }]),
+        ),
+      ).toEqual([]);
+    });
+
+    it('still reports a path that changed case and a port that is not the default (issue #293)', () => {
+      const v1: ServerEntry[] = [{ url: 'https://notes.example.com/v1' }];
+      expect(
+        change(diffOperations('Pets', [withServers(v1)], [withServers([{ url: 'https://notes.example.com/V1' }])])),
+      ).toMatchObject({ serversChanged: true, classification: 'breaking' });
+      expect(
+        change(
+          diffOperations('Pets', [withServers(v1)], [withServers([{ url: 'https://notes.example.com:8443/v1' }])]),
+        ),
+      ).toMatchObject({ serversChanged: true, classification: 'breaking' });
+    });
+
     it('compares a variable named like an Object.prototype member by its own key', () => {
       // Own data properties, as the parser builds them (never set through `obj[name] = …`).
       const withProto = (defaultValue: string): ServerEntry[] => [
@@ -318,6 +368,38 @@ describe('diffOperations – servers (issue #251)', () => {
       expect(operationChanges(report.changes)).toHaveLength(1);
       expect(operationChanges(report.changes)[0]).toMatchObject({ serversChanged: true, classification: 'breaking' });
       expect(report.summary.breaking).toBeGreaterThanOrEqual(1);
+    });
+
+    it("reports nothing for an operation server whose host only changed case (issue #293's comment, end to end)", async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-diff-op-servers-'));
+      try {
+        const document = (notesUrl: string) => `
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+servers:
+  - url: https://api.example.com
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: ${notesUrl}
+      responses: { '204': { description: ok } }
+`;
+        const oldFile = path.join(tmpDir, 'old.yml');
+        const newFile = path.join(tmpDir, 'new.yml');
+        await fs.writeFile(oldFile, document('https://notes.example.com'), 'utf-8');
+        await fs.writeFile(newFile, document('https://NOTES.example.com'), 'utf-8');
+        const [oldSpec, newSpec] = await Promise.all([parseSpec(oldFile), parseSpec(newFile)]);
+        // The IR keeps each spelling as written; only the comparison folds it.
+        expect(newSpec.services[0].operations[0].servers).toEqual([
+          { url: 'https://NOTES.example.com', description: undefined },
+        ]);
+        expect(diffSpecs(oldSpec, newSpec).changes).toEqual([]);
+        expect(diffSpecs(newSpec, oldSpec).changes).toEqual([]);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 });

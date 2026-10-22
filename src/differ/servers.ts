@@ -1,27 +1,36 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
-import { resolveServerUrl, serverUrlPlaceholders, serversBeyondDefault } from '../ir/server-url.js';
+import { normalizeServerUrl, resolveServerUrl, serverUrlPlaceholders, serversBeyondDefault } from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
 /**
  * Compare the two documents' `baseUrl` and `servers`.
+ *
+ * Every URL — `baseUrl` and each `url` template — is compared through
+ * `normalizeServerUrl`, so two spellings RFC 3986 calls equivalent are one
+ * URL: a scheme or host that only changed case, a default port written or
+ * dropped, a `/` added after a bare authority, a percent-encoded octet whose
+ * hex digits changed case. The path, query and variable values are
+ * case-sensitive. Every URL a change carries is reported as written in the
+ * document that declares it.
  *
  * `base-url-changed` is reported once whenever the resolved default host
  * differs, on top of whichever server change moved it, so a consumer that only
  * cares where the client's default host points finds it without reconstructing
  * `servers[0]`. It is the only change a reordered list produces.
  *
- * Servers are matched on their `url` template exactly as written, independent
- * of position: a changed template is a `server-removed` plus a `server-added`.
+ * Servers are matched on their normalised `url` template, independent of
+ * position: a changed template is a `server-removed` plus a `server-added`.
  * A template the document declares more than once is matched as a multiset.
  * Its old and new entries pair up by the strongest signal available, each pass
  * taking the first unmatched candidate in declaration order: identical
  * variables first, so a reordered list, or one whose duplicates are unchanged,
  * reports nothing; then the same variable defaults (the entry kept its
- * identity and changed its enums); then the same resolved URL (it differs only
- * in a variable the template does not use); then position. The surplus on
- * either side is a `server-added` or a `server-removed`. Within a matched
- * pair, variables are matched by name and every difference is collected on one
- * `server-modified`; a change to a variable the template never references is
+ * identity and changed its enums); then the same normalised resolved URL (it
+ * differs only in a variable the template does not use); then position. The
+ * surplus on either side is a `server-added` or a `server-removed`. Within a
+ * matched pair, variables are matched by name and every difference is
+ * collected on one `server-modified` carrying the new document's spelling of
+ * the template; a change to a variable the template never references is
  * additive whatever its kind, since no resolved URL can move (see
  * `diffServerVariables`). Descriptions are not compared, as nowhere else in
  * the differ.
@@ -48,7 +57,7 @@ export function diffServers(
   const oldBaseUrl = oldServers.length > 0 ? oldSpec.baseUrl : '';
   const newBaseUrl = newServers.length > 0 ? newSpec.baseUrl : '';
 
-  if (oldBaseUrl !== newBaseUrl) {
+  if (normalizeServerUrl(oldBaseUrl) !== normalizeServerUrl(newBaseUrl)) {
     changes.push({
       kind: 'base-url-changed',
       oldBaseUrl: oldSpec.baseUrl,
@@ -69,14 +78,14 @@ export function diffServers(
   }
 
   for (const url of newByUrl.keys()) {
-    for (let i = 0; i < pairings.get(url)!.surplusNew; i++) {
-      changes.push({ kind: 'server-added', url, classification: 'additive' });
+    for (const server of pairings.get(url)!.surplusNew) {
+      changes.push({ kind: 'server-added', url: server.url, classification: 'additive' });
     }
   }
 
   for (const url of oldByUrl.keys()) {
-    for (let i = 0; i < pairings.get(url)!.surplusOld; i++) {
-      changes.push({ kind: 'server-removed', url, classification: 'breaking' });
+    for (const server of pairings.get(url)!.surplusOld) {
+      changes.push({ kind: 'server-removed', url: server.url, classification: 'breaking' });
     }
   }
 
@@ -87,7 +96,7 @@ export function diffServers(
         const hasBreaking = variableChanges.some((vc) => vc.classification === 'breaking');
         changes.push({
           kind: 'server-modified',
-          url,
+          url: newServer.url,
           variableChanges,
           classification: hasBreaking ? 'breaking' : 'additive',
         });
@@ -98,13 +107,18 @@ export function diffServers(
   return changes;
 }
 
-/** Every entry with each `url` template, keyed in declaration order of the first one. */
+/**
+ * Every entry with each `url` template, keyed by the template's normalised
+ * form (`normalizeServerUrl`) in declaration order of the first one. Each
+ * entry keeps its own spelling for the report.
+ */
 function groupByUrl(servers: readonly ServerEntry[]): Map<string, ServerEntry[]> {
   const groups = new Map<string, ServerEntry[]>();
   for (const server of servers) {
-    const group = groups.get(server.url);
+    const key = normalizeServerUrl(server.url);
+    const group = groups.get(key);
     if (group) group.push(server);
-    else groups.set(server.url, [server]);
+    else groups.set(key, [server]);
   }
   return groups;
 }
@@ -112,10 +126,10 @@ function groupByUrl(servers: readonly ServerEntry[]): Map<string, ServerEntry[]>
 interface ServerPairing {
   /** Old and new entries that differ, paired in declaration order. */
   pairs: Array<[ServerEntry, ServerEntry]>;
-  /** Old entries with no counterpart: removed. */
-  surplusOld: number;
-  /** New entries with no counterpart: added. */
-  surplusNew: number;
+  /** Old entries with no counterpart, in declaration order: removed. */
+  surplusOld: ServerEntry[];
+  /** New entries with no counterpart, in declaration order: added. */
+  surplusNew: ServerEntry[];
 }
 
 /**
@@ -146,7 +160,7 @@ function pairServers(olds: ServerEntry[], news: ServerEntry[]): ServerPairing {
   // Report in the new document's order, like every other change.
   pairs.sort((a, b) => news.indexOf(a[1]) - news.indexOf(b[1]));
 
-  return { pairs, surplusOld: unmatchedOld.length - paired, surplusNew: unmatchedNew.length - paired };
+  return { pairs, surplusOld: unmatchedOld.slice(paired), surplusNew: unmatchedNew.slice(paired) };
 }
 
 function identicalVariables(a: ServerEntry, b: ServerEntry): boolean {
@@ -163,8 +177,9 @@ function sameDefaults(a: ServerEntry, b: ServerEntry): boolean {
   );
 }
 
+/** The same resolved URL up to `normalizeServerUrl`, like every URL comparison in this file. */
 function sameResolvedUrl(a: ServerEntry, b: ServerEntry): boolean {
-  return resolveServerUrl(a).url === resolveServerUrl(b).url;
+  return normalizeServerUrl(resolveServerUrl(a).url) === normalizeServerUrl(resolveServerUrl(b).url);
 }
 
 /**

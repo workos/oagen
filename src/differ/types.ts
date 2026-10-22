@@ -1,4 +1,5 @@
 import type { Operation, SecurityRequirementSet } from '../ir/types.js';
+import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
   oldVersion: string;
@@ -36,7 +37,7 @@ export interface ParamDefaultChanged {
   /** Parameter name (e.g. 'order', 'limit'). */
   paramName: string;
   /** Where the parameter lives; kept in step with `ParamChange.paramLocation`. */
-  paramLocation: 'path' | 'query' | 'header' | 'cookie';
+  paramLocation: ParamLocation;
   /** Old default value as a string, or null if previously unset. */
   oldDefault: string | null;
   /** New default value as a string, or null if now unset. */
@@ -70,7 +71,7 @@ export type DeprecatedNode =
       serviceName: string;
       operationName: string;
       paramName: string;
-      paramLocation: 'path' | 'query' | 'header' | 'cookie';
+      paramLocation: ParamLocation;
     }
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
@@ -82,7 +83,7 @@ export type DeprecatedNode =
       name: string;
       httpMethod: string;
       paramName: string;
-      paramLocation: 'path' | 'query' | 'header' | 'cookie';
+      paramLocation: ParamLocation;
     };
 
 /**
@@ -329,13 +330,16 @@ export interface OperationModified {
    * the document-level diff uses: matched on `url` template plus variables
    * (names, defaults, enum values as a set), ignoring position, descriptions
    * and enum order — except that a reorder that moves the first entry's
-   * resolved URL counts, as `base-url-changed` does for the document. Absent
-   * on both sides is unchanged: the operation inherits twice, and a moved
-   * document is the document-level diff's to report. So a document that moves
-   * to where an operation already pointed is not a change to that operation.
-   * OpenAPI's default server is one list however it is spelled (#291): no
-   * servers and `/` alone — description and variables aside, since `/`
-   * references no variable — are served from the same place.
+   * resolved URL counts, as `base-url-changed` does for the document. URLs
+   * are compared through `normalizeServerUrl`, so a scheme or host that only
+   * changed case, a default port written or dropped, or a `/` added after a
+   * bare authority is no change. Absent on both sides is unchanged: the
+   * operation inherits twice, and a moved document is the document-level
+   * diff's to report. So a document that moves to where an operation already
+   * pointed is not a change to that operation. OpenAPI's default server is
+   * one list however it is spelled (#291): no servers and `/` alone —
+   * description and variables aside, since `/` references no variable — are
+   * served from the same place.
    */
   serversChanged: boolean;
   /**
@@ -512,8 +516,20 @@ export interface WebhookModified {
 }
 
 /**
- * A change to one parameter of an operation. Parameters are matched by
- * location and name (`parameterKey` in `ir/parameter-key.ts`) — OpenAPI
+ * Where a parameter lives. An operation carries parameters in all four
+ * locations (`Operation.pathParams`, `queryParams`, `headerParams` and
+ * `cookieParams`); a webhook carries `header`, `query` and `cookie` ones.
+ * `locatedParams` in `params.ts` tags every parameter a node carries with
+ * its location, and `paramKey` there joins it to the name to identify one.
+ * The same four locations `ParameterLocation` in `ir/parameter-key.ts`
+ * names, since the parser merges parameters on the same identity.
+ */
+export type ParamLocation = ParameterLocation;
+
+/**
+ * A change to one parameter of an operation or a webhook, in any location it
+ * carries one. Parameters are matched by location and name (`paramKey` in
+ * `params.ts`, which is `parameterKey` in `ir/parameter-key.ts`) — OpenAPI
  * allows a path `id` beside a query `id` on one operation — so every entry
  * carries `paramLocation` to say which one it is. A header's name is
  * compared case-insensitively (RFC 9110 §5.1): a header written
@@ -548,10 +564,11 @@ export interface ParamChange {
   newDeprecated?: boolean;
   /**
    * Where the parameter lives. Set on every entry `diffOperations` produces
-   * and on every entry `diffWebhooks` produces (a webhook's header, query and
-   * cookie parameters may share a name).
+   * (an operation's path, query, header and cookie parameters) and on every
+   * entry `diffWebhooks` produces (a webhook's header, query and cookie
+   * parameters may share a name).
    */
-  paramLocation?: 'path' | 'query' | 'header' | 'cookie';
+  paramLocation?: ParamLocation;
   /**
    * For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`.
    * For `param-name-changed`: `name X-Pet-Token → x-pet-token`.
@@ -565,16 +582,20 @@ export interface ParamChange {
  * requests somewhere else. Reported once per diff whatever moved it: a
  * changed `servers[0]` template (also a `server-removed` plus a
  * `server-added`), a changed variable default (also a `server-modified`), a
- * reordered list, or a `servers` list that appeared or disappeared. A
- * document that declares no server and one whose only server is `/` without
- * variables both have OpenAPI's default server and no default host, so
- * nothing is reported between them (#291).
+ * reordered list, or a `servers` list that appeared or disappeared. The two
+ * URLs are compared through `normalizeServerUrl` (RFC 3986: scheme and host
+ * case, a default or empty port, a bare authority's `/`, percent-encoding
+ * case), so a `baseUrl` that only changed in one of those ways is not
+ * reported; both are carried as written. A document that declares no server
+ * and one whose only server is `/` without variables both have OpenAPI's
+ * default server and no default host, so nothing is reported between them
+ * (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** `''` when the old document declared no server; `/` when it wrote OpenAPI's default out, which means the same. */
+  /** As written in the old document; `''` when it declared no server, `/` when it wrote OpenAPI's default out, which means the same. */
   oldBaseUrl: string;
-  /** `''` when the new document declares no server; `/` when it writes OpenAPI's default out, which means the same. */
+  /** As written in the new document; `''` when it declares no server, `/` when it writes OpenAPI's default out, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
@@ -586,26 +607,29 @@ export interface BaseUrlChanged {
 
 export interface ServerAdded {
   kind: 'server-added';
-  /** The URL template as written in the document, placeholders included. */
+  /** The URL template as written in the new document, placeholders included. */
   url: string;
   classification: 'additive';
 }
 
 export interface ServerRemoved {
   kind: 'server-removed';
-  /** The URL template as written in the document, placeholders included. */
+  /** The URL template as written in the old document, placeholders included. */
   url: string;
   classification: 'breaking';
 }
 
 /**
- * A server present in both documents — matched on its `url` template,
+ * A server present in both documents — matched on its `url` template through
+ * `normalizeServerUrl`, so a template that only changed scheme or host case,
+ * a default port or a bare authority's `/` is the same server;
  * position-independent; a template declared more than once is matched as a
- * multiset, see `diffServers` — whose variables changed. A changed template is
- * a `server-removed` plus a `server-added` instead.
+ * multiset, see `diffServers` — whose variables changed. A changed template
+ * is a `server-removed` plus a `server-added` instead.
  */
 export interface ServerModified {
   kind: 'server-modified';
+  /** The URL template as written in the new document, placeholders included. */
   url: string;
   variableChanges: ServerVariableChange[];
   classification: 'additive' | 'breaking';

@@ -9,10 +9,10 @@ import type {
   TypeRef,
 } from '../ir/types.js';
 import { resolveServerUrl } from '../ir/server-url.js';
-import { parameterKey } from '../ir/parameter-key.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 import { diffServers } from './servers.js';
-import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
+import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange } from './types.js';
+import { locatedParams, paramKey } from './params.js';
 import {
   classifyParamChange,
   deprecationDetails,
@@ -280,10 +280,12 @@ function endOfIterationEqual(
  * `url` template, and any variable change — the additive ones included (a
  * new enum value, a new variable, a lifted enum), since one boolean cannot
  * carry that distinction. Descriptions on a server or a variable, enum order,
- * a repeated enum value and position do not count there, so they do not here.
- * Neither does the spelling of OpenAPI's default server (#291): a list that
- * is empty and one that is `/` alone (description and variables aside, since
- * `/` references no variable) are the same list there, so an operation served
+ * a repeated enum value and position do not count there, so they do not here;
+ * neither does a URL spelling `normalizeServerUrl` folds (scheme and host
+ * case, a default port, a bare authority's `/`). Neither does the spelling of
+ * OpenAPI's default server (#291): a list that is empty and one that is `/`
+ * alone (description and variables aside, since `/` references no variable)
+ * are the same list there, so an operation served
  * from `/` written out and one served from a document that declares nothing
  * are served from the same place.
  */
@@ -665,34 +667,20 @@ function classifyKeyedResponsesChange<K>(
   return 'none';
 }
 
-type ParamLocation = 'path' | 'query' | 'header';
-
 /**
- * Parameters are matched on `parameterKey` — location and name, a header's
- * name case-folded. OpenAPI allows a path `id` beside a query `id` on one
- * operation, and keying by name alone paired whichever came last on each
- * side with the other's, so a change to one of them was reported against
- * the wrong parameter or not at all. Header names are case-insensitive
- * (RFC 9110 §5.1), so a header written `X-Pet-Token` on one side and
- * `x-pet-token` on the other is one parameter, compared like any other and
- * reported as `param-name-changed` (#295) rather than as a removal beside
- * an addition.
+ * Diff an operation's parameters in every location it carries them — path,
+ * query, header and cookie, through `locatedParams` — matched by location
+ * and name (`paramKey`, which folds a header's name, so `X-Pet-Token` on
+ * one side and `x-pet-token` on the other are one parameter, compared like
+ * any other and reported as `param-name-changed` rather than as a removal
+ * beside an addition — #295) and classified from the caller's side by
+ * `classifyParamChange`. Cookie parameters were left out of this walk until
+ * #294, so a change to one came out as no change.
  */
 function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
   const changes: ParamChange[] = [];
-  const tagged = (loc: ParamLocation, params: typeof oldOp.queryParams) => params.map((p) => ({ p, loc }));
-  const allOldParams = [
-    ...tagged('path', oldOp.pathParams),
-    ...tagged('query', oldOp.queryParams),
-    ...tagged('header', oldOp.headerParams),
-  ];
-  const allNewParams = [
-    ...tagged('path', newOp.pathParams),
-    ...tagged('query', newOp.queryParams),
-    ...tagged('header', newOp.headerParams),
-  ];
-  const oldByKey = new Map(allOldParams.map((e) => [parameterKey(e.loc, e.p.name), e]));
-  const newByKey = new Map(allNewParams.map((e) => [parameterKey(e.loc, e.p.name), e]));
+  const oldByKey = new Map(locatedParams(oldOp).map((e) => [paramKey(e.loc, e.p.name), e]));
+  const newByKey = new Map(locatedParams(newOp).map((e) => [paramKey(e.loc, e.p.name), e]));
   // Every entry says where its parameter lives, since the name alone no
   // longer identifies it.
   const at = (change: ParamChange, loc: ParamLocation): ParamChange => {
