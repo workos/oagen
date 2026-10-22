@@ -3388,6 +3388,31 @@ export function schemaToTypeRef(
     const nullVariant = rawVariants.find(isNullVariantSchema);
     const nonNullVariants = rawVariants.filter((v) => v !== nullVariant);
 
+    // Collapse an oneOf/anyOf whose non-null variants are all string-const
+    // schemas into a single enum. This turns patterns like
+    //   provider: { oneOf: [{ const: "AppleOAuth" }, { const: "GitHubOAuth" }, ...] }
+    // into a proper enum type with one member per variant instead of a
+    // structurally-opaque union of literal refs. Each member keeps its
+    // variant's `description` and `deprecated` (`constUnionEnumMembers`), the
+    // way the same `oneOf` under `components.schemas` does (`extractEnum`).
+    // An `enum:` list beside the union restricts the members and `null`
+    // alike, through the two helpers the component path reads
+    // (`constUnionEnumMembers`, `enumListAdmitsNull`), whatever it leaves:
+    // one member is an enum of that member, none an enum with no members —
+    // the component's answers — never the union of every const the list
+    // forbade, nor the nullable literal the single-variant unwrap below would
+    // make of `oneOf: [a, null]` when the list forbids `null`; so this is
+    // decided first. Without a list, a union of fewer than two consts keeps
+    // the shape the branches below give it (a lone const beside
+    // `type: 'null'` is a nullable literal).
+    const constMembers = constUnionEnumMembers(schema);
+    if (constMembers !== null && (constMembers.length >= 2 || Array.isArray(schema.enum))) {
+      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
+      // An `enum:` list beside the union that leaves `null` out forbids it,
+      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
+      return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
+    }
+
     if (nullVariant && nonNullVariants.length === 1) {
       // Nullable single type — unwrap as nullable. `asNullable` keeps a
       // `$ref` to an already-nullable enum component from double-wrapping.
@@ -3403,21 +3428,6 @@ export function schemaToTypeRef(
           reservedNames,
         ),
       );
-    }
-
-    // Collapse an oneOf/anyOf whose non-null variants are all string-const
-    // schemas into a single enum. This turns patterns like
-    //   provider: { oneOf: [{ const: "AppleOAuth" }, { const: "GitHubOAuth" }, ...] }
-    // into a proper enum type with one member per variant instead of a
-    // structurally-opaque union of literal refs. Each member keeps its
-    // variant's `description` and `deprecated` (`constUnionEnumMembers`), the
-    // way the same `oneOf` under `components.schemas` does (`extractEnum`).
-    const constMembers = constUnionEnumMembers(schema);
-    if (constMembers !== null && constMembers.length >= 2) {
-      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
-      // An `enum:` list beside the union that leaves `null` out forbids it,
-      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
-      return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
     // The inline object variants' model names, decided once for this TypeRef
