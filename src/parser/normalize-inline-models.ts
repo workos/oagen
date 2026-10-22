@@ -10,6 +10,7 @@ import {
 import { modelFingerprint } from './operations.js';
 import { isComponentModelRef } from './schemas.js';
 import { unionShapeKey } from './union-shape.js';
+import { shapeWithEnumFlags } from './enum-members.js';
 import {
   inheritedModelRefsOf,
   isInheritedModelRef,
@@ -348,13 +349,15 @@ function differOnlyByDeprecation(a: Model, b: Model): boolean {
  * Same field names with the same types, in any order, and the same
  * named-union variants. Types are compared by their JSON serialization: the
  * parser builds a given shape's TypeRef with the same key order every time,
- * so equal shapes serialize identically.
+ * so equal shapes serialize identically. An inline enum serializes with its
+ * per-value deprecation (`shapeWithEnumFlags`), so a member deprecated on
+ * one side only is a different type.
  */
 function haveSameFields(a: Model, b: Model): boolean {
   const signatures = (m: Model) =>
     new Set([
-      ...m.fields.map((f) => `${f.name}:${JSON.stringify(f.type)}`),
-      ...(m.variants ?? []).map((v, i) => `variant${i}:${JSON.stringify(v)}`),
+      ...m.fields.map((f) => `${f.name}:${JSON.stringify(shapeWithEnumFlags(f.type))}`),
+      ...(m.variants ?? []).map((v, i) => `variant${i}:${JSON.stringify(shapeWithEnumFlags(v))}`),
     ]);
   const aSignatures = signatures(a);
   const bSignatures = signatures(b);
@@ -615,7 +618,9 @@ function adoptShape(target: Model, source: Model): void {
  * different shape, and the base keeps the values its operations accept.
  */
 function foldedVariantKey(ref: TypeRef, jsonName: string, baseName: string): string {
-  const folded = structuredClone(ref);
+  // Flags first: the clone has no identity in the enum side table, so the
+  // per-value deprecation must be spelled out before cloning.
+  const folded = structuredClone(shapeWithEnumFlags(ref)) as TypeRef;
   walkTypeRef(folded, {
     model: (r) => {
       if (r.name.startsWith(jsonName)) r.name = baseName + r.name.slice(jsonName.length);
@@ -669,7 +674,7 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
     // enum or a literal as it is, since the fold renames neither, so a
     // `PetJsonState` enum beside `PetState` is a different union. Identical
     // shapes fold as before.
-    const baseShape = unionShapeKey(baseModel, (v) => JSON.stringify(v));
+    const baseShape = unionShapeKey(baseModel, (v) => JSON.stringify(shapeWithEnumFlags(v)));
     const jsonShape = unionShapeKey(model, (v) => foldedVariantKey(v, model.name, baseName));
     if (baseShape !== '' && baseShape !== jsonShape) {
       console.warn(
