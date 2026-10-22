@@ -115,15 +115,10 @@ export function mintedInlineNameEntries(
     ];
   };
   if (kind === 'allOf' && s.allOf) {
-    const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
-    if (only) return mintedInlineNameEntries(contextName, only, parentModelName, reserved);
-    // The two tests `schemaToTypeRef` applies: beside a `$ref` member, an
-    // inline object member makes the augmentation model; without one, a
-    // member declaring properties inline makes the merged model.
-    const mintsModel = s.allOf.some((m) => m.$ref)
-      ? s.allOf.some(isInlineAllOfMember)
-      : s.allOf.some(declaresInlineProperties);
-    return mintsModel ? modelName() : [];
+    // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
+    const reading = readInlineAllOf(s.allOf);
+    if (reading === 'unwrapped') return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved);
+    return reading === 'merged' ? modelName() : [];
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
@@ -1077,60 +1072,44 @@ export function extractInlineModelsFromProperties(
       }
     }
 
-    // A field expressed via `allOf`. Mirror the four outcomes of the allOf
-    // branch in `schemaToTypeRef` exactly:
-    //  - a `$ref` member plus an inline object member (`isInlineAllOfMember`:
-    //    `type: 'object'`, or properties declared inline — its own, a nested
-    //    `allOf` member's, or a `oneOf`/`anyOf` variant's): the field is
-    //    typed as the augmentation model `<Parent><Field>`; merge the
-    //    referenced component(s) and the inline members into that model
-    //    (`mergeAllOfMembers`), with every inherited property typed under
-    //    its component — `Base.meta` stays `BaseMeta`, a self-reference
-    //    `Base.child` stays `BaseChild` — and only the inline members' own
-    //    properties, a variant's included, qualified under the merged model
-    //    and recursed into. The component pass already materialized whatever
-    //    the inherited properties reference, so nothing is duplicated; a
-    //    component that extends itself through a field simply points back at
-    //    a model that exists, and a component reused by several nested
-    //    augmentations hands each of them its full field list;
-    //  - `$ref` members only: a plain reference to the first component,
-    //    nothing to materialize;
-    //  - a single non-`$ref` member: unwrapped and typed as the field itself,
-    //    so re-enter with it as the field (same siblings);
-    //  - several inline members, one of them declaring properties inline
-    //    (`declaresInlineProperties`): one merged model.
+    // A field expressed via `allOf`, read as `schemaToTypeRef` reads it
+    // (`readInlineAllOf`, the one decision):
+    //  - `'merged'` — a `$ref` member plus an inline object member
+    //    (`isInlineAllOfMember`), or several inline members one of which
+    //    declares properties inline (`declaresInlineProperties`): the field
+    //    is typed as the model `<Parent><Field>`; merge the referenced
+    //    component(s) and the inline members into that model
+    //    (`materializeMergedAllOf`), with every inherited property typed
+    //    under its component — `Base.meta` stays `BaseMeta`, a
+    //    self-reference `Base.child` stays `BaseChild` — and only the inline
+    //    members' own properties, a variant's included, qualified under the
+    //    merged model and recursed into. The component pass already
+    //    materialized whatever the inherited properties reference, so nothing
+    //    is duplicated; a component that extends itself through a field
+    //    simply points back at a model that exists, and a component reused by
+    //    several nested augmentations hands each of them its full field
+    //    list. The model is built whatever fields the merge yields, since the
+    //    reference that names it exists;
+    //  - `'unwrapped'` — a single non-`$ref` member: typed as the field
+    //    itself, so re-enter with it as the field (same siblings);
+    //  - `'reference'` — `$ref` members only: a plain reference to the first
+    //    component, nothing to materialize.
     if (kind === 'allOf' && fieldSchema.allOf) {
-      const members = fieldSchema.allOf;
-      const emitMerged = (): void => {
+      const reading = readInlineAllOf(fieldSchema.allOf);
+      if (reading === 'merged') {
         const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
         materializeMergedAllOf(modelName, fieldSchema, results, componentSchemas);
-      };
-      const only = members.length === 1 ? members[0] : undefined;
-      if (members.some((m) => m.$ref)) {
-        if (members.some(isInlineAllOfMember)) emitMerged();
-      } else if (only) {
-        // The wrapper's own keywords, conjoined with the member's, are the
-        // field's limits (see extractConstraints), so they ride along with the
-        // unwrapped member and its model carries the same constraints. Its
-        // `deprecated` is the wrapper's alone, as `Field.deprecated` reads it,
-        // and its link is the wrapper's too, when the wrapper has one.
+      } else if (reading === 'unwrapped') {
+        // Re-enter with the member as the field (same siblings), carrying the
+        // wrapper's limits, flag and link (`unwrappedAllOfMember`).
         extractInlineModelsFromProperties(
-          {
-            properties: {
-              [fieldName]: withWrapperExternalDocs(
-                withWrapperDeprecation({ ...only, ...extractConstraints(fieldSchema) }, fieldSchema),
-                fieldSchema,
-              ),
-            },
-          },
+          { properties: { [fieldName]: unwrappedAllOfMember(fieldSchema, fieldSchema.allOf[0]!) } },
           results,
           parentName,
           componentSchemas,
           siblings,
           reservedNames,
         );
-      } else if (members.some(declaresInlineProperties)) {
-        emitMerged();
       }
     }
 
@@ -1377,6 +1356,52 @@ export function isInlineAllOfMember(member: SchemaObject): boolean {
   return !member.$ref && (member.type === 'object' || declaresInlineProperties(member));
 }
 
+/** How an inline `allOf` is read; see `readInlineAllOf`. */
+export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
+
+/**
+ * The one decision every site makes of an inline `allOf` — `schemaToTypeRef`
+ * when it types the schema, `mintedInlineNameEntries` when it predicts the
+ * names, the field extractor and `extractInlineModelDeep` when they build
+ * the models — so a model is built exactly when a reference names it:
+ *
+ *   - `'merged'`: a `$ref` member beside an inline object member
+ *     (`isInlineAllOfMember`), or, without a `$ref`, several members one of
+ *     which declares properties inline (`declaresInlineProperties`). The
+ *     schema is the merged model `mergeAllOfMembers` reads, built with
+ *     whatever fields the merge yields: an empty `properties: {}` is an
+ *     inline object with no fields, as it is as a plain field or a union
+ *     variant (`isInlineObjectSchema`), so its model is built with none
+ *     rather than left for the reference to dangle on.
+ *   - `'unwrapped'`: a single non-`$ref` member, typed and extracted as the
+ *     schema itself (`unwrappedAllOfMember`).
+ *   - `'reference'`: `$ref` members with nothing inline beside them — the
+ *     first component is the type, nothing is minted.
+ *
+ * `allOfTypesSchema` admits no other shape as an `allOf`.
+ */
+export function readInlineAllOf(members: readonly SchemaObject[]): InlineAllOfReading {
+  if (members.some((m) => m.$ref)) return members.some(isInlineAllOfMember) ? 'merged' : 'reference';
+  if (members.length === 1) return 'unwrapped';
+  return members.some(declaresInlineProperties) ? 'merged' : 'reference';
+}
+
+/**
+ * The lone member of an `allOf`, read as the schema itself. The wrapper's own
+ * keywords, conjoined with the member's, are the schema's limits (see
+ * `extractConstraints`), so they ride along with the member and the model
+ * built from it carries the same constraints; its `deprecated` is the
+ * wrapper's alone, as `Field.deprecated` reads it, and its link is the
+ * wrapper's too, when the wrapper has one — the one keyword `schemaToTypeRef`
+ * carries onto the member it types (`withWrapperExternalDocs`).
+ */
+export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject): SchemaObject {
+  return withWrapperExternalDocs(
+    withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper),
+    wrapper,
+  );
+}
+
 /**
  * Merge an inline `allOf` into one object shape, remembering where each
  * property comes from. Every site that types an inline `allOf` reads it
@@ -1592,13 +1617,16 @@ function withoutNull(schema: SchemaObject): SchemaObject {
 }
 
 /**
- * Build the model for an inline `allOf` under `name` and materialize what its
- * own properties reference, into `results`; `false`, with nothing built, when
- * the merge declares no properties. The model is `buildMergedModel`'s, so an
- * inherited property is typed as its component's model types it (`Base.meta`
- * stays `BaseMeta`) and is not read into again — the component pass
- * materialized whatever it references, and a component that extends itself
- * through a field (`Node.child: allOf: [{ $ref: Node }, …]`) is typed as the
+ * Build the model for an inline `allOf` read as `'merged'` (`readInlineAllOf`)
+ * under `name`, and materialize what its own properties reference, into
+ * `results`. The model is built whatever fields the merge yields — none for
+ * an `allOf` whose inline members declare only an empty `properties: {}` —
+ * since the reference `schemaToTypeRef` made under the same reading exists
+ * and must resolve. The model is `buildMergedModel`'s, so an inherited
+ * property is typed as its component's model types it (`Base.meta` stays
+ * `BaseMeta`) and is not read into again — the component pass materialized
+ * whatever it references, and a component that extends itself through a
+ * field (`Node.child: allOf: [{ $ref: Node }, …]`) is typed as the
  * `NodeChild` that exists instead of being re-extracted without end. Only
  * the merged model's own properties — the inline members' and the variants'
  * — are re-entered, under `name`, with the full merged property set as
@@ -1611,9 +1639,8 @@ export function materializeMergedAllOf(
   schema: SchemaObject,
   results: Model[],
   componentSchemas: Record<string, SchemaObject> | undefined,
-): boolean {
+): void {
   const merged = mergeAllOfMembers(schema, componentSchemas);
-  if (merged.properties.length === 0) return false;
   results.push(buildMergedModel(name, merged, componentSchemas));
   // Properties are matched by own name throughout the merge (a `Map` there,
   // `Object.fromEntries` here), so a property named `constructor`,
@@ -1621,7 +1648,6 @@ export function materializeMergedAllOf(
   const own = Object.fromEntries(merged.properties.filter((p) => p.origin === null).map((p) => [p.name, p.schema]));
   const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
   extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
-  return true;
 }
 
 /**
