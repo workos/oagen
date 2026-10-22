@@ -130,6 +130,7 @@ describe('issue #273 repro: security and tags on an operation and a webhook', ()
         responseChanged: false,
         requestBodyChanged: false,
         requestBodyRequiredChanged: false,
+        requestBodyContentTypesChanged: false,
         httpMethodChanged: false,
         pathChanged: false,
         paginatedChanged: false,
