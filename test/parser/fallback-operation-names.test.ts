@@ -654,6 +654,119 @@ describe('plural path names (issue #268)', () => {
     ]);
   });
 
+  it('keeps a deeper segment as written when the plural is what tells two paths apart (review)', () => {
+    // One segment deeper than the issue's repro: the singular `Pet` would
+    // give both paths `getToyPet`, so the plural path keeps its spelling.
+    expect(
+      names({
+        '/store/pets/{id}/toys/{toyId}': { get: item('id'), delete: item('id') },
+        '/store/pet/{id}/toys/{toyId}': { get: item('id'), delete: item('id') },
+        '/org/statuses/{id}/notes/{noteId}': { get: item('id') },
+        '/org/status/{id}/notes/{noteId}': { get: item('id') },
+        '/org/aliases/{id}/notes/{noteId}': { get: item('id') },
+        '/org/alias/{id}/notes/{noteId}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getNoteAlias                 GET    /org/alias/{id}/notes/{noteId}',
+      'getNoteAliases               GET    /org/aliases/{id}/notes/{noteId}',
+      'getNoteStatus                GET    /org/status/{id}/notes/{noteId}',
+      'getNoteStatuses              GET    /org/statuses/{id}/notes/{noteId}',
+      'deleteToyPet                 DELETE /store/pet/{id}/toys/{toyId}',
+      'getToyPet                    GET    /store/pet/{id}/toys/{toyId}',
+      'deleteToyPets                DELETE /store/pets/{id}/toys/{toyId}',
+      'getToyPets                   GET    /store/pets/{id}/toys/{toyId}',
+    ]);
+    // Three paths: the two plural spellings share the written form and are
+    // numbered, while the singular path keeps the singular name.
+    expect(
+      names({
+        '/store/Pets/{id}/toys/{toyId}': { get: item('id') },
+        '/store/pets/{id}/toys/{toyId}': { get: item('id') },
+        '/store/pet/{id}/toys/{toyId}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getToyPets                   GET    /store/Pets/{id}/toys/{toyId}',
+      'getToyPet                    GET    /store/pet/{id}/toys/{toyId}',
+      'getToyPets2                  GET    /store/pets/{id}/toys/{toyId}',
+    ]);
+  });
+
+  it('keeps a deeper segment as written when the singular would take an operationId (review)', () => {
+    expect(
+      names({
+        '/store/featured/{toyId}': { get: { ...item('toyId'), operationId: 'getToyCat' } },
+        '/store/cats/{id}/toys/{toyId}': { get: item('id') },
+        '/store/dogs/{id}/toys/{toyId}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getToyCats                   GET    /store/cats/{id}/toys/{toyId}',
+      'getToyDog                    GET    /store/dogs/{id}/toys/{toyId}',
+      'getToyCat                    GET    /store/featured/{toyId}',
+    ]);
+    // An item segment beside the same segment as a collection: the singular
+    // and the plural tell them apart, with no parameter needed.
+    expect(
+      names({
+        '/store/cats/{id}/toys/{toyId}': { get: item('id') },
+        '/store/cats/toys/{toyId}': { get: item('toyId') },
+      }),
+    ).toEqual([
+      'getToyCats                   GET    /store/cats/toys/{toyId}',
+      'getToyCat                    GET    /store/cats/{id}/toys/{toyId}',
+    ]);
+  });
+
+  it('stays singular when two paths agree in both spellings, and goes on to the parameters', () => {
+    expect(
+      names({
+        '/orgs/teams/{id}/members': { get: item('id') },
+        '/orgs/{orgId}/teams/{id}/members': { get: item('orgId') },
+      }),
+    ).toEqual([
+      'listMembersTeam              GET    /orgs/teams/{id}/members',
+      'listMembersTeamByOrgId       GET    /orgs/{orgId}/teams/{id}/members',
+    ]);
+  });
+
+  it('shares a plural between members some other member does not take, and numbers them (review)', () => {
+    expect(
+      names({
+        '/store/Pets/{id}': { get: item('id') },
+        '/store/pets/{id}': { get: item('id') },
+        '/store/pet/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPets                      GET    /store/Pets/{id}',
+      'getPet                       GET    /store/pet/{id}',
+      'getPets2                     GET    /store/pets/{id}',
+    ]);
+    expect(
+      names({
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/Pets/{id}': { get: item('id') },
+        '/store/pets/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPets                      GET    /store/Pets/{id}',
+      'getPet                       GET    /store/featured/{id}',
+      'getPets2                     GET    /store/pets/{id}',
+    ]);
+  });
+
+  it("applies the stemmer's documented limits to a deeper segment as well (review)", () => {
+    // `sms` is an acronym the stemmer reads as a plural; the limit is
+    // documented on singularizePathSegment and reaches the deeper context.
+    expect(
+      names({
+        '/messages/sms/{smsId}/attachments': { get: item('smsId') },
+        '/messages/{id}/attachments': { get: item('id') },
+      }),
+    ).toEqual([
+      'listAttachmentsSm            GET    /messages/sms/{smsId}/attachments',
+      'listAttachments              GET    /messages/{id}/attachments',
+    ]);
+  });
+
   it('singularises the service noun restored to an item operation', () => {
     // `/api/notes/{noteId}` would read `Note` were `notes` not the service
     // segment, so that is the noun restored beside `operationId: get`; the

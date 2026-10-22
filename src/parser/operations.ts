@@ -1080,7 +1080,14 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
  *      `GET /users/{id}/factors` → `listFactorsLegacy`, and
  *      `GET /store/cats/{id}/toys/{toyId}` next to
- *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`;
+ *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`.
+ *      A path whose singular spelling would take the name of an operation
+ *      outside the group, or of another path in the group that the
+ *      spelling as written sets apart, keeps the segments as written, the
+ *      plural being what tells them apart: `/store/pets/{id}/toys/{toyId}`
+ *      next to `/store/pet/{id}/toys/{toyId}` → `getToyPets` and
+ *      `getToyPet`, and `/store/cats/{id}/toys/{toyId}` next to
+ *      `operationId: getToyCat` → `getToyCats`;
  *   3. `By<Param>` for each path parameter the colliding paths do not all
  *      share, in path order, when those are what tell the paths apart:
  *      `GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes
@@ -1104,17 +1111,19 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      `operationId: getPet` on `/store/featured/{id}`, or path-named
  *      `GET /store/pet/{id}`, whose path differs only by the plural the
  *      singular erased — the plural name it had before item resources were
- *      singularised, `getPets` (pluralFallbackName), when no operation in
- *      the service has it. The plural still says which collection is read,
- *      and it is the name every SDK generated from such a document already
- *      exposes, where a number says nothing. Like the qualifiers above it
- *      runs only when it tells the group apart: an operationId-named
+ *      singularised, `getPets` (pluralFallbackName), when no operation
+ *      outside the group has it. The plural still says which collection is
+ *      read, and it is the name every SDK generated from such a document
+ *      already exposes, where a number says nothing. Like the qualifiers
+ *      above it runs only when it tells the group apart: an operationId-named
  *      operation, an action and a name a qualifier has already extended
  *      have no plural, so any member that has one differs from them, while
  *      a group whose members would all take the same plural
  *      (`/store/Pets/{id}` beside `/store/pets/{id}`) goes straight to the
  *      suffix, since `getPets` beside `getPet` would say nothing about
- *      which is which;
+ *      which is which. Members that share a plural some other member does
+ *      not take it together and are numbered by the suffix: beside
+ *      `/store/pet/{id}` those two are `getPets` and `getPets2`;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
  *      operation keeps the plain name over a path-named one; then the path
@@ -1137,7 +1146,11 @@ function disambiguateOperationNames(
   const rename = (op: Operation, name: string) => {
     (op as { name: string }).name = name;
   };
-  const byPath = (a: Operation, b: Operation) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  /** The names every operation of the service outside `group` has right now, operationIds included. */
+  const namesOutside = (group: Operation[]): ReadonlySet<string> => {
+    const members = new Set(group);
+    return new Set(operations.filter((op) => !members.has(op)).map((op) => op.name));
+  };
 
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
@@ -1148,11 +1161,38 @@ function disambiguateOperationNames(
       }
     },
     (group) => {
-      for (const op of group) {
-        if (!pathNamed.has(op)) continue;
+      // Singular, like the resource of an item operation, unless that
+      // spelling gives a path the name of an operation outside the group or
+      // of another path in the group whose spelling as written differs: the
+      // plural is then what tells them apart, so the path takes its context
+      // as written. `/store/pets/{id}/toys/{toyId}` beside
+      // `/store/pet/{id}/toys/{toyId}` is `getToyPets` and `getToyPet`, and
+      // `/store/cats/{id}/toys/{toyId}` beside `operationId: getToyCat` is
+      // `getToyCats`. Two paths whose contexts agree in both spellings
+      // (`/orgs/teams/{id}/members` and `/orgs/{orgId}/teams/{id}/members`)
+      // stay singular and go on to the parameters. Both spellings are read
+      // before any member is renamed, so the outcome does not depend on
+      // document order.
+      const outside = namesOutside(group);
+      const named = group.filter((op) => pathNamed.has(op));
+      const spelled = named.map((op) => {
         const root = apiRootLengthOf(op);
-        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root), root)));
-      }
+        const path = qualifierPath(op, root);
+        return {
+          singular: appendQualifier(op.name, inferDeeperContext(path, root)),
+          written: appendQualifier(op.name, inferDeeperContext(path, root, false)),
+        };
+      });
+      named.forEach((op, i) => {
+        const { singular, written } = spelled[i];
+        const pluralTellsApart =
+          written !== singular &&
+          (outside.has(singular) ||
+            spelled.some(
+              (other, j) => named[j].path !== op.path && other.singular === singular && other.written !== written,
+            ));
+        rename(op, pluralTellsApart ? written : singular);
+      });
     },
     (group) => {
       // Parameters only help when they differ between the colliding paths,
@@ -1211,10 +1251,6 @@ function disambiguateOperationNames(
     for (const group of collidingGroups(operations)) qualify(group);
   }
 
-  // The plural pass and the numeric pass below both draw names from one pool
-  // per service. Groups come in name order and members are sorted by path,
-  // so the names are allocated in an order that depends only on the data.
-  const inUse = new Set(operations.map((op) => op.name));
   // The plural a member could take back: none for an operationId-named
   // operation, and for a path-named one only while its name is still the one
   // it was built with — no qualifier above has extended it.
@@ -1228,21 +1264,20 @@ function disambiguateOperationNames(
     // Like every qualifier, only when it tells the group apart: beside an
     // operationId, which has no plural, or beside a path that spells the
     // resource singular (`/store/pet/{id}`). Members that would all take the
-    // same plural are left to the numeric suffix.
+    // same plural are left to the numeric suffix. A plural is blocked only by
+    // a name outside the group (`operationId: getPets`); members that share
+    // one some other member does not (`/store/Pets/{id}` and
+    // `/store/pets/{id}` beside `/store/pet/{id}`) take it together and are
+    // numbered below, `getPets` and `getPets2` — the names such a document
+    // produced before item resources were singularised. Two groups never
+    // share a plural: it is the group's singular name with the resource as
+    // written, so one plural means one singular name, and one group.
     const plurals = new Map(group.map((op) => [op, pluralOf(op)]));
     if (new Set(plurals.values()).size <= 1) continue;
-    const pluralByPath = new Map<string, string>();
-    for (const op of group.filter((member) => pathNamed.has(member)).sort(byPath)) {
-      let plural = pluralByPath.get(op.path);
-      if (plural === undefined) {
-        const candidate = plurals.get(op);
-        // The plural must be free.
-        if (candidate == null || inUse.has(candidate)) continue;
-        plural = candidate;
-        inUse.add(plural);
-        pluralByPath.set(op.path, plural);
-      }
-      rename(op, plural);
+    const outside = namesOutside(group);
+    for (const op of group) {
+      const plural = plurals.get(op);
+      if (plural != null && !outside.has(plural)) rename(op, plural);
     }
   }
 
@@ -1433,12 +1468,17 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
  * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
  * left out along with the service segment that follows it, so
  * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
+ * `singularItem` false keeps every segment as the path spells it (`Pets` for
+ * `/store/pets/{id}/toys/{toyId}`), for the qualifier that falls back to the
+ * plural when the singular does not tell two paths apart (see
+ * disambiguateOperationNames). The stemmer's limits reach every segment it
+ * singularises: `/messages/sms/{smsId}/attachments` contributes "Sm".
  */
-function inferDeeperContext(path: string, apiRootLength = 0): string | null {
+function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true): string | null {
   const segments = path.split('/').filter(Boolean);
   const nouns: string[] = [];
   for (let i = apiRootLength; i < segments.length; i++) {
-    if (!segments[i].startsWith('{')) nouns.push(pathSegmentNoun(segments, i));
+    if (!segments[i].startsWith('{')) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
   }
   // Skip first (service) and last (already used) — use the middle ones
   if (nouns.length >= 3) {
