@@ -2072,11 +2072,17 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     const warn = silence();
     const withShape = obj({ shape: shapes({ radius: str }) });
     const spec = await parseDocument(
-      document(createPet({ '200': withVendor(withShape), '201': withVendor(withShape, 'created') }), {
-        Circle: obj({ other: str }),
-      }),
+      document(
+        createPet({
+          '200': withVendor(withShape),
+          '201': withVendor(withShape, 'created'),
+          '202': withVendor(withShape, 'accepted'),
+        }),
+        { Circle: obj({ other: str }) },
+      ),
     );
 
+    // One copy, not three: the 201 and the 202 both replay the rename and share.
     expect(modelsOf(spec).sort()).toEqual([
       'Circle { other }',
       `${PLAIN} { shape }`,
@@ -2084,7 +2090,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       'CreatePetResponse { id }',
       'Square { kind, side }',
     ]);
-    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN]);
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN, PLAIN]);
     expect(spec.models.find((m) => m.name === PLAIN)?.fields[0].type).toMatchObject({
       kind: 'union',
       variants: [
@@ -2094,6 +2100,153 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     });
     expectSound(spec, ['Circle']);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  describe("a later body that cannot take an earlier site's rename (Greptile round 2)", () => {
+    it("parses when the 201's inline Circle matches component model Circle and the body also $refs it", async () => {
+      // The 200's inline `Circle` differs from the component, so its rename
+      // (`Circle` → `…ResponseCircle`) is recorded. Replaying it on the 201
+      // would rewrite the 201's `$ref` to the component too, so it is skipped:
+      // the 201's inline `Circle` shares the component, and its root — of
+      // another shape than the 200's — takes its own status code.
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withVendor(obj({ shape: shapes({ diameter: str }) })),
+            '201': withVendor(
+              obj({ shape: shapes({ radius: str }), original: { $ref: '#/components/schemas/Circle' } }),
+              'created',
+            ),
+          }),
+          { Circle: titled('Circle', 'circle', { radius: str }) },
+        ),
+      );
+
+      expect(modelsOf(spec).sort()).toEqual([
+        'Circle { kind, radius }',
+        `${PLAIN} { shape }`,
+        `${PLAIN}201 { shape, original }`,
+        `${PLAIN}Circle { kind, diameter }`,
+        'CreatePetResponse { id }',
+        'Square { kind, side }',
+      ]);
+      const later = spec.models.find((m) => m.name === `${PLAIN}201`)!;
+      expect(later.fields.map((f) => f.type)).toMatchObject([
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'Circle' },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+        { kind: 'model', name: 'Circle' },
+      ]);
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+        PLAIN,
+        `${PLAIN}201`,
+      ]);
+      expectSound(spec, ['Circle']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('renames and shares past a $ref to component enum Circle, which no model rename can reach', async () => {
+      // `Circle` is an enum component: the inline titled `Circle` clashes with
+      // the reserved enum name and is renamed under the root; the `$ref` beside
+      // it is typed as an enum reference, which the rename never touches, so
+      // neither the 200's rename nor the 201's replay of it is blocked.
+      const warn = silence();
+      const withRef = obj({ shape: shapes({ diameter: str }), kind_ref: { $ref: '#/components/schemas/Circle' } });
+      const spec = await parseDocument(
+        document(createPet({ '200': withVendor(withRef), '201': withVendor(withRef, 'created') }), {
+          Circle: { type: 'string', enum: ['a', 'b'] },
+        }),
+      );
+
+      expect(spec.enums.map((e) => e.name)).toEqual(['Circle']);
+      expect(modelsOf(spec).sort()).toEqual([
+        `${PLAIN} { shape, kind_ref }`,
+        `${PLAIN}Circle { kind, diameter }`,
+        'CreatePetResponse { id }',
+        'Square { kind, side }',
+      ]);
+      expect(spec.models.find((m) => m.name === PLAIN)?.fields.map((f) => f.type)).toMatchObject([
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: `${PLAIN}Circle` },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+        { kind: 'enum', name: 'Circle' },
+      ]);
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN]);
+      expectSound(spec, []);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('what the author checked (review on d40a45e)', () => {
+    it('keeps a deprecated 201 body apart from the identical live 200 body', async () => {
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withVendor(obj({ name: str })),
+            '201': withVendor(obj({ name: str }, { deprecated: true }), 'created'),
+          }),
+        ),
+      );
+
+      expect(spec.models.map((m) => `${m.name}${m.deprecated ? ' (deprecated)' : ''}`)).toEqual([
+        'CreatePetResponse',
+        PLAIN,
+        `${PLAIN}201 (deprecated)`,
+      ]);
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+        PLAIN,
+        `${PLAIN}201`,
+      ]);
+      expectSound(spec, []);
+    });
+
+    it('shares identical secondary error bodies on a 404 and a 409 under the name the 404 took', async () => {
+      const ERROR = 'CreatePetApplicationVndPetJsonError';
+      const errorResponse = (description: string) => ({
+        description,
+        content: {
+          'application/json': { schema: obj({ code: str }) },
+          'application/vnd.pet+json': { schema: obj({ reason: str }) },
+        },
+      });
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': { description: 'ok', content: { 'application/json': { schema: obj({ id: str }) } } },
+            '404': errorResponse('missing'),
+            '409': errorResponse('taken'),
+          }),
+          { [ERROR]: obj({ other: str }) },
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual([
+        `${ERROR} { other }`,
+        'CreatePetResponse { id }',
+        'CreatePetError404 { code }',
+        `${ERROR}404 { reason }`,
+        'CreatePetError409 { code }',
+      ]);
+      expect(
+        findOp(spec, 'createPet').errors.map(
+          ({ statusCode, contents }) =>
+            `${statusCode}: ${contents!.map(({ contentType, type }) => `${contentType} → ${name(type)}`).join(', ')}`,
+        ),
+      ).toEqual([
+        `404: application/json → CreatePetError404, application/vnd.pet+json → ${ERROR}404`,
+        `409: application/json → CreatePetError409, application/vnd.pet+json → ${ERROR}404`,
+      ]);
+      expectSound(spec, [ERROR]);
+    });
   });
 
   describe('beside the parameter-based names of side-by-side spellings (#330 round 2)', () => {

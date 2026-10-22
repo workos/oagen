@@ -10,7 +10,7 @@ import {
 } from './schemas.js';
 import { extractOperations } from './operations.js';
 import type { FieldInlineModelGroup } from './inline-models.js';
-import { collectExistingNames, extractWebhooks } from './webhooks.js';
+import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
@@ -161,6 +161,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     servers,
     version,
     options?.operationHints,
+    // The component enums, so no header, fallback, error or secondary-body
+    // model the operations pass names last takes one of their names.
+    enums,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -179,6 +182,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
     },
     collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
+    collectExistingEnumNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 

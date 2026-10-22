@@ -1,7 +1,7 @@
 import type { RequestBodyContent, ResponseContent, TypeRef } from '../ir/types.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
+import { mediaTypeEssence, parseMediaType } from '../utils/media-type.js';
 import type { RequestBodyContentTypesChange } from './types.js';
-import { typeRefsEqual } from './models.js';
+import { sameShape, type DocumentShapes } from './shapes.js';
 
 /**
  * One media type a request body or a response entry declares, as the differ
@@ -17,6 +17,8 @@ export interface MediaTypeBody {
   mediaType: string;
   /** `mediaTypeEssence(mediaType)`: what decides which key of the other document this one is. */
   essence: string;
+  /** `mediaTypeParameters(mediaType)`: the parameters that may select another representation, in one form. */
+  parameters: string;
   /** The body's type, when the entry's contents carry one for this key. */
   type?: TypeRef;
   /**
@@ -54,10 +56,49 @@ export function mediaTypeBodies(
     return {
       mediaType,
       essence: mediaTypeEssence(mediaType),
+      parameters: mediaTypeParameters(mediaType),
       ...(content ? { type: content.type } : {}),
       own: content !== undefined && content === own,
     };
   });
+}
+
+/**
+ * A media type's parameters other than `charset`, in one form whatever the
+ * spelling: each parameter as `parseMediaType` reads it — name lower-cased,
+ * quoted value decoded, so a `;` inside the quotes is part of the value and
+ * `profile="print"` is `profile=print` — sorted and joined with `; `. So
+ * `application/pdf; version=1.7` reads `version=1.7`, `text/html;
+ * Charset=UTF-8` and `text/html` both read `` (empty), and `; a=1; b=2` is
+ * `; b=2 ;a=1`. `charset` is left out because it never selects another
+ * representation of a JSON or text body (RFC 8259 §8.1 has no charset for
+ * JSON at all); any other parameter — `version`, `profile` — may, which is
+ * what `reparameterized` reports.
+ */
+export function mediaTypeParameters(contentType: string): string {
+  return parseMediaType(contentType)
+    .parameters.filter((parameter) => parameter.name !== 'charset')
+    .map((parameter) => (parameter.value.length > 0 ? `${parameter.name}=${parameter.value}` : parameter.name))
+    .sort()
+    .join('; ');
+}
+
+/**
+ * The pairs whose parameters other than `charset` differ
+ * (`mediaTypeParameters`): the body is typed the same on both sides, but
+ * the new spelling may select another representation (`application/pdf;
+ * version=1.7` → `; version=2.0`), so it is reported — additive, since
+ * callers can still ask for the essence and the shape did not change.
+ */
+export function reparameterizedBodies(
+  pairs: Array<[MediaTypeBody, MediaTypeBody]>,
+): Array<[MediaTypeBody, MediaTypeBody]> {
+  return pairs.filter(([before, after]) => before.parameters !== after.parameters);
+}
+
+/** A reparameterized pair as a change reports it: both spellings, as written in their specs. */
+export function respelling([before, after]: [MediaTypeBody, MediaTypeBody]): { from: string; to: string } {
+  return { from: before.mediaType, to: after.mediaType };
 }
 
 /** How the media types of one body compare between two specs, each side as written in its spec. */
@@ -107,16 +148,21 @@ export function pairMediaTypeBodies(oldBodies: MediaTypeBody[], newBodies: Media
 }
 
 /**
- * The pairs whose body types differ, except the own body on both sides when
- * `ownCoveredElsewhere`: another comparison (`responseChanged`,
- * `errorsChanged`, `requestBodyChanged`) reports that very retype.
+ * The pairs whose body types are not one shape (`sameShape`, so a model that
+ * was only renamed — as the parser does when a parameter edit on a key
+ * declared beside another spelling of its essence renames the model it mints
+ * — is no retype; by name alone without `shapes`), except the own body on
+ * both sides when `ownCoveredElsewhere`: another comparison
+ * (`responseChanged`, `errorsChanged`, `requestBodyChanged`) reports that
+ * very retype.
  */
 export function retypedBodies(
   pairs: Array<[MediaTypeBody, MediaTypeBody]>,
   ownCoveredElsewhere: boolean,
+  shapes?: DocumentShapes,
 ): Array<[MediaTypeBody, MediaTypeBody]> {
   return pairs.filter(([before, after]) => {
-    if (!before.type || !after.type || typeRefsEqual(before.type, after.type)) return false;
+    if (!before.type || !after.type || sameShape(before.type, after.type, shapes)) return false;
     return !(before.own && after.own && ownCoveredElsewhere);
   });
 }
@@ -147,25 +193,33 @@ export type RequestBodySide = 'caller' | 'receiver';
  * type it could send that is gone or whose body changed type is breaking and
  * one it can newly send is additive; for the receiver, one the sender can
  * newly use or whose body changed type is breaking (the handler must decode
- * it) and one the sender can no longer use is additive. `undefined` when
- * nothing changed.
+ * it) and one the sender can no longer use is additive. A retype is a body
+ * whose shape changed (`sameShape` through `shapes`, the two documents'
+ * named types), not one whose model was only renamed. A pair whose
+ * parameters other than `charset` differ is `reparameterized`, additive on
+ * either side. `undefined` when nothing changed.
  */
 export function diffRequestBodyContentTypes(
   oldBody: RequestBodyMediaTypes,
   newBody: RequestBodyMediaTypes,
   side: RequestBodySide,
+  shapes?: DocumentShapes,
 ): RequestBodyContentTypesChange | undefined {
   if (!declaresBody(oldBody) || !declaresBody(newBody)) return undefined;
   const bodies = (body: RequestBodyMediaTypes): MediaTypeBody[] =>
     mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
   const { pairs, added, removed } = pairMediaTypeBodies(bodies(oldBody), bodies(newBody));
-  const retyped = retypedBodies(pairs, true);
-  if (added.length === 0 && removed.length === 0 && retyped.length === 0) return undefined;
+  const retyped = retypedBodies(pairs, true, shapes);
+  const reparameterized = reparameterizedBodies(pairs);
+  if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) {
+    return undefined;
+  }
   const breaking = retyped.length > 0 || (side === 'caller' ? removed.length > 0 : added.length > 0);
   return {
     added: added.map((body) => body.mediaType),
     removed: removed.map((body) => body.mediaType),
     retyped: retyped.map(([, after]) => after.mediaType),
+    reparameterized: reparameterized.map(respelling),
     classification: breaking ? 'breaking' : 'additive',
   };
 }
