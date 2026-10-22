@@ -1,6 +1,6 @@
 import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
-import { toPascalCase, cleanSchemaName, singularize, stripListItemMarkers, splitWords } from '../utils/naming.js';
+import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords } from '../utils/naming.js';
 import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { enumValuesOf, inlineEnumExternalDocsOf, inlineEnumRef, toEnumValue, type EnumMember } from './enum-members.js';
 
@@ -3234,158 +3234,25 @@ function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: stri
   return `${fallbackName}${pascal}`;
 }
 
+/**
+ * The model for a discriminated variant's rebuilt object schema, and every
+ * inline model its fields reference: the variant's own model
+ * (`buildInlineModel`, its properties typed under `name`) followed by
+ * whatever its properties mint, extracted by the field extractor
+ * (`extractInlineModelsFromProperties`) under `name` as parent — so a
+ * nested object, typed or not, nullable or not; array items and map values
+ * of any shape (an inline object, an `allOf` merge, a union); every
+ * `oneOf`/`anyOf` variant and its members; an `allOf` field read as
+ * `readInlineAllOf` reads it; an inline enum — is materialized under exactly
+ * the name `buildFieldFromSchema` typed it with, since the extractor and the
+ * type builder name by the same rules. A variant's fields are built here
+ * the one way every inline object's are, so typing and extraction cannot
+ * disagree for any shape under a discriminated variant.
+ */
 function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
-  const requiredSet = new Set(schema.required ?? []);
-  const fields: Field[] = [];
-  const properties = schema.properties ?? {};
   const nestedModels: Model[] = [];
-
-  const siblings = collectProperties(schema);
-  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
-    if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, schemas, siblings));
-
-    // One keyword types the field (`classifyInlineSchema`, the order
-    // `schemaToTypeRef` follows), so exactly one branch below runs and the
-    // models it builds are the ones the field's type references — never an
-    // `allOf` model and a `oneOf` variant under the same name. `properties`
-    // beside the composition that types the field are folded into it first,
-    // as `schemaToTypeRef` typed the field above (`foldSiblingProperties`).
-    const composed = foldSiblingProperties(fieldSchema);
-    const kind = classifyInlineSchema(composed);
-
-    if (kind === 'object' && fieldSchema.type === 'object' && fieldSchema.properties) {
-      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema, schemas));
-    }
-
-    // Array items and map values are named like the field — or `<Field>Item` /
-    // `<Field>Value` when a sibling takes the singular name — exactly as
-    // `schemaToTypeRef` references them (`elementContextName`). An array is
-    // whatever `isArraySchema` says — `classifyInlineSchema`'s answer with the
-    // nullable type list unwrapped — so `items` with no `type` counts too.
-    if (isArraySchema(fieldSchema) && fieldSchema.items?.properties) {
-      const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
-      nestedModels.push(
-        ...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items, schemas),
-      );
-    }
-
-    if (kind === 'map') {
-      const valueSchema = mapValueSchema(fieldSchema);
-      if (valueSchema && !valueSchema.$ref && valueSchema.properties) {
-        const valueContext = elementContextName(fieldName, 'value', siblings, name, valueSchema);
-        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, valueContext), valueSchema, schemas));
-      }
-    }
-
-    // An `allOf` field is read as `schemaToTypeRef` read it above
-    // (`readInlineAllOf`), so a model is built exactly when the field's type
-    // names one: a `'merged'` reading is built by `materializeMergedAllOf`,
-    // exactly as the field extractor builds the same field anywhere else —
-    // `$ref` members resolved, nested `allOf` members and the inline object
-    // variants of a `oneOf`/`anyOf` member read in, inherited properties
-    // typed as their component types them and not read into again (so a
-    // component that extends itself through a field terminates), the
-    // model's own properties materialized under the field's nested name;
-    // a lone member is re-entered as the field itself; a `'reference'`
-    // reading (`$ref` members with nothing inline beside them) is the
-    // component and mints nothing, so a component the document declares
-    // under the nested name is never replaced by an unused merged copy.
-    // Earlier members win on a shared name there as everywhere, and the fold
-    // places the schema's own properties first, so an own `kind` enum beside
-    // a member's plain `kind` stays the enum here as it does in a field or
-    // an array's items.
-    if (kind === 'allOf' && composed.allOf) {
-      const reading = readInlineAllOf(composed.allOf);
-      if (reading === 'merged') {
-        materializeMergedAllOf(qualifyNestedInlineName(name, fieldName), composed, nestedModels, schemas);
-      } else if (reading === 'unwrapped') {
-        // The synthetic wrapper model is dropped, only its nested models kept.
-        const member = unwrappedAllOfMember(composed, composed.allOf[0]!);
-        nestedModels.push(...extractInlineModelDeep(name, { properties: { [fieldName]: member } }, schemas).slice(1));
-      }
-    }
-
-    const unionVariants = kind === 'union' ? (composed.oneOf ?? composed.anyOf) : undefined;
-    if (unionVariants) {
-      const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
-      // Decided once, for the object variants' models and for the other
-      // variants' contexts, which step around those models and their children.
-      const variantNames: ReadonlyMap<SchemaObject, string> =
-        inlineObjectVariants.length > 0
-          ? nameInlineVariants(
-              composed,
-              qualifyNestedInlineName(name, fieldName),
-              reservedInlineNames(fieldName, siblings, name),
-            )
-          : new Map();
-      if (inlineObjectVariants.length > 0) {
-        // A nullable wrapper's one branch is built with the wrapper's
-        // `deprecated` and limits, as everywhere else; a multi-variant union's
-        // variants are built as written (`collapsedNullableBranch`).
-        const branch = collapsedNullableBranch(composed);
-        for (const variant of inlineObjectVariants) {
-          const variantName = variantNames.get(variant);
-          if (variantName === undefined) continue;
-          nestedModels.push(...extractInlineModelDeep(variantName, branch ?? variant, schemas));
-          // A multi-type variant's array member types its items under the
-          // variant's name (`<Variant>Item`); extract them there too. The
-          // synthetic wrapper model is dropped, only its nested models kept.
-          const memberSchemas = variantMemberSchemas(variant, variantName);
-          if (Object.keys(memberSchemas).length > 0) {
-            nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }, schemas).slice(1));
-          }
-        }
-      }
-      // Every other variant that mints a name — an array or map, a nested
-      // union, a nullable wrapper around an object, an `allOf`, an inline
-      // enum — is typed under the context `nonObjectVariantContexts` gives
-      // it, as `buildFieldFromSchema` typed the field above; re-enter the
-      // field extractor with the variant as a property of that name, so it
-      // is materialized under exactly the name the reference uses.
-      for (const [variant, { context, reserved }] of nonObjectVariantContexts(
-        fieldName,
-        unionVariants,
-        siblings,
-        name,
-        variantNames,
-      )) {
-        extractInlineModelsFromProperties(
-          { properties: { [context]: unwrapNullableField(variant) } },
-          nestedModels,
-          name,
-          schemas,
-          undefined,
-          reserved,
-        );
-      }
-    }
-  }
-
-  return [
-    {
-      name,
-      description: schema.description,
-      ...externalDocsEntry(schema.externalDocs),
-      fields,
-      ...deprecatedEntry(schema),
-      ...constraintsEntry(schema),
-    },
-    ...nestedModels,
-  ];
-}
-
-function qualifyNestedInlineName(parentName: string, fieldName: string): string {
-  const pascalField = toPascalCase(fieldName);
-  if (pascalField.startsWith(parentName)) return pascalField;
-
-  const cleanParent = stripListItemMarkers(parentName);
-  const qualified = `${cleanParent}${pascalField}`;
-  const match = qualified.match(/^(.+?)([A-Z][a-z]+s?)$/);
-  if (match && match[2]) {
-    return match[1] + singularize(match[2]);
-  }
-  return qualified;
+  extractInlineModelsFromProperties(schema, nestedModels, name, schemas);
+  return [buildInlineModel(name, schema, schemas), ...nestedModels];
 }
 
 /**
@@ -3886,9 +3753,7 @@ import {
   isContestedTitle,
   mapValueSchema,
   markContestedTitles,
-  materializeMergedAllOf,
   readInlineAllOf,
-  unwrappedAllOfMember,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
