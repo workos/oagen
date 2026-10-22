@@ -282,7 +282,8 @@ function endOfIterationEqual(
  * neither does a URL spelling `normalizeServerUrl` folds (scheme and host
  * case, a default port, a bare authority's `/`). Neither does the spelling of
  * OpenAPI's default server (#291): a list that is empty and one that is `/`
- * alone without variables are the same list there, so an operation served
+ * alone (description and variables aside, since `/` references no variable)
+ * are the same list there, so an operation served
  * from `/` written out and one served from a document that declares nothing
  * are served from the same place.
  */

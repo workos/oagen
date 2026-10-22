@@ -27,14 +27,19 @@ describe('isDefaultServerList', () => {
     expect(isDefaultServerList([{ url: '/', variables: {} }])).toBe(true);
   });
 
-  it('is false for `/` with a variable: a knob a caller can set', () => {
-    expect(isDefaultServerList([{ url: '/', variables: { port: { default: '443' } } }])).toBe(false);
+  it('is true for `/` with a variable: `/` references none, so it is not a knob a caller can set (#292)', () => {
+    expect(isDefaultServerList([{ url: '/', variables: { port: { default: '443' } } }])).toBe(true);
+    expect(
+      isDefaultServerList([
+        { url: '/', description: 'Same origin', variables: { port: { default: '443', enum: ['443', '8443'] } } },
+      ]),
+    ).toBe(true);
   });
 
-  it('counts a variable named like an Object.prototype member as declared', () => {
+  it('ignores a variable named like an Object.prototype member like any other', () => {
     const variables = Object.fromEntries([['__proto__', { default: 'x' }]]);
     expect(Object.hasOwn(variables, '__proto__')).toBe(true);
-    expect(isDefaultServerList([{ url: '/', variables }])).toBe(false);
+    expect(isDefaultServerList([{ url: '/', variables }])).toBe(true);
   });
 
   it('is false for a template that merely resolves to `/`', () => {
@@ -61,14 +66,16 @@ describe('serversBeyondDefault', () => {
     expect(serversBeyondDefault([])).toEqual([]);
     expect(serversBeyondDefault([{ url: '/' }])).toEqual([]);
     expect(serversBeyondDefault([{ url: '/', description: 'Same origin' }])).toEqual([]);
+    // `/` references no variable, so one declared on it is not a server beyond the default (#292).
+    expect(serversBeyondDefault([{ url: '/', variables: { port: { default: '443' } } }])).toEqual([]);
   });
 
   it('is the list itself, not a copy, for anything else', () => {
     const staging: ServerEntry[] = [{ url: 'https://staging.api.example.com' }];
     expect(serversBeyondDefault(staging)).toBe(staging);
 
-    const rootWithVariable: ServerEntry[] = [{ url: '/', variables: { port: { default: '443' } } }];
-    expect(serversBeyondDefault(rootWithVariable)).toBe(rootWithVariable);
+    const rootTemplate: ServerEntry[] = [{ url: '{root}', variables: { root: { default: '/' } } }];
+    expect(serversBeyondDefault(rootTemplate)).toBe(rootTemplate);
 
     const rootBesideHost: ServerEntry[] = [{ url: '/' }, ...staging];
     expect(serversBeyondDefault(rootBesideHost)).toBe(rootBesideHost);

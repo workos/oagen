@@ -105,6 +105,7 @@ export {
   normalizeServerUrl,
   resolveServerUrl,
   serverListsEqual,
+  serverUrlPlaceholders,
   serversBeyondDefault,
 } from './ir/server-url.js';
 

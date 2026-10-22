@@ -12,6 +12,106 @@ export interface ResolvedServerUrl {
 }
 
 /**
+ * Fill a server URL template with its variables' defaults.
+ *
+ * Each `{name}` is replaced by `variables[name].default`; a placeholder with no
+ * declared variable is kept verbatim and reported in `unresolved`. The same
+ * variable may appear more than once, and a declared variable the template
+ * never mentions is simply unused (`serverUrlPlaceholders` lists the names the
+ * template does mention). The substituted value is spliced in as text and not
+ * scanned again, so a default such as `{other}` cannot trigger a second
+ * substitution. A `{` with no closing `}`, an empty `{}`, and a `{` that opens
+ * another `{` before closing are all literal text.
+ *
+ * Plain string scanning only: no pattern is built from the variable names, so
+ * a name containing `.`, `+` or any other character is matched as written.
+ *
+ * The parser uses this for `ApiSpec.baseUrl`; an emitter that offers every
+ * server (an environment picker, say) can resolve each `spec.servers[i]` the
+ * same way instead of reading the OpenAPI document again.
+ */
+export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>): ResolvedServerUrl {
+  const template = server.url;
+  const variables = server.variables ?? {};
+  const unresolved: string[] = [];
+  let url = '';
+  let cursor = 0;
+
+  for (const { name, start, end } of scanPlaceholders(template)) {
+    url += template.slice(cursor, start);
+    // Own keys only: a placeholder named `constructor` or `__proto__` resolves
+    // when the document declares that variable (the parser defines it as an own
+    // data property), never to Object.prototype's member of that name.
+    if (Object.hasOwn(variables, name)) {
+      url += variables[name].default;
+    } else {
+      url += template.slice(start, end);
+      if (!unresolved.includes(name)) unresolved.push(name);
+    }
+    cursor = end;
+  }
+
+  url += template.slice(cursor);
+  return { url, unresolved };
+}
+
+/**
+ * The placeholder names a server URL template references, in order of first
+ * appearance and without repeats: `['region', 'port']` for
+ * `https://{region}.example.com:{port}/{region}`. Read from the template
+ * alone, by the same scan as `resolveServerUrl` (so the same literal-brace
+ * rules apply), whether or not the server declares a variable for each name.
+ *
+ * A declared variable whose name is not listed here is one the template never
+ * references: its default and its allowed values cannot reach any resolved
+ * URL. The differ classifies a change to such a variable as additive on that
+ * basis; an emitter that exposes a server's variables can use it to offer
+ * only the ones that take effect.
+ */
+export function serverUrlPlaceholders(url: string): string[] {
+  const names: string[] = [];
+  for (const { name } of scanPlaceholders(url)) {
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/** One `{name}` in a server URL template: `start` is the index of its `{`, `end` the index just past its `}`. */
+interface Placeholder {
+  name: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Walk a template's placeholders left to right. A `{` with no closing `}`
+ * ends the scan (the rest is literal); an empty `{}` and a `{` that opens
+ * another `{` before closing are literal, and scanning resumes right after
+ * that `{` so a well-formed placeholder later in the text is still found.
+ * The one reading of braces every caller shares, so `resolveServerUrl`,
+ * `serverUrlPlaceholders` and `normalizeServerUrl` (through `templateUnits`)
+ * cannot disagree about what counts as one.
+ */
+function* scanPlaceholders(template: string): Generator<Placeholder> {
+  let cursor = 0;
+  while (cursor < template.length) {
+    const open = template.indexOf('{', cursor);
+    if (open === -1) break;
+    const close = template.indexOf('}', open + 1);
+    if (close === -1) break;
+
+    const name = template.slice(open + 1, close);
+    if (name === '' || name.includes('{')) {
+      cursor = open + 1;
+      continue;
+    }
+
+    yield { name, start: open, end: close + 1 };
+    cursor = close + 1;
+  }
+}
+
+/**
  * One unit of a server URL template: a single literal character, or a whole
  * `{name}` placeholder, which is never split, folded or decoded.
  */
@@ -22,9 +122,9 @@ interface TemplateUnit {
 
 /**
  * Split a server URL template into literal characters and `{name}`
- * placeholders. A `{` with no closing `}`, an empty `{}`, and a `{` that
- * opens another `{` before closing are all literal text. Plain string
- * scanning only: no pattern is built from the template.
+ * placeholders, read by `scanPlaceholders` so the literal-brace rules are
+ * the ones `resolveServerUrl` applies. A literal `{` from an unclosed, empty
+ * or reopened brace is a character like any other.
  */
 function templateUnits(template: string): TemplateUnit[] {
   const units: TemplateUnit[] = [];
@@ -33,76 +133,14 @@ function templateUnits(template: string): TemplateUnit[] {
   };
   let cursor = 0;
 
-  while (cursor < template.length) {
-    const open = template.indexOf('{', cursor);
-    if (open === -1) break;
-    const close = template.indexOf('}', open + 1);
-    if (close === -1) break;
-
-    const name = template.slice(open + 1, close);
-    if (name === '' || name.includes('{')) {
-      // `{}` or a `{` reopened before it closed: the brace is literal. Copy it
-      // through and keep scanning from the character after it.
-      literal(template.slice(cursor, open + 1));
-      cursor = open + 1;
-      continue;
-    }
-
-    literal(template.slice(cursor, open));
-    units.push({ text: template.slice(open, close + 1), placeholder: true });
-    cursor = close + 1;
+  for (const { start, end } of scanPlaceholders(template)) {
+    literal(template.slice(cursor, start));
+    units.push({ text: template.slice(start, end), placeholder: true });
+    cursor = end;
   }
 
   literal(template.slice(cursor));
   return units;
-}
-
-/** The variable name a placeholder unit stands for: the text between its braces. */
-function placeholderName(unit: TemplateUnit): string {
-  return unit.text.slice(1, -1);
-}
-
-/**
- * Fill a server URL template with its variables' defaults.
- *
- * Each `{name}` is replaced by `variables[name].default`; a placeholder with no
- * declared variable is kept verbatim and reported in `unresolved`. The same
- * variable may appear more than once, and a declared variable the template
- * never mentions is simply unused. The substituted value is spliced in as text
- * and not scanned again, so a default such as `{other}` cannot trigger a
- * second substitution. A `{` with no closing `}`, an empty `{}`, and a `{`
- * that opens another `{` before closing are all literal text.
- *
- * Plain string scanning only: no pattern is built from the variable names, so
- * a name containing `.`, `+` or any other character is matched as written.
- *
- * The parser uses this for `ApiSpec.baseUrl`; an emitter that offers every
- * server (an environment picker, say) can resolve each `spec.servers[i]` the
- * same way instead of reading the OpenAPI document again.
- */
-export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>): ResolvedServerUrl {
-  const variables = server.variables ?? {};
-  const unresolved: string[] = [];
-  let url = '';
-
-  for (const unit of templateUnits(server.url)) {
-    if (!unit.placeholder) {
-      url += unit.text;
-      continue;
-    }
-    const name = placeholderName(unit);
-    // Own keys only: a placeholder named `constructor` or `__proto__` resolves
-    // when the document declares that variable (the parser defines it as an own
-    // data property), never to Object.prototype's member of that name.
-    if (Object.hasOwn(variables, name)) {
-      url += variables[name].default;
-    } else {
-      url += unit.text;
-      if (!unresolved.includes(name)) unresolved.push(name);
-    }
-  }
-
-  return { url, unresolved };
 }
 
 /** The port each scheme uses when the URL names none (RFC 9110 §4.2, RFC 6455 §3). */
@@ -357,12 +395,13 @@ const DEFAULT_SERVER_URL = '/';
  * OpenAPI gives a document with no `servers`, or `servers: []`, a single
  * server with `url: '/'`; a document that writes that server out declares
  * nothing beyond it. So `undefined`, an empty list, and a list of exactly one
- * entry whose `url` is `/` and which declares no variables (`variables`
- * absent or empty, by own key) are all the default. The entry's `description`
- * does not count: the default server has none, and a description changes
- * nothing about where a request goes. A `/` entry that declares a variable, a
- * template that merely resolves to `/`, and `/` listed beside another server
- * are not the default.
+ * entry whose `url` is `/` are all the default. Neither the entry's
+ * `description` nor its `variables` count: the default server has neither, a
+ * description changes nothing about where a request goes, and `/` contains no
+ * placeholder (`serverUrlPlaceholders('/')` is empty), so a variable declared
+ * on it is never referenced and cannot change where it points either (#292).
+ * A template that merely resolves to `/` (a referenced variable whose default
+ * is `/`) and `/` listed beside another server are not the default.
  *
  * The parser (`Operation.servers`) and the differ (`base-url-changed`,
  * `server-added`, `server-removed`, `serversChanged`) read lists through
@@ -371,20 +410,18 @@ const DEFAULT_SERVER_URL = '/';
  */
 export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
   if (!servers || servers.length === 0) return true;
-  if (servers.length !== 1) return false;
-  const [only] = servers;
   // `/` is its own RFC 3986 form; read through `normalizeServerUrl` so that
   // every server URL comparison in this module goes through one function.
-  return normalizeServerUrl(only.url) === DEFAULT_SERVER_URL && Object.keys(only.variables ?? {}).length === 0;
+  return servers.length === 1 && normalizeServerUrl(servers[0].url) === DEFAULT_SERVER_URL;
 }
 
 /**
  * The servers a list declares beyond OpenAPI's default: `servers` itself
  * (the same array, not a copy) when it is not the default by
  * `isDefaultServerList`, else an empty list. A document without `servers`,
- * one with `servers: []`, and one whose only server is `/` without variables
- * all come out as `[]`, which is how the parser and the differ compare them
- * as one thing.
+ * one with `servers: []`, and one whose only server is `/` (description and
+ * variables aside) all come out as `[]`, which is how the parser and the
+ * differ compare them as one thing.
  */
 export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
   return servers && !isDefaultServerList(servers) ? servers : [];

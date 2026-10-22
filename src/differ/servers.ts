@@ -1,5 +1,5 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
-import { normalizeServerUrl, resolveServerUrl, serversBeyondDefault } from '../ir/server-url.js';
+import { normalizeServerUrl, resolveServerUrl, serverUrlPlaceholders, serversBeyondDefault } from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
 /**
@@ -30,7 +30,10 @@ import type { Change, ServerVariableChange } from './types.js';
  * surplus on either side is a `server-added` or a `server-removed`. Within a
  * matched pair, variables are matched by name and every difference is
  * collected on one `server-modified` carrying the new document's spelling of
- * the template. Descriptions are not compared, as nowhere else in the differ.
+ * the template; a change to a variable the template never references is
+ * additive whatever its kind, since no resolved URL can move (see
+ * `diffServerVariables`). Descriptions are not compared, as nowhere else in
+ * the differ.
  *
  * OpenAPI's default server is one thing however a document spells it (#291):
  * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (no variables;
@@ -179,6 +182,23 @@ function sameResolvedUrl(a: ServerEntry, b: ServerEntry): boolean {
   return normalizeServerUrl(resolveServerUrl(a).url) === normalizeServerUrl(resolveServerUrl(b).url);
 }
 
+/**
+ * Every difference between the variables of two entries with the same `url`
+ * template, matched by name.
+ *
+ * Whether a difference is breaking depends on whether the template references
+ * the variable. A `{name}` in the template is filled from that variable's
+ * `default`, or from a value the caller picks, so removing the variable,
+ * changing its default or narrowing its values moves a resolved URL some
+ * caller was built on: breaking. A declared variable the template never
+ * references (`serverUrlPlaceholders` does not list it; the parser keeps it
+ * as written) cannot reach any resolved URL, so the same differences take
+ * nothing away from any caller and are additive, with `details` saying why.
+ * The template is the same on both sides, since entries are matched on it, so
+ * one reading of it serves the pair. The kinds that are additive for any
+ * variable (a variable added, an enum lifted, an enum value added) are not
+ * affected.
+ */
 function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): ServerVariableChange[] {
   const changes: ServerVariableChange[] = [];
   // Own enumerable keys only: the parser defines each variable as an own data
@@ -186,6 +206,7 @@ function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): Se
   // other and nothing is read from Object.prototype.
   const oldByName = new Map(Object.entries(oldServer.variables ?? {}));
   const newByName = new Map(Object.entries(newServer.variables ?? {}));
+  const referenced = new Set(serverUrlPlaceholders(oldServer.url));
 
   for (const [name] of newByName) {
     if (!oldByName.has(name)) {
@@ -197,7 +218,7 @@ function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): Se
 
   for (const [name] of oldByName) {
     if (!newByName.has(name)) {
-      changes.push({ kind: 'variable-removed', variableName: name, classification: 'breaking' });
+      changes.push(breakingIfReferenced({ kind: 'variable-removed', variableName: name }, referenced));
     }
   }
 
@@ -206,25 +227,49 @@ function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): Se
     if (!oldVar) continue;
 
     if (oldVar.default !== newVar.default) {
-      // The default is what a caller gets without choosing, so this moves the
-      // server's resolved URL whether or not it is servers[0].
-      changes.push({
-        kind: 'variable-default-changed',
-        variableName: name,
-        classification: 'breaking',
-        oldDefault: oldVar.default,
-        newDefault: newVar.default,
-        details: `default changed from '${oldVar.default}' to '${newVar.default}'`,
-      });
+      // The default is what a caller gets without choosing, so when the
+      // template references the variable this moves the server's resolved
+      // URL whether or not it is servers[0].
+      changes.push(
+        breakingIfReferenced(
+          {
+            kind: 'variable-default-changed',
+            variableName: name,
+            oldDefault: oldVar.default,
+            newDefault: newVar.default,
+            details: `default changed from '${oldVar.default}' to '${newVar.default}'`,
+          },
+          referenced,
+        ),
+      );
     }
 
-    changes.push(...diffVariableEnum(name, oldVar, newVar));
+    changes.push(...diffVariableEnum(name, oldVar, newVar, referenced));
   }
 
   return changes;
 }
 
-function diffVariableEnum(name: string, oldVar: ServerVariable, newVar: ServerVariable): ServerVariableChange[] {
+/**
+ * Classify a variable difference that moves a resolved URL when the template
+ * references the variable: breaking then, additive otherwise — with
+ * `details` extended to say why, since the kind alone reads as breaking.
+ */
+function breakingIfReferenced(
+  change: Omit<ServerVariableChange, 'classification'>,
+  referenced: ReadonlySet<string>,
+): ServerVariableChange {
+  if (referenced.has(change.variableName)) return { ...change, classification: 'breaking' };
+  const reason = `{${change.variableName}} is not in the URL template, so no resolved URL moves`;
+  return { ...change, classification: 'additive', details: change.details ? `${change.details}; ${reason}` : reason };
+}
+
+function diffVariableEnum(
+  name: string,
+  oldVar: ServerVariable,
+  newVar: ServerVariable,
+  referenced: ReadonlySet<string>,
+): ServerVariableChange[] {
   const oldEnum = oldVar.enum;
   const newEnum = newVar.enum;
   if (!oldEnum && !newEnum) return [];
@@ -232,12 +277,10 @@ function diffVariableEnum(name: string, oldVar: ServerVariable, newVar: ServerVa
   if (!oldEnum) {
     // Any value was accepted; now only the listed ones are.
     return [
-      {
-        kind: 'variable-enum-added',
-        variableName: name,
-        classification: 'breaking',
-        details: `values restricted to ${newEnum!.join(', ')}`,
-      },
+      breakingIfReferenced(
+        { kind: 'variable-enum-added', variableName: name, details: `values restricted to ${newEnum!.join(', ')}` },
+        referenced,
+      ),
     ];
   }
 
@@ -263,7 +306,9 @@ function diffVariableEnum(name: string, oldVar: ServerVariable, newVar: ServerVa
 
   for (const value of oldEnum) {
     if (!newEnum.includes(value)) {
-      changes.push({ kind: 'variable-enum-value-removed', variableName: name, value, classification: 'breaking' });
+      changes.push(
+        breakingIfReferenced({ kind: 'variable-enum-value-removed', variableName: name, value }, referenced),
+      );
     }
   }
 

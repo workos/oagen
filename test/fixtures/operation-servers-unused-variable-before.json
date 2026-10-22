@@ -1,0 +1,14 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "repro", "version": "1" },
+  "servers": [{ "url": "https://api.example.com" }],
+  "paths": {
+    "/notes": {
+      "get": {
+        "operationId": "listNotes",
+        "servers": [{ "url": "https://notes.example.com", "variables": { "port": { "default": "443" } } }],
+        "responses": { "204": { "description": "ok" } }
+      }
+    }
+  }
+}
