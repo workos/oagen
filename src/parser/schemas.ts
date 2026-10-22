@@ -2861,15 +2861,19 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
 
 /**
  * Whether a `components/schemas` entry is read as an array component: an
- * array schema itself (`isArrayComponentSchema`), or an alias of one — a
- * bare `$ref`, or an `allOf` that `schemaToTypeRef` types as its first
- * `$ref` member because no member declares an object inline (`allOf: [{ $ref:
- * Pets }]`, `allOf: [{ $ref: Pets }, { maxItems: 10 }]`; `aliasTarget`) —
- * followed through aliases of aliases, so a `$ref` to the alias resolves to
- * the array exactly as the same schema written on a field does. A chain
- * that returns to an entry it has visited names no array: such an entry
- * stays the fieldless model it always became, as an alias of an object
- * component does.
+ * array schema itself (`isArrayComponentSchema`), or one `schemaToTypeRef`
+ * types as an array through the readings it makes of a `$ref` and an
+ * `allOf` — a bare `$ref` to one; an `allOf` read as a plain reference
+ * (`readInlineAllOf`: `$ref` members with nothing inline beside them —
+ * `allOf: [{ $ref: Pets }]`, `allOf: [{ $ref: Pets }, { maxItems: 10 }]`),
+ * read as its first `$ref` member; an `allOf` of one member, read as that
+ * member (`unwrappedAllOfMember`) — followed through aliases of aliases, so a
+ * `$ref` to the alias resolves to the array exactly as the same schema
+ * written on a field does. `properties` written beside the composition are
+ * folded in first (`foldSiblingProperties`), as `schemaToTypeRef` folds
+ * them. A chain that returns to an entry it has visited names no array:
+ * such an entry stays the fieldless model it always became, as an alias of
+ * an object component does.
  */
 export function isArrayComponentEntry(
   schema: SchemaObject,
@@ -2879,28 +2883,24 @@ export function isArrayComponentEntry(
   if (isArrayComponentSchema(schema)) return true;
   if (seen.has(schema)) return false;
   seen.add(schema);
-  const target = aliasTarget(schema);
-  const aliased = target === undefined ? undefined : schemas[target];
-  return aliased !== undefined && isArrayComponentEntry(aliased, schemas, seen);
+  const folded = foldSiblingProperties(schema);
+  const aliasOf = (ref: string | undefined): boolean => {
+    const key = ref === undefined ? undefined : componentKeyOf(ref);
+    const aliased = key === undefined ? undefined : schemas[key];
+    return aliased !== undefined && isArrayComponentEntry(aliased, schemas, seen);
+  };
+  if (folded.$ref) return aliasOf(folded.$ref);
+  if (classifyInlineSchema(folded) !== 'allOf' || !folded.allOf) return false;
+  const reading = readInlineAllOf(folded.allOf);
+  if (reading === 'reference') return aliasOf(folded.allOf.find((member) => member.$ref)?.$ref);
+  if (reading === 'unwrapped') {
+    return isArrayComponentEntry(unwrappedAllOfMember(folded, folded.allOf[0]), schemas, seen);
+  }
+  return false;
 }
 
-/**
- * The key of the component `schema` is an alias of, read as `schemaToTypeRef`
- * reads the same schema: a bare `$ref`'s target, or — once `properties`
- * written beside the composition are folded in (`foldSiblingProperties`) —
- * the first `$ref` member of an `allOf` none of whose members declares an
- * object inline (`isInlineAllOfMember`), the member `schemaToTypeRef` types
- * such an `allOf` as. `undefined` for every other schema, and for a `$ref`
- * into another section of the document.
- */
-function aliasTarget(schema: SchemaObject): string | undefined {
-  const folded = foldSiblingProperties(schema);
-  const ref =
-    folded.$ref ??
-    (classifyInlineSchema(folded) === 'allOf' && !folded.allOf?.some(isInlineAllOfMember)
-      ? folded.allOf?.find((member) => member.$ref)?.$ref
-      : undefined);
-  if (ref === undefined) return undefined;
+/** The `components/schemas` key a `$ref` names, or `undefined` for a `$ref` into another section of the document. */
+function componentKeyOf(ref: string): string | undefined {
   const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
   return match?.[1];
 }
