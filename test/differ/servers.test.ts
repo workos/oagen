@@ -629,6 +629,23 @@ describe('diffServers', () => {
       ).toEqual(['8443', '9443']);
     });
 
+    it('still reports a `/` added after a placeholder that supplies the path, on a non-first server too (Greptile)', () => {
+      const basePath = { basePath: { default: '/v1' } };
+      const templated = server('https://api.example.com{basePath}', basePath);
+      const slashed = server('https://api.example.com{basePath}/', basePath);
+      // Resolved: `/v1` vs `/v1/`. As servers[0] the move is reported on baseUrl
+      // too; after the first it is still a removal plus an addition.
+      expect(diffServers(spec([templated]), spec([slashed])).map((c) => c.kind)).toEqual([
+        'base-url-changed',
+        'server-added',
+        'server-removed',
+      ]);
+      expect(diffServers(spec([staging, templated]), spec([staging, slashed]))).toEqual([
+        { kind: 'server-added', url: 'https://api.example.com{basePath}/', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://api.example.com{basePath}', classification: 'breaking' },
+      ]);
+    });
+
     it('reports nothing for a baseUrl that only changed spelling while the template did not', () => {
       // The variable default moved from `EU` to `eu`: the resolved URL's host only
       // changed case, which is no move, while the default is reported as written.

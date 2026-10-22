@@ -165,8 +165,12 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  *   80, `https` and `wss` to 443). Any other port stays, and so does a port
  *   written as a placeholder.
  * - An empty path after an authority is `/` (`https://pets.example.com` and
- *   `https://pets.example.com/` are one server). Nothing else is done to the
- *   path: `/v1` and `/v1/` stay two servers, and dot-segments are kept.
+ *   `https://pets.example.com/` are one server), unless the authority ends in
+ *   a placeholder, which may itself supply the path
+ *   (`https://api.example.com{basePath}` with `basePath` defaulting to `/v1`
+ *   and `https://api.example.com{basePath}/` resolve to `/v1` and `/v1/`, so
+ *   they stay two servers). Nothing else is done to the path: `/v1` and
+ *   `/v1/` stay two servers, and dot-segments are kept.
  * - In a percent-encoded octet the hex digits are upper-cased (`%2f` is
  *   `%2F`) and one that encodes an unreserved character — a letter, a digit,
  *   `-`, `.`, `_` or `~` — is decoded (`%7E` is `~`). Every other octet is
@@ -177,9 +181,11 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  * variables) and a template is never confused with what it resolves to
  * (`https://{region}.api.example.com` and `https://eu.api.example.com` stay
  * two servers). A template that opens with a placeholder (`{scheme}://…`)
- * has no known scheme, so no port is dropped from it. A relative reference
- * (`/v1`, `//api.example.com/v1`) goes through the same rules from wherever
- * its syntax starts.
+ * has no known scheme, so no port is dropped from it; one whose authority
+ * ends in a placeholder (`https://{host}`, `https://api.example.com:{port}`)
+ * gets no `/` added, as above. A relative reference (`/v1`,
+ * `//api.example.com/v1`) goes through the same rules from wherever its
+ * syntax starts.
  */
 export function normalizeServerUrl(url: string): string {
   const units = templateUnits(url);
@@ -201,21 +207,29 @@ export function normalizeServerUrl(url: string): string {
     cursor = schemeEnd + 1;
   }
 
-  // Authority: after `//`, up to the first `/`, `?` or `#`.
+  // Authority: after `//`, up to the first `/`, `?` or `#`. A placeholder is
+  // never a boundary, so one inside the authority (`{region}.api.example.com`,
+  // `api.example.com:{port}`) belongs to it.
   let hasAuthority = false;
+  let authorityEndsWithPlaceholder = false;
   if (isLiteral(units[cursor], '/') && isLiteral(units[cursor + 1], '/')) {
     hasAuthority = true;
     const start = cursor + 2;
     cursor = start;
     while (cursor < units.length && !isLiteral(units[cursor], '/', '?', '#')) cursor++;
     out += '//' + normalizeAuthority(units.slice(start, cursor), scheme);
+    authorityEndsWithPlaceholder = cursor > start && units[cursor - 1].placeholder;
   }
 
-  // Path: up to the first `?` or `#`; `/` when an authority is followed by none.
+  // Path: up to the first `?` or `#`; `/` when a literal authority is followed
+  // by none. An authority that ends in a placeholder may already supply the
+  // path through it (`https://api.example.com{basePath}` with `basePath`
+  // defaulting to `/v1`), so nothing is added there and `…{basePath}` and
+  // `…{basePath}/` stay two templates.
   const pathStart = cursor;
   while (cursor < units.length && !isLiteral(units[cursor], '?', '#')) cursor++;
   const path = render(units.slice(pathStart, cursor), normalizePercentEncoding);
-  out += hasAuthority && path === '' ? '/' : path;
+  out += hasAuthority && !authorityEndsWithPlaceholder && path === '' ? '/' : path;
 
   // Query and fragment: kept as written, percent-encoding aside.
   out += render(units.slice(cursor), normalizePercentEncoding);
@@ -348,7 +362,8 @@ function isUnreserved(char: string): boolean {
  * Structural: the same length, and at each position the same `url` — up to
  * `normalizeServerUrl`, so a scheme or host that differs only in case, a
  * default port written or not, and a trailing `/` after a bare authority
- * are the same URL — and the same `description` and the same `variables`:
+ * are the same URL — resolving to the same URL up to `normalizeServerUrl`
+ * as well, and the same `description` and the same `variables`:
  * the same names, each with the same `default`, the same `enum` (same values
  * in the same order) and the same `description`, all compared as written.
  * Position matters because `servers[0]` is the one a client defaults to. A
@@ -370,6 +385,13 @@ export function serverListsEqual(a: readonly ServerEntry[], b: readonly ServerEn
 
 function serverEntriesEqual(a: ServerEntry, b: ServerEntry): boolean {
   if (normalizeServerUrl(a.url) !== normalizeServerUrl(b.url) || a.description !== b.description) return false;
+  // Conservative: the resolved URLs must agree in RFC 3986 form as well. With
+  // equal templates and equal variables they do by construction, except where
+  // a placeholder's value changes the URL's structure — `{host}` defaulting
+  // to `api.example.com/v1` makes `https://{host}:443` and
+  // `https://{host}:443/` one template (`https://{host}/`) but
+  // `/v1:443` and `/v1:443/` two paths.
+  if (normalizeServerUrl(resolveServerUrl(a).url) !== normalizeServerUrl(resolveServerUrl(b).url)) return false;
   const aVariables = a.variables ?? {};
   const bVariables = b.variables ?? {};
   const names = Object.keys(aVariables);
@@ -440,5 +462,8 @@ export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined
  * `servers[0]` resolved, or `''`).
  */
 export function isDefaultServerSet(spec: Pick<ApiSpec, 'baseUrl' | 'servers'>): boolean {
-  return isDefaultServerList(spec.servers) && (spec.baseUrl === '' || spec.baseUrl === DEFAULT_SERVER_URL);
+  // `baseUrl` is read through `normalizeServerUrl` like every other server
+  // URL comparison in this module; `''` and `/` are each their own form.
+  const baseUrl = normalizeServerUrl(spec.baseUrl);
+  return isDefaultServerList(spec.servers) && (baseUrl === '' || baseUrl === DEFAULT_SERVER_URL);
 }
