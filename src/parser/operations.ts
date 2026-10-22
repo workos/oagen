@@ -31,7 +31,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
+import { isJsonMediaType, isPlainJsonMediaType, mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -2610,8 +2610,15 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
   encoding: RequestBodyEncoding;
   schemaRequired: boolean;
 }> = [
-  { matches: (essence) => essence === 'application/json', encoding: 'json', schemaRequired: true },
-  { matches: (essence) => essence.endsWith('+json'), encoding: 'json', schemaRequired: true },
+  // The one JSON rule requests and responses share (`isJsonMediaType`), in
+  // the order `jsonResponseSchema` applies it: `application/json` itself
+  // first, then any `+json` type.
+  { matches: isPlainJsonMediaType, encoding: 'json', schemaRequired: true },
+  {
+    matches: (essence) => isJsonMediaType(essence) && !isPlainJsonMediaType(essence),
+    encoding: 'json',
+    schemaRequired: true,
+  },
   { matches: (essence) => essence === 'multipart/form-data', encoding: 'form-data', schemaRequired: true },
   {
     matches: (essence) => essence === 'application/x-www-form-urlencoded',
@@ -4475,9 +4482,11 @@ function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema
  */
 function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
   const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  // The one JSON rule requests and responses share (`isJsonMediaType`):
+  // `application/json` itself first, then any `+json` type.
   const match =
-    entries.find(([mediaType]) => mediaTypeEssence(mediaType) === 'application/json') ??
-    entries.find(([mediaType]) => mediaTypeEssence(mediaType).endsWith('+json'));
+    entries.find(([mediaType]) => isPlainJsonMediaType(mediaType)) ??
+    entries.find(([mediaType]) => isJsonMediaType(mediaType));
   return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 

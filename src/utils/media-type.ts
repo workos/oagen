@@ -13,6 +13,28 @@ export function mediaTypeEssence(contentType: string): string {
 }
 
 /**
+ * Whether a media type is `application/json` itself, by essence
+ * (`application/json; charset=utf-8`, `APPLICATION/JSON`): the JSON
+ * spelling a request body pick and a response body read prefer over a
+ * `+json` type declared beside it.
+ */
+export function isPlainJsonMediaType(contentType: string): boolean {
+  return mediaTypeEssence(contentType) === 'application/json';
+}
+
+/**
+ * Whether a media type is JSON by essence: `application/json` itself, or any
+ * type with the `+json` structured-syntax suffix (`application/vnd.api+json`,
+ * `application/merge-patch+json`, `application/problem+json`). The one rule
+ * for what a JSON body is, on a request and on a response alike; which JSON
+ * spelling wins when several are declared is `isPlainJsonMediaType`'s.
+ */
+export function isJsonMediaType(contentType: string): boolean {
+  const essence = mediaTypeEssence(contentType);
+  return essence === 'application/json' || essence.endsWith('+json');
+}
+
+/**
  * The PascalCase fragment that qualifies a model minted for a non-primary
  * media type among the `content` keys it is declared beside (`siblings`,
  * the key itself included or not): the essence's token (`text/html` →
