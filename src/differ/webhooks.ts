@@ -1,8 +1,10 @@
 import type { Parameter, Webhook } from '../ir/types.js';
+import { parameterKey } from '../ir/parameter-key.js';
 import type { Change, ParamChange } from './types.js';
 import {
   deprecationDetails,
   deprecationFlip,
+  parameterNameShift,
   requestBodyEncodingDetails,
   requestBodyEncodingShift,
   tagsShift,
@@ -176,11 +178,14 @@ function diffWebhookResponses(oldWebhook: Webhook, newWebhook: Webhook): { chang
  * Diff a webhook's header, query and cookie parameters from the receiver's
  * side, which inverts the request-side rules `classifyParamChange` applies
  * to an operation: the receiver reads these values and never supplies them.
- * Parameters are matched by location and name, since OpenAPI lets a header
- * and a query parameter share a name, and every change carries its
- * `paramLocation`.
+ * Parameters are matched on `parameterKey` — location and name, a header's
+ * name case-folded — since OpenAPI lets a header and a query parameter
+ * share a name, and every change carries its `paramLocation`.
  *
  * - added: additive, required or not — the sender simply starts carrying it.
+ * - name changed: only a header's case can (`X-Pet-Signature` →
+ *   `x-pet-signature`); additive, as on an operation — the wire reads it
+ *   the same (RFC 9110 §5.1).
  * - removed: breaking — handler code that read it has nothing to read.
  * - type changed: breaking; format-only changes are additive, as elsewhere.
  * - optional → required: additive (now always present);
@@ -192,8 +197,8 @@ function diffWebhookResponses(oldWebhook: Webhook, newWebhook: Webhook): { chang
  */
 function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChange[] {
   const changes: ParamChange[] = [];
-  const oldByKey = new Map(locatedParams(oldWebhook).map((e) => [`${e.loc}:${e.p.name}`, e]));
-  const newByKey = new Map(locatedParams(newWebhook).map((e) => [`${e.loc}:${e.p.name}`, e]));
+  const oldByKey = new Map(locatedParams(oldWebhook).map((e) => [parameterKey(e.loc, e.p.name), e]));
+  const newByKey = new Map(locatedParams(newWebhook).map((e) => [parameterKey(e.loc, e.p.name), e]));
 
   for (const [k, { p, loc }] of newByKey) {
     if (!oldByKey.has(k)) {
@@ -212,6 +217,17 @@ function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChang
     if (!oldEntry) continue;
     const oldParam = oldEntry.p;
     const name = newParam.name;
+
+    const renamed = parameterNameShift(oldParam, newParam);
+    if (renamed) {
+      changes.push({
+        kind: 'param-name-changed',
+        paramName: name,
+        classification: 'additive',
+        paramLocation: loc,
+        ...renamed,
+      });
+    }
 
     if (!typeRefsEqual(oldParam.type, newParam.type)) {
       if (primitivesDifferOnlyByFormat(oldParam.type, newParam.type)) {

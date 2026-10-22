@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Enum, HttpMethod, Model, Parameter, Service, TypeRef, Webhook, WebhookResponse } from '../ir/types.js';
 import { collectResponseHeaders, walkTypeRef } from '../ir/types.js';
+import { parameterKey } from '../ir/parameter-key.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef } from './schemas.js';
@@ -238,12 +239,12 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
       const label = `webhooks.${name}.${method}`;
       warnOnIgnoredCallbacks(op.callbacks, label);
       // Same precedence as buildOperation: an operation-level parameter replaces
-      // a path-item-level one of the same (in, name) identity, in the
-      // path-level position.
+      // a path-item-level one of the same identity (`parameterKey`: location
+      // and name, a header's name case-folded), in the path-level position.
       const paramsByIdentity = new Map<string, ParameterObject>();
       for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
         const param = resolveParameterRef(rawParam, components.parameters, label);
-        paramsByIdentity.set(`${param.in}:${param.name}`, param);
+        paramsByIdentity.set(parameterKey(param.in, param.name), param);
       }
       const params: ParameterObject[] = [];
       for (const param of paramsByIdentity.values()) {

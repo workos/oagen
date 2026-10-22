@@ -648,6 +648,14 @@ export interface Constraints {
 }
 
 export interface Parameter {
+  /**
+   * The name as the document wrote it (`X-Pet-Token`); emitters apply their
+   * own casing. A parameter's identity is its location and name —
+   * `parameterKey` in `ir/parameter-key.ts`, which compares a header's name
+   * case-insensitively (RFC 9110 §5.1) and every other as written. The
+   * parser merges a path item's parameters into its operations on that
+   * identity, and the differ pairs parameters on it.
+   */
   name: string;
   /**
    * The parameter schema's type. An inline object schema (a `deepObject`
@@ -1345,7 +1353,10 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
 /**
  * A header a response declares, typed like a parameter. `name` is kept exactly
  * as written in the spec (e.g. `Content-Disposition`); emitters apply their
- * own casing.
+ * own casing. Header names are case-insensitive (RFC 9110 §5.1), so one
+ * response declares each header once: of two keys that differ in case
+ * alone, the parser keeps the later (`foldHeaderName` in
+ * `ir/parameter-key.ts` decides which keys are one header).
  */
 export interface ResponseHeader {
   name: string;

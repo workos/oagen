@@ -9,6 +9,7 @@ import type {
   TypeRef,
 } from '../ir/types.js';
 import { resolveServerUrl } from '../ir/server-url.js';
+import { parameterKey } from '../ir/parameter-key.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 import { diffServers } from './servers.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
@@ -16,6 +17,7 @@ import {
   classifyParamChange,
   deprecationDetails,
   deprecationFlip,
+  parameterNameShift,
   requestBodyEncodingShift,
   tagsShift,
 } from './classify.js';
@@ -666,15 +668,16 @@ function classifyKeyedResponsesChange<K>(
 type ParamLocation = 'path' | 'query' | 'header';
 
 /**
- * The key `diffParams` matches parameters on. OpenAPI allows a path `id`
- * beside a query `id` on one operation, and keying by name alone paired
- * whichever came last on each side with the other's, so a change to one of
- * them was reported against the wrong parameter or not at all.
+ * Parameters are matched on `parameterKey` — location and name, a header's
+ * name case-folded. OpenAPI allows a path `id` beside a query `id` on one
+ * operation, and keying by name alone paired whichever came last on each
+ * side with the other's, so a change to one of them was reported against
+ * the wrong parameter or not at all. Header names are case-insensitive
+ * (RFC 9110 §5.1), so a header written `X-Pet-Token` on one side and
+ * `x-pet-token` on the other is one parameter, compared like any other and
+ * reported as `param-name-changed` (#295) rather than as a removal beside
+ * an addition.
  */
-function paramKey(loc: ParamLocation, name: string): string {
-  return `${loc}:${name}`;
-}
-
 function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
   const changes: ParamChange[] = [];
   const tagged = (loc: ParamLocation, params: typeof oldOp.queryParams) => params.map((p) => ({ p, loc }));
@@ -688,8 +691,8 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     ...tagged('query', newOp.queryParams),
     ...tagged('header', newOp.headerParams),
   ];
-  const oldByKey = new Map(allOldParams.map((e) => [paramKey(e.loc, e.p.name), e]));
-  const newByKey = new Map(allNewParams.map((e) => [paramKey(e.loc, e.p.name), e]));
+  const oldByKey = new Map(allOldParams.map((e) => [parameterKey(e.loc, e.p.name), e]));
+  const newByKey = new Map(allNewParams.map((e) => [parameterKey(e.loc, e.p.name), e]));
   // Every entry says where its parameter lives, since the name alone no
   // longer identifies it.
   const at = (change: ParamChange, loc: ParamLocation): ParamChange => {
@@ -714,6 +717,11 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     if (!oldEntry) continue;
     const name = newEntry.p.name;
     const loc = newEntry.loc;
+
+    const renamed = parameterNameShift(oldEntry.p, newEntry.p);
+    if (renamed) {
+      changes.push({ ...at(classifyParamChange('param-name-changed', name), loc), ...renamed });
+    }
 
     if (!typeRefsEqual(oldEntry.p.type, newEntry.p.type)) {
       if (primitivesDifferOnlyByFormat(oldEntry.p.type, newEntry.p.type)) {
