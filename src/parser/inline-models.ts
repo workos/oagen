@@ -842,7 +842,17 @@ export function mapValueSchema(schema: SchemaObject): SchemaObject | null {
   return patterns[0] ?? null;
 }
 
-function buildInlineModel(name: string, schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): Model {
+/**
+ * The model for an inline object: its properties as fields, typed under
+ * `name`, with its description and constraints. Shared with the named-union
+ * extractor in schemas.ts, which materializes a union's inline object variants
+ * exactly as the union branch below does.
+ */
+export function buildInlineModel(
+  name: string,
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): Model {
   const requiredSet = new Set(schema.required ?? []);
   const fields: Field[] = [];
   const siblings = collectProperties(schema);

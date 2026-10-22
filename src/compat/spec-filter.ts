@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs, collectResponseBodyTypes } from '../ir/types.js';
 import type { ApiSurface, LanguageHints } from './types.js';
 
 /**
@@ -44,14 +44,15 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
     }
   }
 
-  // Models → domain interface + language-specific derived names
+  // Models → domain interface + language-specific derived names, plus
+  // whatever their fields and named-union variants reference
   for (const model of spec.models) {
     names.add(model.name);
     for (const derived of hints.derivedModelNames(model.name)) {
       names.add(derived);
     }
-    for (const field of model.fields) {
-      collectTypeRefNames(field.type, names, hints, topLevelEnumNames);
+    for (const ref of collectModelTypeRefs(model)) {
+      collectTypeRefNames(ref, names, hints, topLevelEnumNames);
     }
   }
 

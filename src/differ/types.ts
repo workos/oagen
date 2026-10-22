@@ -119,6 +119,11 @@ export interface ModelModified {
   name: string;
   fieldChanges: FieldChange[];
   /**
+   * Changes to a named union's `variants` and `discriminator`
+   * (`Model.variants`). Present only when there is at least one.
+   */
+  variantChanges?: VariantChange[];
+  /**
    * The model's own `deprecated` flipped. Additive either way: the model and
    * its fields are unchanged. A model whose only change is this flag is still
    * reported, with an empty `fieldChanges`.
@@ -128,6 +133,18 @@ export interface ModelModified {
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
   classification: 'additive' | 'breaking';
+}
+
+export interface VariantChange {
+  kind: 'variant-added' | 'variant-removed' | 'discriminator-changed' | 'composition-changed';
+  /**
+   * The variant, as a short type label (`Cat`, `string`, `nullable<Cat>`,
+   * `array<Cat>`); the discriminator property for `discriminator-changed`;
+   * the new composition keyword for `composition-changed`.
+   */
+  variant: string;
+  classification: 'additive' | 'breaking';
+  details?: string;
 }
 
 export interface FieldChange {

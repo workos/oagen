@@ -639,10 +639,29 @@ export interface Model {
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
   /**
-   * When set, this model is a discriminated union over allOf+oneOf variants.
-   * Emitters should generate a dispatcher (factory) instead of a regular dataclass.
-   * The `property` field is the discriminator key (e.g. "event"), and `mapping`
-   * maps each discriminator value to the concrete variant model name.
+   * Set when the model is a named union: a component schema that is itself a
+   * `oneOf`/`anyOf` with no `properties` of its own. One TypeRef per non-null
+   * variant, in document order, built exactly as an inline union's are: a
+   * `$ref` variant is a `model`/`enum` ref, an inline object variant is a ref
+   * to a model extracted for it (named from this model with the inline
+   * variant rules, never this model's own name), a primitive stays a
+   * primitive. A `type: 'null'` variant is dropped, as an inline union lifts
+   * it into a `nullable` wrapper; a Model has no such wrapper. `fields` keeps
+   * the optional merge of the inline variants' properties it always had, so
+   * an emitter that does not read `variants` sees the same model as before.
+   */
+  variants?: TypeRef[];
+  /** Which composition keyword produced `variants`. Present exactly when `variants` is. */
+  compositionKind?: 'oneOf' | 'anyOf';
+  /**
+   * When set, this model is a discriminated union — over its `variants` (a
+   * named `oneOf`/`anyOf` with a `discriminator:` keyword or a const-pinned
+   * property shared by every variant) or over allOf+oneOf variants (where
+   * `variants` is absent and the mapping alone names them). Emitters should
+   * generate a dispatcher (factory) instead of a regular dataclass. The
+   * `property` field is the discriminator key (e.g. "event"), and `mapping`
+   * maps each discriminator value to the concrete variant model name (an IR
+   * model name, after `schemaNameTransform`).
    */
   discriminator?: {
     property: string;
@@ -851,6 +870,43 @@ export function mapTypeRef<T>(
 // --- IR traversal utilities ---
 
 /**
+ * Every TypeRef a model owns: each field's type, then each union variant
+ * (`Model.variants`). Every pass that walks a model's type refs (reachability,
+ * service assignment, ref rewriting and validation, dependency collection,
+ * inline-enum promotion, fingerprinting) goes through this so a type reached
+ * only through a named union's variant is treated the way a field type is.
+ */
+export function collectModelTypeRefs(model: Model): TypeRef[] {
+  return [...model.fields.map((field) => field.type), ...(model.variants ?? [])];
+}
+
+/**
+ * Rename the models a model refers to: every `model` ref in its fields' types
+ * and its union variants, and every `discriminator.mapping` target, that
+ * `renames` maps is pointed at the new name. Each reference is looked up
+ * once, so a map `{ A → B, B → C }` moves `A` to `B`, never on to `C`. The
+ * model's own `name` is left to the caller. Every rename and fold site goes
+ * through this, so a dispatcher's mapping can never keep naming a model that
+ * was renamed away while its variants moved on.
+ */
+export function renameModelRefs(model: Model, renames: ReadonlyMap<string, string>): void {
+  for (const ref of collectModelTypeRefs(model)) {
+    walkTypeRef(ref, {
+      model: (r) => {
+        const renamed = renames.get(r.name);
+        if (renamed !== undefined) r.name = renamed;
+      },
+    });
+  }
+  const mapping = model.discriminator?.mapping;
+  if (!mapping) return;
+  for (const [value, target] of Object.entries(mapping)) {
+    const renamed = renames.get(target);
+    if (renamed !== undefined) mapping[value] = renamed;
+  }
+}
+
+/**
  * Collect all model names referenced (directly or transitively) by a TypeRef.
  */
 export function collectModelRefs(ref: TypeRef): string[] {
@@ -869,7 +925,8 @@ export function collectEnumRefs(ref: TypeRef): string[] {
 }
 
 /**
- * Collect all TypeRef-referenced model and enum names from a model's fields.
+ * Collect all TypeRef-referenced model and enum names from a model's fields
+ * and, for a named union, its variants.
  * Returns { models, enums } sets for generating import statements.
  */
 export function collectFieldDependencies(model: Model): {
@@ -879,11 +936,11 @@ export function collectFieldDependencies(model: Model): {
   const models = new Set<string>();
   const enums = new Set<string>();
 
-  for (const field of model.fields) {
-    for (const name of collectModelRefs(field.type)) {
+  for (const ref of collectModelTypeRefs(model)) {
+    for (const name of collectModelRefs(ref)) {
       if (name !== model.name) models.add(name);
     }
-    for (const name of collectEnumRefs(field.type)) {
+    for (const name of collectEnumRefs(ref)) {
       enums.add(name);
     }
   }
@@ -965,13 +1022,14 @@ export function assignModelsToServices(
     }
 
     // Transitively collect models referenced by the directly-referenced models
+    // (through their fields and, for a named union, its variants)
     const toVisit = [...referencedModels];
     while (toVisit.length > 0) {
       const name = toVisit.pop()!;
       const model = models.find((m) => m.name === name);
       if (!model) continue;
-      for (const field of model.fields) {
-        for (const ref of collectModelRefs(field.type)) {
+      for (const typeRef of collectModelTypeRefs(model)) {
+        for (const ref of collectModelRefs(typeRef)) {
           if (!referencedModels.has(ref) && modelNames.has(ref)) {
             referencedModels.add(ref);
             toVisit.push(ref);

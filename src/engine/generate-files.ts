@@ -1,5 +1,11 @@
 import type { ApiSpec, Model, TypeRef, Service, Operation, Webhook } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes, collectWebhookTypeRefs } from '../ir/types.js';
+import {
+  walkTypeRef,
+  collectResponseHeaders,
+  collectModelTypeRefs,
+  collectResponseBodyTypes,
+  collectWebhookTypeRefs,
+} from '../ir/types.js';
 import type { OperationHint } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
@@ -218,8 +224,10 @@ export function collectReferencedNames(
         }
       }
     }
-    for (const field of model.fields) {
-      collectFromTypeRef(field.type);
+    // Fields and, for a named union, its variants: a union alias dangles
+    // without the models it is a union of.
+    for (const ref of collectModelTypeRefs(model)) {
+      collectFromTypeRef(ref);
       // If new models were discovered, enqueue them
       for (const m of referencedModels) {
         if (!visited.has(m)) queue.push(m);

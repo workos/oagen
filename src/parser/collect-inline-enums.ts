@@ -1,11 +1,17 @@
 import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef, Webhook } from '../ir/types.js';
-import { walkTypeRef, collectResponseBodyTypes, collectModelRefs, collectWebhookTypeRefs } from '../ir/types.js';
+import {
+  walkTypeRef,
+  collectModelTypeRefs,
+  collectResponseBodyTypes,
+  collectModelRefs,
+  collectWebhookTypeRefs,
+} from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { STATUS_RANGE_LABELS } from './responses.js';
 
 /**
- * Promote the inline enums a model's fields declare to top-level enums. A
- * field enum is named from its model and field alone
+ * Promote the inline enums a model's fields and named-union variants
+ * declare to top-level enums. A field enum is named from its model and field alone
  * (`GetReportResponseStatus`, `ListPetsDefaultResponseStatus`), a name a
  * component enum — or the same field of another model — may already own with
  * other values; such a field is renamed to a distinct name before it is
@@ -16,8 +22,8 @@ import { STATUS_RANGE_LABELS } from './responses.js';
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
   for (const model of models) {
-    for (const field of model.fields) {
-      collectDistinctEnums(field.type, undefined, enums, enumNames);
+    for (const ref of collectModelTypeRefs(model)) {
+      collectDistinctEnums(ref, undefined, enums, enumNames);
     }
   }
 }
