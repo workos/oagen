@@ -4163,6 +4163,146 @@ describe('a title two unions give different shapes at different depths of one ro
       markContestedTitles(undefined);
       expect(variantsOf(top).map(isContestedTitle)).toEqual([false, false]);
     });
+
+    it('reads a union object two roots share under each root, whichever root comes first (Greptile)', () => {
+      // One union object as the request body's `shape` and the response's,
+      // beside a deeper `marker.shape` of other shapes in the response only.
+      // The response root contests the titles, so the shared variants are
+      // marked — not hidden because the body root read the object first.
+      for (const responseFirst of [false, true]) {
+        const shared = byRadius();
+        const deeper = byDiameter();
+        const requestBody = { content: { 'application/json': { schema: obj({ shape: shared }) } } };
+        const responses = {
+          '200': {
+            content: { 'application/json': { schema: obj({ shape: shared, marker: obj({ shape: deeper }) }) } },
+          },
+        };
+        markContestedTitles({
+          paths: { '/d': { post: responseFirst ? { responses, requestBody } : { requestBody, responses } } },
+        });
+        expect(variantsOf(shared).map(isContestedTitle)).toEqual([true, true]);
+        expect(variantsOf(deeper).map(isContestedTitle)).toEqual([true, true]);
+      }
+    });
+
+    it('a shared union object no root contests stays uncontested', () => {
+      const shared = byRadius();
+      const alike = byRadius();
+      markContestedTitles({
+        paths: {
+          '/d': {
+            post: {
+              requestBody: { content: { 'application/json': { schema: obj({ shape: shared }) } } },
+              responses: {
+                '200': {
+                  content: {
+                    'application/json': { schema: obj({ shape: shared, marker: obj({ shape: alike }) }) },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(variantsOf(shared).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(alike).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('reads only the first variant of a union to carry a title: a later one never keeps it anyway', () => {
+      // One union giving `Circle` two shapes: the second falls back through
+      // `emitted` whatever the document holds, so it claims nothing and the
+      // first keeps `Circle` — the rule `nameInlineVariantEntries` has always
+      // applied within a union.
+      const twice: SchemaObject = { oneOf: [circle({ radius: n }), circle({ diameter: n })] };
+      markContestedTitles({ components: { schemas: { Drawing: obj({ shape: twice }) } } });
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([false, false]);
+      // A second union whose `Circle` has the later variant's shape contests
+      // the first variant's, not the later one's.
+      const other = byDiameter();
+      markContestedTitles({
+        components: { schemas: { Drawing: obj({ shape: twice, marker: obj({ shape: other }) }) } },
+      });
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([true, false]);
+      expect(variantsOf(other).map(isContestedTitle)).toEqual([true, false]);
+    });
+
+    it('ends on a schema that refers back to itself, within a root and across the document', () => {
+      // A root whose property is the root itself, with a conflict further
+      // down; a component that contains itself; and a document that refers
+      // back to its own top level from inside a media type.
+      const top = byRadius();
+      const inner = byDiameter();
+      const root = obj({ shape: top, marker: obj({ shape: inner }) });
+      root.properties!['self'] = root;
+      const node: SchemaObject = obj({ shape: byRadius() });
+      node.properties!['child'] = node;
+      const mediaType: Record<string, unknown> = { schema: root };
+      const document = {
+        paths: { '/d': { get: { responses: { '200': { content: { 'application/json': mediaType } } } } } },
+        components: { schemas: { Node: node } },
+      };
+      mediaType['document'] = document;
+      markContestedTitles(document);
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(node.properties!['shape']!).map(isContestedTitle)).toEqual([false, false]);
+    });
+  });
+
+  it('qualifies a union object `transformSpec` shares between a request body and a response (Greptile)', async () => {
+    const spec = doc({
+      paths: {
+        '/drawings': {
+          post: {
+            operationId: 'createDrawing',
+            requestBody: json(obj({ shape: byRadius() })),
+            responses: { '200': { description: 'ok', ...json(nested(byRadius(), byDiameter())) } },
+          },
+        },
+      },
+    });
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-inline-models-'));
+    const specFile = path.join(tmpDir, 'spec.json');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
+      const ir = await parseSpec(specFile, {
+        transformSpec: (document) => {
+          // The response's `shape` becomes the very object the body's is.
+          type Node = Record<string, unknown>;
+          const operation = ((document['paths'] as Node)['/drawings'] as Node)['post'] as Node;
+          const schemaOf = (owner: Node): SchemaObject =>
+            ((owner['content'] as Node)['application/json'] as Node)['schema'] as SchemaObject;
+          const body = schemaOf(operation['requestBody'] as Node);
+          const response = schemaOf((operation['responses'] as Node)['200'] as Node);
+          response.properties!['shape'] = body.properties!['shape'];
+          return document;
+        },
+      });
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      // Contested in the response root, so the shared union is qualified
+      // under both roots; the deeper union is qualified with it.
+      expect(types['CreateDrawingRequest']).toEqual({
+        shape: unionOf('CircleCreateDrawingRequestShape', 'SquareCreateDrawingRequestShape'),
+      });
+      expect(types['CreateDrawingResponse']).toEqual({
+        shape: unionOf('CircleCreateDrawingResponseShape', 'SquareCreateDrawingResponseShape'),
+        marker: model('CreateDrawingResponseMarker'),
+      });
+      expect(types['CreateDrawingResponseMarker']).toEqual({
+        shape: unionOf('CircleCreateDrawingResponseMarkerShape', 'SquareCreateDrawingResponseMarkerShape'),
+      });
+      expect(types['CircleCreateDrawingRequestShape']).toEqual({ ...kind('circle'), radius: num });
+      expect(types['CircleCreateDrawingResponseShape']).toEqual({ ...kind('circle'), radius: num });
+      expect(types['CircleCreateDrawingResponseMarkerShape']).toEqual({ ...kind('circle'), diameter: num });
+      expect(ir.models.some((m) => m.name === 'Circle' || m.name === 'Square')).toBe(false);
+      expectConsistent(ir, ['CreateDrawingRequest', 'CreateDrawingResponse']);
+    } finally {
+      warnSpy.mockRestore();
+      await fs.rm(tmpDir, { recursive: true });
+    }
   });
 
   describe('the extractor never drops a variant of another shape silently', () => {

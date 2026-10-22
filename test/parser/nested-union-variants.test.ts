@@ -598,11 +598,127 @@ describe("a discriminated allOf + oneOf variant's field", () => {
   });
 });
 
+describe('a title-mapped nested union (Greptile round 1)', () => {
+  // Every variant titled and pinning the same const: `nameInlineVariants`
+  // names them by their titles, which are context-free — the same under
+  // every context — so no step applies, but the models must still be built.
+  const titledA = obj({ kind: { const: 'a' }, a: str }, { title: 'A' });
+  const titledB = obj({ kind: { const: 'b' }, b: str }, { title: 'B' });
+  const titledUnion: SchemaObject = { oneOf: [titledA, titledB] };
+
+  it("the finding's shape: two titled objects beside `{ message }` — `A` and `B` are built and the nested mapping points at them", async () => {
+    const { spec, warnings } = await parse('titled', everySite({ oneOf: [message, titledUnion] }));
+    expect(siteTypes(spec)).toEqual({
+      body: '(CreateThingRequest | (A | B))',
+      response: '(CreateThingResponse | (A | B))',
+      error: '(CreateThingError400 | (A | B))',
+      field: '(HolderPayload | (A | B))',
+    });
+    expect(fieldsOf(spec, 'A')).toEqual(['kind', 'a']);
+    expect(fieldsOf(spec, 'B')).toEqual(['kind', 'b']);
+    expect(opsOf(spec)['createThing']!.errors[0]!.type).toMatchObject({
+      variants: [{}, { kind: 'union', discriminator: { property: 'kind', mapping: { a: 'A', b: 'B' } } }],
+    });
+    expect(warnings).toEqual([]);
+    expectSound(spec, everySiteComponents);
+  });
+
+  const cases: Array<{
+    label: string;
+    schema: SchemaObject;
+    type: (base: string) => string;
+    models: (base: string) => Record<string, string[]>;
+  }> = [
+    {
+      label: 'beside only a primitive',
+      schema: { oneOf: [str, titledUnion] },
+      type: () => '(string | (A | B))',
+      models: () => ({ A: ['kind', 'a'], B: ['kind', 'b'] }),
+    },
+    {
+      label:
+        'under an anyOf, which is never title-mapped: the titles name nothing, the const prefixes and the position do',
+      schema: { anyOf: [message, { anyOf: [titledA, titledB] }] },
+      type: (base) => `(${base} | (${base}Variant2 | B${base}Variant2))`,
+      models: (base) => ({
+        [base]: ['message'],
+        [`${base}Variant2`]: ['kind', 'a'],
+        [`B${base}Variant2`]: ['kind', 'b'],
+      }),
+    },
+    {
+      label: 'as the items of an array variant',
+      schema: { oneOf: [message, { type: 'array', items: titledUnion }] },
+      type: (base) => `(${base} | (A | B)[])`,
+      models: (base) => ({ [base]: ['message'], A: ['kind', 'a'], B: ['kind', 'b'] }),
+    },
+    {
+      label: 'two levels down, under a nested union that stepped',
+      schema: { oneOf: [message, { oneOf: [obj({ x: str }), titledUnion] }] },
+      type: (base) => `(${base} | (${base}Variant2 | (A | B)))`,
+      models: (base) => ({ [base]: ['message'], [`${base}Variant2`]: ['x'], A: ['kind', 'a'], B: ['kind', 'b'] }),
+    },
+    {
+      label: 'with one title already taken by an earlier variant: that variant falls back to a context-qualified name',
+      schema: { oneOf: [message, { oneOf: [titledA, obj({ kind: { const: 'a2' }, z: str }, { title: 'A' })] }] },
+      type: (base) => `(${base} | (A | A${base}))`,
+      models: (base) => ({ [base]: ['message'], A: ['kind', 'a'], [`A${base}`]: ['kind', 'z'] }),
+    },
+  ];
+
+  it.each(cases)('$label', async ({ label, schema, type, models }) => {
+    const { spec, warnings } = await parse(label.replace(/\W+/g, '-'), everySite(schema));
+    expect(siteTypes(spec)).toEqual(
+      Object.fromEntries(Object.entries(siteBases).map(([site, base]) => [site, type(base)])),
+    );
+    for (const base of Object.values(siteBases)) {
+      for (const [name, fields] of Object.entries(models(base))) expect(fieldsOf(spec, name)).toEqual(fields);
+    }
+    expect(warnings).toEqual([]);
+    expectSound(spec, everySiteComponents);
+  });
+
+  it('a title that names a component is treated exactly as a field-level union treats it: the component wins, with the same warning', async () => {
+    const titledComp = obj({ kind: { const: 'c' }, c: str }, { title: 'Comp' });
+    const comp = { Comp: obj({ id: str }) };
+    const nested = await parse(
+      'titled-component-nested',
+      specDoc({}, { ...comp, Thing: obj({ shape: { oneOf: [message, { oneOf: [titledComp, titledB] }] } }) }),
+    );
+    const flat = await parse(
+      'titled-component-flat',
+      specDoc({}, { ...comp, Thing: obj({ shape: { oneOf: [titledComp, titledB] } }) }),
+    );
+    expect(render(fieldType(nested.spec, 'Thing', 'shape')!)).toBe('(ThingShape | (Comp | B))');
+    expect(render(fieldType(flat.spec, 'Thing', 'shape')!)).toBe('(Comp | B)');
+    for (const { spec, warnings } of [nested, flat]) {
+      expect(fieldsOf(spec, 'Comp')).toEqual(['id']);
+      expect(fieldsOf(spec, 'B')).toEqual(['kind', 'b']);
+      expect(warnings).toEqual([
+        '[oagen] Warning: Inline model "Comp" has different fields than component schema — using component schema',
+      ]);
+      expectSound(spec, ['Comp', 'Thing']);
+    }
+  });
+});
+
 describe('nonObjectVariantContexts', () => {
   const nested: SchemaObject = { oneOf: [a, b] };
   const arr: SchemaObject = { type: 'array', items: b };
   const ref: SchemaObject = { $ref: '#/components/schemas/Base' };
   const nul: SchemaObject = { type: 'null' };
+
+  it('maps a nested title-mapped union under the field context: its names are context-free, so nothing could claim them away', () => {
+    const titled: SchemaObject = {
+      oneOf: [
+        obj({ kind: { const: 'a' }, a: str }, { title: 'A' }),
+        obj({ kind: { const: 'b' }, b: str }, { title: 'B' }),
+      ],
+    };
+    expect([
+      ...nonObjectVariantContexts('shape', [message, titled], undefined, 'Thing', new Map([[message, 'ThingShape']])),
+    ]).toEqual([[titled, 'shape']]);
+  });
 
   it('maps every variant that mints a name and is not an inline object; a `$ref`, a primitive and `null` get no entry', () => {
     const contexts = nonObjectVariantContexts(
