@@ -239,7 +239,10 @@ export interface Operation {
    * document's: the operation's own `servers`, else its Path Item's (OpenAPI
    * precedence). Absent when the operation inherits `ApiSpec.servers` — it
    * declares none at either level, or what it declares is the document's list
-   * again (same URLs, descriptions and variables, in the same order). Same
+   * again (same URLs, descriptions and variables, in the same order), or both
+   * it and the document mean OpenAPI's default server (no servers,
+   * `servers: []`, or `/` alone without variables, whatever its description;
+   * `isDefaultServerList` in `ir/server-url.ts`). Same
    * shape as `ApiSpec.servers`, variables included, so `resolveServerUrl`
    * from `ir/server-url.ts` fills a template's defaults the way `baseUrl` was
    * produced. To find where a request goes, take `op.servers ?? spec.servers`.

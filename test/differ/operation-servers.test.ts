@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { resolve } from 'node:path';
 import { diffOperations, type DocumentServers } from '../../src/differ/operations.js';
 import { diffServices } from '../../src/differ/services.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import type { Change } from '../../src/differ/types.js';
 import type { ApiSpec, Operation, ServerEntry } from '../../src/ir/types.js';
 
@@ -316,6 +318,83 @@ describe('diffOperations – servers (issue #251)', () => {
       expect(operationChanges(report.changes)).toHaveLength(1);
       expect(operationChanges(report.changes)[0]).toMatchObject({ serversChanged: true, classification: 'breaking' });
       expect(report.summary.breaking).toBeGreaterThanOrEqual(1);
+    });
+  });
+});
+
+/**
+ * OpenAPI's default server at operation level (issue #291, the comment): an
+ * operation that writes `/` out and one that inherits a document without
+ * servers are served from the same place, so neither is a change to the other.
+ */
+describe("diffOperations – servers: OpenAPI's default (issue #291)", () => {
+  const fixtures = resolve(import.meta.dirname, '../fixtures');
+  const root: ServerEntry[] = [{ url: '/' }];
+  const described: ServerEntry[] = [{ url: '/', description: 'Same origin' }];
+
+  it('reports nothing when an operation gains or loses `/` written out under documents without servers', () => {
+    expect(diffOperations('Pets', [withServers()], [withServers(root)], documents(undefined, undefined))).toHaveLength(
+      0,
+    );
+    expect(diffOperations('Pets', [withServers(root)], [withServers()], documents(undefined, undefined))).toHaveLength(
+      0,
+    );
+  });
+
+  it('reports nothing without the documents either: no servers is the default', () => {
+    expect(diffOperations('Pets', [withServers()], [withServers(root)])).toHaveLength(0);
+    expect(diffOperations('Pets', [withServers(root)], [withServers()])).toHaveLength(0);
+  });
+
+  it('reports nothing when the document writes `/` out on one side and declares nothing on the other', () => {
+    expect(diffOperations('Pets', [withServers(root)], [withServers()], documents(undefined, root))).toHaveLength(0);
+    expect(diffOperations('Pets', [withServers()], [withServers(root)], documents(root, undefined))).toHaveLength(0);
+  });
+
+  it('ignores a description on the `/` entry, as on any server', () => {
+    expect(
+      diffOperations('Pets', [withServers()], [withServers(described)], documents(undefined, undefined)),
+    ).toHaveLength(0);
+    expect(
+      diffOperations('Pets', [withServers(described)], [withServers(root)], documents(undefined, undefined)),
+    ).toHaveLength(0);
+  });
+
+  it('reports an operation that moves from `/` written out to a named host, and back', () => {
+    expect(
+      change(diffOperations('Pets', [withServers(root)], [withServers(pets)], documents(undefined, undefined))),
+    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+    expect(
+      change(diffOperations('Pets', [withServers(pets)], [withServers(root)], documents(undefined, undefined))),
+    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+  });
+
+  it('reports an operation that gains `/` under a document that names a host', () => {
+    expect(change(diffOperations('Pets', [withServers()], [withServers(root)], documents(api, api)))).toMatchObject({
+      kind: 'operation-modified',
+      serversChanged: true,
+      classification: 'breaking',
+    });
+  });
+
+  it('reports an operation that keeps `/` while its document moves from nothing to a named host', () => {
+    // Served from `/` on both sides; the document-level diff reports the document.
+    expect(diffOperations('Pets', [withServers(root)], [withServers(root)], documents(undefined, api))).toHaveLength(0);
+    // Inherits on both sides: the document-level diff's to report, as before.
+    expect(diffOperations('Pets', [withServers()], [withServers()], documents(undefined, api))).toHaveLength(0);
+  });
+
+  describe("the comment's documents", () => {
+    it('reports no change when an operation writes `/` out under a document without servers', async () => {
+      const [none, slash] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-default-operation-none.json')),
+        parseSpec(resolve(fixtures, 'servers-default-operation-root.json')),
+      ]);
+      expect(slash.servers).toBeUndefined();
+      expect(slash.services[0].operations[0].servers).toBeUndefined();
+
+      expect(diffSpecs(none, slash).changes).toEqual([]);
+      expect(diffSpecs(slash, none).changes).toEqual([]);
     });
   });
 });

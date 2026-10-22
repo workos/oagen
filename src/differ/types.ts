@@ -333,6 +333,8 @@ export interface OperationModified {
    * on both sides is unchanged: the operation inherits twice, and a moved
    * document is the document-level diff's to report. So a document that moves
    * to where an operation already pointed is not a change to that operation.
+   * OpenAPI's default server is one list however it is spelled (#291): no
+   * servers and `/` alone without variables are served from the same place.
    */
   serversChanged: boolean;
   /**
@@ -545,18 +547,21 @@ export interface ParamChange {
  * requests somewhere else. Reported once per diff whatever moved it: a
  * changed `servers[0]` template (also a `server-removed` plus a
  * `server-added`), a changed variable default (also a `server-modified`), a
- * reordered list, or a `servers` list that appeared or disappeared.
+ * reordered list, or a `servers` list that appeared or disappeared. A
+ * document that declares no server and one whose only server is `/` without
+ * variables both have OpenAPI's default server and no default host, so
+ * nothing is reported between them (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** `''` when the old document declared no server. */
+  /** `''` when the old document declared no server; `/` when it wrote OpenAPI's default out, which means the same. */
   oldBaseUrl: string;
-  /** `''` when the new document declares no server. */
+  /** `''` when the new document declares no server; `/` when it writes OpenAPI's default out, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
-   * document declared no server: every existing caller had to name a host
-   * themselves and still can.
+   * document declared no server, or only `/`: every existing caller had to
+   * name a host themselves and still can.
    */
   classification: 'additive' | 'breaking';
 }
