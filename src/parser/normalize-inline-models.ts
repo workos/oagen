@@ -282,6 +282,25 @@ function adoptShape(target: Model, source: Model): void {
   else delete target.discriminator;
 }
 
+/**
+ * A `…Json` model's variant as the fold would leave it on the base: every
+ * model reference the fold renames — the `…Json` model itself (pass 2) and
+ * every `<Json>…`-prefixed child (pass 3) — read under the base's prefix, and
+ * nothing else. The fold renames no enum and rewrites no literal, so an enum
+ * reference and a `const` value are compared as they are: a `PetJsonState`
+ * enum beside a `PetState` one, or a `PetJsonA` literal beside `PetA`, is a
+ * different shape, and the base keeps the values its operations accept.
+ */
+function foldedVariantKey(ref: TypeRef, jsonName: string, baseName: string): string {
+  const folded = structuredClone(ref);
+  walkTypeRef(folded, {
+    model: (r) => {
+      if (r.name.startsWith(jsonName)) r.name = baseName + r.name.slice(jsonName.length);
+    },
+  });
+  return JSON.stringify(folded);
+}
+
 export function collapseJsonSuffixModels(models: Model[], services: Service[], webhooks: Webhook[] = []): Model[] {
   const normalizedModels = [...models];
   const byName = new Map(normalizedModels.map((m) => [m.name, m]));
@@ -311,11 +330,14 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
     // turn the dispatcher into a plain object, or swap its variants or rules,
     // under operations that already use it (two undiscriminated unions share
     // the rules `oneOf` while dispatching to different members). A Json
-    // model's variants are read under the base's name, as pass 3 renames
-    // them, so `PetJsonWithName` matches `PetWithName`. Identical shapes fold
-    // as before.
+    // model's variants are read as the fold would leave them
+    // (`foldedVariantKey`): its model references under the base's name, as
+    // pass 3 renames them, so `PetJsonWithName` matches `PetWithName`; an
+    // enum or a literal as it is, since the fold renames neither, so a
+    // `PetJsonState` enum beside `PetState` is a different union. Identical
+    // shapes fold as before.
     const baseShape = unionShapeKey(baseModel, (v) => JSON.stringify(v));
-    const jsonShape = unionShapeKey(model, (v) => JSON.stringify(v).split(`"${model.name}`).join(`"${baseName}`));
+    const jsonShape = unionShapeKey(model, (v) => foldedVariantKey(v, model.name, baseName));
     if (baseShape !== '' && baseShape !== jsonShape) {
       console.warn(
         `[oagen] Warning: Json-suffix model "${model.name}" does not preserve the union rules of "${baseName}" — keeping both`,

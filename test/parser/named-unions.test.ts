@@ -1497,3 +1497,158 @@ ${animals}`);
     }
   });
 });
+
+describe('named unions: the Json fold reads enums and literals as they are', () => {
+  // The fold renames model references only — `PetJson` → `Pet`, and every
+  // `PetJson…` child → `Pet…` — so only those are compared under the base's
+  // name. An enum or a literal the Json union references is what the base
+  // would be handed as is.
+  const str = (name: string) => ({ name, type: { kind: 'primitive', type: 'string' } as TypeRef, required: false });
+  const enumRef = (name: string): TypeRef => ({ kind: 'enum', name });
+  const literal = (value: string): TypeRef => ({ kind: 'literal', value });
+
+  it('refuses to fold a Json union onto a base when they reference different enums', async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    const pet: Model = {
+      name: 'Pet',
+      fields: [str('a')],
+      variants: [enumRef('PetState'), modelRef('PetWithA')],
+      compositionKind: 'oneOf',
+    };
+    const petJson: Model = {
+      name: 'PetJson',
+      fields: [str('a'), str('b')],
+      variants: [enumRef('PetJsonState'), modelRef('PetJsonWithA')],
+      compositionKind: 'oneOf',
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kept = collapseJsonSuffixModels([pet, petJson], []);
+      expect(kept.map((m) => m.name)).toEqual(['Pet', 'PetJson']);
+      expect(kept[0]?.variants).toEqual([enumRef('PetState'), modelRef('PetWithA')]);
+      expect(kept[0]?.fields.map((f) => f.name)).toEqual(['a']);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Json-suffix model "PetJson" does not preserve the union rules of "Pet" — keeping both',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('refuses to fold a Json union onto a base when they pin different literals', async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    const pet: Model = {
+      name: 'Pet',
+      fields: [str('a')],
+      variants: [literal('PetA'), modelRef('PetWithA')],
+      compositionKind: 'oneOf',
+    };
+    const petJson: Model = {
+      name: 'PetJson',
+      fields: [str('a'), str('b')],
+      variants: [literal('PetJsonA'), modelRef('PetJsonWithA')],
+      compositionKind: 'oneOf',
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kept = collapseJsonSuffixModels([pet, petJson], []);
+      expect(kept.map((m) => m.name)).toEqual(['Pet', 'PetJson']);
+      expect(kept[0]?.variants).toEqual([literal('PetA'), modelRef('PetWithA')]);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still folds a Json union that references the same enum and literal beside its renamed models', async () => {
+    const { collapseJsonSuffixModels } = await import('../../src/parser/normalize-inline-models.js');
+    const pet: Model = {
+      name: 'Pet',
+      fields: [str('a')],
+      variants: [
+        enumRef('PetState'),
+        literal('PetA'),
+        modelRef('PetWithA'),
+        { kind: 'array', items: modelRef('PetItem') },
+      ],
+      compositionKind: 'oneOf',
+    };
+    const petJson: Model = {
+      name: 'PetJson',
+      fields: [str('a'), str('b')],
+      variants: [
+        enumRef('PetState'),
+        literal('PetA'),
+        modelRef('PetJsonWithA'),
+        { kind: 'array', items: modelRef('PetJsonItem') },
+      ],
+      compositionKind: 'oneOf',
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const kept = collapseJsonSuffixModels([pet, petJson], []);
+      expect(kept.map((m) => m.name)).toEqual(['Pet']);
+      expect(kept[0]?.fields.map((f) => f.name)).toEqual(['a', 'b']);
+      expect(kept[0]?.variants).toEqual(petJson.variants);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps a Pet that accepts PetState apart from a PetJson that accepts PetJsonState', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseInline(`
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Pet' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PetJson' }
+components:
+  schemas:
+    PetState: { type: string, enum: [asleep] }
+    PetJsonState: { type: string, enum: [asleep, awake] }
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/PetState'
+        - type: object
+          properties:
+            a: { type: string }
+    PetJson:
+      oneOf:
+        - $ref: '#/components/schemas/PetJsonState'
+        - type: object
+          properties:
+            a: { type: string }
+            b: { type: string }
+`);
+      const pet = model(ir, 'Pet');
+      expect(pet.variants).toEqual([enumRef('PetState'), modelRef('PetWithA')]);
+      expect(pet.fields.map((f) => f.name)).toEqual(['a']);
+      expect(model(ir, 'PetWithA').fields.map((f) => f.name)).toEqual(['a']);
+      const petJson = model(ir, 'PetJson');
+      expect(petJson.variants).toEqual([enumRef('PetJsonState'), modelRef('PetJsonWithA')]);
+      expect(model(ir, 'PetJsonWithA').fields.map((f) => f.name)).toEqual(['a', 'b']);
+      expect(ir.services[0]?.operations[0]?.requestBody).toEqual(modelRef('Pet'));
+      expect(ir.services[0]?.operations[0]?.response).toEqual(modelRef('PetJson'));
+      expect(unresolvedRefs(ir)).toEqual([]);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Json-suffix model "PetJson" does not preserve the union rules of "Pet" — keeping both',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
