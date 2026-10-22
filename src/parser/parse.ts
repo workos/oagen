@@ -30,6 +30,7 @@ import { extractSecurityRequirements, type RawSecurityRequirements } from './sec
 import { extractServers, type RawServerObject } from './servers.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 import type { SchemaNameTransform } from './schemas.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 
 /**
  * A bundled OpenAPI document, post-`$ref` resolution but pre-IR extraction.
@@ -57,6 +58,13 @@ export interface ParseOptions {
    * wire key. Language-agnostic — honored by any emitter that reads `domainName`.
    */
   fieldHints?: Record<string, Record<string, string>>;
+  /**
+   * Per-operation overrides keyed by "METHOD /path" — the same map
+   * `resolveOperations` reads. The parser applies only each hint's
+   * `pagination`, which wins over the operation's `x-pagination` extension
+   * and over name-based detection (see `PaginationHint`).
+   */
+  operationHints?: Record<string, OperationHint>;
   /**
    * Pre-IR overlay applied to the bundled OpenAPI document before any IR
    * extraction runs. Use this when the upstream spec can't be changed but you
@@ -114,6 +122,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     { schemaNameTransform: options?.schemaNameTransform },
   );
 
+  // Before the operations: an operation carries its own `servers` only when
+  // they differ from the document's, so the document's list is needed first.
+  const { servers, baseUrl } = extractServers(spec.servers);
+
   // Extract inline models from model field definitions (objects/arrays with properties).
   // schemaNameTransform is kept active so inline child names use the
   // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
@@ -143,6 +155,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
     spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
     fieldInlineModels,
+    servers,
+    version,
+    options?.operationHints,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -199,8 +214,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   collectInlineEnumsFromWebhooks(webhooks, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
-
-  const { servers, baseUrl } = extractServers(spec.servers);
 
   const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',

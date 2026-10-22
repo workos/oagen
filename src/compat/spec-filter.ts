@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs, collectResponseBodyTypes } from '../ir/types.js';
 import type { ApiSurface, LanguageHints } from './types.js';
 
 /**
@@ -20,8 +20,14 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
       // Operation methods are matched by the class diff, not by name here
       collectTypeRefNames(op.response, names, hints, topLevelEnumNames);
       if (op.requestBody) collectTypeRefNames(op.requestBody, names, hints, topLevelEnumNames);
+      // The iterator's item type, which an explicit `dataPath` can point at a
+      // model `response` does not reach.
+      if (op.pagination) collectTypeRefNames(op.pagination.itemType, names, hints, topLevelEnumNames);
       for (const field of op.pagination?.envelopeFields ?? []) {
         collectTypeRefNames(field.type, names, hints, topLevelEnumNames);
+      }
+      for (const error of op.errors) {
+        if (error.type) collectTypeRefNames(error.type, names, hints, topLevelEnumNames);
       }
       for (const header of collectResponseHeaders(op)) {
         collectTypeRefNames(header.type, names, hints, topLevelEnumNames);
@@ -41,14 +47,15 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
     }
   }
 
-  // Models → domain interface + language-specific derived names
+  // Models → domain interface + language-specific derived names, plus
+  // whatever their fields and named-union variants reference
   for (const model of spec.models) {
     names.add(model.name);
     for (const derived of hints.derivedModelNames(model.name)) {
       names.add(derived);
     }
-    for (const field of model.fields) {
-      collectTypeRefNames(field.type, names, hints, topLevelEnumNames);
+    for (const ref of collectModelTypeRefs(model)) {
+      collectTypeRefNames(ref, names, hints, topLevelEnumNames);
     }
   }
 

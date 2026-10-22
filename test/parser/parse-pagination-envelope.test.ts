@@ -74,12 +74,14 @@ describe('parseSpec — pagination envelope fields', () => {
     const [operation] = ir.services.flatMap((s) => s.operations);
     expect(operation.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'Customer' } });
     expect(operation.pagination).toEqual({
-      strategy: 'offset',
+      strategy: 'page',
       param: 'page',
       limitParam: 'limit',
+      pageStart: 1,
       dataPath: 'customers',
       itemType: { kind: 'model', name: 'Customer' },
       envelopeFields: [{ name: 'pagination', type: { kind: 'model', name: 'Pagination' }, required: true }],
+      endOfIteration: { kind: 'totalPages', path: 'pagination.totalPages' },
     });
     expect(ir.models.map((m) => m.name)).toContain('Pagination');
   });

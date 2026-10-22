@@ -1,7 +1,15 @@
 import type { Enum, Model, Service, TypeRef, Webhook } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes, collectWebhookTypeRefs } from '../ir/types.js';
+import {
+  walkTypeRef,
+  collectResponseHeaders,
+  collectModelTypeRefs,
+  collectResponseBodyTypes,
+  collectWebhookTypeRefs,
+  renameModelRefs,
+} from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
 import { isComponentModelRef } from './schemas.js';
+import { unionShapeKey } from './union-shape.js';
 import {
   inheritedModelRefsOf,
   isInheritedModelRef,
@@ -53,7 +61,8 @@ export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models:
  * either pass (header models, list-envelope companions and union variants
  * included), and every inline enum — named on its `EnumRef` when the field,
  * parameter or header was typed, and only lifted into `spec.enums` after the
- * merges have run — found in any model's fields or anywhere on an operation.
+ * merges have run — found in any model's fields or named-union variants, or
+ * anywhere on an operation.
  */
 export function reservedTypeNames(
   models: Model[],
@@ -69,7 +78,7 @@ export function reservedTypeNames(
   };
   for (const model of [...models, ...inlineModels, ...fieldInlineModels]) {
     reserved.add(model.name);
-    for (const field of model.fields) visit(field.type);
+    for (const ref of collectModelTypeRefs(model)) visit(ref);
   }
   for (const e of enums) reserved.add(e.name);
   for (const service of services) {
@@ -254,7 +263,7 @@ function separateDeprecatedCopies(
       // another site's field lent them.
       for (const root of bundle.roots) repointInlineModelRefs(root, name, renamed, true);
       for (const model of bundle.models) {
-        for (const field of model.fields) repointInlineModelRefs(field.type, name, renamed, false);
+        for (const ref of collectModelTypeRefs(model)) repointInlineModelRefs(ref, name, renamed, false);
       }
       console.warn(
         `[oagen] Renamed inline model "${name}" → "${renamed}": it is ${flag(copy)} while "${name}" is ${nameDeprecated ? 'deprecated' : 'live'}`,
@@ -267,9 +276,9 @@ function separateDeprecatedCopies(
 
 /**
  * The names in `groups`, each after every name the models under it reference
- * (through their fields, at any depth of array, map, union or nullable
- * wrapper) — a post-order walk, so a cycle is cut where it closes and every
- * name appears once. Insertion order breaks ties, so the result is as stable
+ * (through their fields and named-union variants, at any depth of array,
+ * map, union or nullable wrapper) — a post-order walk, so a cycle is cut
+ * where it closes and every name appears once. Insertion order breaks ties, so the result is as stable
  * as the document.
  */
 function bottomUp(groups: ReadonlyMap<string, Model[]>): string[] {
@@ -279,11 +288,11 @@ function bottomUp(groups: ReadonlyMap<string, Model[]>): string[] {
     if (visited.has(name)) return;
     visited.add(name);
     for (const model of groups.get(name) ?? []) {
-      for (const field of model.fields) {
-        walkTypeRef(field.type, {
-          model: (ref) => {
+      for (const ref of collectModelTypeRefs(model)) {
+        walkTypeRef(ref, {
+          model: (r) => {
             // An explicit `$ref` names a component, never a contender.
-            if (!isComponentModelRef(ref) && groups.has(ref.name)) visit(ref.name);
+            if (!isComponentModelRef(r) && groups.has(r.name)) visit(r.name);
           },
         });
       }
@@ -336,12 +345,17 @@ function differOnlyByDeprecation(a: Model, b: Model): boolean {
 }
 
 /**
- * Same field names with the same types, in any order. Types are compared by
- * their JSON serialization: the parser builds a given shape's TypeRef with the
- * same key order every time, so equal shapes serialize identically.
+ * Same field names with the same types, in any order, and the same
+ * named-union variants. Types are compared by their JSON serialization: the
+ * parser builds a given shape's TypeRef with the same key order every time,
+ * so equal shapes serialize identically.
  */
 function haveSameFields(a: Model, b: Model): boolean {
-  const signatures = (m: Model) => new Set(m.fields.map((f) => `${f.name}:${JSON.stringify(f.type)}`));
+  const signatures = (m: Model) =>
+    new Set([
+      ...m.fields.map((f) => `${f.name}:${JSON.stringify(f.type)}`),
+      ...(m.variants ?? []).map((v, i) => `variant${i}:${JSON.stringify(v)}`),
+    ]);
   const aSignatures = signatures(a);
   const bSignatures = signatures(b);
   return aSignatures.size === bSignatures.size && [...aSignatures].every((s) => bSignatures.has(s));
@@ -362,19 +376,24 @@ function rewriteModelRefs(
   newName: string,
   webhooks: Webhook[] = [],
 ): void {
-  for (const model of models) {
-    for (const field of model.fields) {
-      rewriteModelRef(field.type, oldName, newName);
-    }
-  }
+  // Fields, named-union variants and discriminator mappings alike.
+  const renames = new Map([[oldName, newName]]);
+  for (const model of models) renameModelRefs(model, renames);
   for (const service of services) {
     for (const op of service.operations) {
       rewriteModelRef(op.response, oldName, newName);
       if (op.requestBody) {
         rewriteModelRef(op.requestBody, oldName, newName);
       }
+      // The iterator's item type is its own reference when an explicit
+      // `dataPath` typed it from the document (`resolveDataPathFromSchema`),
+      // not the one `response` holds, so it is rewritten on its own.
+      if (op.pagination) rewriteModelRef(op.pagination.itemType, oldName, newName);
       for (const field of op.pagination?.envelopeFields ?? []) {
         rewriteModelRef(field.type, oldName, newName);
+      }
+      for (const error of op.errors) {
+        if (error.type) rewriteModelRef(error.type, oldName, newName);
       }
       for (const header of collectResponseHeaders(op)) {
         rewriteModelRef(header.type, oldName, newName);
@@ -417,7 +436,13 @@ export function mergeInlineResponseModels(
       model.fields.some((f) => !existingFieldNames.has(f.name)) ||
       existing.fields.some((f) => !inlineFieldNames.has(f.name));
 
-    if (hasDifference && model.fields.length > existing.fields.length) {
+    // A named union's merged fields are not its shape — its variants are —
+    // so a field count never argues for replacing it with a plain object.
+    if (hasDifference && existing.variants && !model.variants) {
+      console.warn(
+        `[oagen] Warning: Inline model "${model.name}" has different fields than the named union component — using component schema`,
+      );
+    } else if (hasDifference && model.fields.length > existing.fields.length) {
       // The component's name is the type the SDK exposes, so what documents
       // and flags that name stays the component's: its `description` and
       // `externalDocs` where it has them (the response's fill in only where
@@ -547,9 +572,9 @@ function hasModelConstDiscriminant(model: Model): boolean {
 function isModelReferencedByOthers(name: string, models: Model[], excludeNames: Set<string>): boolean {
   for (const model of models) {
     if (excludeNames.has(model.name)) continue;
-    for (const field of model.fields) {
+    for (const ref of collectModelTypeRefs(model)) {
       let found = false;
-      walkTypeRef(field.type, {
+      walkTypeRef(ref, {
         model: (r) => {
           if (r.name === name) found = true;
         },
@@ -558,6 +583,45 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
     }
   }
   return false;
+}
+
+/**
+ * Make `target` describe `source`'s shape: its fields and its named-union
+ * metadata — `variants`, `compositionKind` and `discriminator`, each present
+ * or absent exactly as on `source` — so a fold never turns a named union back
+ * into a plain object. A target that dispatches by rules the source does not
+ * preserve is never handed here (`collapseJsonSuffixModels` refuses that
+ * fold), so this only ever adds union metadata to a plain target or replaces
+ * a union's with identical rules. Every site that copies one model's shape
+ * onto another goes through this.
+ */
+function adoptShape(target: Model, source: Model): void {
+  target.fields = source.fields;
+  if (source.variants) target.variants = source.variants;
+  else delete target.variants;
+  if (source.compositionKind) target.compositionKind = source.compositionKind;
+  else delete target.compositionKind;
+  if (source.discriminator) target.discriminator = source.discriminator;
+  else delete target.discriminator;
+}
+
+/**
+ * A `…Json` model's variant as the fold would leave it on the base: every
+ * model reference the fold renames — the `…Json` model itself (pass 2) and
+ * every `<Json>…`-prefixed child (pass 3) — read under the base's prefix, and
+ * nothing else. The fold renames no enum and rewrites no literal, so an enum
+ * reference and a `const` value are compared as they are: a `PetJsonState`
+ * enum beside a `PetState` one, or a `PetJsonA` literal beside `PetA`, is a
+ * different shape, and the base keeps the values its operations accept.
+ */
+function foldedVariantKey(ref: TypeRef, jsonName: string, baseName: string): string {
+  const folded = structuredClone(ref);
+  walkTypeRef(folded, {
+    model: (r) => {
+      if (r.name.startsWith(jsonName)) r.name = baseName + r.name.slice(jsonName.length);
+    },
+  });
+  return JSON.stringify(folded);
 }
 
 export function collapseJsonSuffixModels(models: Model[], services: Service[], webhooks: Webhook[] = []): Model[] {
@@ -592,13 +656,35 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
       continue;
     }
 
+    // Guard: the base is a union — a named union's variants, composition
+    // keyword and discriminator, or an allOf+oneOf dispatcher's mapping (such
+    // a base may have no fields at all) — that the Json model does not
+    // preserve: it has no variants or rules, or different ones. Folding would
+    // turn the dispatcher into a plain object, or swap its variants or rules,
+    // under operations that already use it (two undiscriminated unions share
+    // the rules `oneOf` while dispatching to different members). A Json
+    // model's variants are read as the fold would leave them
+    // (`foldedVariantKey`): its model references under the base's name, as
+    // pass 3 renames them, so `PetJsonWithName` matches `PetWithName`; an
+    // enum or a literal as it is, since the fold renames neither, so a
+    // `PetJsonState` enum beside `PetState` is a different union. Identical
+    // shapes fold as before.
+    const baseShape = unionShapeKey(baseModel, (v) => JSON.stringify(v));
+    const jsonShape = unionShapeKey(model, (v) => foldedVariantKey(v, model.name, baseName));
+    if (baseShape !== '' && baseShape !== jsonShape) {
+      console.warn(
+        `[oagen] Warning: Json-suffix model "${model.name}" does not preserve the union rules of "${baseName}" — keeping both`,
+      );
+      continue;
+    }
+
     mergeCandidates.push({ jsonModel: model, baseModel });
   }
 
   // Pass 2: apply merges
   const toRemove = new Set<string>();
   for (const { jsonModel, baseModel } of mergeCandidates) {
-    baseModel.fields = jsonModel.fields;
+    adoptShape(baseModel, jsonModel);
     // The base model now describes the Json schema's shape, so carry that
     // schema's own limits (minProperties, dependentRequired, ...) with the
     // fields; the base's keywords fill in wherever the Json model is silent.

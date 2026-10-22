@@ -876,6 +876,10 @@ describe('parseSpec — arrays without type', () => {
         'OwnerPets',
         'Shape',
         'ShapeRing',
+        // The named union's variants are materialized (#244), typed or not.
+        'CircleShape',
+        'CircleShapeRing',
+        'SquareShape',
         'EventSchema',
         'SessionCreated',
         'SessionCreatedTags',

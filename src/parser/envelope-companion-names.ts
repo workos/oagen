@@ -1,6 +1,7 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
-import { assertNever, collectModelRefs, walkTypeRef } from '../ir/types.js';
+import { assertNever, collectModelRefs, renameModelRefs, walkTypeRef } from '../ir/types.js';
 import type { InlineModelBundle } from './inline-models.js';
+import { unionRulesKey, unionShapeKey } from './union-shape.js';
 
 /**
  * A list-envelope companion that was lifted to one or more inline models:
@@ -214,7 +215,7 @@ function renameCompanion(companion: EnvelopeCompanion, names: string[]): void {
   repoint(companion.field.type);
   for (const model of companion.models) {
     model.name = renames.get(model.name) ?? model.name;
-    for (const field of model.fields) repoint(field.type);
+    renameModelRefs(model, renames);
   }
 }
 
@@ -247,6 +248,15 @@ function admits(
       if (!expected) return false;
       if (expected.required && !field.required) return false;
       if (!typeAdmits(expected.type, targetMap, field.type, copyMap, visiting)) return false;
+    }
+    // A named union is its variants — the same ones, in the same order —
+    // dispatched by the same rules (composition keyword, discriminator).
+    if (unionRulesKey(target) !== unionRulesKey(copy)) return false;
+    const targetVariants = target.variants ?? [];
+    const copyVariants = copy.variants ?? [];
+    if (targetVariants.length !== copyVariants.length) return false;
+    for (let i = 0; i < copyVariants.length; i++) {
+      if (!typeAdmits(targetVariants[i]!, targetMap, copyVariants[i]!, copyMap, visiting)) return false;
     }
     return true;
   } finally {
@@ -307,8 +317,11 @@ function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set
   const fields = [...model.fields]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((f) => `${f.name}${f.required ? '!' : '?'}:${fingerprintType(f.type, local, visiting)}`);
+  // A named union's variants, in document order, and its dispatch rules are
+  // part of its shape.
+  const union = unionShapeKey(model, (v) => fingerprintType(v, local, visiting));
   visiting.delete(model.name);
-  return `${model.deprecated ? 'deprecated' : ''}{${fields.join(',')}}`;
+  return `${model.deprecated ? 'deprecated' : ''}{${fields.join(',')}}${union}`;
 }
 
 function fingerprintType(ref: TypeRef, local: Map<string, Model>, visiting: Set<string>): string {

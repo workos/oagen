@@ -103,9 +103,10 @@ describe('detectPagination', () => {
       'items',
     );
     expect(result).toEqual({
-      strategy: 'offset',
+      strategy: 'page',
       param: 'page',
       limitParam: 'per_page',
+      pageStart: 1,
       dataPath: 'items',
       itemType: { kind: 'model', name: 'Item' },
     });

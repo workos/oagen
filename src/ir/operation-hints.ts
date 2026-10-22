@@ -1,4 +1,4 @@
-import type { ApiSpec, Service, Operation, HttpMethod } from './types.js';
+import type { ApiSpec, Service, Operation, HttpMethod, PaginationEndOfIteration, PaginationStrategy } from './types.js';
 
 /** Minimal snake_case converter for path segments (avoids cross-layer import). */
 function toSnake(s: string): string {
@@ -31,6 +31,49 @@ export interface OperationHint {
    * such as /auth/authorize and /accounts/sessions/logout.
    */
   urlBuilder?: boolean;
+  /**
+   * Explicit pagination for this operation, applied by the parser (through
+   * `ParseOptions.operationHints`) rather than by `resolveOperations`. Same
+   * shape as the spec's `x-pagination` Operation Object extension; a field set
+   * here wins over the extension, which wins over name-based detection.
+   */
+  pagination?: PaginationHint;
+}
+
+/**
+ * Explicit pagination for one operation — the object a spec can carry as
+ * `x-pagination` on an Operation Object and that `OperationHint.pagination`
+ * accepts from config. Every field is optional and layers over the
+ * lower-precedence sources (config hint > `x-pagination` > detection), so
+ * `{ strategy: 'page' }` alone keeps the detected `param` and `limitParam`.
+ *
+ * `strategy: 'none'` turns pagination off for the operation; a list envelope
+ * is then kept as a plain response model rather than unwrapped. Any other
+ * strategy needs a `param`, from some source, that names one of the
+ * operation's query parameters. An override that fails validation — unknown
+ * strategy, missing or undeclared parameter, a `dataPath` that does not reach
+ * an array, malformed field — is reported with an `[oagen] Warning:` and
+ * ignored, leaving the detected metadata as is.
+ */
+export interface PaginationHint {
+  strategy?: PaginationStrategy | 'none';
+  /** Query parameter that selects the page (cursor, offset, or page number). */
+  param?: string;
+  /** Query parameter that sets the page size. */
+  limitParam?: string;
+  /**
+   * First page number the API expects (`page` strategy only). Defaults to the
+   * page parameter's integer `default`, else its `minimum`, else 1.
+   */
+  pageStart?: number;
+  /**
+   * Dotted path to the data array inside the response. Resolved against the
+   * response, so the array's element type — not the wrapper — becomes
+   * `itemType`.
+   */
+  dataPath?: string;
+  /** Response field that ends the iteration. */
+  endOfIteration?: PaginationEndOfIteration;
 }
 
 export interface SplitHint {

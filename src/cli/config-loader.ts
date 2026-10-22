@@ -57,7 +57,9 @@ export interface OagenConfig {
   /**
    * Per-operation overrides keyed by "METHOD /path" (e.g. "POST /auth/token").
    * Used by the operation resolver to override derived method names, mount
-   * targets, and to split union-body operations into typed wrappers.
+   * targets, and to split union-body operations into typed wrappers. A hint's
+   * `pagination` entry is applied by the parser instead, where it overrides
+   * the operation's `x-pagination` extension and name-based detection.
    */
   operationHints?: Record<string, OperationHint>;
   /**

@@ -34,7 +34,7 @@ export interface InlineModelOwner {
 }
 
 /** Field properties that only document a field; two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'example', 'examples']);
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
 /** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
 

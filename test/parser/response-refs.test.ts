@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { resolveResponseRef } from '../../src/parser/response-refs.js';
 
 type Response = { description?: string; content?: Record<string, unknown> };
@@ -6,6 +6,10 @@ type Response = { description?: string; content?: Record<string, unknown> };
 const problem: Response = { description: 'A problem', content: { 'application/json': { schema: { type: 'object' } } } };
 
 describe('resolveResponseRef', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('returns an inline Response Object as it is', () => {
     const inline: Response = { description: 'ok' };
     expect(resolveResponseRef(inline, undefined, 'ctx')).toBe(inline);
@@ -44,20 +48,46 @@ describe('resolveResponseRef', () => {
     expect(resolveResponseRef<Response>({ $ref: '#/components/responses/Problem' }, components, 'ctx')).toBe(problem);
   });
 
-  it('throws on a ref no component response answers, naming the ref and the context', () => {
-    expect(() =>
-      resolveResponseRef({ $ref: '#/components/responses/Missing' }, { Problem: problem }, 'default of op'),
-    ).toThrow(
-      'Unresolved response $ref "#/components/responses/Missing" in default of op: no matching entry under components/responses.',
+  it('warns on a ref no component response answers, naming the ref and the context, and returns it as written', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const missing = { $ref: '#/components/responses/Missing' };
+    expect(resolveResponseRef(missing, { Problem: problem }, 'default of op')).toBe(missing);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Unresolved response $ref "#/components/responses/Missing" in default of op: no matching entry under components/responses',
+      ),
     );
-    expect(() => resolveResponseRef({ $ref: '#/components/responses/Problem' }, undefined, 'ctx')).toThrow(
-      'Unresolved response $ref',
-    );
+    expect(resolveResponseRef({ $ref: '#/components/responses/Problem' }, undefined, 'ctx')).toEqual({
+      $ref: '#/components/responses/Problem',
+    });
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a sibling description under 'ignore' (OAS 3.0), keeping the component's own", () => {
+    const components = { Problem: problem, Alias: { $ref: '#/components/responses/Problem', description: 'Inner' } };
+    expect(
+      resolveResponseRef<Response>(
+        { $ref: '#/components/responses/Alias', description: 'Outer' },
+        components,
+        'ctx',
+        'ignore',
+      ),
+    ).toBe(problem);
+  });
+
+  it('keeps the sibling description on a ref it cannot resolve', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(
+      resolveResponseRef({ $ref: '#/components/responses/Missing', description: 'Gone' }, { Problem: problem }, 'ctx'),
+    ).toEqual({ $ref: '#/components/responses/Missing', description: 'Gone' });
   });
 
   it('does not resolve a ref into another section off a same-named response', () => {
-    expect(() => resolveResponseRef({ $ref: '#/components/schemas/Problem' }, { Problem: problem }, 'ctx')).toThrow(
-      'Unresolved response $ref "#/components/schemas/Problem"',
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const elsewhere = { $ref: '#/components/schemas/Problem' };
+    expect(resolveResponseRef(elsewhere, { Problem: problem }, 'ctx')).toBe(elsewhere);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Unresolved response $ref "#/components/schemas/Problem"'),
     );
   });
 

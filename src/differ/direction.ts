@@ -1,5 +1,10 @@
 import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
-import { collectResponseHeaders, collectResponseBodyTypes, collectWebhookTypeRefs } from '../ir/types.js';
+import {
+  collectResponseHeaders,
+  collectModelTypeRefs,
+  collectResponseBodyTypes,
+  collectWebhookTypeRefs,
+} from '../ir/types.js';
 
 /**
  * Which side of the wire a model sits on, from the caller's point of view.
@@ -50,6 +55,9 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
           requestSeeds.push(param.type);
         }
         responseSeeds.push(op.response);
+        // The iterator yields its item type, which an explicit `dataPath` can
+        // point at a model `response` does not reach.
+        if (op.pagination) responseSeeds.push(op.pagination.itemType);
         for (const field of op.pagination?.envelopeFields ?? []) responseSeeds.push(field.type);
         for (const header of collectResponseHeaders(op)) responseSeeds.push(header.type);
         for (const { type } of collectResponseBodyTypes(op)) responseSeeds.push(type);
@@ -95,7 +103,8 @@ function reachableModels(seeds: TypeRef[], models: ReadonlyMap<string, Model>): 
         found.add(ref.name);
         const model = models.get(ref.name);
         if (!model) break;
-        for (const field of model.fields) queue.push(field.type);
+        // Fields and, for a named union, its variants.
+        queue.push(...collectModelTypeRefs(model));
         // A dispatcher model reaches its variants by name, not by field type.
         for (const variant of Object.values(model.discriminator?.mapping ?? {})) {
           queue.push({ kind: 'model', name: variant });

@@ -104,7 +104,8 @@ describe('response descriptions', () => {
         [422, 'The pet is invalid.'],
         [500, 'Something went wrong.'],
       ]);
-      expect(op.errors[1].type).toEqual({ kind: 'model', name: 'Error422' });
+      // The inline 422 body is materialized under the operation-qualified error name (#236).
+      expect(op.errors[1].type).toEqual({ kind: 'model', name: 'ListPetsError422' });
     });
 
     it('keeps headers and description side by side on the same entry', () => {

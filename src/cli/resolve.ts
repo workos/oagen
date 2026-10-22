@@ -19,6 +19,7 @@ export async function resolveCommand(opts: {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
+    operationHints: opts.operationHints,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);

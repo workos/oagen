@@ -1,7 +1,7 @@
 import type { Model, TypeRef } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
-import type { Change, FieldChange } from './types.js';
-import { classifyFieldChange } from './classify.js';
+import type { Change, FieldChange, VariantChange } from './types.js';
+import { classifyFieldChange, deprecationDetails, deprecationFlip } from './classify.js';
 import type { DirectionIndex, ModelDirection } from './direction.js';
 import { directionOf } from './direction.js';
 
@@ -32,18 +32,124 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
     if (!oldModel) continue;
 
     const fieldChanges = diffFields(oldModel, newModel, directionOf(directions, name));
-    if (fieldChanges.length > 0) {
-      const hasBreaking = fieldChanges.some((fc) => fc.classification === 'breaking');
+    const variantChanges = diffVariants(oldModel, newModel);
+    // A flipped flag alone is a change: nothing the model's callers compile
+    // against moves, but a changelog has to say it.
+    const deprecation = deprecationFlip(oldModel, newModel);
+    if (fieldChanges.length > 0 || variantChanges.length > 0 || deprecation) {
+      const hasBreaking = [...fieldChanges, ...variantChanges].some((c) => c.classification === 'breaking');
       changes.push({
         kind: 'model-modified',
         name,
         fieldChanges,
+        ...(variantChanges.length > 0 ? { variantChanges } : {}),
+        deprecatedChanged: deprecation !== undefined,
+        ...deprecation,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
   }
 
   return changes;
+}
+
+/**
+ * Changes to a named union's `variants` and `discriminator`. A variant is
+ * matched by type equality (`typeRefsEqual`), not by position, so reordering
+ * reports nothing. An added variant is additive, like a new enum value — a
+ * value the API may now produce or accept; a removed variant is breaking,
+ * since callers may construct or match it. Any discriminator change (the
+ * property, or an entry of its mapping) is breaking: it changes how a
+ * payload is dispatched to a variant, and so is a change of composition
+ * keyword between two unions (`anyOf` → `oneOf` rejects values that match
+ * more than one branch; the reverse loosens what callers may receive). A
+ * model that gains or loses `variants` altogether reports each variant added
+ * or removed, not a composition change.
+ */
+function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
+  const changes: VariantChange[] = [];
+  const oldVariants = oldModel.variants ?? [];
+  const newVariants = newModel.variants ?? [];
+
+  if (oldModel.compositionKind && newModel.compositionKind && oldModel.compositionKind !== newModel.compositionKind) {
+    changes.push({
+      kind: 'composition-changed',
+      variant: newModel.compositionKind,
+      classification: 'breaking',
+      details: `composition changed from '${oldModel.compositionKind}' to '${newModel.compositionKind}'`,
+    });
+  }
+
+  for (const variant of newVariants) {
+    if (!oldVariants.some((v) => typeRefsEqual(v, variant))) {
+      changes.push({ kind: 'variant-added', variant: variantLabel(variant), classification: 'additive' });
+    }
+  }
+  for (const variant of oldVariants) {
+    if (!newVariants.some((v) => typeRefsEqual(v, variant))) {
+      changes.push({ kind: 'variant-removed', variant: variantLabel(variant), classification: 'breaking' });
+    }
+  }
+
+  const oldDisc = oldModel.discriminator;
+  const newDisc = newModel.discriminator;
+  if (oldDisc || newDisc) {
+    if (!oldDisc || !newDisc) {
+      changes.push({
+        kind: 'discriminator-changed',
+        variant: (newDisc ?? oldDisc)!.property,
+        classification: 'breaking',
+        details: newDisc ? 'discriminator added' : 'discriminator removed',
+      });
+    } else if (oldDisc.property !== newDisc.property) {
+      changes.push({
+        kind: 'discriminator-changed',
+        variant: newDisc.property,
+        classification: 'breaking',
+        details: `property changed from '${oldDisc.property}' to '${newDisc.property}'`,
+      });
+    } else {
+      // Own keys only, so a value spelled like an inherited property
+      // (`constructor`) on one side is compared against nothing, not against
+      // `Object.prototype`'s.
+      const own = (mapping: Record<string, string>, key: string): string | undefined =>
+        Object.hasOwn(mapping, key) ? mapping[key] : undefined;
+      const keys = new Set([...Object.keys(oldDisc.mapping), ...Object.keys(newDisc.mapping)]);
+      const differing = [...keys].filter((k) => own(oldDisc.mapping, k) !== own(newDisc.mapping, k)).sort();
+      if (differing.length > 0) {
+        changes.push({
+          kind: 'discriminator-changed',
+          variant: newDisc.property,
+          classification: 'breaking',
+          details: `mapping changed for ${differing.map((k) => `'${k}'`).join(', ')}`,
+        });
+      }
+    }
+  }
+
+  return changes;
+}
+
+/** A short, human-readable label for a union variant in a change report. */
+function variantLabel(ref: TypeRef): string {
+  switch (ref.kind) {
+    case 'model':
+    case 'enum':
+      return ref.name;
+    case 'primitive':
+      return ref.format ? `${ref.type}:${ref.format}` : ref.type;
+    case 'literal':
+      return `literal:${String(ref.value)}`;
+    case 'nullable':
+      return `nullable<${variantLabel(ref.inner)}>`;
+    case 'array':
+      return `array<${variantLabel(ref.items)}>`;
+    case 'map':
+      return `map<${variantLabel(ref.valueType)}>`;
+    case 'union':
+      return `union<${ref.variants.map(variantLabel).join('|')}>`;
+  }
+  return assertNever(ref);
 }
 
 function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection = 'unknown'): FieldChange[] {
@@ -93,6 +199,15 @@ function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection 
 
     if (!!oldField.readOnly !== !!newField.readOnly || !!oldField.writeOnly !== !!newField.writeOnly) {
       changes.push(classifyFieldChange('field-access-changed', name));
+    }
+
+    const deprecation = deprecationFlip(oldField, newField);
+    if (deprecation) {
+      changes.push({
+        ...classifyFieldChange('field-deprecated-changed', name),
+        ...deprecation,
+        details: deprecationDetails(deprecation.newDeprecated),
+      });
     }
   }
 

@@ -1,5 +1,12 @@
-import type { TypeRef, Model, Field, StatusRange } from '../ir/types.js';
-import { toPascalCase } from '../utils/naming.js';
+import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
+import { toPascalCase, singularize } from '../utils/naming.js';
+import {
+  detectEndOfIteration,
+  END_OF_ITERATION_FIELDS,
+  looksLikePaginationMetadata,
+  resolveBareSchema,
+  resolveSchemaPath,
+} from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -38,12 +45,38 @@ export interface ResponseExtractionResult {
    */
   envelopeFields?: Field[];
   /**
+   * The envelope field that ends an iteration, when the envelope declares an
+   * obvious one (see `PaginationMeta.endOfIteration`). Set only for a list
+   * envelope.
+   */
+  endOfIteration?: PaginationEndOfIteration;
+  /**
    * Models lifted from inline companion objects, still under their
    * operation-qualified names. They are deliberately not in `inlineModels`:
    * `resolveEnvelopeCompanionNames` decides their final names once every list
    * operation has been extracted.
    */
   envelopeCompanions?: EnvelopeCompanion[];
+}
+
+export interface ResponseClassificationOptions {
+  /**
+   * The operation's pagination was switched off explicitly (`strategy:
+   * 'none'`). A list envelope is then not unwrapped: the body becomes a plain
+   * response model carrying every field, exactly as a non-list body does, so
+   * the wire shape survives without a `pagination` entry to describe it.
+   */
+  paginationDisabled?: boolean;
+  /**
+   * An explicit `dataPath` (already known to reach an array in the body) that
+   * names another array than the one a list envelope would be unwrapped on.
+   * Detection was wrong for this operation, so the envelope is kept as a
+   * wrapper exactly as under `paginationDisabled` — `response` is what the
+   * wire returns, the override says where the items are in it, and the
+   * wrapper carries the companions — except that its stop field is still
+   * read, with the override's root property as the data property.
+   */
+  dataPathOverride?: string;
 }
 
 /**
@@ -64,6 +97,7 @@ export function classifyAndExtractResponse(
   schema: SchemaObject,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
+  options: ResponseClassificationOptions = {},
 ): ResponseExtractionResult {
   // 1. If schema is a $ref, resolve to model name (Phase 1)
   if (schema.$ref) {
@@ -71,9 +105,23 @@ export function classifyAndExtractResponse(
   }
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
-  const envelope = detectListEnvelope(schema);
-  if (envelope.isEnvelope) {
-    return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+  if (!options.paginationDisabled) {
+    const envelope = detectListEnvelope(schema);
+    if (envelope.isEnvelope) {
+      const override = options.dataPathOverride;
+      if (override === undefined || override === envelope.dataPath) {
+        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+      }
+      // The full path is excluded, not its root: a stop field beside the
+      // nested array (`pagination.has_more` next to `pagination.items`) stays
+      // visible, and the array itself is never a stop field.
+      const { properties } = collectEnvelopeProperties(schema, componentSchemas);
+      const endOfIteration = detectEndOfIteration(properties, override, componentSchemas);
+      return {
+        ...extractDirectResource(schema, contextName, componentSchemas),
+        ...(endOfIteration && { endOfIteration }),
+      };
+    }
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
@@ -91,19 +139,6 @@ interface ListEnvelopeResult {
 }
 
 const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges']);
-
-const PAGINATION_METADATA_PATTERNS = [
-  'meta',
-  'metadata',
-  'pagination',
-  'cursor',
-  'has_more',
-  'page_info',
-  'total',
-  'next_page',
-  'previous_page',
-  'offset',
-];
 
 function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema)
@@ -146,8 +181,13 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   if (arrayProps.length === 1 && nonArrayKeys.length >= 1) {
     const arrayPropName = arrayProps[0];
 
-    const hasPaginationCompanion = nonArrayKeys.some((key) =>
-      PAGINATION_METADATA_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern)),
+    // A companion is pagination metadata when it is one of the stop fields
+    // the end-of-iteration detector reads (`hasMore`, `hasNext`, `pageCount`,
+    // …) — one shared list, so an envelope that carries a stop field is
+    // always recognized — or when its name contains one of the metadata
+    // patterns (`meta`, `pagination`, `cursor`, …).
+    const hasPaginationCompanion = nonArrayKeys.some(
+      (key) => END_OF_ITERATION_FIELDS.includes(key) || looksLikePaginationMetadata(key),
     );
 
     if (KNOWN_DATA_PATHS.has(arrayPropName) && hasPaginationCompanion) {
@@ -215,6 +255,10 @@ function extractListResponse(
     componentSchemas,
   );
 
+  // The field that says the list is exhausted — `has_more`, `total_pages`,
+  // `pagination.totalPages` — so an iterator can stop without a wasted request.
+  const endOfIteration = detectEndOfIteration(properties, dataPath, componentSchemas);
+
   return {
     // The data array's own nullability is the response's: a `data` declared
     // `type: ['array', 'null']` (or OAS 3.0 `nullable: true`) means the list
@@ -231,8 +275,74 @@ function extractListResponse(
     ...(dataDescription !== undefined && { dataDescription }),
     itemType: itemTypeRef,
     envelopeFields,
+    endOfIteration,
     envelopeCompanions: envelopeCompanions.length > 0 ? envelopeCompanions : undefined,
   };
+}
+
+/**
+ * Element type of the array an explicit `dataPath` points at, read from the
+ * response document when the IR cannot answer — a `$ref` wrapper whose path
+ * runs through a model the parser has not materialized (an array
+ * component's, say), or an envelope the parser did not recognize — and the
+ * check `extractResponses` makes before classifying a body, to learn whether
+ * the path reaches an array at all. `undefined` when it does not.
+ *
+ * The array may sit under a nullable wrapper of any form — `type: ['array',
+ * 'null']`, OAS 3.0 `nullable: true`, `oneOf: [{ type: 'array' }, { type:
+ * 'null' }]`, a nullable `$ref` to an array component — which
+ * `resolveBareSchema` looks through exactly as the IR walk
+ * (`resolveDataPathItemType`) looks through the `nullable` TypeRef those
+ * forms become, so the two never disagree about whether the path lands on
+ * an array; `isArraySchema` then decides, as every other site does.
+ *
+ * The items are typed and materialized the way every other inline schema
+ * that is not a model field is (`extractListResponse`'s fall-through, the
+ * header and fallback-body paths): as a field named for the path
+ * (`result.items` → `ListPetsResultItem`, `records` → `ListPetsRecord`; see
+ * `inlineItemNameForPath`) under no parent, typed by `schemaToTypeRef` and
+ * extracted by `extractInlineModelsFromProperties`, which mirror each other
+ * form for form. A `$ref` is a reference and mints nothing; a plain object
+ * is that model; a nullable object (`type: ['object', 'null']`, OAS 3.0
+ * `nullable: true`, a nullable `oneOf`) is a `nullable` reference to it; the
+ * object variants of a union, the objects of a nested array or map, and
+ * whatever those reference in turn are each materialized under the name the
+ * reference uses — so the item type never names a model nobody created.
+ */
+export function resolveDataPathFromSchema(
+  schema: SchemaObject,
+  dataPath: string,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { itemType: TypeRef; inlineModels: Model[] } | undefined {
+  const target = resolveSchemaPath(schema, dataPath, componentSchemas);
+  if (!target) return undefined;
+  const array = resolveBareSchema(target, componentSchemas);
+  if (!isArraySchema(array) || !array.items) return undefined;
+
+  const items = array.items;
+  const itemName = inlineItemNameForPath(contextName, dataPath);
+  const inlineModels: Model[] = [];
+  extractInlineModelsFromProperties({ properties: { [itemName]: items } }, inlineModels, undefined, componentSchemas);
+  return { itemType: schemaToTypeRef(items, itemName), inlineModels };
+}
+
+/**
+ * Name for inline items reached through an overridden `dataPath`, built from
+ * the path the way the inline extractor names a nested field's items: the
+ * operation, the enclosing properties, then the singular of the array's own
+ * name (`result.items` → `ListPetsResultItem`). It therefore coincides with a
+ * model the parser may already have minted for that field, and never takes
+ * the bare `<Op>Item` that a recognized envelope's data array owns.
+ */
+function inlineItemNameForPath(contextName: string, dataPath: string): string {
+  const segments = dataPath.split('.');
+  const parents = segments
+    .slice(0, -1)
+    .map((segment) => toPascalCase(segment))
+    .join('');
+  const own = singularize(toPascalCase(segments[segments.length - 1]));
+  return contextName.replace(/Response$/, '') + parents + own;
 }
 
 /**
