@@ -38,7 +38,16 @@ describe('unionShapeKey / unionRulesKey', () => {
 
     const keys = [byKind, byType, remapped, anyOf, undiscriminated].map((m) => unionShapeKey(m, key));
     expect(new Set(keys).size).toBe(keys.length);
-    expect(unionShapeKey(byKind, key)).toBe('|oneOf<Cat,Dog>|kind:oneOf|disc:"kind"[["cat","Cat"],["dog","Dog"]]');
+    expect(unionShapeKey(byKind, key)).toBe('|oneOf["Cat","Dog"]|kind:oneOf|disc:"kind"[["cat","Cat"],["dog","Dog"]]');
+  });
+
+  it('keeps unions apart whose joined variant keys would read alike (Greptile)', () => {
+    const literal = (value: string): TypeRef => ({ kind: 'literal', value });
+    const literalKey = (ref: TypeRef): string => (ref.kind === 'literal' ? `l:${String(ref.value)}` : ref.kind);
+    const two: Model = { name: 'U', fields: [], compositionKind: 'oneOf', variants: [literal('a'), literal('b')] };
+    const one: Model = { name: 'U', fields: [], compositionKind: 'oneOf', variants: [literal('a","l:b')] };
+    expect(unionShapeKey(two, literalKey)).not.toBe(unionShapeKey(one, literalKey));
+    expect(unionShapeKey(two, literalKey, { sorted: true })).not.toBe(unionShapeKey(one, literalKey, { sorted: true }));
   });
 
   it('ignores mapping key order, and member order only when asked to', () => {
