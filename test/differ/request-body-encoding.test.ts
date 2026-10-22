@@ -289,6 +289,22 @@ describe('diffWebhooks — request body encoding (issue #290)', () => {
     });
   });
 
+  it('carries neither side when the payload appears or disappears, as an operation-modified change does (issue author review)', () => {
+    const none = petAdopted({ requestBody: undefined, requestBodyEncoding: undefined, requestBodyRequired: undefined });
+    const [removed] = diffWebhooks([petAdopted()], [none]);
+    expect(removed).toMatchObject({
+      requestBodyChanged: true,
+      details: 'payload removed; body required → optional',
+      classification: 'breaking',
+    });
+    expect(removed).not.toHaveProperty('oldRequestBodyEncoding');
+    expect(removed).not.toHaveProperty('newRequestBodyEncoding');
+    const [added] = diffWebhooks([none], [petAdopted()]);
+    expect(added).toMatchObject({ details: 'payload added; body optional → required', classification: 'breaking' });
+    expect(added).not.toHaveProperty('oldRequestBodyEncoding');
+    expect(added).not.toHaveProperty('newRequestBodyEncoding');
+  });
+
   it('spells a lost encoding as <none> in the details, as before, with the sides beside it', () => {
     const [change] = diffWebhooks([petAdopted()], [petAdopted({ requestBodyEncoding: undefined })]);
     expect(change).toMatchObject({
@@ -304,16 +320,22 @@ describe('diffWebhooks — request body encoding (issue #290)', () => {
 
 describe('requestBodyEncodingShift — the one comparison both diffs read the encoding through', () => {
   it('returns both sides when the encodings differ, undefined when they do not', () => {
-    expect(requestBodyEncodingShift({ requestBodyEncoding: 'json' }, { requestBodyEncoding: 'json' })).toBeUndefined();
-    expect(requestBodyEncodingShift({}, {})).toBeUndefined();
-    expect(requestBodyEncodingShift({ requestBodyEncoding: 'json' }, { requestBodyEncoding: 'text' })).toEqual({
+    const json = { requestBody: pet, requestBodyEncoding: 'json' as const };
+    expect(requestBodyEncodingShift(json, { requestBody: pet, requestBodyEncoding: 'json' })).toBeUndefined();
+    expect(requestBodyEncodingShift({ requestBody: pet }, { requestBody: pet })).toBeUndefined();
+    expect(requestBodyEncodingShift(json, { requestBody: pet, requestBodyEncoding: 'text' })).toEqual({
       oldRequestBodyEncoding: 'json',
       newRequestBodyEncoding: 'text',
     });
-    expect(requestBodyEncodingShift({ requestBodyEncoding: 'binary' }, {})).toEqual({
-      oldRequestBodyEncoding: 'binary',
-      newRequestBodyEncoding: undefined,
-    });
+    expect(requestBodyEncodingShift({ requestBody: pet, requestBodyEncoding: 'binary' }, { requestBody: pet })).toEqual(
+      { oldRequestBodyEncoding: 'binary', newRequestBodyEncoding: undefined },
+    );
+  });
+
+  it('compares only while both nodes carry a body: one appearing or disappearing takes its encoding with it', () => {
+    expect(requestBodyEncodingShift({ requestBody: pet, requestBodyEncoding: 'json' }, {})).toBeUndefined();
+    expect(requestBodyEncodingShift({}, { requestBody: pet, requestBodyEncoding: 'json' })).toBeUndefined();
+    expect(requestBodyEncodingShift({ requestBodyEncoding: 'json' }, { requestBodyEncoding: 'text' })).toBeUndefined();
   });
 
   it('spells the details the webhook change reports, <none> for no encoding', () => {
@@ -329,6 +351,8 @@ describe('requestBodyEncodingShift — the one comparison both diffs read the en
 describe('parseSpec to diffSpecs — the issue #290 repro', () => {
   const petRef = { schema: { $ref: '#/components/schemas/Pet' } };
   const newPetRef = { schema: { $ref: '#/components/schemas/NewPet' } };
+  /** The `Pet` shape written inline, so the parser mints a model named after the body's place. */
+  const inlinePet = { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } };
   /** `POST /pets` and the `petAdopted` webhook, both with a required body under the given `content` map. */
   const documentWith = (content: Record<string, unknown>) => {
     const requestBody = { required: true, content };
@@ -537,6 +561,38 @@ describe('parseSpec to diffSpecs — the issue #290 repro', () => {
       classification: 'additive',
     });
     expect(summary).toMatchObject({ modified: 2, breaking: 1, additive: 1 });
+  });
+
+  it('keeps JSON added beside a kept inline form body additive although the parser renames its model (issue author review)', async () => {
+    // The form body is `CreatePetRequest` while it is the body `requestBody`
+    // is read from and `CreatePetApplicationXWwwFormUrlencodedRequest` once
+    // JSON is preferred: one shape under two names, compared through the
+    // two specs' models, so it is neither retyped nor a lost representation.
+    const [oldSpec, newSpec] = await parseDocuments(
+      documentWith({ [form]: inlinePet }),
+      documentWith({ [form]: inlinePet, 'application/json': inlinePet }),
+    );
+    expect(oldSpec.services[0].operations[0].requestBodyEncoding).toBe('form-urlencoded');
+    expect(newSpec.services[0].operations[0].requestBodyEncoding).toBe('json');
+
+    const { changes, summary } = diffSpecs(oldSpec, newSpec);
+    expect(changes.map((c) => c.kind)).not.toContain('model-removed');
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      requestBodyChanged: false,
+      requestBodyEncodingChanged: true,
+      oldRequestBodyEncoding: 'form-urlencoded',
+      newRequestBodyEncoding: 'json',
+      requestBodyContentTypeChange: {
+        added: ['application/json'],
+        removed: [],
+        retyped: [],
+        classification: 'additive',
+      },
+      classification: 'additive',
+    });
+    // Only the webhook breaks: its handler never decoded JSON.
+    expect(changes.find((c) => c.kind === 'webhook-modified')).toMatchObject({ classification: 'breaking' });
+    expect(summary.breaking).toBe(1);
   });
 
   it('reports nothing when both documents declare the body the same way', async () => {

@@ -1,3 +1,4 @@
+import type { Operation } from '../ir/types.js';
 import type { ModelDirection } from './direction.js';
 import type { FieldChange, ParamChange, RequestBodyEncoding } from './types.js';
 
@@ -67,24 +68,27 @@ export interface RequestBodyEncodingShift {
 
 /**
  * `{ oldRequestBodyEncoding, newRequestBodyEncoding }` when a node's
- * `requestBodyEncoding` differs between the two specs, `undefined` when it
- * does not. The encoding is the wire format the body is serialized as
- * (`json`, `form-data`, `form-urlencoded`, `binary`, `text`), read from the
- * media type the body is declared under. Whether a change breaks is the
- * caller's rule — `diffOperations` and `diffWebhookBody` read it off the
- * media types each side declares (`ownRepresentationKept`): an SDK built
- * for the old spec keeps sending the old representation, and a handler
- * built for it keeps decoding what it declared. An absent encoding is compared
- * as a value of its own, so a body that gained or lost one is a change too;
- * whether to compare at all when one side carries no body is the caller's
- * rule. `diffOperations` and `diffWebhooks` both read the encoding through
- * this function, so an operation's body and a webhook's payload are judged
- * alike.
+ * `requestBodyEncoding` differs between the two specs while both carry a
+ * `requestBody`, `undefined` otherwise. The encoding is the wire format the
+ * body is serialized as (`json`, `form-data`, `form-urlencoded`, `binary`,
+ * `text`), read from the media type the body is declared under. A body
+ * appearing or disappearing takes its encoding with it and is the body
+ * change's to report (`requestBodyChanged` on an operation, `payload added`
+ * / `payload removed` on a webhook), so neither change kind carries the two
+ * sides for it. An absent encoding beside a body is compared as a value of
+ * its own, so a body that gained or lost one is a change too. Whether a
+ * change breaks is the caller's rule — `diffOperations` and
+ * `diffWebhookBody` read it off the media types each side declares
+ * (`ownRepresentationKept`): an SDK built for the old spec keeps sending
+ * the old representation, and a handler built for it keeps decoding what
+ * it declared. Both read the encoding through this function, so an
+ * operation's body and a webhook's payload are judged alike.
  */
 export function requestBodyEncodingShift(
-  oldNode: { requestBodyEncoding?: RequestBodyEncoding },
-  newNode: { requestBodyEncoding?: RequestBodyEncoding },
+  oldNode: { requestBody?: Operation['requestBody']; requestBodyEncoding?: RequestBodyEncoding },
+  newNode: { requestBody?: Operation['requestBody']; requestBodyEncoding?: RequestBodyEncoding },
 ): RequestBodyEncodingShift | undefined {
+  if (!oldNode.requestBody || !newNode.requestBody) return undefined;
   const oldRequestBodyEncoding = oldNode.requestBodyEncoding;
   const newRequestBodyEncoding = newNode.requestBodyEncoding;
   return oldRequestBodyEncoding === newRequestBodyEncoding
