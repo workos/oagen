@@ -992,6 +992,34 @@ describe('round 2: keywords the declarations of a combined property agree on', (
     expectSound(ir, []);
   });
 
+  it('keeps a field read-only when both declarations say so but differ in type, with no const to make an enum', async () => {
+    // Review on #338: `value` declared `readOnly: true` as a string in one
+    // variant and as an integer in the other becomes a bare `oneOf` of the
+    // two primitives; the flag both declare must sit on the combined field,
+    // which is what the request builder reads, not only inside the branches.
+    const ir = await parseWithoutWarnings(
+      createPet([
+        { properties: { value: { type: 'string', readOnly: true } } },
+        { properties: { value: { type: 'integer', readOnly: true } } },
+      ]),
+    );
+    const value = modelsByName(ir)['CreatePetRequest']!.fields.find((f) => f.name === 'value');
+    expect(value).toMatchObject({
+      type: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'primitive', type: 'string' },
+          { kind: 'primitive', type: 'integer' },
+        ],
+      },
+      required: false,
+      readOnly: true,
+    });
+    expect(value?.writeOnly).toBeUndefined();
+    expectSound(ir, []);
+  });
+
   it('leaves off a keyword the declarations disagree on, or only some declare', async () => {
     const ir = await parseWithoutWarnings(
       createPet([
