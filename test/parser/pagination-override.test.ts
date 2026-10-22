@@ -3,7 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
+import { walkTypeRef } from '../../src/ir/types.js';
 import type { PaginationHint } from '../../src/ir/operation-hints.js';
 
 /**
@@ -76,6 +77,13 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     return operations[0];
   };
 
+  /** Every model name a TypeRef references, through nullable, array, map and union wrappers. */
+  const modelNamesIn = (ref: TypeRef): string[] => {
+    const names: string[] = [];
+    walkTypeRef(ref, { model: (m) => names.push(m.name) });
+    return names;
+  };
+
   it('reports the issue repro as page pagination ending at pagination.totalPages (#221)', async () => {
     const op = onlyOperation(await parseJson(petsSpec({})));
     expect(op.pagination).toEqual({
@@ -112,6 +120,20 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     const components = { schemas: { Meta: { type: 'object', properties: { total_pages: { type: 'integer' } } } } };
     const op = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(schema) }, components)));
     expect(op.pagination?.endOfIteration).toEqual({ kind: 'totalPages', path: 'meta.total_pages' });
+  });
+
+  it('survives a companion whose component refers to itself, as a stop field or beside one (Greptile)', async () => {
+    const schemas = { Flag: { oneOf: [{ $ref: '#/components/schemas/Flag' }, { type: 'null' }] } };
+    const flag = { $ref: '#/components/schemas/Flag' };
+    const beside = envelope({ flag, has_more: { type: 'boolean' } });
+    const op = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(beside) }, { schemas })));
+    expect(op.pagination).toMatchObject({ dataPath: 'pets', endOfIteration: { kind: 'hasMore', path: 'has_more' } });
+    // As the stop field itself its type is never known, so there is no stop field.
+    const asStop = envelope({ has_more: flag });
+    const op2 = onlyOperation(await parseJson(petsSpec({ responses: jsonResponse(asStop) }, { schemas })));
+    expect(op2.pagination?.dataPath).toBe('pets');
+    expect(op2.pagination?.endOfIteration).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('leaves endOfIteration unset when the envelope declares nothing recognizable', async () => {
@@ -628,6 +650,144 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(warn).toHaveBeenCalledWith(
         '[oagen] Warning: x-pagination on listPets: dataPath "pagination" does not resolve to an array in the response — ignoring the override',
       );
+    });
+
+    describe('through a nullable wrapper around the array (Greptile)', () => {
+      // The early check (does the path reach an array? then keep the wrapper)
+      // and the IR walk (what are its items?) must unwrap the same forms, or
+      // the body is unwrapped on `data` while the iterator reads `result.items`.
+      const stringArray = { type: 'array', items: { type: 'string' } };
+      const forms: Record<string, unknown> = {
+        'a oneOf with a null variant': { oneOf: [stringArray, { type: 'null' }] },
+        'an anyOf with a null variant': { anyOf: [{ type: 'null' }, stringArray] },
+        'a type list naming null': { type: ['array', 'null'], items: { type: 'string' } },
+        'an OAS 3.0 nullable flag': { type: 'array', nullable: true, items: { type: 'string' } },
+        'a nullable $ref to an array component': {
+          oneOf: [{ $ref: '#/components/schemas/Tags' }, { type: 'null' }],
+        },
+      };
+      const schemas = { Tags: { type: 'array', items: { type: 'string' } } };
+      const listBody = (items: unknown) => ({
+        type: 'object',
+        properties: {
+          data: stringArray,
+          result: { type: 'object', properties: { items } },
+          total: { type: 'integer' },
+        },
+      });
+      const expectWrapperKept = (ir: ApiSpec): Operation => {
+        const op = onlyOperation(ir);
+        expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+        const wrapper = ir.models.find((m) => m.name === 'ListPetsResponse');
+        expect(wrapper?.fields.map((f) => f.name)).toEqual(['data', 'result', 'total']);
+        expect(op.pagination).toMatchObject({
+          dataPath: 'result.items',
+          itemType: { kind: 'primitive', type: 'string' },
+          endOfIteration: { kind: 'totalCount', path: 'total' },
+        });
+        expect(op.pagination).not.toHaveProperty('envelopeFields');
+        return op;
+      };
+
+      it.each(Object.entries(forms))(
+        'keeps the wrapper when the path ends on %s, as it does for a plain array',
+        async (_form, items) => {
+          const operation = { responses: jsonResponse(listBody(items)), 'x-pagination': { dataPath: 'result.items' } };
+          expectWrapperKept(await parseJson(petsSpec(operation, { schemas })));
+          expect(warn).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        ['200 declared before 202', (list: unknown, job: unknown) => ({ '200': list, '202': job })],
+        ['202 declared before 200', (list: unknown, job: unknown) => ({ '202': job, '200': list })],
+      ])('reads the primary body, whichever 2xx is declared first (%s)', async (_order, order) => {
+        const list = {
+          description: 'ok',
+          content: { 'application/json': { schema: listBody(forms['a oneOf with a null variant']) } },
+        };
+        const jobBody = { type: 'object', properties: { job_id: { type: 'string' } } };
+        const job = { description: 'queued', content: { 'application/json': { schema: jobBody } } };
+        const ir = await parseJson(
+          petsSpec({ responses: order(list, job), 'x-pagination': { dataPath: 'result.items' } }),
+        );
+        const op = expectWrapperKept(ir);
+        expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
+        // The one warning is #240's: the 202's inline body takes the 200's name with another shape.
+        expect(warn.mock.calls.map((call) => call[0])).toEqual([
+          expect.stringContaining(
+            'Inline model "ListPetsResponse" from the 202 response has different fields than the 200 response\'s',
+          ),
+        ]);
+      });
+    });
+
+    describe('items only the document can type (Greptile)', () => {
+      // A `$ref` wrapper whose array is itself a component: the IR walk ends
+      // on that component's model, so the items are read from the document,
+      // and whatever they reference must be materialized there — every shape.
+      const id = { type: 'object', properties: { id: { type: 'string' } } };
+      const shapes: Record<string, unknown> = {
+        'a nullable object (type list)': { ...id, type: ['object', 'null'] },
+        'a nullable object (OAS 3.0 flag)': { ...id, nullable: true },
+        'a nullable oneOf around an object': { oneOf: [id, { type: 'null' }] },
+        'a union of inline objects': { oneOf: [id, { type: 'object', properties: { name: { type: 'string' } } }] },
+        'an object holding a nested object': {
+          type: 'object',
+          properties: { owner: { type: 'object', properties: { name: { type: 'string' } } } },
+        },
+      };
+      const wrapperSpec = (items: unknown) =>
+        petsSpec(
+          {
+            responses: jsonResponse({ $ref: '#/components/schemas/Wrapper' }),
+            'x-pagination': { dataPath: 'records' },
+          },
+          {
+            schemas: {
+              Wrapper: {
+                type: 'object',
+                properties: { records: { $ref: '#/components/schemas/PetList' }, total: { type: 'integer' } },
+              },
+              PetList: { type: 'array', items },
+            },
+          },
+        );
+
+      it.each(Object.entries(shapes))(
+        'creates every model the iterator type references when the items are %s',
+        async (_shape, items) => {
+          const ir = await parseJson(wrapperSpec(items));
+          const op = onlyOperation(ir);
+          expect(op.response).toEqual({ kind: 'model', name: 'Wrapper' });
+          expect(op.pagination?.dataPath).toBe('records');
+          const names = ir.models.map((m) => m.name);
+          const referenced = modelNamesIn(op.pagination!.itemType);
+          expect(referenced.length).toBeGreaterThan(0);
+          for (const name of referenced) expect(names).toContain(name);
+          // ...and whatever those models' own fields reference (`owner`).
+          for (const model of ir.models.filter((m) => referenced.includes(m.name))) {
+            for (const field of model.fields)
+              for (const nested of modelNamesIn(field.type)) expect(names).toContain(nested);
+          }
+          // Named from the path as the inline extractor names a field's items
+          // (`records` → `ListPetsRecord`): never from the response, nor the
+          // `<Op>Item` a recognized envelope's data array owns.
+          for (const name of referenced) expect(name).toContain('ListPetsRecord');
+          expect(names).not.toContain('ListPetsResponse');
+          expect(names).not.toContain('ListPetsItem');
+          expect(warn).not.toHaveBeenCalled();
+        },
+      );
+
+      it("types Greptile's case as a nullable reference to a model that exists", async () => {
+        const ir = await parseJson(wrapperSpec({ ...id, type: ['object', 'null'] }));
+        expect(onlyOperation(ir).pagination?.itemType).toEqual({
+          kind: 'nullable',
+          inner: { kind: 'model', name: 'ListPetsRecord' },
+        });
+        expect(ir.models.find((m) => m.name === 'ListPetsRecord')?.fields.map((f) => f.name)).toEqual(['id']);
+      });
     });
   });
 

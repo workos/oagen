@@ -8,7 +8,7 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { resolveComponentSchemaRef } from './schemas.js';
+import { resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -262,11 +262,19 @@ function classifyEndField(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration['kind'] | undefined {
-  const resolved = unwrapNullableSchema(schema, componentSchemas);
-  if (HAS_MORE_FIELDS.includes(name)) return hasType(resolved, 'boolean') ? 'hasMore' : undefined;
-  if (TOTAL_PAGES_FIELDS.includes(name)) return isNumeric(resolved) ? 'totalPages' : undefined;
-  if (TOTAL_COUNT_FIELDS.includes(name)) return isNumeric(resolved) ? 'totalCount' : undefined;
-  return undefined;
+  // The name decides the kind, and only a named stop field has its schema
+  // read: a companion of any other name is never resolved at all.
+  const kind: PaginationEndOfIteration['kind'] | undefined = HAS_MORE_FIELDS.includes(name)
+    ? 'hasMore'
+    : TOTAL_PAGES_FIELDS.includes(name)
+      ? 'totalPages'
+      : TOTAL_COUNT_FIELDS.includes(name)
+        ? 'totalCount'
+        : undefined;
+  if (!kind) return undefined;
+  const resolved = resolveBareSchema(schema, componentSchemas);
+  const fits = kind === 'hasMore' ? hasType(resolved, 'boolean') : isNumeric(resolved);
+  return fits ? kind : undefined;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -278,17 +286,33 @@ function isNumeric(schema: SchemaObject): boolean {
 }
 
 /**
- * The schema a stop field is typed from: its `$ref` followed, and a nullable
- * `oneOf`/`anyOf` wrapper (`[{ type: 'boolean' }, { type: 'null' }]`)
- * opened onto its one non-null variant, which may itself be a `$ref`. A type
- * list with `'null'` needs nothing: `hasType` reads through it.
+ * The schema under every `$ref` and nullable wrapper: a `$ref` is followed
+ * to its component, a nullable wrapper — an OAS 3.1 type list naming
+ * `'null'`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
+ * variant — is stripped by `unwrapNullableSchema`, the one definition the
+ * model side unwraps by, and the two alternate until the schema is neither,
+ * so `{ oneOf: [{ $ref: 'Tags' }, { type: 'null' }] }` with `Tags: { type:
+ * ['array', 'null'], items }` reaches the array. A `$ref` met a second time
+ * (`Flag: { oneOf: [{ $ref: Flag }, { type: 'null' }] }`) ends the walk on
+ * the reference instead of looping on it, as `resolveSchemaKeyword` and
+ * `objectProperties` stop; so does a `$ref` with no component map or to no
+ * component. Shared by the stop-field check and the document walk an
+ * explicit `dataPath` makes (`resolveDataPathFromSchema`), so a stop field
+ * and a data array behind the same wrappers are read the same way.
  */
-function unwrapNullableSchema(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): SchemaObject {
-  const resolved = resolveComponentSchemaRef(schema, componentSchemas) ?? schema;
-  const variants = resolved.oneOf ?? resolved.anyOf;
-  if (!variants) return resolved;
-  const nonNull = variants.filter((variant) => !isNullSchema(variant));
-  return nonNull.length === 1 ? unwrapNullableSchema(nonNull[0], componentSchemas) : resolved;
+export function resolveBareSchema(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+  seen: Set<string> = new Set(),
+): SchemaObject {
+  if (schema.$ref) {
+    if (seen.has(schema.$ref)) return schema;
+    seen.add(schema.$ref);
+    const resolved = resolveComponentSchemaRef(schema, componentSchemas);
+    return resolved ? resolveBareSchema(resolved, componentSchemas, seen) : schema;
+  }
+  const bare = unwrapNullableSchema(schema);
+  return bare.$ref ? resolveBareSchema(bare, componentSchemas, seen) : bare;
 }
 
 function isNullSchema(schema: SchemaObject): boolean {

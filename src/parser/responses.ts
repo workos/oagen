@@ -4,6 +4,7 @@ import {
   detectEndOfIteration,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
+  resolveBareSchema,
   resolveSchemaPath,
 } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
@@ -282,12 +283,31 @@ function extractListResponse(
 /**
  * Element type of the array an explicit `dataPath` points at, read from the
  * response document when the IR cannot answer — a `$ref` wrapper whose path
- * runs through an inline object the parser has not materialized yet, or an
- * envelope the parser did not recognize. A `$ref` item is typed by name and
- * anything non-object through `schemaToTypeRef`; an inline object is
- * materialized under a name derived from the path (see
- * `inlineItemNameForPath`). `undefined` when the path does not land on an
- * array.
+ * runs through a model the parser has not materialized (an array
+ * component's, say), or an envelope the parser did not recognize — and the
+ * check `extractResponses` makes before classifying a body, to learn whether
+ * the path reaches an array at all. `undefined` when it does not.
+ *
+ * The array may sit under a nullable wrapper of any form — `type: ['array',
+ * 'null']`, OAS 3.0 `nullable: true`, `oneOf: [{ type: 'array' }, { type:
+ * 'null' }]`, a nullable `$ref` to an array component — which
+ * `resolveBareSchema` looks through exactly as the IR walk
+ * (`resolveDataPathItemType`) looks through the `nullable` TypeRef those
+ * forms become, so the two never disagree about whether the path lands on
+ * an array; `isArraySchema` then decides, as every other site does.
+ *
+ * The items are typed and materialized the way every other inline schema
+ * that is not a model field is (`extractListResponse`'s fall-through, the
+ * header and fallback-body paths): as a field named for the path
+ * (`result.items` → `ListPetsResultItem`, `records` → `ListPetsRecord`; see
+ * `inlineItemNameForPath`) under no parent, typed by `schemaToTypeRef` and
+ * extracted by `extractInlineModelsFromProperties`, which mirror each other
+ * form for form. A `$ref` is a reference and mints nothing; a plain object
+ * is that model; a nullable object (`type: ['object', 'null']`, OAS 3.0
+ * `nullable: true`, a nullable `oneOf`) is a `nullable` reference to it; the
+ * object variants of a union, the objects of a nested array or map, and
+ * whatever those reference in turn are each materialized under the name the
+ * reference uses — so the item type never names a model nobody created.
  */
 export function resolveDataPathFromSchema(
   schema: SchemaObject,
@@ -297,19 +317,14 @@ export function resolveDataPathFromSchema(
 ): { itemType: TypeRef; inlineModels: Model[] } | undefined {
   const target = resolveSchemaPath(schema, dataPath, componentSchemas);
   if (!target) return undefined;
-  const isArray = Array.isArray(target.type) ? target.type.includes('array') : target.type === 'array';
-  if (!isArray || !target.items) return undefined;
+  const array = resolveBareSchema(target, componentSchemas);
+  if (!isArraySchema(array) || !array.items) return undefined;
 
-  const items = target.items;
-  if (items.$ref) return { itemType: schemaToTypeRef(items, contextName), inlineModels: [] };
-  if (items.properties && (items.type === 'object' || !items.type)) {
-    const itemName = inlineItemNameForPath(contextName, dataPath);
-    return {
-      itemType: { kind: 'model', name: itemName },
-      inlineModels: extractInlineModel(itemName, items, componentSchemas),
-    };
-  }
-  return { itemType: schemaToTypeRef(items, contextName), inlineModels: [] };
+  const items = array.items;
+  const itemName = inlineItemNameForPath(contextName, dataPath);
+  const inlineModels: Model[] = [];
+  extractInlineModelsFromProperties({ properties: { [itemName]: items } }, inlineModels, undefined, componentSchemas);
+  return { itemType: schemaToTypeRef(items, itemName), inlineModels };
 }
 
 /**

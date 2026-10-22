@@ -14,6 +14,7 @@ import {
 import type { PaginationOverrides } from '../../src/parser/pagination.js';
 import { resolveDataPathFromSchema } from '../../src/parser/responses.js';
 import type { Model, Parameter, PaginationMeta, TypeRef } from '../../src/ir/types.js';
+import { walkTypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 
 /**
@@ -30,6 +31,13 @@ const param = (name: string, extra: Partial<Parameter> = {}): Parameter => ({
 });
 const pets: TypeRef = { kind: 'array', items: { kind: 'model', name: 'Pet' } };
 const pet: TypeRef = { kind: 'model', name: 'Pet' };
+
+/** Every model name a TypeRef references, through nullable, array, map and union wrappers. */
+const modelNamesIn = (ref: TypeRef): string[] => {
+  const names: string[] = [];
+  walkTypeRef(ref, { model: (m) => names.push(m.name) });
+  return names;
+};
 
 describe('detectPagination — page-number strategy', () => {
   it('reports page + limit as the page strategy, advanced by one from pageStart', () => {
@@ -269,6 +277,46 @@ describe('detectEndOfIteration', () => {
     const list_metadata = { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } } };
     expect(detectEndOfIteration({ data, list_metadata, object: { type: 'string' } }, 'data')).toBeUndefined();
   });
+
+  it('stops on a component that refers to itself, as a stop field or beside one (Greptile)', () => {
+    // `Flag: oneOf [$ref Flag, null]` is a reference cycle: unwrapping it must
+    // end on the reference, whatever the companion is called.
+    const components: Record<string, SchemaObject> = {
+      Flag: { oneOf: [{ $ref: '#/components/schemas/Flag' }, { type: 'null' }] },
+      Ping: { anyOf: [{ type: 'null' }, { $ref: '#/components/schemas/Pong' }] },
+      Pong: { oneOf: [{ $ref: '#/components/schemas/Ping' }, { type: 'null' }] },
+    };
+    const flag: SchemaObject = { $ref: '#/components/schemas/Flag' };
+    const ping: SchemaObject = { $ref: '#/components/schemas/Ping' };
+    expect(detectEndOfIteration({ data, flag, has_more: boolean }, 'data', components)).toEqual({
+      kind: 'hasMore',
+      path: 'has_more',
+    });
+    expect(detectEndOfIteration({ data, has_more: flag }, 'data', components)).toBeUndefined();
+    expect(detectEndOfIteration({ data, total: ping }, 'data', components)).toBeUndefined();
+    expect(detectEndOfIteration({ data, pagination: flag }, 'data', components)).toBeUndefined();
+    const pagination: SchemaObject = { type: 'object', properties: { has_more: flag, total: integer } };
+    expect(detectEndOfIteration({ data, pagination }, 'data', components)).toEqual({
+      kind: 'totalCount',
+      path: 'pagination.total',
+    });
+  });
+
+  it('reads a stop field through alternating $refs and nullable wrappers', () => {
+    const components: Record<string, SchemaObject> = {
+      MaybeCount: { oneOf: [{ $ref: '#/components/schemas/Count' }, { type: 'null' }] },
+      Count: { type: ['integer', 'null'] },
+      Flagged: { type: 'boolean', nullable: true },
+    };
+    expect(
+      detectEndOfIteration({ data, total: { $ref: '#/components/schemas/MaybeCount' } }, 'data', components),
+    ).toEqual({ kind: 'totalCount', path: 'total' });
+    const has_more: SchemaObject = { anyOf: [{ type: 'null' }, { $ref: '#/components/schemas/Flagged' }] };
+    expect(detectEndOfIteration({ data, has_more }, 'data', components)).toEqual({
+      kind: 'hasMore',
+      path: 'has_more',
+    });
+  });
 });
 
 describe('resolveSchemaPath', () => {
@@ -389,6 +437,71 @@ describe('resolveDataPathFromSchema — the document fallback', () => {
     expect(resolveDataPathFromSchema(root, 'count', 'ListPetsResponse', components)).toBeUndefined();
     expect(resolveDataPathFromSchema(root, 'missing', 'ListPetsResponse', components)).toBeUndefined();
   });
+});
+
+describe('resolveDataPathFromSchema — nullable arrays and every item shape (Greptile)', () => {
+  const stringArray: SchemaObject = { type: 'array', items: { type: 'string' } };
+  const string: TypeRef = { kind: 'primitive', type: 'string' };
+  const components: Record<string, SchemaObject> = {
+    Tags: { type: ['array', 'null'], items: { type: 'string' } },
+    Wrapper: {
+      type: 'object',
+      properties: {
+        union: { oneOf: [stringArray, { type: 'null' }] },
+        anyOfUnion: { anyOf: [{ type: 'null' }, stringArray] },
+        typeList: { type: ['array', 'null'], items: { type: 'string' } },
+        flagged: { type: 'array', nullable: true, items: { type: 'string' } },
+        viaRef: { oneOf: [{ $ref: '#/components/schemas/Tags' }, { type: 'null' }] },
+        nested: {
+          oneOf: [
+            { type: 'object', properties: { items: { oneOf: [stringArray, { type: 'null' }] } } },
+            { type: 'null' },
+          ],
+        },
+      },
+    },
+  };
+  const root: SchemaObject = { $ref: '#/components/schemas/Wrapper' };
+
+  it.each(['union', 'anyOfUnion', 'typeList', 'flagged', 'viaRef', 'nested.items'])(
+    'reaches the array under the nullable wrapper at %s, as the IR walk unwraps a nullable field',
+    (path) => {
+      expect(resolveDataPathFromSchema(root, path, 'ListPetsResponse', components)).toEqual({
+        itemType: string,
+        inlineModels: [],
+      });
+    },
+  );
+
+  const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+  const id = object({ id: { type: 'string' } });
+  const itemShapes: Record<string, SchemaObject> = {
+    'a nullable object (type list)': { ...id, type: ['object', 'null'] },
+    'a nullable object (OAS 3.0 flag)': { ...id, nullable: true },
+    'a nullable oneOf around an object': { oneOf: [id, { type: 'null' }] },
+    'a union of inline objects': { oneOf: [id, object({ name: { type: 'string' } })] },
+    'an object holding a nested object': object({ owner: object({ name: { type: 'string' } }) }),
+    'an array of inline objects': { type: 'array', items: id },
+    'a map of inline objects': { type: 'object', additionalProperties: id },
+  };
+
+  it.each(Object.entries(itemShapes))(
+    'materializes every model the item type references when the items are %s, under the path-derived name',
+    (_shape, items) => {
+      const schema = object({ result: object({ items: { type: 'array', items } }) });
+      const resolved = resolveDataPathFromSchema(schema, 'result.items', 'ListPetsResponse');
+      expect(resolved).toBeDefined();
+      const materialized = resolved!.inlineModels.map((m) => m.name);
+      const referenced = [
+        ...modelNamesIn(resolved!.itemType),
+        ...resolved!.inlineModels.flatMap((m) => m.fields.flatMap((f) => modelNamesIn(f.type))),
+      ];
+      expect(referenced.length).toBeGreaterThan(0);
+      for (const name of referenced) expect(materialized).toContain(name);
+      for (const name of materialized) expect(name).toContain('ListPetsResultItem');
+      expect(materialized).not.toContain('ListPetsItem');
+    },
+  );
 });
 
 describe('resolvePaginationOverride + applyPaginationOverride', () => {
