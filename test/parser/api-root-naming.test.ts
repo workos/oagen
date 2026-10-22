@@ -113,12 +113,13 @@ describe('1. a path-prefix split keyed on the raw first segment separated operat
       { name: 'Organizations', operations: ['list: GET /organizations'] },
       { name: 'OrganizationDomains', operations: ['list: GET /organization_domains'] },
     ]);
-    // A tagged operation whose first segment differs is carved out as
-    // before; the untagged one stays in the service it was named for.
+    // Issue #287: the split is decided over the tag's own operations, and
+    // the one tagged operation sits under one first segment, so it stays in
+    // `Notes` as it would alone; the untagged one it was carved away from
+    // on #258 stays in the service it was named for.
     const notes = { get: { tags: ['notes'], ...ok } };
     expect(services({ '/x/notes': notes, '/api/v1/notes': get })).toEqual([
-      { name: 'X', operations: ['listNotes: GET /x/notes'] },
-      { name: 'Notes', operations: ['list: GET /api/v1/notes'] },
+      { name: 'Notes', operations: ['listNotes: GET /x/notes', 'list: GET /api/v1/notes'] },
     ]);
   });
 });
@@ -315,9 +316,9 @@ describe('every service has unique, order-independent operation names across the
       '/api/admin/users': get,
       '/api/admin/users/{id}': { get: withParam('id') },
     },
-    // The tagged pair is carved out of `Notes` into `Api` by the split, which
-    // keys a tagged operation on its raw first segment as it always has; the
-    // untagged ones now stay in `Notes` instead of following it there.
+    // The tagged pair sits under one first segment, so the split leaves it
+    // in `Notes` (issue #287); the untagged ones stay in `Notes` too instead
+    // of following a split there.
     'tagged and untagged under one root': {
       '/api/notes': tagged('notes'),
       '/api/notes/{id}': tagged('notes'),
@@ -424,8 +425,8 @@ describe('every service has unique, order-independent operation names across the
             "GET /api/v2/pets": "V2.listPets",
           },
           "tagged and untagged under one root": {
-            "GET /api/notes": "Api.listNotes",
-            "GET /api/notes/{id}": "Api.getNote",
+            "GET /api/notes": "Notes.listNotes",
+            "GET /api/notes/{id}": "Notes.getNote",
             "GET /api/v1/notes": "Notes.list2",
             "GET /api/v1/notes/{id}": "Notes.get",
             "GET /health": "Ops.list",
