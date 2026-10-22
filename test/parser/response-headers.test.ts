@@ -451,12 +451,10 @@ describe('response headers', () => {
             "name": "DocumentsXRateLimitPolicy",
             "values": [
               {
-                "description": undefined,
                 "name": "BURST",
                 "value": "burst",
               },
               {
-                "description": undefined,
                 "name": "SUSTAINED",
                 "value": "sustained",
               },

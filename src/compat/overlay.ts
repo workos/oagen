@@ -1,6 +1,7 @@
 import type { ApiSurface, ApiInterface, ApiMethod, OverlayLookup, LanguageHints } from './types.js';
 import type { ClassifiedChange } from './classify.js';
 import type { ApiSpec, Model } from '../ir/types.js';
+import { pathSegments } from '../ir/operation-hints.js';
 import { toSnakeCase, splitWords } from '../utils/naming.js';
 import { nodeHints as defaultNodeHints } from './language-hints.js';
 
@@ -114,11 +115,9 @@ export function buildOverlayLookup(
             // derived from the FIRST segment of the operation path. This avoids
             // mismatching when a class combines operations from multiple path groups
             // (e.g., /organizations and /organization_domains both in Organizations).
-            const firstSegment =
-              entry.path
-                .split('/')
-                .filter(Boolean)[0]
-                ?.replace(/[{}_-]/g, '') ?? '';
+            // pathSegments reads a custom method apart from the segment it is
+            // written on, so `/pets:batchGet` contributes `pets`.
+            const firstSegment = pathSegments(entry.path)[0]?.replace(/[{}_-]/g, '') ?? '';
             if (firstSegment) {
               const segLower = firstSegment.toLowerCase();
               // Try the path segment as-is and as singular

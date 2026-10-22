@@ -7,11 +7,11 @@ import { schemaToTypeRef } from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import {
   HTTP_METHODS,
-  buildDescription,
   extractParams,
   extractTags,
   operationIdModelBase,
   presentText,
+  resolveOperationDocs,
   resolveParameterRef,
   resolveRequestBodyRef,
   selectRequestBodyContent,
@@ -20,7 +20,9 @@ import {
   type PathItem,
   type RequestBodyObject,
 } from './operations.js';
+import { externalDocsEntry } from './external-docs.js';
 import { extractSecurityRequirements } from './security.js';
+import { warnOnIgnoredCallbacks } from './callbacks.js';
 
 /** The `components` sections webhook extraction resolves references against. */
 export interface WebhookComponents {
@@ -45,6 +47,12 @@ interface WebhookEntry {
   name: string;
   method: HttpMethod;
   op: OperationObject;
+  /**
+   * The path item the operation sits on — the entry itself, or the
+   * `components/pathItems` item its `$ref` leads to — whose `summary` and
+   * `description` apply to the operation (`resolveOperationDocs`).
+   */
+  pathItem: PathItem;
   /** The webhook's own parameters after path-item-level ones, deduplicated by (in, name). */
   params: ParameterObject[];
   body: RequestBodyObject | undefined;
@@ -225,6 +233,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
     for (const method of methods) {
       const op = pathItem[method] as OperationObject;
       const label = `webhooks.${name}.${method}`;
+      warnOnIgnoredCallbacks(op.callbacks, label);
       // Same precedence as buildOperation: an operation-level parameter replaces
       // a path-item-level one of the same (in, name) identity, in the
       // path-level position.
@@ -244,7 +253,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
         params.push(param);
       }
       const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label);
-      entries.push({ name, method, op, params, body, label, methodCount: methods.length });
+      entries.push({ name, method, op, pathItem, params, body, label, methodCount: methods.length });
     }
   }
 
@@ -635,10 +644,11 @@ function mintSchema(
 }
 
 function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: WebhookComponents): Webhook {
-  const { name, method, op, body, label } = entry;
+  const { name, method, op, pathItem, body, label } = entry;
   const { headerParams, queryParams, cookieParams, requestBody, requestBodyEncoding } = minted;
-  const summary = presentText(op.summary);
-  const description = buildDescription(summary, op.description);
+  // Read as an operation's are: the operation's own `summary` and
+  // `description`, or the path item's for each it declares none for.
+  const { summary, description } = resolveOperationDocs(op, pathItem);
   const tags = extractTags(op.tags);
   const security = extractSecurityRequirements(op.security, label);
 
@@ -648,6 +658,10 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     httpMethod: method,
     ...(summary !== undefined ? { summary } : {}),
     ...(description !== undefined ? { description } : {}),
+    // The operation's own link, present only when usable, as on an operation.
+    // A Path Item Object has no `externalDocs` field, so there is no path-item
+    // level to fall back to.
+    ...externalDocsEntry(op.externalDocs),
     ...(op.deprecated === true ? { deprecated: true } : {}),
     ...(tags !== undefined ? { tags } : {}),
     headerParams,
