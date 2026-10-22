@@ -98,6 +98,17 @@ export interface SettledSite {
  */
 export type SiblingSites = SettledSite[];
 
+/**
+ * The form `siblings` took before a settlement carried its renames: the
+ * stems earlier sites settled on, and nothing else. Accepted so a caller on
+ * that form keeps compiling: `materializeInlineSchema` reads it as a
+ * `SiblingSites` whose entries carry no renames (`siblingSitesOf`), to the
+ * same result that `SiblingSites` would give, and records this call's
+ * settlement in that private copy only — a caller that wants the sites after
+ * this one to see the settlement passes a `SiblingSites`.
+ */
+export type SiblingStems = readonly string[];
+
 export interface MaterializeInlineOptions {
   /**
    * The property name to extract the schema under for the `index`-th stem:
@@ -111,10 +122,11 @@ export interface MaterializeInlineOptions {
    * The settlements of the earlier sites of the same bare name, whose stems
    * are tried between the bare name and the caller's other candidates with
    * their renames replayed, and which this site's settlement is appended to
-   * (see `SiblingSites`). Absent, only the caller's candidates are tried and
-   * nothing is recorded.
+   * (see `SiblingSites`; the earlier string form, `SiblingStems`, is read the
+   * same way). Absent, only the caller's candidates are tried and nothing is
+   * recorded.
    */
-  siblings?: SiblingSites;
+  siblings?: SiblingSites | SiblingStems;
   /** The parent the schema is a property of; none for a body. */
   parentName?: string;
   componentSchemas?: Record<string, SchemaObject>;
@@ -192,7 +204,8 @@ const MAX_RENAME_ROUNDS = 64;
  * trial was under or the one its root moved to, with the renames made under
  * it — is appended to `options.siblings` for the sites after it.
  */
-export function materializeInlineSchema(schema: SchemaObject, options: MaterializeInlineOptions): TypeRef {
+export function materializeInlineSchema(schema: SchemaObject, given: MaterializeInlineOptions): TypeRef {
+  const options: ResolvedOptions = { ...given, siblings: siblingSitesOf(given.siblings) };
   const { registry } = options;
   const reserved = new Set<string>();
   let stemIndex = 0;
@@ -226,6 +239,24 @@ export function materializeInlineSchema(schema: SchemaObject, options: Materiali
   return commit(renameClashing(previous!.trial, options, candidateAt), options);
 }
 
+/** `MaterializeInlineOptions` with `siblings` in the one form the loop reads (`siblingSitesOf`). */
+interface ResolvedOptions extends Omit<MaterializeInlineOptions, 'siblings'> {
+  siblings?: SiblingSites;
+}
+
+/**
+ * `siblings` as the loop reads it: a `SiblingSites` as given — the very array,
+ * since this call's settlement is appended to it — or the earlier string form
+ * (`SiblingStems`) copied into entries without renames. An empty array is a
+ * `SiblingSites` with nothing settled yet; absent stays absent.
+ */
+function siblingSitesOf(siblings: SiblingSites | SiblingStems | undefined): SiblingSites | undefined {
+  if (siblings === undefined || siblings.length === 0 || typeof siblings[0] !== 'string') {
+    return siblings as SiblingSites | undefined;
+  }
+  return (siblings as SiblingStems).map((stem) => ({ stem, renames: [] }));
+}
+
 /** A stem to try, with the renames to replay on the trial extracted under it (none for the caller's own candidates). */
 interface Candidate {
   stem: string;
@@ -244,11 +275,7 @@ interface Candidate {
  * there are siblings are left out and the search is bounded; past the bound
  * the caller's own `index`-th candidate is the fallback.
  */
-function candidateStem(
-  index: number,
-  options: MaterializeInlineOptions,
-  firstClashOwners: InlineModelOwner[],
-): Candidate {
+function candidateStem(index: number, options: ResolvedOptions, firstClashOwners: InlineModelOwner[]): Candidate {
   const own = (i: number): string => options.stem(i, firstClashOwners);
   const bare = own(0);
   const sites = options.siblings ?? [];
@@ -303,7 +330,7 @@ function runTrial(
   schema: SchemaObject,
   candidate: Candidate,
   reservedNames: Set<string>,
-  options: MaterializeInlineOptions,
+  options: ResolvedOptions,
 ): Trial {
   const { stem: propertyName } = candidate;
   const reserved = reservedNames.size > 0 ? new Set(reservedNames) : undefined;
@@ -355,7 +382,7 @@ function sameNames(a: string[], b: string[]): boolean {
  * it — is recorded for its siblings, whether it minted models or shared every
  * one of them; a stem an earlier site already recorded keeps that site's.
  */
-function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
+function commit(trial: Trial, options: ResolvedOptions): TypeRef {
   for (const model of trial.models) {
     const fingerprint = trial.fingerprints.get(model)!;
     const owner = options.registry.get(model.name);
@@ -441,11 +468,7 @@ function renameModel(
  * is appended to the trial's, after any replayed from an earlier site, so a
  * later site can replay them all in order.
  */
-function renameClashing(
-  trial: Trial,
-  options: MaterializeInlineOptions,
-  candidateAt: (index: number) => Candidate,
-): Trial {
+function renameClashing(trial: Trial, options: ResolvedOptions, candidateAt: (index: number) => Candidate): Trial {
   const { registry } = options;
   const rootOf = (propertyName: string): string =>
     qualifyInlineModelName(toPascalCase(propertyName), options.parentName);

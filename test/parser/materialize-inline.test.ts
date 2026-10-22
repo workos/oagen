@@ -6,6 +6,7 @@ import {
   type InlineModelRegistry,
   type SettledSite,
   type SiblingSites,
+  type SiblingStems,
 } from '../../src/parser/materialize-inline.js';
 
 const num = { kind: 'primitive' as const, type: 'number' as const };
@@ -247,6 +248,30 @@ describe('materializeInlineSchema — the stems earlier sites of the same bare n
 
     expect(type).toEqual({ kind: 'model', name: 'Body201' });
     expect(names(models)).toEqual(['Body201']);
+  });
+
+  it('reads the earlier string form of `siblings` as settlements without renames, to the same result', () => {
+    const stems: SiblingStems = ['Body200'];
+    const sites: SiblingSites = [settled('Body200')];
+    const run = (schema: Record<string, unknown>, siblings: SiblingSites | SiblingStems) => {
+      const models: Model[] = [];
+      const type = materializeInlineSchema(schema, {
+        stem: byCode(201),
+        siblings,
+        registry: registryWithSettled(),
+        models,
+      });
+      return { type, names: names(models) };
+    };
+
+    // The identical shape shares `Body200`; another shape steps to `Body201` — as with `SiblingSites`.
+    expect(run(shape, stems)).toEqual(run(shape, sites));
+    expect(run(shape, stems)).toEqual({ type: { kind: 'model', name: 'Body200' }, names: [] });
+    expect(run(otherShape, stems)).toEqual(run(otherShape, sites));
+    expect(run(otherShape, stems)).toEqual({ type: { kind: 'model', name: 'Body201' }, names: ['Body201'] });
+    // The string form is read, never written back: the settlement goes to a private copy.
+    expect(stems).toEqual(['Body200']);
+    expect(sites).toEqual([settled('Body200'), settled('Body201')]);
   });
 
   describe('a site whose nested variant was renamed under the root (Greptile)', () => {
