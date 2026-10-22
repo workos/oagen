@@ -204,9 +204,11 @@ describe('response content types', () => {
       expect(fieldsOf(spec, 'GetReportApplicationVndApiJsonResponse')).toEqual(['data', 'links']);
       expect(fieldsOf(spec, 'GetReportApplicationVndApiJsonResponseLink')).toEqual(['self']);
       // An error body is named for its role. The +json body is the error's
-      // `type` (#235), named `Error<code>` like an inline application/json body
-      // and, like it, not materialized; only the secondary body is.
-      expect(findOp(spec, 'renderPetCard').errors[1].type).toEqual({ kind: 'model', name: 'Error500' });
+      // `type` (#235), named `<Op>Error<code>` like an inline application/json
+      // body and materialized under that name (#236), not under the media
+      // type's; only a secondary body is named after its media type.
+      expect(findOp(spec, 'renderPetCard').errors[1].type).toEqual({ kind: 'model', name: 'RenderPetCardError500' });
+      expect(fieldsOf(spec, 'RenderPetCardError500')).toEqual(['title', 'detail']);
       expect(fieldsOf(spec, 'RenderPetCardApplicationProblemJsonError')).toBeUndefined();
       expect(fieldsOf(spec, 'RenderPetCardApplicationYamlError')).toEqual(['message']);
       // Without an operationId the path names it, as it names the primary body.
@@ -327,11 +329,11 @@ describe('response content types', () => {
       expect(notFound.contents?.[1]).toEqual({ contentType: 'text/html', type: { kind: 'primitive', type: 'string' } });
 
       // No application/json: `type` is read from the +json entry (#235), named
-      // like an inline application/json body, and that entry shares it. The
-      // lists stay, since `application/problem+json` is not the plain
-      // `application/json` a reader would otherwise assume.
+      // like an inline application/json body (`<Op>Error<code>`, #236), and
+      // that entry shares it. The lists stay, since `application/problem+json`
+      // is not the plain `application/json` a reader would otherwise assume.
       expect(problem.statusCode).toBe(500);
-      expect(problem.type).toEqual({ kind: 'model', name: 'Error500' });
+      expect(problem.type).toEqual({ kind: 'model', name: 'RenderPetCardError500' });
       expect(problem.contentTypes).toEqual(['application/problem+json', 'application/yaml']);
       expect(problem.contents).toEqual([
         { contentType: 'application/problem+json', type: problem.type },
@@ -340,18 +342,20 @@ describe('response content types', () => {
       expect(problem.contents?.[0].type).toBe(problem.type);
     });
 
-    it('leaves an inline application/json error body exactly as before: no new model, no new warning', async () => {
+    it('materializes an inline application/json error body under `<Op>Error<code>`, shared with its content entry, with no warning', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const spec = await parseSpec(FIXTURE);
       const report = findOp(spec, 'getReport');
       const [invalid] = report.errors;
 
-      // The unqualified `Error<code>` ref the parser has always produced for an inline error body.
+      // The operation-qualified name (#236), never the unqualified `Error<code>` nothing created.
       expect(invalid.statusCode).toBe(422);
-      expect(invalid.type).toEqual({ kind: 'model', name: 'Error422' });
+      expect(invalid.type).toEqual({ kind: 'model', name: 'GetReportError422' });
+      expect(fieldsOf(spec, 'GetReportError422')).toEqual(['message']);
       expect(invalid.contents?.[0].type).toBe(invalid.type);
       expect(invalid.contents?.[1]).toEqual({ contentType: 'text/plain', type: { kind: 'primitive', type: 'string' } });
       expect(spec.models.map((m) => m.name)).not.toContain('Error422');
+      // The media type's own name (`GetReportApplicationJsonError`) is for a secondary body, never the JSON body `type` is read from.
       expect(spec.models.some((m) => m.name.startsWith('GetReport') && m.name.endsWith('Error'))).toBe(false);
       // The shared entry is reached through `errors[].type`, never through the
       // content walk, so it raises no unresolved-reference warning either.

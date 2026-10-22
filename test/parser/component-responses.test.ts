@@ -815,11 +815,16 @@ describe('responses written as $ref into components/responses (issue #234)', () 
           type: { kind: 'model', name: 'ConflictResponse' },
         },
       ]);
+      // The component response's inline error body is materialized under the component's name (#236).
+      expect(spec.models.find((m: Model) => m.name === 'ConflictResponse')?.fields.map((f) => f.name)).toEqual([
+        'adopted_by',
+      ]);
 
       const modelNames = spec.models.map((m: Model) => m.name).sort();
       expect(new Set(modelNames).size).toBe(modelNames.length);
       expect(modelNames).toMatchInlineSnapshot(`
         [
+          "ConflictResponse",
           "ListMetadata",
           "OwnerCardResponse",
           "OwnerCardResponseAddress",

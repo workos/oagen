@@ -946,6 +946,12 @@ export function assignModelsToServices(
           }
         }
       }
+      for (const error of op.errors) {
+        if (!error.type) continue;
+        for (const name of collectModelRefs(error.type)) {
+          referencedModels.add(name);
+        }
+      }
       for (const header of collectResponseHeaders(op)) {
         for (const name of collectModelRefs(header.type)) {
           referencedModels.add(name);
