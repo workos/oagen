@@ -3755,6 +3755,19 @@ function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema
   return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 
+/**
+ * The type of a body the document does not describe:
+ * `{ kind: 'primitive', type: 'unknown' }`. A 3xx entry's `type` is always
+ * this; a 2xx entry's is this until a media-type rule types it; and an
+ * operation's `response` is this when the operation declares no 2xx or 3xx
+ * response at all — only `default`, ranges or errors, an empty `responses`
+ * map, or no `responses` key — so an emitter never types a return value the
+ * document does not describe. Each call returns a new object.
+ */
+function undescribedBodyType(): TypeRef {
+  return { kind: 'primitive', type: 'unknown' };
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -3788,7 +3801,7 @@ function extractResponses(
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
-  let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let response: TypeRef = undescribedBodyType();
   let responseHeaders: ResponseHeader[] | undefined;
   let responseContentTypes: string[] | undefined;
   let responseContents: ResponseContent[] | undefined;
@@ -3803,6 +3816,9 @@ function extractResponses(
   let overrideItemType: TypeRef | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
 
+  // An operation without a `responses` object declares no success response,
+  // so `response` is `unknown` here as it is for one that declares only
+  // `default`, ranges or errors.
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
   const allSuccessResponses: SuccessResponse[] = [];
@@ -3862,7 +3878,7 @@ function extractResponses(
     const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
-      let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
+      let extractedType: TypeRef = undescribedBodyType();
       // The body schema to classify: the JSON one when a JSON media type is
       // declared (`application/json` by essence, then `+json`), else — past
       // the binary and text media types typed below without a schema — the
@@ -3922,7 +3938,7 @@ function extractResponses(
       );
       allSuccessResponses.push({
         statusCode: code,
-        type: { kind: 'primitive', type: 'unknown' },
+        type: undescribedBodyType(),
         ...(headers && { headers }),
         ...(description && { description }),
         ...contents,
@@ -3979,8 +3995,9 @@ function extractResponses(
   // Primary response = lowest status code whose type is not `unknown` (the
   // lowest 2xx with a typed body; a 3xx entry is always `unknown`), falling
   // back to the lowest declared code (an untyped 2xx, or a 3xx when there is
-  // no 2xx). With no 2xx or 3xx at all, `response` keeps its initial `string`;
-  // a `2XX` range or `default` body is never promoted into it.
+  // no 2xx). With no 2xx or 3xx at all, `response` stays `unknown` — the type
+  // of a body the document does not describe — with no headers, description
+  // or media types; a `2XX` range or `default` body is never promoted into it.
   let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
