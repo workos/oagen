@@ -20,6 +20,7 @@ import {
   collapsedNullableBranch,
   nullableUnionBranch,
   unwrapNullableSchema,
+  warnOnUncarriedProperties,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import {
@@ -155,7 +156,11 @@ export function classifyAndExtractResponse(
   // into the composition, as `schemaToTypeRef` and the field extractor read
   // them (`foldSiblingProperties`), so a body is read the one way wherever it
   // appears: the branches below read `properties` before a composition and
-  // would otherwise drop the composition that a field keeps.
+  // would otherwise drop the composition that a field keeps. The variants
+  // that cannot take the properties are reported on the body as written,
+  // under the body's name, since the fold leaves `schemaToTypeRef` nothing
+  // to report.
+  warnOnUncarriedProperties(schema, contextName, undefined);
   schema = foldSiblingProperties(schema);
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
@@ -485,10 +490,16 @@ function collectEnvelopeProperties(
 
 /**
  * Combine two `allOf` declarations of one property. Inline objects merge their
- * fields; an array — under a nullable wrapper or not (`arraySchemaOf`) —
- * keeps the earlier `items` when the later declaration only constrains it
- * (`minItems: 1`), so `data: User[]` is not downgraded to `string[]`;
- * anything else takes the later declaration.
+ * fields. Two arrays, each under a nullable wrapper of any spelling or none
+ * (`arraySchemaOf`), merge as the bare arrays they wrap, so the `items` land
+ * in the one array that is then read, whichever declaration wore the wrapper:
+ * the later declaration's keywords over the earlier's, the later `items` when
+ * it narrows them and the earlier `items` when the later declaration only
+ * constrains the array (`minItems: 1`) or allows any item (`items: {}`), so
+ * `data: User[]` is not downgraded to `string[]` or `unknown[]`; the result
+ * is `type: ['array', 'null']` when either declaration admits `null`, else
+ * `type: 'array'`, and carries the later `description`, else the earlier.
+ * Anything else takes the later declaration.
  */
 function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): SchemaObject {
   if (isInlineObjectSchema(earlier) && isInlineObjectSchema(later)) {
@@ -500,10 +511,38 @@ function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): 
     };
   }
   const earlierArray = arraySchemaOf(earlier);
-  if (earlierArray && arraySchemaOf(later)) {
-    return { ...earlier, ...later, items: later.items ?? earlierArray.items };
+  const laterArray = earlierArray && arraySchemaOf(later);
+  if (earlierArray && laterArray) {
+    const narrows = laterArray.items !== undefined && Object.keys(laterArray.items).length > 0;
+    const items = narrows ? laterArray.items : earlierArray.items;
+    const description = later.description ?? earlier.description;
+    const { nullable: _earlierFlag, ...earlierBare } = earlierArray;
+    const { nullable: _laterFlag, ...laterBare } = laterArray;
+    return {
+      ...earlierBare,
+      ...laterBare,
+      ...(items !== undefined && { items }),
+      ...(description !== undefined && { description }),
+      type: declaresNull(earlier) || declaresNull(later) ? ['array', 'null'] : 'array',
+    };
   }
   return later;
+}
+
+/**
+ * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
+ * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
+ * `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to
+ * one non-null variant (`nullableUnionBranch`). The one test for the places
+ * the response path builds an array TypeRef itself (`nullableIf`) or merges
+ * two array declarations (`mergePropertyDeclarations`).
+ */
+function declaresNull(schema: SchemaObject): boolean {
+  return (
+    (Array.isArray(schema.type) && schema.type.includes('null')) ||
+    (schema.nullable === true && schema.type !== undefined) ||
+    nullableUnionBranch(schema) !== undefined
+  );
 }
 
 /**
@@ -691,6 +730,10 @@ function extractDirectResource(
   // than silently dropped, and the inline object variants of a
   // `oneOf`/`anyOf` member contribute their fields as optional ones
   // (workos/oagen#283), as the same schema's component model has them.
+  // Earlier members win on a shared name there, and the fold places the
+  // body's own properties first, so an own `kind` enum beside a member's
+  // plain `kind` stays the enum here as it does in a field or an array's
+  // items.
   if (schema.allOf) {
     const merged = mergeAllOfMembers(schema, componentSchemas);
     const mergedRefFields = merged.resolvedRefs.length > 0;
@@ -793,17 +836,11 @@ function extractDirectResource(
 
 /**
  * Wrap `ref` in `nullable` when `schemaToTypeRef` would wrap the schema's
- * own type: an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
- * an OAS 3.0 `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that
- * collapses to one non-null variant (`nullableUnionBranch`). For the places
- * the response path builds an array TypeRef itself instead of delegating.
+ * own type (`declaresNull`). For the places the response path builds an
+ * array TypeRef itself instead of delegating.
  */
 function nullableIf(schema: SchemaObject, ref: TypeRef): TypeRef {
-  const nullable =
-    (Array.isArray(schema.type) && schema.type.includes('null')) ||
-    (schema.nullable === true && schema.type !== undefined) ||
-    nullableUnionBranch(schema) !== undefined;
-  return nullable ? { kind: 'nullable', inner: ref } : ref;
+  return declaresNull(schema) ? { kind: 'nullable', inner: ref } : ref;
 }
 
 function deriveModelName(schema: SchemaObject, fallback: string): string {

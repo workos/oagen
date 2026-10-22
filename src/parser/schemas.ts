@@ -928,9 +928,12 @@ export function extractSchemas(
     }
   }
 
-  // Collect inline enums from model fields and named-union variants
+  // Collect inline enums from model fields and named-union variants. One
+  // whose name a model extracted here owns (`Pet.kind` beside a `PetKind`
+  // object) is left on its ref: `collectInlineEnumsFromModels` promotes it
+  // under a distinct name once every model is known, as it does any clash.
   for (const model of models) {
-    collectInlineEnums(model, enums);
+    collectInlineEnums(model, enums, modelNames);
   }
   // ...and from every array component's items, which no model holds: the
   // reference side types them, so an array of an inline enum lifts its enum
@@ -990,13 +993,20 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
 
 /**
  * Walk a model's type refs (its fields' types and, for a named union, its
- * variants) and extract inline enum refs as top-level enum definitions.
+ * variants) and extract inline enum refs as top-level enum definitions,
+ * skipping one whose name is in `modelNames`: a model and an enum must never
+ * share a name, and the collision-aware model pass
+ * (`collectInlineEnumsFromModels`) renames and promotes that one later.
  * This ensures type alias files are generated for inline enums.
  */
-function collectInlineEnums(model: Model, enums: Enum[]): void {
+function collectInlineEnums(model: Model, enums: Enum[], modelNames: ReadonlySet<string>): void {
   const seen = new Set(enums.map((e) => e.name));
   for (const ref of collectModelTypeRefs(model)) {
-    collectInlineEnumFromRef(ref, enums, seen);
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (!modelNames.has(r.name)) collectInlineEnumFromRef(r, enums, seen);
+      },
+    });
   }
 }
 
@@ -2010,9 +2020,11 @@ export function resetFoldWarnings(): void {
  * around an object — because only an inline object variant takes them
  * (`foldSiblingProperties`). A primitive, array or enum variant is no object
  * and is not reported. Called by `schemaToTypeRef` with the context it types
- * the schema under, before the fold, on the schema as written.
+ * the schema under, before the fold, on the schema as written — and by the
+ * response and request-body paths, which fold a body before anything types
+ * it, on the body as written under the body's name.
  */
-function warnOnUncarriedProperties(
+export function warnOnUncarriedProperties(
   schema: SchemaObject,
   contextName: string | undefined,
   parentModelName: string | undefined,
@@ -3598,7 +3610,10 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     // `oneOf`/`anyOf` member read in, inherited properties typed as their
     // component types them and not read into again (so a component that
     // extends itself through a field terminates), the model's own properties
-    // materialized under the field's nested name.
+    // materialized under the field's nested name. Earlier members win on a
+    // shared name there as everywhere, and the fold places the schema's own
+    // properties first, so an own `kind` enum beside a member's plain `kind`
+    // stays the enum here as it does in a field or an array's items.
     if (kind === 'allOf' && composed.allOf) {
       materializeMergedAllOf(qualifyNestedInlineName(name, fieldName), composed, nestedModels, schemas);
     }
@@ -3866,6 +3881,31 @@ export function schemaToTypeRef(
     const nullVariant = rawVariants.find(isNullVariantSchema);
     const nonNullVariants = rawVariants.filter((v) => v !== nullVariant);
 
+    // Collapse an oneOf/anyOf whose non-null variants are all string-const
+    // schemas into a single enum. This turns patterns like
+    //   provider: { oneOf: [{ const: "AppleOAuth" }, { const: "GitHubOAuth" }, ...] }
+    // into a proper enum type with one member per variant instead of a
+    // structurally-opaque union of literal refs. Each member keeps its
+    // variant's `description` and `deprecated` (`constUnionEnumMembers`), the
+    // way the same `oneOf` under `components.schemas` does (`extractEnum`).
+    // An `enum:` list beside the union restricts the members and `null`
+    // alike, through the two helpers the component path reads
+    // (`constUnionEnumMembers`, `enumListAdmitsNull`), whatever it leaves:
+    // one member is an enum of that member, none an enum with no members —
+    // the component's answers — never the union of every const the list
+    // forbade, nor the nullable literal the single-variant unwrap below would
+    // make of `oneOf: [a, null]` when the list forbids `null`; so this is
+    // decided first. Without a list, a union of fewer than two consts keeps
+    // the shape the branches below give it (a lone const beside
+    // `type: 'null'` is a nullable literal).
+    const constMembers = constUnionEnumMembers(schema);
+    if (constMembers !== null && (constMembers.length >= 2 || Array.isArray(schema.enum))) {
+      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
+      // An `enum:` list beside the union that leaves `null` out forbids it,
+      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
+      return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
+    }
+
     if (nullVariant && nonNullVariants.length === 1) {
       // Nullable single type — unwrap as nullable. `asNullable` keeps a
       // `$ref` to an already-nullable enum component from double-wrapping.
@@ -3881,21 +3921,6 @@ export function schemaToTypeRef(
           reservedNames,
         ),
       );
-    }
-
-    // Collapse an oneOf/anyOf whose non-null variants are all string-const
-    // schemas into a single enum. This turns patterns like
-    //   provider: { oneOf: [{ const: "AppleOAuth" }, { const: "GitHubOAuth" }, ...] }
-    // into a proper enum type with one member per variant instead of a
-    // structurally-opaque union of literal refs. Each member keeps its
-    // variant's `description` and `deprecated` (`constUnionEnumMembers`), the
-    // way the same `oneOf` under `components.schemas` does (`extractEnum`).
-    const constMembers = constUnionEnumMembers(schema);
-    if (constMembers !== null && constMembers.length >= 2) {
-      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
-      // An `enum:` list beside the union that leaves `null` out forbids it,
-      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
-      return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
     // The inline object variants' model names, decided once for this TypeRef
