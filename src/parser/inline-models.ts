@@ -325,14 +325,28 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * order and depth play no part, and once per document, before any union is
  * named (`extractSchemas`), so the union TypeRef and every extractor read
  * the same decision. `undefined` clears the previous document's marks.
+ *
+ * Each root is read with a visited set of its own, so a schema object two
+ * roots share — one a `transformSpec` assigned in both places, a bundled
+ * external schema inlined twice as one object — is read under each root and
+ * compared with each root's other variants, and a mark from either root
+ * stands: the shared variant's title is then qualified wherever it appears.
+ * The generic descent over the document keeps a separate guard that never
+ * holds a schema. Both guards end the walk on a document that refers back
+ * to itself.
  */
 export function markContestedTitles(document: unknown): void {
   contestedTitledVariants = new WeakSet();
   if (!isRecord(document)) return;
-  const seen = new WeakSet<object>();
   const components = (document['components'] as { schemas?: unknown } | undefined)?.['schemas'];
-  if (isRecord(components)) markContestedTitlesUnderRoot(Object.values(components).filter(isSchemaRecord), seen);
-  visitSchemaRoots(document, seen, (root) => markContestedTitlesUnderRoot([root], seen));
+  // The generic descent's own guard. The components map is read here, as
+  // one root, so the descent steps over it.
+  const descended = new WeakSet<object>();
+  if (isRecord(components)) {
+    descended.add(components);
+    markContestedTitlesUnderRoot(Object.values(components).filter(isSchemaRecord));
+  }
+  visitSchemaRoots(document, descended, (root) => markContestedTitlesUnderRoot([root]));
 }
 
 /** A plain object: the only value that can be a schema or a container of them. */
@@ -348,16 +362,17 @@ function isSchemaRecord(value: unknown): value is SchemaObject {
 /**
  * Call `onRoot` for every schema root outside `components.schemas` (see
  * `markContestedTitles`): the value of every `schema` key reached from
- * `value` without entering a schema. `seen` is shared with the schema walks,
- * so a root already read — a component schema reached again through the
- * generic descent, a bundled schema inlined twice as one object — is read
- * once.
+ * `value` without entering a schema. `descended` holds the containers
+ * already entered — a guard against a document that refers back to itself
+ * — and never a schema: a root is handed to `onRoot` and not entered, so a
+ * schema object reached under two `schema` keys is handed over for each,
+ * and read under each root (`markContestedTitlesUnderRoot`).
  */
-function visitSchemaRoots(value: unknown, seen: WeakSet<object>, onRoot: (root: SchemaObject) => void): void {
-  if (!value || typeof value !== 'object' || seen.has(value)) return;
-  seen.add(value);
+function visitSchemaRoots(value: unknown, descended: WeakSet<object>, onRoot: (root: SchemaObject) => void): void {
+  if (!value || typeof value !== 'object' || descended.has(value)) return;
+  descended.add(value);
   if (Array.isArray(value)) {
-    for (const item of value) visitSchemaRoots(item, seen, onRoot);
+    for (const item of value) visitSchemaRoots(item, descended, onRoot);
     return;
   }
   for (const [key, entry] of Object.entries(value)) {
@@ -366,20 +381,25 @@ function visitSchemaRoots(value: unknown, seen: WeakSet<object>, onRoot: (root: 
       if (isSchemaRecord(entry)) onRoot(entry);
       continue;
     }
-    visitSchemaRoots(entry, seen, onRoot);
+    visitSchemaRoots(entry, descended, onRoot);
   }
 }
 
 /**
  * Mark every title-mapped variant under `roots` (read as one root) whose
  * title another variant under the same roots gives a different shape; see
- * `markContestedTitles` for the walk.
+ * `markContestedTitles` for the walk. The visited set is this root's own:
+ * a schema object another root also holds is read here as well, against
+ * this root's variants, and a schema reached twice within this root — the
+ * same object under two properties, or one that refers back to itself — is
+ * read once, which ends the walk.
  */
-function markContestedTitlesUnderRoot(roots: readonly SchemaObject[], seen: WeakSet<object>): void {
+function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
+  const visited = new WeakSet<SchemaObject>();
   const walk = (schema: SchemaObject): void => {
-    if (seen.has(schema)) return;
-    seen.add(schema);
+    if (visited.has(schema)) return;
+    visited.add(schema);
     if (schema.$ref) return;
     for (const [variant, title] of titleMappedVariantNames(schema)) {
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
