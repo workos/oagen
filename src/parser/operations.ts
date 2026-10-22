@@ -72,7 +72,7 @@ import {
   modelFingerprint,
   type InlineModelRegistry,
   type InlineModelOwner,
-  type SiblingStems,
+  type SiblingSites,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -3058,7 +3058,7 @@ function resolveDeferredInlineTypes(
   }
   const models: Model[] = [];
   const bundles: InlineModelBundle[] = [];
-  const siblingsByBareName = new Map<string, SiblingStems>();
+  const siblingsByBareName = new Map<string, SiblingSites>();
   for (const item of deferred) {
     const bareName = `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
     let siblings = siblingsByBareName.get(bareName);
@@ -3181,7 +3181,7 @@ function materializeDeferredType(
   item: DeferredInlineType,
   registry: ModelShapeRegistry,
   models: Model[],
-  siblings: SiblingStems,
+  siblings: SiblingSites,
 ): TypeRef {
   return materializeInlineSchema(item.schema, {
     stem: deferredNamingStem(item),

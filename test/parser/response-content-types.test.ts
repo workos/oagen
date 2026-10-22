@@ -2063,6 +2063,39 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expectSound(spec, [PLAIN]);
   });
 
+  it('shares a body whose nested titled variant was renamed under its root, the 201 replaying the rename (Greptile)', async () => {
+    // A component `Circle` of another shape owns the title; the 200's body
+    // renames its nested `Circle` to `…ResponseCircle` (no stem reaches a
+    // variant below the top level). The identical 201 body replays that
+    // rename before comparing, so it shares every model rather than
+    // settling on `…Response201` with a `…Response201Circle` of its own.
+    const warn = silence();
+    const withShape = obj({ shape: shapes({ radius: str }) });
+    const spec = await parseDocument(
+      document(createPet({ '200': withVendor(withShape), '201': withVendor(withShape, 'created') }), {
+        Circle: obj({ other: str }),
+      }),
+    );
+
+    expect(modelsOf(spec).sort()).toEqual([
+      'Circle { other }',
+      `${PLAIN} { shape }`,
+      `${PLAIN}Circle { kind, radius }`,
+      'CreatePetResponse { id }',
+      'Square { kind, side }',
+    ]);
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN]);
+    expect(spec.models.find((m) => m.name === PLAIN)?.fields[0].type).toMatchObject({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: `${PLAIN}Circle` },
+        { kind: 'model', name: 'Square' },
+      ],
+    });
+    expectSound(spec, ['Circle']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   describe('a replaced application/json body', () => {
     const json = (schema: unknown, description = 'ok') => ({
       description,
