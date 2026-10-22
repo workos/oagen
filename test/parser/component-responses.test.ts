@@ -398,6 +398,74 @@ describe('responses written as $ref into components/responses (issue #234)', () 
       const op = singleOperation(unnamedGetOwner, { responses: { PetFound: petFound } });
       expect(op.response).toEqual({ kind: 'model', name: 'OwnerGetResponse' });
     });
+
+    // Greptile, after the merge with main: a path stem that extends the
+    // component's stem starts with no reserved stem, yet its `…Response` is a
+    // name the component body mints for a nested object.
+    const addressCard = {
+      description: 'An owner card',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: { address_get_response: { type: 'object', properties: { street: { type: 'string' } } } },
+          },
+        },
+      },
+    };
+    const cardOwner = get('getOwner', { '200': { $ref: '#/components/responses/OwnerCard' } }, '/owners/{ownerId}');
+    const unnamedAddress = {
+      '/owner/card/response/address': {
+        get: {
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { type: 'object', properties: { line1: { type: 'string' } } } },
+              },
+            },
+          },
+        },
+      },
+    };
+    it.each([
+      ['component first', { ...cardOwner, ...unnamedAddress }],
+      ['path first', { ...unnamedAddress, ...cardOwner }],
+    ])('reserves the names the component body mints, not only its stem (%s)', (_order, paths) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { services, inlineModels } = extract(paths, { responses: { OwnerCard: addressCard } });
+      const byPath = new Map(services.flatMap((s) => s.operations).map((op) => [op.path, op.response]));
+      expect(byPath.get('/owners/{ownerId}')).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
+      const nested = inlineModels.filter((m) => m.name === 'OwnerCardResponseAddressGetResponse');
+      expect(nested).toHaveLength(1);
+      expect(nested[0].fields.map((f) => f.name)).toEqual(['street']);
+      const pathDerived = byPath.get('/owner/card/response/address') as { kind: string; name: string };
+      expect(pathDerived.kind).toBe('model');
+      expect(pathDerived.name).not.toBe('OwnerCardResponseAddressGetResponse');
+      const own = inlineModels.filter((m) => m.name === pathDerived.name);
+      expect(own).toHaveLength(1);
+      expect(own[0].fields.map((f) => f.name)).toEqual(['line1']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reserves the names a non-JSON component body mints too (the first media type with a schema)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const yamlCard = {
+        description: 'An owner card',
+        content: { 'application/yaml': addressCard.content['application/json'] },
+      };
+      const { services, inlineModels } = extract(
+        { ...cardOwner, ...unnamedAddress },
+        { responses: { OwnerCard: yamlCard } },
+      );
+      const byPath = new Map(services.flatMap((s) => s.operations).map((op) => [op.path, op.response]));
+      expect(byPath.get('/owners/{ownerId}')).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
+      expect(inlineModels.filter((m) => m.name === 'OwnerCardResponseAddressGetResponse')).toHaveLength(1);
+      const pathDerived = byPath.get('/owner/card/response/address') as { kind: string; name: string };
+      expect(pathDerived.name).not.toBe('OwnerCardResponseAddressGetResponse');
+      expect(inlineModels.filter((m) => m.name === pathDerived.name)[0].fields.map((f) => f.name)).toEqual(['line1']);
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   describe('an operation returning different shared bodies at two success codes', () => {
@@ -485,6 +553,104 @@ describe('responses written as $ref into components/responses (issue #234)', () 
       afterEach(() => {
         if (dir) rmSync(dir, { recursive: true, force: true });
         dir = undefined;
+      });
+
+      // Greptile, after the merge with main: a component schema that already
+      // owns `<Component>Response` must not be folded onto by the shared body,
+      // which steps to the first free numbered name and stays shared.
+      it.each([
+        [
+          'a component schema owns the name',
+          { schemas: { OwnerCardResponse: { type: 'object', properties: { id: { type: 'string' } } } } },
+        ],
+        ['a component response named like it derives it', { responses: { OwnerCardResponse: ownerCard } }],
+      ])('steps a shared body to a numbered name when %s', async (_why, extraComponents: Record<string, unknown>) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
+        const specPath = join(dir, 'spec.json');
+        const components = {
+          schemas: { ...(extraComponents.schemas as object) },
+          responses: {
+            OwnerCard: {
+              description: 'An owner',
+              content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'integer' } } } } },
+            },
+            ...(extraComponents.responses as object),
+          },
+        };
+        writeFileSync(
+          specPath,
+          JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'clash', version: '1' },
+            paths: {
+              '/owners/{ownerId}': {
+                get: { operationId: 'getOwner', responses: { '200': { $ref: '#/components/responses/OwnerCard' } } },
+              },
+            },
+            components,
+          }),
+        );
+        const spec = await parseSpec(specPath);
+        const op = spec.services.flatMap((s) => s.operations)[0];
+        expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse2' });
+        const own = spec.models.find((m) => m.name === 'OwnerCardResponse2');
+        expect(own?.fields.map((f) => [f.name, f.type])).toEqual([['id', { kind: 'primitive', type: 'integer' }]]);
+        if (extraComponents.schemas) {
+          const component = spec.models.find((m) => m.name === 'OwnerCardResponse');
+          expect(component?.fields.map((f) => [f.name, f.type])).toEqual([
+            ['id', { kind: 'primitive', type: 'string' }],
+          ]);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('keeps two stepped bodies of one operation apart (200 and 201)', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
+        const specPath = join(dir, 'spec.json');
+        const inline = (name: string, type: string) => ({
+          description: name,
+          content: { 'application/json': { schema: { type: 'object', properties: { [name]: { type } } } } },
+        });
+        writeFileSync(
+          specPath,
+          JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'clash', version: '1' },
+            paths: {
+              '/owners': {
+                post: {
+                  operationId: 'createOwner',
+                  responses: {
+                    '200': { $ref: '#/components/responses/OwnerCard' },
+                    '201': { $ref: '#/components/responses/NewOwner' },
+                  },
+                },
+              },
+            },
+            components: {
+              schemas: {
+                OwnerCardResponse: { type: 'object', properties: { id: { type: 'string' } } },
+                NewOwnerResponse: { type: 'object', properties: { name: { type: 'string' } } },
+              },
+              responses: { OwnerCard: inline('id', 'integer'), NewOwner: inline('name', 'integer') },
+            },
+          }),
+        );
+        const spec = await parseSpec(specPath);
+        const op = spec.services.flatMap((s) => s.operations)[0];
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, { kind: 'model', name: 'OwnerCardResponse2' }],
+          [201, { kind: 'model', name: 'NewOwnerResponse2' }],
+        ]);
+        const fieldsOf = (name: string) =>
+          spec.models.find((m) => m.name === name)?.fields.map((f) => [f.name, f.type]);
+        expect(fieldsOf('OwnerCardResponse2')).toEqual([['id', { kind: 'primitive', type: 'integer' }]]);
+        expect(fieldsOf('NewOwnerResponse2')).toEqual([['name', { kind: 'primitive', type: 'integer' }]]);
+        expect(fieldsOf('OwnerCardResponse')).toEqual([['id', { kind: 'primitive', type: 'string' }]]);
+        expect(fieldsOf('NewOwnerResponse')).toEqual([['name', { kind: 'primitive', type: 'string' }]]);
+        expect(warn).not.toHaveBeenCalled();
       });
 
       async function parseWithVersion(openapi: string): Promise<Operation> {

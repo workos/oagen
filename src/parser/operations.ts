@@ -335,11 +335,19 @@ export function extractOperations(
   // path, and two distinct paths — or a path and an operationId, component
   // schema or component response — can produce the same name, so the prefix
   // for every such operation is decided up front (see resolvePathModelBaseNames).
+  // The model name each component response's inline body takes, decided once
+  // for every operation that returns it (see resolveComponentResponseModelNames).
+  const componentResponseModelNames = resolveComponentResponseModelNames(componentResponses, [
+    ...(componentModels ?? []),
+    ...(componentFieldModels ?? []),
+  ]);
   const pathModelBaseNames = resolvePathModelBaseNames(
     paths,
     componentModels,
     componentRequestBodies,
     componentResponses,
+    componentResponseModelNames,
+    componentSchemas,
   );
   // An API root the untagged paths sit under (`/api`, `/v1`) tells the
   // services apart no better than nothing, so untagged operations skip it
@@ -402,6 +410,7 @@ export function extractOperations(
         deferred,
         apiRootLength,
         refSiblingDescriptions,
+        componentResponseModelNames,
       );
       inlineModels.push(...opModels);
       for (const model of opModels) operationOf.set(model, operationQualifier);
@@ -1342,6 +1351,7 @@ function buildOperation(
   deferred: DeferredInlineType[] = [],
   apiRootLength = 0,
   refSiblingDescriptions: 'override' | 'ignore' = 'override',
+  componentResponseModelNames?: ReadonlyMap<string, string>,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -1461,6 +1471,7 @@ function buildOperation(
     operationQualifier,
     deferred,
     refSiblingDescriptions,
+    componentResponseModelNames,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -2244,6 +2255,12 @@ interface ResponseTypingContext {
    * component's (OAS 3.1) or is ignored (OAS 3.0); see `resolveResponseRef`.
    */
   refSiblingDescriptions?: 'override' | 'ignore';
+  /**
+   * The model name each component response's inline body is shared under
+   * (`resolveComponentResponseModelNames`). Absent, every component keeps
+   * `componentResponseModelName`.
+   */
+  componentResponseModelNames?: ReadonlyMap<string, string>;
   /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
   serviceName?: string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
@@ -2546,6 +2563,8 @@ function resolvePathModelBaseNames(
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentResponses?: Record<string, Record<string, unknown>>,
+  componentResponseModelNames: ReadonlyMap<string, string> = new Map(),
+  componentSchemas?: Record<string, SchemaObject>,
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -2557,9 +2576,35 @@ function resolvePathModelBaseNames(
   }
   // A shared response names its inline body after the component, not the
   // operation (see componentResponseModelName), so its stem is reserved like
-  // an operationId's.
-  for (const componentName of Object.keys(componentResponses ?? {})) {
+  // an operationId's — and so is every name that body mints, the model and
+  // everything nested under it (`OwnerCardResponseAddressGetResponse` for an
+  // `address_get_response` object in `OwnerCard`): a path stem that merely
+  // extends the component's (`GET /owner/card/response/address` →
+  // `OwnerCardResponseAddressGet`) starts with none of the stems above, yet
+  // its `…Response` is exactly such a nested name, and the later merge would
+  // keep one shape for both. The names are read by the extractor the
+  // operation will use, under the same context name, so they agree by
+  // construction, under whatever media type the body is declared (the same
+  // fixed-order pick, `primaryBodySchema`); a chain of refs is followed to the
+  // body silently, since the operation declaring the ref warns when it reads it.
+  for (const [componentName, modelName] of componentResponseModelNames) {
+    const component = componentResponses?.[componentName];
+    if (!component) continue;
     reservedNames.add(componentResponseModelBase(componentName));
+    const resolved = resolveResponseRef<ResponseObject>(
+      component as ResponseObject | ReferenceObject,
+      componentResponses,
+      `components/responses/${componentName}`,
+      'override',
+      'silent',
+    );
+    const { schema } = primaryBodySchema(resolved);
+    if (!schema) continue;
+    const body = classifyAndExtractResponse(schema, modelName, componentSchemas);
+    for (const model of body.inlineModels) reservedNames.add(model.name);
+    for (const companion of body.envelopeCompanions ?? []) {
+      for (const model of companion.models) reservedNames.add(model.name);
+    }
   }
 
   for (const [path, pathItem] of Object.entries(paths)) {
@@ -2785,6 +2830,42 @@ function componentResponseNameOf(resp: ResponseObject | ReferenceObject): string
 function componentResponseModelName(componentName: string): string {
   const base = toPascalCase(componentName);
   return cleanSchemaName(base.endsWith('Response') ? base : base + 'Response');
+}
+
+/**
+ * The model name each component response's inline body is shared under,
+ * decided once for the document: `componentResponseModelName`, stepped to the
+ * first free numbered form (`OwnerCardResponse2`, `…3`) when a component
+ * schema (or a model a component field mints) already owns the name, or when
+ * another component response derives it — `OwnerCard` beside a schema
+ * `OwnerCardResponse`, or beside a component response `OwnerCardResponse`.
+ * A shared name of another shape would otherwise be folded by the later
+ * merge, which compares field names, onto a model with other field types,
+ * silently; and naming such a body per operation instead would hand two
+ * shared bodies of one operation (`OwnerCard` at 200, `NewOwner` at 201) the
+ * same `<Op>Response`. A component already named like its derived name
+ * (`OwnerCardResponse` → `OwnerCardResponse`) keeps it ahead of one that
+ * only derives it; the rest are decided in document order, so the outcome
+ * never depends on which operation is read first. Every component ends up in
+ * the map, so every operation that returns it shares the one model.
+ */
+function resolveComponentResponseModelNames(
+  componentResponses: Record<string, Record<string, unknown>> | undefined,
+  takenModels: readonly Model[],
+): ReadonlyMap<string, string> {
+  const taken = new Set(takenModels.map((model) => model.name));
+  const componentNames = Object.keys(componentResponses ?? {});
+  const exact = componentNames.filter((name) => componentResponseModelName(name) === name);
+  const ordered = [...exact, ...componentNames.filter((name) => !exact.includes(name))];
+  const names = new Map<string, string>();
+  for (const componentName of ordered) {
+    const base = componentResponseModelName(componentName);
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = `${base}${n}`;
+    taken.add(name);
+    names.set(componentName, name);
+  }
+  return names;
 }
 
 /**
@@ -3136,6 +3217,38 @@ function typeErrorBody(
 }
 
 /**
+ * The fixed-order pick of a success response's body: the JSON schema when a
+ * JSON media type is declared (`application/json` by essence, then `+json`);
+ * else a binary (`application/octet-stream`, `application/pdf`) or text
+ * (`TEXT_RESPONSE_MEDIA_TYPES`) media type, typed as a string without reading
+ * its schema; else the first media type that declares a schema; else the
+ * first declared, which reads as `unknown`. Media types are compared by
+ * essence (`application/pdf; foo=bar` is as binary as `application/pdf`,
+ * `TEXT/PLAIN; charset=utf-8` as much a string as `text/plain`) and
+ * `contentType` is the key as written. `extractResponses` reads a 2xx body
+ * through this, and `resolvePathModelBaseNames` asks the same question of a
+ * component response, so the names it reserves are the ones the operation
+ * will mint, whatever media type the body is declared under.
+ */
+function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema?: SchemaObject; type?: TypeRef } {
+  const json = jsonResponseSchema(resp);
+  if (json) return { contentType: json.contentType, schema: json.schema };
+  const content = resp.content;
+  if (!content) return {};
+  const keyWithEssence = (essence: string): string | undefined =>
+    Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
+  const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
+  if (binaryKey) return { contentType: binaryKey, type: { kind: 'primitive', type: 'string', format: 'binary' } };
+  const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+  if (textKey) return { contentType: textKey, type: { kind: 'primitive', type: 'string' } };
+  // The first media type that declares a schema; when none does, the first
+  // declared is the primary and reads as unknown.
+  const entries = Object.entries(content);
+  const first = entries.find(([, media]) => media?.schema) ?? entries[0];
+  return first ? { contentType: first[0], schema: first[1]?.schema } : {};
+}
+
+/**
  * The schema of a response's JSON body, with the media type it was declared
  * under as written: `application/json` first, else a `+json` media type
  * (`application/problem+json` is the usual shape of a `default` error),
@@ -3228,7 +3341,12 @@ function extractResponses(
     // Set when the response came from a component: its inline body is then
     // named after the component, shared by every operation that returns it.
     const componentName = code >= 200 ? componentResponseNameOf(rawResponse) : undefined;
-    const componentModelName = componentName === undefined ? undefined : componentResponseModelName(componentName);
+    const componentModelName =
+      componentName === undefined
+        ? undefined
+        : ctx.componentResponseModelNames
+          ? ctx.componentResponseModelNames.get(componentName)
+          : componentResponseModelName(componentName);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
     // response, which no branch below keeps, declares none worth
@@ -3250,39 +3368,13 @@ function extractResponses(
       // first other media type that declares one. Either way it goes through
       // `classifyAndExtractResponse`, so its inline models are created and
       // the response never references a model the parser did not emit.
-      const json = jsonResponseSchema(resp);
-      let bodySchema = json?.schema;
-      // The media type the fixed-order pick reads `extractedType` from, as
-      // written, so its `contents` entry can share that TypeRef instead of
-      // re-deriving it.
-      let primaryContentType = json?.contentType;
-      if (!bodySchema && resp.content) {
-        // Handle non-JSON response content types (text/plain, binary, XML, etc.)
-        // Media types are compared by essence: `application/pdf; foo=bar` is
-        // as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much
-        // a string as `text/plain`. The keys themselves stay as written.
-        const content = resp.content;
-        const keyWithEssence = (essence: string): string | undefined =>
-          Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
-        const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
-        const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
-        if (binaryKey) {
-          extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
-          primaryContentType = binaryKey;
-        } else if (textKey) {
-          extractedType = { kind: 'primitive', type: 'string' };
-          primaryContentType = textKey;
-        } else {
-          // Try the first media type that declares a schema; when none does,
-          // the first declared is the primary and reads as unknown.
-          const entries = Object.entries(content);
-          const first = entries.find(([, media]) => media?.schema) ?? entries[0];
-          if (first) {
-            primaryContentType = first[0];
-            bodySchema = first[1]?.schema;
-          }
-        }
-      }
+      // The fixed-order pick (`primaryBodySchema`): `primaryContentType` is
+      // the media type `extractedType` is read from, as written, so its
+      // `contents` entry can share that TypeRef instead of re-deriving it.
+      const pick = primaryBodySchema(resp);
+      const bodySchema = pick.schema;
+      const primaryContentType = pick.contentType;
+      if (pick.type) extractedType = pick.type;
       if (bodySchema) {
         const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
