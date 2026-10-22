@@ -658,6 +658,119 @@ describe('plural path names (issue #268)', () => {
     ]);
   });
 
+  it('keeps a deeper segment as written when the plural is what tells two paths apart (review)', () => {
+    // One segment deeper than the issue's repro: the singular `Pet` would
+    // give both paths `getToyPet`, so the plural path keeps its spelling.
+    expect(
+      names({
+        '/store/pets/{id}/toys/{toyId}': { get: item('id'), delete: item('id') },
+        '/store/pet/{id}/toys/{toyId}': { get: item('id'), delete: item('id') },
+        '/org/statuses/{id}/notes/{noteId}': { get: item('id') },
+        '/org/status/{id}/notes/{noteId}': { get: item('id') },
+        '/org/aliases/{id}/notes/{noteId}': { get: item('id') },
+        '/org/alias/{id}/notes/{noteId}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getNoteAlias                 GET    /org/alias/{id}/notes/{noteId}',
+      'getNoteAliases               GET    /org/aliases/{id}/notes/{noteId}',
+      'getNoteStatus                GET    /org/status/{id}/notes/{noteId}',
+      'getNoteStatuses              GET    /org/statuses/{id}/notes/{noteId}',
+      'deleteToyPet                 DELETE /store/pet/{id}/toys/{toyId}',
+      'getToyPet                    GET    /store/pet/{id}/toys/{toyId}',
+      'deleteToyPets                DELETE /store/pets/{id}/toys/{toyId}',
+      'getToyPets                   GET    /store/pets/{id}/toys/{toyId}',
+    ]);
+    // Three paths: the two plural spellings share the written form and are
+    // numbered, while the singular path keeps the singular name.
+    expect(
+      names({
+        '/store/Pets/{id}/toys/{toyId}': { get: item('id') },
+        '/store/pets/{id}/toys/{toyId}': { get: item('id') },
+        '/store/pet/{id}/toys/{toyId}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getToyPets                   GET    /store/Pets/{id}/toys/{toyId}',
+      'getToyPet                    GET    /store/pet/{id}/toys/{toyId}',
+      'getToyPets2                  GET    /store/pets/{id}/toys/{toyId}',
+    ]);
+  });
+
+  it('keeps a deeper segment as written when the singular would take an operationId (review)', () => {
+    expect(
+      names({
+        '/store/featured/{toyId}': { get: { ...item('toyId'), operationId: 'getToyCat' } },
+        '/store/cats/{id}/toys/{toyId}': { get: item('id') },
+        '/store/dogs/{id}/toys/{toyId}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getToyCats                   GET    /store/cats/{id}/toys/{toyId}',
+      'getToyDog                    GET    /store/dogs/{id}/toys/{toyId}',
+      'getToyCat                    GET    /store/featured/{toyId}',
+    ]);
+    // An item segment beside the same segment as a collection: the singular
+    // and the plural tell them apart, with no parameter needed.
+    expect(
+      names({
+        '/store/cats/{id}/toys/{toyId}': { get: item('id') },
+        '/store/cats/toys/{toyId}': { get: item('toyId') },
+      }),
+    ).toEqual([
+      'getToyCats                   GET    /store/cats/toys/{toyId}',
+      'getToyCat                    GET    /store/cats/{id}/toys/{toyId}',
+    ]);
+  });
+
+  it('stays singular when two paths agree in both spellings, and goes on to the parameters', () => {
+    expect(
+      names({
+        '/orgs/teams/{id}/members': { get: item('id') },
+        '/orgs/{orgId}/teams/{id}/members': { get: item('orgId') },
+      }),
+    ).toEqual([
+      'listMembersTeam              GET    /orgs/teams/{id}/members',
+      'listMembersTeamByOrgId       GET    /orgs/{orgId}/teams/{id}/members',
+    ]);
+  });
+
+  it('shares a plural between members some other member does not take, and numbers them (review)', () => {
+    expect(
+      names({
+        '/store/Pets/{id}': { get: item('id') },
+        '/store/pets/{id}': { get: item('id') },
+        '/store/pet/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPets                      GET    /store/Pets/{id}',
+      'getPet                       GET    /store/pet/{id}',
+      'getPets2                     GET    /store/pets/{id}',
+    ]);
+    expect(
+      names({
+        '/store/featured/{id}': { get: { ...item('id'), operationId: 'getPet' } },
+        '/store/Pets/{id}': { get: item('id') },
+        '/store/pets/{id}': { get: item('id') },
+      }),
+    ).toEqual([
+      'getPets                      GET    /store/Pets/{id}',
+      'getPet                       GET    /store/featured/{id}',
+      'getPets2                     GET    /store/pets/{id}',
+    ]);
+  });
+
+  it("applies the stemmer's documented limits to a deeper segment as well (review)", () => {
+    // `sms` is an acronym the stemmer reads as a plural; the limit is
+    // documented on singularizePathSegment and reaches the deeper context.
+    expect(
+      names({
+        '/messages/sms/{smsId}/attachments': { get: item('smsId') },
+        '/messages/{id}/attachments': { get: item('id') },
+      }),
+    ).toEqual([
+      'listAttachmentsSm            GET    /messages/sms/{smsId}/attachments',
+      'listAttachments              GET    /messages/{id}/attachments',
+    ]);
+  });
+
   it('singularises the service noun restored to an item operation', () => {
     // `/api/notes/{noteId}` would read `Note` were `notes` not the service
     // segment, so that is the noun restored beside `operationId: get`; the
@@ -741,6 +854,72 @@ describe('custom-method paths (issue #269)', () => {
     ).toEqual([
       'adoptPet                     POST   /pets/{petId}/adopt',
       'adoptPet2                    POST   /pets/{petId}:adopt',
+    ]);
+  });
+
+  /** One entry per service, `name: METHOD /path` per operation, as the issue prints it. */
+  const services = (paths: Record<string, Partial<Record<Method, unknown>>>) =>
+    extractOperations(paths as Parameters<typeof extractOperations>[0]).services.map(({ name, operations }) => ({
+      name,
+      operations: operations.map((op) => `${op.name}: ${op.httpMethod.toUpperCase()} ${op.path}`),
+    }));
+
+  it('keeps a tagged service whole when some of its paths carry a custom method', () => {
+    const vet = (...params: string[]) => ({
+      ...json,
+      tags: ['vets'],
+      parameters: params.map((name) => ({ name, in: 'path' as const, required: true, schema: { type: 'string' } })),
+    });
+    expect(
+      services({
+        '/vets:bulkCertify': { post: vet() },
+        '/vets/{id}': { get: vet('id') },
+        '/vets/{id}:certify': { post: vet('id') },
+      }),
+    ).toEqual([
+      {
+        name: 'Vets',
+        operations: [
+          'createBulkCertify: POST /vets:bulkCertify',
+          'get: GET /vets/{id}',
+          'certifyVet: POST /vets/{id}:certify',
+        ],
+      },
+    ]);
+  });
+
+  it('never names a service from the verb of a custom method', () => {
+    // `/v1/{name}:cancel` stays in `V1` beside `/v1/{name}`: the verb is not
+    // a resource. The slash-written `/v1/{name}/cancel` names `Cancel`, as it
+    // always did.
+    expect(
+      services({
+        '/v1/operations': { get: json },
+        '/v1/{name}': { get: jsonItem('name') },
+        '/v1/{name}:cancel': { post: jsonItem('name') },
+        '/v1/{name}:wait': { post: jsonItem('name') },
+      }),
+    ).toEqual([
+      { name: 'Operations', operations: ['list: GET /v1/operations'] },
+      {
+        name: 'V1',
+        operations: ['get: GET /v1/{name}', 'cancel: POST /v1/{name}:cancel', 'wait: POST /v1/{name}:wait'],
+      },
+    ]);
+    expect(
+      services({ '/v1/{name}': { get: jsonItem('name') }, '/v1/{name}/cancel': { post: jsonItem('name') } }),
+    ).toEqual([
+      { name: 'V1', operations: ['get: GET /v1/{name}'] },
+      { name: 'Cancel', operations: ['cancel: POST /v1/{name}/cancel'] },
+    ]);
+  });
+
+  it('reads a custom method on the API root as part of the root, and names no service from its verb', () => {
+    // `/api/v1:reset` contributes `api/v1` to the document root exactly as
+    // `/api/v1/notes` does, so `Notes` is not pushed into `V1`.
+    expect(services({ '/api/v1:reset': { post: json }, '/api/v1/notes': { get: json } })).toEqual([
+      { name: 'Api', operations: ['createReset: POST /api/v1:reset'] },
+      { name: 'Notes', operations: ['list: GET /api/v1/notes'] },
     ]);
   });
 });
