@@ -1,4 +1,4 @@
-import type { Enum, Model, Service, TypeRef, Webhook } from '../ir/types.js';
+import type { Enum, Model, ModelRef, Service, TypeRef, Webhook } from '../ir/types.js';
 import {
   walkTypeRef,
   collectResponseHeaders,
@@ -7,6 +7,7 @@ import {
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
   renameModelRefs,
+  renameTypeRefModels,
 } from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
 import { isComponentModelRef } from './schemas.js';
@@ -16,6 +17,7 @@ import {
   inheritedModelRefsOf,
   isInheritedModelRef,
   modelAdmits,
+  recordFieldModelRename,
   type FieldInlineModelGroup,
   type InlineModelBundle,
 } from './inline-models.js';
@@ -37,11 +39,16 @@ export interface InlineModelNaming {
 
 /**
  * Bundle the models each component field produced with the references that
- * field owns: its own type, looked up in `models` as the response pass left
- * them, and every reference an `allOf` merge copied from it
+ * field owns: its own type, looked up in `models` (the components), and
+ * every reference an `allOf` merge has copied from it so far
  * (`inheritedModelRefsOf`), so a renamed child is repointed from the field
  * that produced it and from each copy of that field, and from nowhere else.
- * A field the model no longer has falls back to every field of its component.
+ * A field the model no longer has falls back to every field of its
+ * component. A rename is recorded for the field (`recordFieldModelRename`),
+ * so a reference an `allOf` merge copies from it afterwards — an operation's
+ * or a webhook's, read after the fields are settled — is created under the
+ * settled name. Read once before the operations (`settleFieldInlineModels`)
+ * and again, with the copies made since, before the merges.
  */
 export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
@@ -53,6 +60,7 @@ export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models:
       qualifier: parentName,
       roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
       models: fieldModels,
+      renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
     };
   });
 }
@@ -111,21 +119,17 @@ export function reservedTypeNames(
 }
 
 /**
- * Repoint every reference to the inline model `oldName` within `ref` to
- * `newName`, by the reference's identity rather than its name alone: an
- * explicit `$ref` to a same-named component (`isComponentModelRef`) is never
- * touched, and a reference an `allOf` merge copied from another component's
- * field (`isInheritedModelRef`) belongs to that field's site and is left to
- * it, unless the caller is that site (`includeInherited`).
+ * Which references a merge pass may repoint when it renames an inline model,
+ * by the reference's identity rather than its name alone: one minted for an
+ * inline model, never an explicit `$ref` to a same-named component
+ * (`isComponentModelRef`); and a reference an `allOf` merge copied from
+ * another component's field (`isInheritedModelRef`) only for that field's
+ * own site (`includeInherited`), since it belongs to that site. Handed to
+ * `renameTypeRefModels`, so a union's discriminator mapping follows a
+ * repointed variant and stays on a `$ref` left in place.
  */
-function repointInlineModelRefs(ref: TypeRef, oldName: string, newName: string, includeInherited: boolean): void {
-  walkTypeRef(ref, {
-    model: (r) => {
-      if (r.name !== oldName || isComponentModelRef(r)) return;
-      if (!includeInherited && isInheritedModelRef(r)) return;
-      (r as { name: string }).name = newName;
-    },
-  });
+function inlineRefAdmit(includeInherited: boolean): (ref: ModelRef) => boolean {
+  return (ref) => !isComponentModelRef(ref) && (includeInherited || !isInheritedModelRef(ref));
 }
 
 function keepLargestByName(models: Model[]): Model[] {
@@ -310,18 +314,21 @@ function settleSharedNames(
 /**
  * Move `copy` off `name` to a free name qualified by its site
  * (`mintQualifiedName`), reserve it, and repoint exactly the references its
- * site minted: the site's own roots, copies of its field included; then the
- * references in the models minted beside it, which never include what
- * another site's field lent them. Returns the new name.
+ * site minted (`inlineRefAdmit`): the site's own roots, copies of its field
+ * included; then the references in the models minted beside it, which never
+ * include what another site's field lent them — every reference kind alike,
+ * a union's discriminator mapping following its variant
+ * (`renameTypeRefModels`, `renameModelRefs`). A site that copies references
+ * later is told (`InlineModelBundle.renamed`). Returns the new name.
  */
 function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, naming: InlineModelNaming): string {
   const renamed = mintQualifiedName(name, bundle.qualifier, naming.reserved);
   naming.reserved.add(renamed);
   copy.name = renamed;
-  for (const root of bundle.roots) repointInlineModelRefs(root, name, renamed, true);
-  for (const model of bundle.models) {
-    for (const ref of collectModelTypeRefs(model)) repointInlineModelRefs(ref, name, renamed, false);
-  }
+  const renames = new Map([[name, renamed]]);
+  for (const root of bundle.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
+  for (const model of bundle.models) renameModelRefs(model, renames, inlineRefAdmit(false));
+  bundle.renamed?.(name, renamed);
   return renamed;
 }
 
@@ -414,14 +421,12 @@ function haveSameFields(a: Model, b: Model): boolean {
   return aSignatures.size === bSignatures.size && [...aSignatures].every((s) => bSignatures.has(s));
 }
 
-function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
-  walkTypeRef(ref, {
-    model: (r) => {
-      if (r.name === oldName) (r as { name: string }).name = newName;
-    },
-  });
-}
-
+/**
+ * Rename `oldName` to `newName` everywhere, by name: in every model's fields,
+ * named-union variants and discriminator mapping, and in every reference an
+ * operation or webhook holds — a union's mapping following its variants
+ * (`renameTypeRefModels`).
+ */
 function rewriteModelRefs(
   models: Model[],
   services: Service[],
@@ -429,38 +434,25 @@ function rewriteModelRefs(
   newName: string,
   webhooks: Webhook[] = [],
 ): void {
-  // Fields, named-union variants and discriminator mappings alike.
   const renames = new Map([[oldName, newName]]);
   for (const model of models) renameModelRefs(model, renames);
   for (const service of services) {
     for (const op of service.operations) {
-      rewriteModelRef(op.response, oldName, newName);
-      if (op.requestBody) {
-        rewriteModelRef(op.requestBody, oldName, newName);
-      }
+      renameTypeRefModels(op.response, renames);
+      if (op.requestBody) renameTypeRefModels(op.requestBody, renames);
       // The iterator's item type is its own reference when an explicit
       // `dataPath` typed it from the document (`resolveDataPathFromSchema`),
       // not the one `response` holds, so it is rewritten on its own.
-      if (op.pagination) rewriteModelRef(op.pagination.itemType, oldName, newName);
-      for (const field of op.pagination?.envelopeFields ?? []) {
-        rewriteModelRef(field.type, oldName, newName);
-      }
-      for (const error of op.errors) {
-        if (error.type) rewriteModelRef(error.type, oldName, newName);
-      }
-      for (const header of collectResponseHeaders(op)) {
-        rewriteModelRef(header.type, oldName, newName);
-      }
-      for (const { type } of collectResponseBodyTypes(op)) {
-        rewriteModelRef(type, oldName, newName);
-      }
-      for (const { type } of collectRequestBodyTypes(op)) {
-        rewriteModelRef(type, oldName, newName);
-      }
+      if (op.pagination) renameTypeRefModels(op.pagination.itemType, renames);
+      for (const field of op.pagination?.envelopeFields ?? []) renameTypeRefModels(field.type, renames);
+      for (const error of op.errors) if (error.type) renameTypeRefModels(error.type, renames);
+      for (const header of collectResponseHeaders(op)) renameTypeRefModels(header.type, renames);
+      for (const { type } of collectResponseBodyTypes(op)) renameTypeRefModels(type, renames);
+      for (const { type } of collectRequestBodyTypes(op)) renameTypeRefModels(type, renames);
     }
   }
   for (const webhook of webhooks) {
-    for (const ref of collectWebhookTypeRefs(webhook)) rewriteModelRef(ref, oldName, newName);
+    for (const ref of collectWebhookTypeRefs(webhook)) renameTypeRefModels(ref, renames);
   }
 }
 
@@ -481,12 +473,45 @@ export function mergeInlineResponseModels(
   inlineModels: Model[],
   naming?: InlineModelNaming,
 ): Model[] {
-  const owners = new Map(schemaModels.map((m) => [m.name, m]));
-  const { kept } = settleSharedNames(owners, inlineModels, naming);
-  // A kept copy still named like a component could not be renamed (no
-  // site): the component's definition stands and the copy is dropped.
-  const survivors = kept.filter((model) => !owners.has(model.name));
-  return [...schemaModels, ...keepLargestByName(survivors)];
+  return [...schemaModels, ...keepLargestByName(settleAgainstComponents(schemaModels, inlineModels, naming))];
+}
+
+/**
+ * Settle the components' own inline field models against the components —
+ * the first merge step, run as soon as both are extracted and before any
+ * operation or webhook is read (see `parseSpec`): a field object, array
+ * item or union variant named like a component shares the name when the
+ * component admits it and is dropped, the field resolving to the component;
+ * one the component does not admit, or whose flag differs, takes its
+ * qualified name now (`PetOwner2`), its field and every `allOf` copy of it
+ * repointed (`settleSharedNames`). Settling the fields first means every
+ * later comparison with a component — the shape registry's, the response
+ * merge's — reads the component's children by their final names, so a body
+ * that `$ref`s a component `GetPetResponseOwner` is never admitted by a
+ * component whose `owner` was an inline object of another shape that only
+ * later becomes `GetPetResponseOwner2`. Returns the field models still
+ * competing for a name, the renamed ones under their new names; the merges
+ * that follow compare them with the operations' survivors only
+ * (`mergeFieldInlineModels`).
+ */
+export function settleFieldInlineModels(
+  components: Model[],
+  fieldInlineModels: Model[],
+  naming?: InlineModelNaming,
+): Model[] {
+  return settleAgainstComponents(components, fieldInlineModels, naming);
+}
+
+/**
+ * `contenders` settled against `components` (`settleSharedNames`), minus
+ * those that folded onto one and those still named like one — a kept copy
+ * still carrying a component's name had no site to be renamed from, and the
+ * component's definition stands.
+ */
+function settleAgainstComponents(components: Model[], contenders: Model[], naming?: InlineModelNaming): Model[] {
+  const owners = new Map(components.map((m) => [m.name, m]));
+  const { kept } = settleSharedNames(owners, contenders, naming);
+  return kept.filter((model) => !owners.has(model.name));
 }
 
 /**
@@ -502,13 +527,16 @@ export function mergeInlineResponseModels(
  * model named like a component keeps the name only when the component
  * admits it (and is then dropped, the field resolving to the component) and
  * takes a qualified name otherwise, so a component is never replaced; and a
- * deprecated and a live definition of one name are told apart. The fold
- * below then only joins models that agree on the flag, and a field model
- * named like an inline survivor of another shape is dropped in favour of the
- * survivor, with a warning naming both shapes, as the earlier definition of
- * an inline name is kept everywhere. A copy without a site to rename from
- * (`naming`) is dropped in favour of the component, with the settle pass's
- * warning.
+ * deprecated and a live definition of one name are told apart. The parser
+ * has already settled its field models against the components
+ * (`settleFieldInlineModels`), so for it this step decides only the names
+ * the field models share with the response pass's survivors; a direct
+ * caller's field models are settled here. The fold below then only joins
+ * models that agree on the flag, and a field model named like an inline
+ * survivor of another shape is dropped in favour of the survivor, with a
+ * warning naming both shapes, as the earlier definition of an inline name
+ * is kept everywhere. A copy without a site to rename from (`naming`) is
+ * dropped in favour of the component, with the settle pass's warning.
  */
 export function mergeFieldInlineModels(
   existingModels: Model[],
