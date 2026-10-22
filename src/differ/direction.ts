@@ -1,5 +1,10 @@
 import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
-import { collectResponseHeaders, collectModelTypeRefs, collectResponseBodyTypes, collectWebhookTypeRefs } from '../ir/types.js';
+import {
+  collectResponseHeaders,
+  collectModelTypeRefs,
+  collectResponseBodyTypes,
+  collectWebhookTypeRefs,
+} from '../ir/types.js';
 
 /**
  * Which side of the wire a model sits on, from the caller's point of view.
