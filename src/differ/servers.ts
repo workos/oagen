@@ -1,9 +1,10 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
 import {
   baseUrlBeyondDefault,
+  isDefaultServerList,
   resolveServerUrl,
   serverUrlPlaceholders,
-  serversBeyondDefault,
+  serversOrDefault,
 } from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
@@ -34,17 +35,19 @@ import type { Change, ServerVariableChange } from './types.js';
  * OpenAPI's default server is one thing however a document spells it (#291):
  * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (description and
  * variables aside: `/` references no variable, so one declared on it changes
- * nothing — #292) all compare as a document with no server and no default
- * host, and nothing is reported between two such documents. A `/`
- * entry is left out of the matching wherever it sits
- * (`serversBeyondDefault`), so it is never a `server-added` or a
- * `server-removed`: `/` gaining a named host beside it is one `server-added`
- * and losing that host one `server-removed`, and a document that moves from
- * `/` to a named host gains it as additive. The default address is compared
- * through `baseUrlBeyondDefault`, which reads `''` and `/` as one, so a
- * document whose first server merely resolves to `/` has not moved, while a
- * `baseUrl` naming a host with no `servers` beside it — an IR built by hand,
- * which the parser never produces — is compared as written. `oldBaseUrl` and
+ * nothing — #292) are all matched as `[{ url: '/' }]`
+ * (`serversOrDefault`), so nothing is reported between two such documents
+ * and `/` gaining a named host beside it is one `server-added`, losing that
+ * host one `server-removed`. The `/` a document is only implied to have is
+ * never a `server-added` or a `server-removed` itself: a document that moves
+ * from any spelling of the default to a named host gains it as additive with
+ * no `server-removed` for `/`, and the reverse has no `server-added` for
+ * `/`. A `/` listed beside another server is one a caller can pick, so it is
+ * added and removed like any other. The default address is compared through
+ * `baseUrlBeyondDefault`, which reads `''` and `/` as one, so a document
+ * whose first server merely resolves to `/` has not moved, while a `baseUrl`
+ * naming a host with no `servers` beside it — an IR built by hand, which the
+ * parser never produces — is compared as written. `oldBaseUrl` and
  * `newBaseUrl` still carry `ApiSpec.baseUrl` as the parser set it, `/`
  * included.
  */
@@ -54,10 +57,10 @@ export function diffServers(
 ): Change[] {
   const changes: Change[] = [];
 
-  // A `/` entry is OpenAPI's default server, not a host a caller picks: it is
-  // left out of the matching on both sides, so it is never added or removed.
-  const oldServers = serversBeyondDefault(oldSpec.servers);
-  const newServers = serversBeyondDefault(newSpec.servers);
+  // A document that declares nothing beyond the default is served from
+  // OpenAPI's single `/`, so that is what it is matched as.
+  const oldServers = serversOrDefault(oldSpec.servers);
+  const newServers = serversOrDefault(newSpec.servers);
   // `''` and `/` are one address — the default — on either side, so only a
   // move to or from somewhere else is a change. Any other `baseUrl` is
   // compared as written, even with no `servers` beside it.
@@ -84,15 +87,27 @@ export function diffServers(
     pairings.set(url, pairServers(oldByUrl.get(url) ?? [], newByUrl.get(url) ?? []));
   }
 
-  for (const url of newByUrl.keys()) {
-    for (let i = 0; i < pairings.get(url)!.surplusNew; i++) {
-      changes.push({ kind: 'server-added', url, classification: 'additive' });
+  // The `/` a document is only implied to have (its list means the default,
+  // so it was matched as `[{ url: '/' }]` above) is not a server a caller
+  // gained or lost: left unmatched, it is not reported. A side that lists
+  // anything beyond the default has no implied entry, so every surplus there
+  // is reported, a `/` beside a named host included.
+  const oldImplied = isDefaultServerList(oldSpec.servers);
+  const newImplied = isDefaultServerList(newSpec.servers);
+
+  if (!newImplied) {
+    for (const url of newByUrl.keys()) {
+      for (let i = 0; i < pairings.get(url)!.surplusNew; i++) {
+        changes.push({ kind: 'server-added', url, classification: 'additive' });
+      }
     }
   }
 
-  for (const url of oldByUrl.keys()) {
-    for (let i = 0; i < pairings.get(url)!.surplusOld; i++) {
-      changes.push({ kind: 'server-removed', url, classification: 'breaking' });
+  if (!oldImplied) {
+    for (const url of oldByUrl.keys()) {
+      for (let i = 0; i < pairings.get(url)!.surplusOld; i++) {
+        changes.push({ kind: 'server-removed', url, classification: 'breaking' });
+      }
     }
   }
 

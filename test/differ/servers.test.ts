@@ -678,7 +678,13 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
       ]);
     });
 
-    it('never reports `/` itself as added or removed, in either position', () => {
+    it("reports `/` listed beside a named host as a server of its own when it comes or goes (the issue author's review)", () => {
+      expect(diffServers(spec([staging]), spec([staging, root]))).toEqual([
+        { kind: 'server-added', url: '/', classification: 'additive' },
+      ]);
+      expect(diffServers(spec([staging, root]), spec([staging]))).toEqual([
+        { kind: 'server-removed', url: '/', classification: 'breaking' },
+      ]);
       expect(diffServers(spec([root, staging]), spec([staging]))).toEqual([
         {
           kind: 'base-url-changed',
@@ -686,9 +692,29 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
           newBaseUrl: 'https://staging.api.example.com',
           classification: 'additive',
         },
+        { kind: 'server-removed', url: '/', classification: 'breaking' },
       ]);
-      expect(diffServers(spec([staging, root]), spec([staging]))).toEqual([]);
-      expect(diffServers(spec([staging]), spec([staging, root]))).toEqual([]);
+    });
+
+    it('pairs a listed `/` with the implied one, so `/` beside a host against the default reports only the host', () => {
+      expect(diffServers(spec([staging, root]), spec())).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://staging.api.example.com',
+          newBaseUrl: '',
+          classification: 'breaking',
+        },
+        { kind: 'server-removed', url: 'https://staging.api.example.com', classification: 'breaking' },
+      ]);
+      expect(diffServers(spec([root]), spec([staging, root]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '/',
+          newBaseUrl: 'https://staging.api.example.com',
+          classification: 'additive',
+        },
+        { kind: 'server-added', url: 'https://staging.api.example.com', classification: 'additive' },
+      ]);
     });
 
     it('treats `/` written out twice as the default too', () => {
@@ -702,7 +728,7 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
     expect(diffServers(spec([rootWithPort]), spec())).toEqual([]);
     expect(diffServers(spec(), spec([rootWithPort]))).toEqual([]);
     expect(diffServers(spec([root]), spec([rootWithPort]))).toEqual([]);
-    // Beside a named host it is left out of the matching like any `/` entry.
+    // Beside a named host it comes and goes like any listed `/`.
     expect(diffServers(spec([rootWithPort, staging]), spec([staging]))).toEqual([
       {
         kind: 'base-url-changed',
@@ -710,6 +736,7 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
         newBaseUrl: 'https://staging.api.example.com',
         classification: 'additive',
       },
+      { kind: 'server-removed', url: '/', classification: 'breaking' },
     ]);
   });
 

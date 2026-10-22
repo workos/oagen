@@ -111,7 +111,7 @@ export {
   resolveServerUrl,
   serverListsEqual,
   serverUrlPlaceholders,
-  serversBeyondDefault,
+  serversOrDefault,
 } from './ir/server-url.js';
 
 // Errors
