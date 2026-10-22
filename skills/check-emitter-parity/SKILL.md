@@ -146,6 +146,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### Enum
 
+- `description` — Enum doc comment (the component enum schema's own `description`; a lifted inline enum carries none)
 - `default` — The schema's `default:` value, for a default-value annotation
 - `externalDocs` — Link to external documentation, for a `@see`-style tag
 - `deprecated` — Deprecation marker on enums (the component enum schema's own keyword, normalized to a literal `true`)

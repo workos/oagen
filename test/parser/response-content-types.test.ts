@@ -1915,3 +1915,281 @@ describe('beside default and range responses', () => {
     warn.mockRestore();
   });
 });
+
+describe('identical inline bodies on two status codes (issue #280)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  const silence = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const warnings = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.map((call) => String(call[0]));
+
+  /** Every model reference resolves, and no model other than a component is left with nothing referencing it. */
+  function expectSound(spec: ApiSpec, componentNames: string[]): void {
+    const names = new Set(spec.models.map((m) => m.name));
+    const refs: TypeRef[] = [];
+    for (const op of spec.services.flatMap((s) => s.operations)) {
+      refs.push(op.response);
+      if (op.requestBody) refs.push(op.requestBody);
+      for (const r of op.successResponses ?? []) refs.push(r.type);
+      for (const e of op.errors) if (e.type) refs.push(e.type);
+      for (const { type } of collectResponseBodyTypes(op)) refs.push(type);
+      for (const r of [...(op.successResponses ?? []), ...op.errors])
+        for (const h of r.headers ?? []) refs.push(h.type);
+      for (const h of op.responseHeaders ?? []) refs.push(h.type);
+    }
+    for (const model of spec.models) for (const field of model.fields) refs.push(field.type);
+    const referenced = new Set(refs.flatMap((ref) => collectModelRefs(ref)));
+    expect([...referenced].filter((name) => !names.has(name))).toEqual([]);
+    const orphaned = spec.models.map((m) => m.name).filter((n) => !componentNames.includes(n) && !referenced.has(n));
+    expect(orphaned).toEqual([]);
+  }
+
+  const modelsOf = (spec: ApiSpec) =>
+    spec.models.map(({ fields, name }) => `${name} { ${fields.map((f) => f.name).join(', ')} }`);
+  const name = (type: TypeRef) => (type.kind === 'model' ? type.name : type.kind);
+  const successOf = (op: Operation) =>
+    op.successResponses!.map(
+      ({ contents, statusCode }) =>
+        `${statusCode}: ${contents!.map(({ contentType, type }) => `${contentType} → ${name(type)}`).join(', ')}`,
+    );
+  const createPet = (responses: Record<string, unknown>) => ({
+    '/pets': { post: { operationId: 'createPet', responses } },
+  });
+  /** A response with `{ id }` under application/json and the given schema under the vendor media type. */
+  const withVendor = (vendor: unknown, description = 'ok') => ({
+    description,
+    content: { 'application/json': { schema: obj({ id: str }) }, 'application/vnd.pet+json': { schema: vendor } },
+  });
+  const PLAIN = 'CreatePetApplicationVndPetJsonResponse';
+
+  it('shares one model, under the name the 200 took, when a component owns the plain name (the issue repro)', async () => {
+    const warn = silence();
+    const spec = await parseDocument(
+      document(createPet({ '200': withVendor(obj({ name: str })), '201': withVendor(obj({ name: str }), 'created') }), {
+        [PLAIN]: obj({ other: str }),
+      }),
+    );
+
+    expect(modelsOf(spec)).toEqual([`${PLAIN} { other }`, 'CreatePetResponse { id }', `${PLAIN}200 { name }`]);
+    expect(successOf(findOp(spec, 'createPet'))).toEqual([
+      `200: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}200`,
+      `201: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}200`,
+    ]);
+    expectSound(spec, [PLAIN]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('shares the plain name when nothing owns it', async () => {
+    const spec = await parseDocument(
+      document(createPet({ '200': withVendor(obj({ name: str })), '201': withVendor(obj({ name: str }), 'created') })),
+    );
+
+    expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${PLAIN} { name }`]);
+    expect(successOf(findOp(spec, 'createPet'))).toEqual([
+      `200: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}`,
+      `201: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}`,
+    ]);
+    expectSound(spec, []);
+  });
+
+  it('shares the nested models too, since they are named from the name the 200 took', async () => {
+    const nested = obj({ owner: obj({ id: str }) });
+    const spec = await parseDocument(
+      document(createPet({ '200': withVendor(nested), '201': withVendor(nested, 'created') }), {
+        [PLAIN]: obj({ other: str }),
+      }),
+    );
+
+    expect(modelsOf(spec)).toEqual([
+      `${PLAIN} { other }`,
+      'CreatePetResponse { id }',
+      `${PLAIN}200 { owner }`,
+      `${PLAIN}200Owner { id }`,
+    ]);
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+      `${PLAIN}200`,
+      `${PLAIN}200`,
+    ]);
+    expectSound(spec, [PLAIN]);
+  });
+
+  it('gives a later different shape its own status code, which a later identical shape then shares', async () => {
+    const spec = await parseDocument(
+      document(
+        createPet({
+          '200': withVendor(obj({ name: str })),
+          '201': withVendor(obj({ name: str }), 'created'),
+          '202': withVendor(obj({ name: str, eta: str }), 'accepted'),
+          '203': withVendor(obj({ name: str, eta: str }), 'non-authoritative'),
+        }),
+        { [PLAIN]: obj({ other: str }) },
+      ),
+    );
+
+    expect(modelsOf(spec)).toEqual([
+      `${PLAIN} { other }`,
+      'CreatePetResponse { id }',
+      `${PLAIN}200 { name }`,
+      `${PLAIN}202 { name, eta }`,
+    ]);
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+      `${PLAIN}200`,
+      `${PLAIN}200`,
+      `${PLAIN}202`,
+      `${PLAIN}202`,
+    ]);
+    expectSound(spec, [PLAIN]);
+  });
+
+  it('keeps a different shape on the 201 apart when its vendor body differs only in a nested object', async () => {
+    const spec = await parseDocument(
+      document(
+        createPet({
+          '200': withVendor(obj({ owner: obj({ id: str }) })),
+          '201': withVendor(obj({ owner: obj({ name: str }) }), 'created'),
+        }),
+        { [PLAIN]: obj({ other: str }) },
+      ),
+    );
+
+    expect(modelsOf(spec)).toEqual([
+      `${PLAIN} { other }`,
+      'CreatePetResponse { id }',
+      `${PLAIN}200 { owner }`,
+      `${PLAIN}200Owner { id }`,
+      `${PLAIN}201 { owner }`,
+      `${PLAIN}201Owner { name }`,
+    ]);
+    expectSound(spec, [PLAIN]);
+  });
+
+  describe('a replaced application/json body', () => {
+    const json = (schema: unknown, description = 'ok') => ({
+      description,
+      content: { 'application/json': { schema } },
+    });
+
+    it('takes the models only it referenced with it, with the one warning (the issue repro)', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({ '200': json(obj({ id: str })), '201': json(obj({ owner: obj({ id: str }) }), 'created') }),
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }']);
+      expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+        'CreatePetResponse',
+        'CreatePetResponse',
+      ]);
+      expect(warnings(warn)).toEqual([
+        expect.stringContaining(
+          'Inline model "CreatePetResponse" from the 201 response has different fields than the 200 response\'s',
+        ),
+      ]);
+      expectSound(spec, []);
+    });
+
+    it('keeps a nested model the primary body holds under the same name, and compares the replaced copy of it', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ owner: obj({ id: str }) })),
+            '201': json(obj({ owner: obj({ name: str }) }), 'created'),
+          }),
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { owner }', 'CreatePetResponseOwner { id }']);
+      // Both roots read `owner` as the model named `CreatePetResponseOwner`, so their shapes agree and the 201's
+      // root is shared silently; its `owner` is reached through that root, so its copy is compared and warned about.
+      expect(warnings(warn)).toEqual([
+        expect.stringContaining(
+          'Inline model "CreatePetResponseOwner" from the 201 response has different fields than the 200 response\'s',
+        ),
+      ]);
+      expectSound(spec, []);
+    });
+
+    it('shares a nested model the replaced copy and the primary hold alike, warning for the root only', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ owner: obj({ id: str }) })),
+            '201': json(obj({ owner: obj({ id: str }), extra: str }), 'created'),
+          }),
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { owner }', 'CreatePetResponseOwner { id }']);
+      expect(warnings(warn)).toEqual([
+        expect.stringContaining('Inline model "CreatePetResponse" from the 201 response'),
+      ]);
+      expectSound(spec, []);
+    });
+
+    it('keeps what a later status code still reaches under a name of its own, beside the replaced copy', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(
+              {
+                oneOf: [obj({ owner: obj({ id: str }) }), obj({ tags: { type: 'array', items: obj({ label: str }) } })],
+              },
+              'created',
+            ),
+          }),
+        ),
+      );
+
+      // The first variant takes the bare `CreatePetResponse` and is replaced by the 200's, its `owner` with it;
+      // the second variant and the item model under it are reached from the 201 entry's union and kept.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponseWithTags { tags }',
+        'CreatePetResponseWithTagsTags { label }',
+      ]);
+      expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'CreatePetResponse' },
+          { kind: 'model', name: 'CreatePetResponseWithTags' },
+        ],
+      });
+      expect(warnings(warn)).toEqual([
+        expect.stringContaining('Inline model "CreatePetResponse" from the 201 response'),
+      ]);
+      expectSound(spec, []);
+    });
+
+    it("drops a later status code's list-envelope companions, which only the primary's paging fields read", async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(
+              obj({
+                data: { type: 'array', items: obj({ id: str }) },
+                list_metadata: obj({ before: str, after: str }),
+              }),
+              'created',
+            ),
+          }),
+        ),
+      );
+
+      const op = findOp(spec, 'createPet');
+      expect(op.response).toEqual({ kind: 'model', name: 'CreatePetResponse' });
+      expect(op.successResponses![1].type).toEqual({ kind: 'array', items: { kind: 'model', name: 'CreatePetItem' } });
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', 'CreatePetItem { id }']);
+      expect(warn).not.toHaveBeenCalled();
+      expectSound(spec, []);
+    });
+  });
+});

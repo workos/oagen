@@ -22,6 +22,7 @@ import {
   variantMemberSchemas,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
+import { shapeWithEnumFlags } from './enum-members.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -82,11 +83,19 @@ export interface MintedInlineName {
   schema?: SchemaObject;
 }
 
-/** `mintedInlineNames`, also telling for each name whether it is context-free. */
+/**
+ * `mintedInlineNames`, also telling for each name whether it is context-free.
+ * `reserved` are the names the schema's unions must step around
+ * (`nameInlineVariantEntries`), as `schemaToTypeRef` receives them for the
+ * same schema (`reservedNames`); the sibling-reservation readers leave it
+ * unset and read the names in isolation, while `nonObjectVariantContexts`
+ * passes a variant's own set so the names it records are the ones taken.
+ */
 export function mintedInlineNameEntries(
   contextName: string,
   schema: SchemaObject,
   parentModelName: string | undefined,
+  reserved?: ReadonlySet<string>,
 ): MintedInlineName[] {
   const s = unwrapNullableSchema(schema);
   // Dispatch on the one classification `schemaToTypeRef` uses, so the names
@@ -105,33 +114,36 @@ export function mintedInlineNameEntries(
   };
   if (kind === 'allOf' && s.allOf) {
     const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
-    if (only) return mintedInlineNameEntries(contextName, only, parentModelName);
+    if (only) return mintedInlineNameEntries(contextName, only, parentModelName, reserved);
     return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : [];
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name);
+    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name, reserved);
     // Every other variant mints under the context `nonObjectVariantContexts`
     // gives it (read here without siblings but with the object variants'
     // names): `<context>_item` / `<context>_value` for an array or map, the
     // context itself or `<context>_variant_<n>` for a nested union, a nullable
-    // object, an `allOf` or an inline enum — so a sibling that would take one
-    // of those names steps around it.
+    // object, an `allOf` or an inline enum — stepping around the names the
+    // entry reserves — so a sibling that would take one of those names steps
+    // around it.
     const objectVariantNames = new Map([...variantEntries].map(([variant, entry]) => [variant, entry.name]));
     const others = [
-      ...nonObjectVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames),
-    ].flatMap(([variant, context]) => mintedInlineNameEntries(context, unwrapNullableSchema(variant), parentModelName));
+      ...nonObjectVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames, reserved),
+    ].flatMap(([variant, entry]) =>
+      mintedInlineNameEntries(entry.context, unwrapNullableSchema(variant), parentModelName, entry.reserved),
+    );
     return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...others];
   }
   if (kind === 'const') return [];
   if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
-  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName);
+  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName, reserved);
   if (kind === 'object') return modelName();
   if (kind === 'map') {
     const value = mapValueSchema(s);
-    return value ? mintedInlineNameEntries(contextName, value, parentModelName) : [];
+    return value ? mintedInlineNameEntries(contextName, value, parentModelName, reserved) : [];
   }
   return [];
 }
@@ -197,8 +209,14 @@ export function reservedInlineNames(
   return reserved;
 }
 
-/** Documentation keywords that do not shape a model; ignored by `schemaShapeKey` at a schema's own level. */
-const DOC_KEYWORDS = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs', 'deprecated']);
+/**
+ * Documentation keywords that do not shape a model; ignored by
+ * `schemaShapeKey` at a schema's own level. `deprecated` is not one of them:
+ * a deprecated copy never shares a live model's name, and a `const` member
+ * deprecated on one side only makes a different enum, so `deprecated: true`
+ * is shape at every level (a `false` is dropped, like `nullable: false`).
+ */
+const DOC_KEYWORDS = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs']);
 /** Keywords whose value maps NAMES (not keywords) to schemas: names are kept verbatim, values recurse as schemas. */
 const NAMED_SCHEMA_MAPS = new Set(['properties', 'patternProperties', 'dependentSchemas', '$defs', 'definitions']);
 /** Keywords whose value is a single schema. */
@@ -254,6 +272,7 @@ export function schemaShapeKey(schema: SchemaObject): string {
       const v = value[keyword];
       if (DOC_KEYWORDS.has(keyword) || keyword.startsWith('x-')) continue;
       if (keyword === 'nullable' && v === false) continue;
+      if (keyword === 'deprecated' && v !== true) continue;
       if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(v)) {
         const named: Record<string, unknown> = {};
         for (const name of Object.keys(v).sort()) named[name] = schemaKey(v[name]);
@@ -280,6 +299,59 @@ export function schemaShapeKey(schema: SchemaObject): string {
   return JSON.stringify(schemaKey(schema));
 }
 
+/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
+/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+
+/**
+ * Shape of a model, independent of field order, name and documentation:
+ * every field's name, type, requiredness, limits, default and access flags,
+ * plus the model's own limits, type parameters, variants and discriminator.
+ * Types are read through `shapeWithEnumFlags`, so an inline enum's per-value
+ * deprecation counts as its values do. Two schemas share a model only when
+ * this agrees, so a body that repeats another's fields with a different
+ * `minLength` or `minProperties`, or an enum member deprecated on one side
+ * only, keeps its own model and its own limits. `schemaShapeKey` is the same
+ * question asked of a schema before any model is built; this is asked of the
+ * models, so two built by different paths (an ordinary object and a union
+ * variant) compare the same way (`warnOnVariantNameClash`, the shape
+ * registry in `materializeInlineSchema`, the response merge).
+ */
+export function modelFingerprint(model: Model): string {
+  const fields = model.fields
+    .map(
+      (field) =>
+        `${field.name}:${stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) })}`,
+    )
+    .sort()
+    .join('|');
+  const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
+  if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
+  return `${fields}#${stableStringify(rest)}`;
+}
+
+/** The entries of `value` whose key is not in `keys` and whose value is set. */
+function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
+  );
+}
+
+/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
 /**
  * The title-mapped union variants that must not keep their bare title
  * because a variant of another shape takes the same title under the same
@@ -302,7 +374,17 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * title different shapes (`schemaShapeKey`), neither can keep it, and both
  * take their context-qualified names instead (`nameInlineVariantEntries`).
  * Identical shapes under one title share one model, as between siblings
- * (`reservedInlineNames`), and a title used once is kept.
+ * (`reservedInlineNames`), and a title used once is kept. Within one union
+ * only the first variant to carry a title is read: a later one with the
+ * same title never keeps it, whatever the document holds (`emitted` in
+ * `nameInlineVariantEntries`), so it is no claim on the title. The same
+ * holds across everything one union reaches without entering an object —
+ * its nested unions, its array variants' items, its map variants' values,
+ * a lone `allOf` member — the names `mintedInlineNameEntries` reads for the
+ * union, which `nonObjectVariantContexts` decides in variant order: an
+ * earlier variant's kept title is reserved for a later variant of another
+ * shape and shared for the identical one. So one claim set spans that
+ * group, and only its first variant per title is read here.
  *
  * A root is a schema whose inline models are collected together: every
  * `components.schemas` entry is read as one root, because one pass collects
@@ -320,19 +402,34 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * `allOf`/`oneOf`/`anyOf` and the rest of `schemaShapeKey`'s structural
  * keywords — so a property named `schema` or `title` is a property, and a
  * `$ref` is a reference to a component read under the components root, not
- * descended into. Outside schemas, `example`, `examples` and `x-` extensions
- * are not walked. Decided from the document's content alone, so declaration
- * order and depth play no part, and once per document, before any union is
- * named (`extractSchemas`), so the union TypeRef and every extractor read
- * the same decision. `undefined` clears the previous document's marks.
+ * descended into. The roots are found by following the OpenAPI object model
+ * (`schemaRootsOf`), the way the operation, response and webhook readers
+ * do, so a name is never mistaken for a specification extension: a header
+ * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`
+ * or a property `x-id` is read like any other, and an `x-` key is stepped
+ * over only where the readers step over it or read nothing: a Responses
+ * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
+ * the specification; the parser reads no callbacks). Decided from the document's content
+ * alone, so declaration order and depth play no part, and once per
+ * document, before any union is named (`extractSchemas`), so the union
+ * TypeRef and every extractor read the same decision. `undefined` clears
+ * the previous document's marks.
+ *
+ * Each root is read with a visited set of its own, so a schema object two
+ * roots share — one a `transformSpec` assigned in both places, a bundled
+ * external schema inlined twice as one object — is read under each root and
+ * compared with each root's other variants, and a mark from either root
+ * stands: the shared variant's title is then qualified wherever it appears.
+ * The descent over the document keeps a separate guard that never holds a
+ * schema. Both guards end the walk on a document that refers back to itself.
  */
 export function markContestedTitles(document: unknown): void {
   contestedTitledVariants = new WeakSet();
   if (!isRecord(document)) return;
-  const seen = new WeakSet<object>();
-  const components = (document['components'] as { schemas?: unknown } | undefined)?.['schemas'];
-  if (isRecord(components)) markContestedTitlesUnderRoot(Object.values(components).filter(isSchemaRecord), seen);
-  visitSchemaRoots(document, seen, (root) => markContestedTitlesUnderRoot([root], seen));
+  const components = isRecord(document['components']) ? document['components'] : undefined;
+  const schemas = components?.['schemas'];
+  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord));
+  for (const root of schemaRootsOf(document, components)) markContestedTitlesUnderRoot([root]);
 }
 
 /** A plain object: the only value that can be a schema or a container of them. */
@@ -345,55 +442,166 @@ function isSchemaRecord(value: unknown): value is SchemaObject {
   return isRecord(value);
 }
 
+/** The Path Item Object's operation fields, the keys the operation readers dispatch on. */
+const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
+
 /**
- * Call `onRoot` for every schema root outside `components.schemas` (see
- * `markContestedTitles`): the value of every `schema` key reached from
- * `value` without entering a schema. `seen` is shared with the schema walks,
- * so a root already read — a component schema reached again through the
- * generic descent, a bundled schema inlined twice as one object — is read
- * once.
+ * Every schema root of the document outside `components.schemas`, found by
+ * walking the OpenAPI 3.0/3.1 object model (see `markContestedTitles`):
+ *
+ *   - the OpenAPI Object's `paths` and `webhooks` (a path or a name per
+ *     key) to Path Item Objects; the Components Object's `responses`,
+ *     `parameters`, `requestBodies`, `headers`, `pathItems` and `callbacks`
+ *     (a name per key);
+ *   - a Path Item's `parameters` list and operations; an Operation's
+ *     `parameters`, `requestBody`, `responses` (a status code, `default`, a
+ *     range or an `x-` extension per key) and `callbacks` (a name per key,
+ *     each a Callback Object: an expression or an `x-` extension per key,
+ *     each a Path Item);
+ *   - a Parameter's or Header's `schema` and `content`; a Request Body's and
+ *     a Response's `content` (a media type per key) and a Response's
+ *     `headers` (a name per key); a Media Type's `schema` and `encoding` (a
+ *     property name per key, each an Encoding Object with `headers`).
+ *
+ * A map whose keys are names is read whole, whatever the keys look like.
+ * The Paths Object is read whole too, every key as a Path Item, exactly as
+ * `extractOperations` reads it. An `x-` key is stepped over in a Responses
+ * Object, as `readFallbackResponse` steps over it, and in a Callback Object,
+ * where the specification makes it an extension (the parser reads no
+ * callbacks, so nothing named under one is ever typed). A `$ref` entry
+ * anywhere carries no schema of its own: the target is a component, read
+ * under its own map. A `schema` is yielded and not entered, so one shared by
+ * two sites is yielded for each; every other object is entered once, which
+ * ends the walk on a document that refers back to itself. `example`,
+ * `examples`, `links` and extensions are never entered.
  */
-function visitSchemaRoots(value: unknown, seen: WeakSet<object>, onRoot: (root: SchemaObject) => void): void {
-  if (!value || typeof value !== 'object' || seen.has(value)) return;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const item of value) visitSchemaRoots(item, seen, onRoot);
-    return;
+function schemaRootsOf(
+  document: Record<string, unknown>,
+  components: Record<string, unknown> | undefined,
+): SchemaObject[] {
+  const roots: SchemaObject[] = [];
+  const entered = new WeakSet<object>();
+  /** Enter an object once; false for a non-object or one entered before. */
+  const enter = (value: unknown): value is Record<string, unknown> => {
+    if (!isRecord(value) || entered.has(value)) return false;
+    entered.add(value);
+    return true;
+  };
+  /** Every entry of a map whose keys are names. */
+  const named = (map: unknown, visit: (entry: unknown) => void): void => {
+    if (!enter(map)) return;
+    for (const entry of Object.values(map)) visit(entry);
+  };
+  /** Every entry of a map whose keys OpenAPI defines beside `x-` extensions. */
+  const keyed = (map: unknown, visit: (entry: unknown) => void): void => {
+    if (!enter(map)) return;
+    for (const [key, entry] of Object.entries(map)) if (!key.startsWith('x-')) visit(entry);
+  };
+  const listed = (list: unknown, visit: (entry: unknown) => void): void => {
+    if (!Array.isArray(list) || entered.has(list)) return;
+    entered.add(list);
+    for (const entry of list) visit(entry);
+  };
+  const schema = (value: unknown): void => {
+    if (isSchemaRecord(value)) roots.push(value);
+  };
+  const encoding = (value: unknown): void => {
+    if (enter(value)) named(value['headers'], parameter);
+  };
+  const mediaType = (value: unknown): void => {
+    if (!enter(value)) return;
+    schema(value['schema']);
+    named(value['encoding'], encoding);
+  };
+  /** A Parameter Object or a Header Object: the same schema sites. */
+  const parameter = (value: unknown): void => {
+    if (!enter(value)) return;
+    schema(value['schema']);
+    named(value['content'], mediaType);
+  };
+  const requestBody = (value: unknown): void => {
+    if (enter(value)) named(value['content'], mediaType);
+  };
+  const response = (value: unknown): void => {
+    if (!enter(value)) return;
+    named(value['headers'], parameter);
+    named(value['content'], mediaType);
+  };
+  const pathItem = (value: unknown): void => {
+    if (!enter(value)) return;
+    listed(value['parameters'], parameter);
+    for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
+  };
+  const operation = (value: unknown): void => {
+    if (!enter(value)) return;
+    listed(value['parameters'], parameter);
+    requestBody(value['requestBody']);
+    keyed(value['responses'], response);
+    named(value['callbacks'], (callback) => keyed(callback, pathItem));
+  };
+
+  named(document['paths'], pathItem);
+  named(document['webhooks'], pathItem);
+  if (components) {
+    named(components['responses'], response);
+    named(components['parameters'], parameter);
+    named(components['requestBodies'], requestBody);
+    named(components['headers'], parameter);
+    named(components['pathItems'], pathItem);
+    named(components['callbacks'], (callback) => keyed(callback, pathItem));
   }
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === 'example' || key === 'examples' || key.startsWith('x-')) continue;
-    if (key === 'schema') {
-      if (isSchemaRecord(entry)) onRoot(entry);
-      continue;
-    }
-    visitSchemaRoots(entry, seen, onRoot);
-  }
+  return roots;
 }
 
 /**
  * Mark every title-mapped variant under `roots` (read as one root) whose
  * title another variant under the same roots gives a different shape; see
- * `markContestedTitles` for the walk.
+ * `markContestedTitles` for the walk. The visited set is this root's own:
+ * a schema object another root also holds is read here as well, against
+ * this root's variants, and a schema reached twice within this root — the
+ * same object under two properties, or one that refers back to itself — is
+ * read once, which ends the walk.
  */
-function markContestedTitlesUnderRoot(roots: readonly SchemaObject[], seen: WeakSet<object>): void {
+function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
-  const walk = (schema: SchemaObject): void => {
-    if (seen.has(schema)) return;
-    seen.add(schema);
+  const visited = new WeakSet<SchemaObject>();
+  // `claims` is the group's claim set (see `markContestedTitles`): the titles
+  // already read for the union this schema is reached from without entering
+  // an object. Only the first variant of a group to carry a title can keep
+  // it — a later one with the same title is stepped off it by its own union
+  // (`emitted` in `nameInlineVariantEntries` within one union; the kept
+  // titles `nonObjectVariantContexts` reserves across a union's non-object
+  // variants) whatever else is in the document — so a later one competes
+  // for nothing and is not read here. A schema reached any other way starts
+  // a group of its own.
+  const walk = (schema: SchemaObject, claims: Set<string> = new Set()): void => {
+    if (visited.has(schema)) return;
+    visited.add(schema);
     if (schema.$ref) return;
     for (const [variant, title] of titleMappedVariantNames(schema)) {
+      if (claims.has(title)) continue;
+      claims.add(title);
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
       entry.shapes.add(schemaShapeKey(variant));
       entry.variants.push(variant);
       byTitle.set(title, entry);
     }
+    // The group continues through what `mintedInlineNameEntries` reads for a
+    // union: its variants, an array's items, a map's values (whether under
+    // `additionalProperties` or `patternProperties`), and the one member of a
+    // lone `allOf`. `properties` and every other keyword begin a new group.
     for (const [keyword, value] of Object.entries(schema)) {
       if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(value)) {
-        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub);
+        const inherited = keyword === 'patternProperties' ? claims : undefined;
+        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub, inherited);
       } else if (SCHEMA_KEYWORDS.has(keyword) && isSchemaRecord(value)) {
-        walk(value);
+        walk(value, keyword === 'items' || keyword === 'additionalProperties' ? claims : undefined);
       } else if (SCHEMA_LIST_KEYWORDS.has(keyword) && Array.isArray(value)) {
-        for (const sub of value) if (isSchemaRecord(sub)) walk(sub);
+        const inherited =
+          keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && value.length === 1)
+            ? claims
+            : undefined;
+        for (const sub of value) if (isSchemaRecord(sub)) walk(sub, inherited);
       }
     }
   };
@@ -933,11 +1141,10 @@ export function extractInlineModelsFromProperties(
             // roots read into one list), and the union's reference will
             // resolve to the model that keeps the name, so say so rather
             // than drop the variant silently.
-            warnOnVariantNameClash(existing, variant, variantName, parentName);
+            warnOnVariantNameClash(existing, variant, variantName, parentName, componentSchemas);
             continue;
           }
           const model = buildInlineModel(variantName, variant, componentSchemas);
-          variantShapeKeys.set(model, schemaShapeKey(variant));
           existingByName.set(variantName, model);
           results.push(model);
           extractInlineModelsFromProperties(variant, results, variantName, componentSchemas);
@@ -965,7 +1172,7 @@ export function extractInlineModelsFromProperties(
       // variants of a union nested under the second variant). The context
       // already stepped around the siblings; the re-entry sees none, exactly
       // as `schemaToTypeRef` types the variant.
-      for (const [variant, context] of nonObjectVariantContexts(
+      for (const [variant, { context, reserved }] of nonObjectVariantContexts(
         fieldName,
         unionVariants,
         siblings,
@@ -974,40 +1181,45 @@ export function extractInlineModelsFromProperties(
         reservedNames,
       )) {
         const member = unwrapNullableField(variant);
-        extractInlineModelsFromProperties({ properties: { [context]: member } }, results, parentName, componentSchemas);
+        extractInlineModelsFromProperties(
+          { properties: { [context]: member } },
+          results,
+          parentName,
+          componentSchemas,
+          undefined,
+          reserved,
+        );
       }
     }
   }
 }
 
 /**
- * The shape (`schemaShapeKey`) of the variant schema each union variant model
- * in a results list was built from, so a later variant that takes the same
- * name can be told shared (identical shape) from clashing. Keyed by model
- * identity: the list is the extractor's own, read before any pass copies a
- * model, and an entry drops out with its model.
- */
-const variantShapeKeys = new WeakMap<Model, string>();
-
-/**
  * Warn when a union variant named `variantName` finds a model of that name
  * already in the results list and the two are not the same shape: the
  * variant is not extracted, and the union's reference resolves to the model
- * that keeps the name. Silent for the identical shape, which the naming
- * rules share by design. Once per variant, since each is visited once.
+ * that keeps the name. The comparison is between the models themselves —
+ * the one in the list, however it was built (an ordinary object, an `allOf`
+ * merge, a variant), and the one the variant would have produced — by
+ * `modelFingerprint`, the shape every clash check in the parser reads, so an
+ * ordinary object of exactly the variant's shape shares the name silently,
+ * as a sibling variant of the identical shape does. Once per variant, since
+ * each is visited once.
  */
 function warnOnVariantNameClash(
   existing: Model,
   variant: SchemaObject,
   variantName: string,
   parentName: string | undefined,
+  componentSchemas: Record<string, SchemaObject> | undefined,
 ): void {
-  if (variantShapeKeys.get(existing) === schemaShapeKey(variant)) return;
-  const fieldList = (names: string[]): string => names.join(', ') || '(no fields)';
+  const candidate = buildInlineModel(variantName, variant, componentSchemas);
+  if (modelFingerprint(existing) === modelFingerprint(candidate)) return;
+  const fieldList = (model: Model): string => model.fields.map((f) => f.name).join(', ') || '(no fields)';
   const site = parentName ? ` under ${parentName}` : '';
   console.warn(
     `[oagen] Warning: Inline model "${variantName}" is minted twice with different shapes${site} ` +
-      `(fields: ${fieldList(existing.fields.map((f) => f.name))} | ${fieldList(Object.keys(variant.properties ?? {}))}) ` +
+      `(fields: ${fieldList(existing)} | ${fieldList(candidate)}) ` +
       `— keeping the first; the second union's reference resolves to it`,
   );
 }
