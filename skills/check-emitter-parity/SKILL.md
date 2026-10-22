@@ -106,6 +106,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `successResponses` — Every declared 2xx and 3xx response, set when there is more than one; a 3xx entry's `type` is `unknown`
 - `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits); each carries `description`, `deprecated` and `externalDocs`
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
+- `responseStatusCode` — The primary response's status code (`200`, `201`, `204`, a lone `302`), for an SDK that checks or documents the status it expects; absent when the operation declares no 2xx or 3xx response
 - `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
 - `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry

@@ -327,8 +327,10 @@ function ownMediaTypeOf(
  * `successResponses` lists it — with several 2xx it is the lowest-coded entry
  * whose type is the operation's `response`, the parser's own pick — so a
  * primary that changes status still pairs with the entry of its code; a lone
- * 2xx carries no code in the IR and is keyed `primary` (see
- * `pairContentEntries` for what it pairs with).
+ * 2xx is not listed in `successResponses` and is keyed `primary` — its
+ * `responseStatusCode` is not used as a key, so the two specs' lone primaries
+ * pair with each other whatever their codes (see `pairContentEntries` for
+ * what it pairs with).
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
@@ -405,9 +407,10 @@ function contentTypeOf(entry: ContentEntry, mediaType: string): TypeRef | undefi
  * reports that very body: the entry's own media type on both sides, for two
  * primaries (`responseChanged`) or two errors of one code (`errorsChanged`)
  * — never for a primary paired with an alternate 2xx. Entries pair by
- * status code (`pairContentEntries`); a primary whose code the IR does not
- * carry (a lone 2xx) pairs with the entry of the other spec that offers its
- * media types, else with that spec's primary. An error only one spec has is
+ * status code (`pairContentEntries`); a primary that `successResponses` does
+ * not list (a lone 2xx — its `responseStatusCode` is not a key) pairs with
+ * the entry of the other spec that offers its media types, else with that
+ * spec's primary. An error only one spec has is
  * not a media-type change — a code that came or went is the errors diff's
  * business — and neither is a 2xx the new spec adds, but a 2xx the old spec
  * declared and the new does not has no other diff to report it, so its
@@ -463,7 +466,9 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
 
 /**
  * Which old entry each new entry is compared with. Entries pair by key: a
- * status code, or `primary` for a lone 2xx, which carries no code in the IR.
+ * status code, or `primary` for a lone 2xx, which `successResponses` does
+ * not list (its `responseStatusCode` is not used as a key, so two lone
+ * primaries pair whatever their codes).
  * A lone 2xx on one side only has no counterpart by key, so it pairs with
  * the 2xx entry of the other side that offers the very same media types,
  * whatever that entry's code — the response it most plausibly still is, as
