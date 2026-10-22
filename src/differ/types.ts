@@ -416,8 +416,10 @@ export interface OperationModified {
  * How one response entry's media types changed between two specs. Entries
  * pair up by status code — 2xx entries from `successResponses`, the primary
  * among them, errors from `errors` — so a primary that changes status still
- * pairs with the entry of its code; a lone 2xx carries no code in the IR and
- * is paired with the entry of the other spec that offers its media types,
+ * pairs with the entry of its code; a lone 2xx is not listed in
+ * `successResponses` (its code is `Operation.responseStatusCode`, which takes
+ * no part in pairing) and is paired with the entry of the other spec that
+ * offers its media types,
  * else with that spec's primary — reported with `statusCode` unset when it is
  * the new spec's lone entry. The `default` and range responses pair by key
  * and are reported with `fallback` set. A 2xx the old spec declared and the
@@ -748,10 +750,12 @@ export interface DocumentSecurityChanged {
   /** The new document's list; `[]` when it declares none. */
   newSecurity: SecurityRequirementSet[];
   /**
-   * Read from the caller's side, as for an operation: breaking when a
-   * request built for the old list no longer satisfies the new one. When a
-   * webhook in either document inherits the default, read from the
-   * receiver's side as well, and breaking if either side breaks.
+   * Read from each side that inherits the default, by the rule the
+   * inheriting node would be read by (`classifySecurityChange`): the
+   * caller's when an operation in either document declares no `security`
+   * of its own, the receiver's when a webhook does; breaking if any such
+   * side breaks. When nothing inherits it, no request reads the default,
+   * so the change is additive.
    */
   classification: 'additive' | 'breaking';
 }

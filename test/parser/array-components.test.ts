@@ -1148,6 +1148,23 @@ describe('an alias of an array component (MichaelDeBoey)', () => {
     expectSound(spec, ['Holder'], ['Pets', 'PetsAlias', 'PetsLimited', 'PetsRef', 'Chain']);
   });
 
+  it('reads an `allOf` of one member as that member, an array or an alias of one', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: { type: 'array', items },
+        Wrapped: { allOf: [{ type: 'array', items }] },
+        WrappedRef: { allOf: [ref('Pets')], description: 'Also pets' },
+        Holder: { type: 'object', properties: { w: ref('Wrapped'), r: ref('WrappedRef') } },
+      }),
+    );
+    // The wrapped inline array names its own items; the wrapped `$ref` resolves to `Pets`'s.
+    expect(fieldType(spec, 'Holder', 'w')).toEqual(array(model('WrappedItem')));
+    expect(fieldType(spec, 'Holder', 'r')).toEqual(array(model('PetsItem')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'PetsItem', 'WrappedItem']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder'], ['Pets', 'Wrapped', 'WrappedRef']);
+  });
+
   it('leaves an alias of an object component, and an `allOf` that adds properties, the models they were', async () => {
     const spec = await parse(
       specDoc({
