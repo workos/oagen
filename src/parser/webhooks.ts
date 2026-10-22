@@ -617,15 +617,14 @@ function mintWebhook(
   for (const param of params) {
     const ir = typed.get(`${param.in}:${param.name}`);
     if (!ir || !param.schema) continue;
-    const {
-      property,
-      ref,
-      models,
-      names: own,
-    } = mintParameter(param, param.schema, parent, names, components.schemas, reserved);
-    // `extractParams` typed the parameter under its own name; a parameter
-    // moved to a qualified property is re-typed so the reference matches.
-    if (property !== param.name) ir.type = ref;
+    const { ref, models, names: own } = mintParameter(param, param.schema, parent, names, components.schemas, reserved);
+    // `extractParams` typed the parameter from its schema alone; the minted
+    // reference is the one whose models exist — it differs when the parameter
+    // moved to a qualified property, and when a variant was renamed past a
+    // decided enum (`mintSchema`) under the parameter's own name — so it
+    // always replaces the extracted type, variants and discriminator mapping
+    // included, whether or not the property name changed.
+    ir.type = ref;
     inlineModels.push(...models);
     for (const name of own) names.add(name);
   }
@@ -720,8 +719,10 @@ function mintPayload(
  * identical shape; a name taken by a different shape (`application/xml` and
  * `APPLICATION/XML` with other fields) steps on, so no two entries of one
  * payload ever point at a model with the other's fields. When a candidate
- * changes none of the minted names (a title-mapped variant), the last is
- * kept and the clash left to the model merge, as `mintParameter` does.
+ * changes none of the clashing names (a title-mapped variant, which embeds
+ * no property), no candidate can clear them: the earliest trial is kept,
+ * under `<Fragment>Payload`, and the clash left to the model merge, as
+ * `mintParameter` does.
  */
 function mintSecondaryPayload(
   schema: SchemaObject,
@@ -734,7 +735,7 @@ function mintSecondaryPayload(
 ): MintedSchema {
   const fragment = mediaTypeNameFragment(contentType, siblings);
   const own = new Map(minted.models.map((model) => [model.name, model]));
-  let previous: MintedSchema | undefined;
+  let previous: { trial: MintedSchema; clashing: string } | undefined;
   for (let attempt = 0; ; attempt++) {
     const property = attempt === 0 ? `${fragment}Payload` : `${fragment}Payload${attempt + 1}`;
     const trial = mintSchema(schema, property, stem, componentSchemas, reserved);
@@ -747,9 +748,12 @@ function mintSecondaryPayload(
         return owner !== undefined && modelFingerprint(owner) === modelFingerprint(model);
       });
     if (sharesShape) return { ref: trial.ref, models: [], names: new Set() };
-    const stuck = previous !== undefined && sameNames(previous.names, trial.names);
-    if (stuck || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return trial;
-    previous = trial;
+    // Judged on the clashing names alone: a name that embeds the property (a
+    // variant renamed past a decided enum) changes with every candidate.
+    const clashing = taken.sort().join('\n');
+    if (previous !== undefined && previous.clashing === clashing) return previous.trial;
+    if (attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return trial;
+    previous = { trial, clashing };
   }
 }
 
@@ -758,11 +762,14 @@ function mintSecondaryPayload(
  * property whose minted names are all free: the parameter's own name, then
  * `<in>_<name>`, then `<in>_<name>_2`, `<in>_<name>_3`, …. A schema that
  * mints nothing (a primitive, a `$ref`) keeps the parameter's name at once.
- * When a candidate changes none of the minted names — they do not embed the
- * property, as a title-mapped union variant does not — no candidate can
- * avoid the clash, so the last one is kept and the clash is left to the
- * model merge, as for operations; `MAX_PARAMETER_PROPERTY_ATTEMPTS` is a
- * backstop behind that rule.
+ * When a candidate changes none of the clashing names — they do not embed
+ * the property, as a title-mapped union variant does not — no candidate can
+ * avoid the clash, so the earliest trial is kept, under the parameter's own
+ * name, and the clash is left to the model merge, as for operations;
+ * `MAX_PARAMETER_PROPERTY_ATTEMPTS` is a backstop behind that rule. The
+ * caller always takes the returned reference, whether or not the property
+ * moved: a variant renamed past a decided enum (`PetAdoptedFilterCircle`,
+ * see `mintSchema`) is referenced only by the minted type.
  */
 function mintParameter(
   param: ParameterObject,
@@ -771,25 +778,30 @@ function mintParameter(
   taken: ReadonlySet<string>,
   componentSchemas: Record<string, SchemaObject> | undefined,
   reserved: ReservedNames,
-): MintedSchema & { property: string } {
-  let previous: MintedSchema | undefined;
+): MintedSchema {
+  let previous: { minted: MintedSchema; clashing: string } | undefined;
   for (let attempt = 0; ; attempt++) {
     const property =
       attempt === 0 ? param.name : attempt === 1 ? `${param.in}_${param.name}` : `${param.in}_${param.name}_${attempt}`;
     const minted = mintSchema(schema, property, parent, componentSchemas, reserved);
-    const free = [...minted.names].every((name) => !taken.has(name));
-    const stuck = previous !== undefined && sameNames(previous.names, minted.names);
-    if (free || stuck || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return { ...minted, property };
-    previous = minted;
+    const clashing = [...minted.names]
+      .filter((name) => taken.has(name))
+      .sort()
+      .join('\n');
+    if (clashing === '' || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return minted;
+    // The clash did not move with the property: what clashes are names that
+    // do not embed it (a title-mapped variant), which no candidate can clear
+    // — keep the earliest trial, under the parameter's own name, and leave
+    // the clash to the model merge. Judged on the clashing names alone, since
+    // a name that does embed the property (a variant renamed past a decided
+    // enum, `PetAdoptedXShapeCircle`) changes with every candidate.
+    if (previous !== undefined && previous.clashing === clashing) return previous.minted;
+    previous = { minted, clashing };
   }
 }
 
 /** Hard cap on the properties `mintParameter` tries; the no-progress rule stops it long before in practice. */
 const MAX_PARAMETER_PROPERTY_ATTEMPTS = 64;
-
-function sameNames(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  return a.size === b.size && [...a].every((name) => b.has(name));
-}
 
 /**
  * Type `schema` as the synthetic property `property` of `parent` and
