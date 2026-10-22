@@ -150,11 +150,14 @@ export type {
   ParamDefaultChanged,
   DeprecatedChanged,
   DeprecatedNode,
+  SecurityChanged,
+  SecurityNode,
   BaseUrlChanged,
   ServerAdded,
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  DocumentSecurityChanged,
 } from './differ/types.js';
 
 // Core parse + generate
