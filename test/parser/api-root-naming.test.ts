@@ -392,7 +392,7 @@ describe('every service has unique, order-independent operation names across the
         {
           "a versionless path beside versioned ones": {
             "GET /api/admin/users": "Admin.listUsers",
-            "GET /api/admin/users/{id}": "Admin.getUsers",
+            "GET /api/admin/users/{id}": "Admin.getUser",
             "GET /api/openapi.json": "OpenapiJson.list",
             "GET /api/v1/notes": "Notes.list",
             "GET /api/v1/pets": "Pets.list",
@@ -418,14 +418,14 @@ describe('every service has unique, order-independent operation names across the
           },
           "shared root with two versions": {
             "GET /api/v1/notes": "V1.listNotes",
-            "GET /api/v1/notes/{id}": "V1.getNotes",
+            "GET /api/v1/notes/{id}": "V1.getNote",
             "GET /api/v2/notes": "V2.listNotes",
-            "GET /api/v2/notes/{id}": "V2.getNotes",
+            "GET /api/v2/notes/{id}": "V2.getNote",
             "GET /api/v2/pets": "V2.listPets",
           },
           "tagged and untagged under one root": {
             "GET /api/notes": "Api.listNotes",
-            "GET /api/notes/{id}": "Api.getNotes",
+            "GET /api/notes/{id}": "Api.getNote",
             "GET /api/v1/notes": "Notes.list2",
             "GET /api/v1/notes/{id}": "Notes.get",
             "GET /health": "Ops.list",

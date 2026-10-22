@@ -1,0 +1,182 @@
+openapi: '3.1.0'
+info:
+  title: Webhooks
+  version: '1'
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '204':
+          description: ok
+webhooks:
+  # Issue #218 repro: a payload that references a component schema.
+  petAdopted:
+    post:
+      operationId: petAdopted
+      description: Sent when a pet is adopted.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdoptionEvent'
+      responses:
+        '200':
+          description: Acknowledged
+  # An inline payload with a nested object and inline enums, signature headers,
+  # a deprecation, tags, security, and a `default` response that is not carried.
+  pet.returned:
+    post:
+      summary: Pet returned
+      description: Sent when an adopted pet is returned to the shelter.
+      deprecated: true
+      tags:
+        - pets
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          description: HMAC of the body.
+          schema:
+            type: string
+        - name: X-Event-Type
+          in: header
+          schema:
+            type: string
+            enum:
+              - pet.returned
+              - pet.returned.v2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - pet
+              properties:
+                reason:
+                  type: string
+                  enum:
+                    - allergy
+                    - moved
+                pet:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+      responses:
+        '200':
+          description: Acknowledged
+        '400':
+          description: Malformed; not retried
+        default:
+          description: Anything else is retried
+      security:
+        - webhookSecret: []
+  # A path item reference (OpenAPI 3.1) with path-item-level parameters and no body.
+  shelterClosed:
+    $ref: '#/components/pathItems/ShelterClosed'
+  # A referenced request body whose payload is a discriminated oneOf, and a
+  # referenced response.
+  petEvent:
+    post:
+      requestBody:
+        $ref: '#/components/requestBodies/PetEvent'
+      responses:
+        '202':
+          $ref: '#/components/responses/Queued'
+  # Two methods on one key: each payload gets its own model.
+  petUpdated:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: ok
+    put:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                age:
+                  type: integer
+      responses:
+        '200':
+          description: ok
+components:
+  pathItems:
+    ShelterClosed:
+      parameters:
+        - $ref: '#/components/parameters/DeliveryId'
+      post:
+        operationId: shelterClosed
+        # An object-shaped header: its model must be materialized.
+        parameters:
+          - name: X-Meta
+            in: header
+            schema:
+              type: object
+              properties:
+                etag:
+                  type: string
+        responses:
+          '204':
+            description: ok
+  responses:
+    Queued:
+      description: Queued for delivery
+  parameters:
+    DeliveryId:
+      name: X-Delivery-Id
+      in: header
+      required: true
+      schema:
+        type: string
+  requestBodies:
+    PetEvent:
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - type: object
+                properties:
+                  kind:
+                    const: adopted
+                  pet_id:
+                    type: string
+              - type: object
+                properties:
+                  kind:
+                    const: returned
+                  pet_id:
+                    type: string
+            discriminator:
+              propertyName: kind
+  securitySchemes:
+    webhookSecret:
+      type: apiKey
+      in: header
+      name: X-Signature
+  schemas:
+    AdoptionEvent:
+      type: object
+      properties:
+        petId:
+          type: string
+        adoptedAt:
+          type: string
+          format: date-time
+      required:
+        - petId
+        - adoptedAt
