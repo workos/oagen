@@ -61,16 +61,29 @@ describe('serverListsEqual', () => {
     // A bare authority, and one under a placeholder scheme, with and without `/`.
     expect(serverListsEqual([api], [{ url: 'https://api.example.com/' }])).toBe(true);
     expect(serverListsEqual([{ url: '{s}://api.example.com' }], [{ url: '{s}://api.example.com/' }])).toBe(true);
-    // The resolved forms must agree too: equal templates whose placeholder
-    // value changes the URL's structure are two servers.
+    // After a placeholder the authority is kept as written, so a port or `/`
+    // that a placeholder value could turn into path text is a difference
+    // (Greptile): `host` = `api.example.com/v1` gives `/v1:443/v2` vs `/v1/v2`.
     const host = { host: { default: 'api.example.com/v1' } };
-    expect(normalizeServerUrl('https://{host}:443')).toBe(normalizeServerUrl('https://{host}:443/'));
+    expect(normalizeServerUrl('https://{host}:443/v2')).not.toBe(normalizeServerUrl('https://{host}/v2'));
     expect(
       serverListsEqual(
-        [{ url: 'https://{host}:443', variables: host }],
-        [{ url: 'https://{host}:443/', variables: host }],
+        [{ url: 'https://{host}:443/v2', variables: host }],
+        [{ url: 'https://{host}/v2', variables: host }],
       ),
     ).toBe(false);
+    // Also when the path-bearing value is an enum choice, not the default.
+    const hostChoice = { host: { default: 'api.example.com', enum: ['api.example.com', 'api.example.com/v1'] } };
+    expect(
+      serverListsEqual(
+        [{ url: 'https://{host}:443/v2', variables: hostChoice }],
+        [{ url: 'https://{host}/v2', variables: hostChoice }],
+      ),
+    ).toBe(false);
+    // Literal spellings of the same thing are still one server.
+    expect(serverListsEqual([{ url: 'https://api.example.com:443/v2' }], [{ url: 'https://api.example.com/v2' }])).toBe(
+      true,
+    );
     expect(serverListsEqual([regional], [{ ...regional, url: 'https://eu.api.example.com' }])).toBe(false);
     // Variable values stay as written.
     expect(

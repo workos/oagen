@@ -12,6 +12,7 @@ import { resolveServerUrl } from '../ir/server-url.js';
 import { diffServers } from './servers.js';
 import {
   diffRequestBodyContentTypes,
+  ownRepresentationKept,
   mediaTypeBodies,
   pairMediaTypeBodies,
   retypedBodies,
@@ -196,6 +197,14 @@ export function diffOperations(
       // are breaking. An absent flag reads as optional, as it does in OpenAPI.
       const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
       const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
+      // requestBodyEncoding: an SDK built for the old spec keeps sending the
+      // representation that spec's body was read from. Breaking when the new
+      // spec no longer accepts it — that media type gone, or its type
+      // changed; additive when it still does, as when a media type the
+      // parser prefers is added beside it (`application/json` beside a kept
+      // `application/x-www-form-urlencoded`). A body without media-type
+      // lists reads as breaking.
+      const requestBodyEncodingBreaking = requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp);
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
       // that changed shape, breaks them; one they can newly ask for does not.
@@ -215,10 +224,7 @@ export function diffOperations(
         responseChanged ||
         requestBodyBreaking ||
         requestBodyRequiredBreaking ||
-        // requestBodyEncoding: breaking either way — an SDK built for the old
-        // spec serializes and labels the body as that spec said, which the
-        // server no longer reads.
-        requestBodyEncodingChanged ||
+        requestBodyEncodingBreaking ||
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
