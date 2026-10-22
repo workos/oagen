@@ -447,15 +447,17 @@ The `injectIdempotencyKey` flag is spec-driven: it is `true` only when the opera
 
 ### Request Body Encoding
 
-The `requestBodyEncoding` field tells emitters how to serialize the request body:
+`requestBody` is read from one entry of the Request Body Object's `content` map (after a `$ref` into `components/requestBodies` is resolved), and `requestBodyEncoding` tells emitters how to serialize it:
 
-| Value             | Content-Type                        |
-| ----------------- | ----------------------------------- |
-| `json`            | `application/json`                  |
-| `form-data`       | `multipart/form-data`               |
-| `form-urlencoded` | `application/x-www-form-urlencoded` |
-| `binary`          | `application/octet-stream`          |
-| `text`            | `text/plain`                        |
+| Value             | Media types                                |
+| ----------------- | ------------------------------------------ |
+| `json`            | `application/json`, any `+json` media type |
+| `form-data`       | `multipart/form-data`                      |
+| `form-urlencoded` | `application/x-www-form-urlencoded`        |
+| `binary`          | `application/octet-stream`                 |
+| `text`            | `text/plain`                               |
+
+Media types are matched by essence — `type/subtype` with parameters stripped and case folded, as response media types are (see Multiple Success Responses below) — so `application/json; charset=utf-8`, `APPLICATION/JSON` and `multipart/form-data; boundary=x` are read as their bare types, and `application/vnd.api+json` or `application/merge-patch+json` as JSON. The entries are tried in a fixed order: `application/json`, then a `+json` media type, then `multipart/form-data`, then `application/x-www-form-urlencoded`, each only when it declares a schema (an `application/json` entry without one yields to a later media type that has one); then `application/octet-stream`, then `text/plain`, with or without a schema — a schema-less binary body is a `string` with `format: "binary"`, a schema-less text body a `string`, and one with a schema is typed from it. Within a tier the first matching key in document order wins. `requestBodyEncoding` is set exactly when `requestBody` is. A body that declares media types but none the parser reads — `application/xml`, `text/csv`, or only an `application/json` entry without a schema — yields no `requestBody`, and the parser warns once per operation (and once per webhook, whose payload goes through the same pick) rather than dropping it silently. The `x-mutually-exclusive-body-groups` extension resolves its members from the same pick, as do the body-owned query parameters (`bodyOwnedQueryParams`). Media types the body declares beside the one it is read from are not carried in the IR.
 
 ### Request Body Required
 

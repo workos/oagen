@@ -126,8 +126,10 @@ export interface Webhook {
    * materialized as a model named `<Stem>Payload`, where the stem is the
    * `operationId` when there is one and the webhook's name otherwise (see the
    * parser's `resolveWebhookModelStems` for how the stem is kept unique).
-   * Absent when the operation declares no `requestBody` or one with no usable
-   * content.
+   * Read from the content entry the same pick as `Operation.requestBody`
+   * chooses, by media type essence. Absent when the operation declares no
+   * `requestBody`, or one none of whose media types is read — which the
+   * parser warns about.
    */
   requestBody?: TypeRef;
   /** How the payload is encoded, read like `Operation.requestBodyEncoding`. */
@@ -234,7 +236,30 @@ export interface Operation {
   bodyOwnedQueryParams?: Parameter[];
   headerParams: Parameter[];
   cookieParams?: Parameter[];
+  /**
+   * The request body's type, read from one content entry of the Request Body
+   * Object (after a `components/requestBodies` `$ref` is resolved). Media
+   * types are matched by essence — parameters and case aside, so
+   * `application/json; charset=utf-8` and `APPLICATION/JSON` are
+   * `application/json` — and tried in a fixed order: `application/json`, then
+   * a `+json` media type (`application/vnd.api+json`), then
+   * `multipart/form-data`, then `application/x-www-form-urlencoded`, each
+   * only when it declares a schema; then `application/octet-stream`, then
+   * `text/plain`, with or without one (a schema-less binary body is a binary
+   * string, a schema-less text body a string). An inline object body is
+   * materialized as `<Op>Request`. Absent when the operation declares no
+   * body, or one none of whose media types is read — which the parser warns
+   * about once, so a body is never dropped silently.
+   */
   requestBody?: TypeRef;
+  /**
+   * The wire encoding of the media type `requestBody` was read from: `json`
+   * for `application/json` and any `+json` media type, `form-data` for
+   * `multipart/form-data`, `form-urlencoded` for
+   * `application/x-www-form-urlencoded`, `binary` for
+   * `application/octet-stream`, `text` for `text/plain`. Set exactly when
+   * `requestBody` is.
+   */
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
   /**
    * Whether a caller must send `requestBody`: the Request Body Object's

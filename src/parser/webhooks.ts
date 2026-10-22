@@ -13,7 +13,9 @@ import {
   presentText,
   resolveParameterRef,
   resolveRequestBodyRef,
+  schemalessRequestBodyType,
   selectRequestBodyContent,
+  warnDroppedRequestBody,
   type OperationObject,
   type ParameterObject,
   type PathItem,
@@ -243,6 +245,9 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
         params.push(param);
       }
       const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label);
+      // Reported here, once per webhook: the mint below runs twice for each
+      // (`resolveWebhookModelStems`, then the build), so it must not report.
+      warnDroppedRequestBody(body, label);
       entries.push({ name, method, op, params, body, label, methodCount: methods.length });
     }
   }
@@ -543,22 +548,26 @@ interface MintedSchema {
   names: Set<string>;
 }
 
-/** The payload typed and materialized as the `payload` property of `stem`; `undefined` when there is no usable body. */
+/**
+ * The payload typed and materialized as the `payload` property of `stem`,
+ * read from the content entry the operation body pick chooses
+ * (`selectRequestBodyContent`, by media type essence); `undefined` when there
+ * is no usable body. A declared body none of whose media types is read is
+ * reported where the webhook's entry is built (`warnDroppedRequestBody`),
+ * not here: the mint runs twice per webhook and the warning fires once.
+ */
 function mintPayload(
   body: RequestBodyObject | undefined,
   stem: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): (MintedSchema & { encoding: Webhook['requestBodyEncoding'] }) | undefined {
-  if (!body?.content) return undefined;
-  const { encoding, schema } = selectRequestBodyContent(body);
+  const selected = selectRequestBodyContent(body);
+  if (!selected) return undefined;
+  const { encoding, schema } = selected;
   if (!schema) {
-    if (encoding === 'binary') {
-      return { ref: { kind: 'primitive', type: 'string', format: 'binary' }, encoding, models: [], names: new Set() };
-    }
-    if (encoding === 'text') {
-      return { ref: { kind: 'primitive', type: 'string' }, encoding, models: [], names: new Set() };
-    }
-    return undefined;
+    // Only a binary or text pick comes without a schema; it is a primitive.
+    const primitive = schemalessRequestBodyType(encoding);
+    return primitive ? { ref: primitive, encoding, models: [], names: new Set() } : undefined;
   }
   return { ...mintSchema(schema, 'payload', stem, componentSchemas), encoding };
 }
