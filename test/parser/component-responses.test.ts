@@ -555,6 +555,55 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         dir = undefined;
       });
 
+      // Greptile, after the merge with main: a component schema that already
+      // owns `<Component>Response` must not be folded onto by the shared body.
+      it.each([
+        [
+          'a component schema owns the name',
+          { schemas: { OwnerCardResponse: { type: 'object', properties: { id: { type: 'string' } } } } },
+        ],
+        ['two component responses derive it', { responses: { OwnerCardResponse: ownerCard } }],
+      ])('names a shared body per operation when %s', async (_why, extraComponents: Record<string, unknown>) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
+        const specPath = join(dir, 'spec.json');
+        const components = {
+          schemas: { ...(extraComponents.schemas as object) },
+          responses: {
+            OwnerCard: {
+              description: 'An owner',
+              content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'integer' } } } } },
+            },
+            ...(extraComponents.responses as object),
+          },
+        };
+        writeFileSync(
+          specPath,
+          JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'clash', version: '1' },
+            paths: {
+              '/owners/{ownerId}': {
+                get: { operationId: 'getOwner', responses: { '200': { $ref: '#/components/responses/OwnerCard' } } },
+              },
+            },
+            components,
+          }),
+        );
+        const spec = await parseSpec(specPath);
+        const op = spec.services.flatMap((s) => s.operations)[0];
+        expect(op.response).toEqual({ kind: 'model', name: 'GetOwnerResponse' });
+        const own = spec.models.find((m) => m.name === 'GetOwnerResponse');
+        expect(own?.fields.map((f) => [f.name, f.type])).toEqual([['id', { kind: 'primitive', type: 'integer' }]]);
+        if (extraComponents.schemas) {
+          const component = spec.models.find((m) => m.name === 'OwnerCardResponse');
+          expect(component?.fields.map((f) => [f.name, f.type])).toEqual([
+            ['id', { kind: 'primitive', type: 'string' }],
+          ]);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      });
+
       async function parseWithVersion(openapi: string): Promise<Operation> {
         dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
         const specPath = join(dir, 'spec.json');

@@ -335,11 +335,18 @@ export function extractOperations(
   // path, and two distinct paths — or a path and an operationId, component
   // schema or component response — can produce the same name, so the prefix
   // for every such operation is decided up front (see resolvePathModelBaseNames).
+  // The model name each component response's inline body takes, decided once
+  // for every operation that returns it (see resolveComponentResponseModelNames).
+  const componentResponseModelNames = resolveComponentResponseModelNames(componentResponses, [
+    ...(componentModels ?? []),
+    ...(componentFieldModels ?? []),
+  ]);
   const pathModelBaseNames = resolvePathModelBaseNames(
     paths,
     componentModels,
     componentRequestBodies,
     componentResponses,
+    componentResponseModelNames,
     componentSchemas,
   );
   // An API root the untagged paths sit under (`/api`, `/v1`) tells the
@@ -403,6 +410,7 @@ export function extractOperations(
         deferred,
         apiRootLength,
         refSiblingDescriptions,
+        componentResponseModelNames,
       );
       inlineModels.push(...opModels);
       for (const model of opModels) operationOf.set(model, operationQualifier);
@@ -1341,6 +1349,7 @@ function buildOperation(
   deferred: DeferredInlineType[] = [],
   apiRootLength = 0,
   refSiblingDescriptions: 'override' | 'ignore' = 'override',
+  componentResponseModelNames?: ReadonlyMap<string, string>,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -1460,6 +1469,7 @@ function buildOperation(
     operationQualifier,
     deferred,
     refSiblingDescriptions,
+    componentResponseModelNames,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -2242,6 +2252,13 @@ interface ResponseTypingContext {
    * component's (OAS 3.1) or is ignored (OAS 3.0); see `resolveResponseRef`.
    */
   refSiblingDescriptions?: 'override' | 'ignore';
+  /**
+   * The model name each component response's inline body is shared under
+   * (`resolveComponentResponseModelNames`); a component absent from the map
+   * names its body per operation. Absent altogether, every component keeps
+   * `componentResponseModelName`.
+   */
+  componentResponseModelNames?: ReadonlyMap<string, string>;
   /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
   serviceName?: string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
@@ -2537,6 +2554,7 @@ function resolvePathModelBaseNames(
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentResponses?: Record<string, Record<string, unknown>>,
+  componentResponseModelNames: ReadonlyMap<string, string> = new Map(),
   componentSchemas?: Record<string, SchemaObject>,
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
@@ -2560,7 +2578,11 @@ function resolvePathModelBaseNames(
   // construction, under whatever media type the body is declared (the same
   // fixed-order pick, `primaryBodySchema`); a chain of refs is followed to the
   // body silently, since the operation declaring the ref warns when it reads it.
-  for (const [componentName, component] of Object.entries(componentResponses ?? {})) {
+  // A component that names its body per operation (absent from the map)
+  // reserves nothing: its models start with the operations' own stems.
+  for (const [componentName, modelName] of componentResponseModelNames) {
+    const component = componentResponses?.[componentName];
+    if (!component) continue;
     reservedNames.add(componentResponseModelBase(componentName));
     const resolved = resolveResponseRef<ResponseObject>(
       component as ResponseObject | ReferenceObject,
@@ -2571,7 +2593,7 @@ function resolvePathModelBaseNames(
     );
     const { schema } = primaryBodySchema(resolved);
     if (!schema) continue;
-    const body = classifyAndExtractResponse(schema, componentResponseModelName(componentName), componentSchemas);
+    const body = classifyAndExtractResponse(schema, modelName, componentSchemas);
     for (const model of body.inlineModels) reservedNames.add(model.name);
     for (const companion of body.envelopeCompanions ?? []) {
       for (const model of companion.models) reservedNames.add(model.name);
@@ -2801,6 +2823,36 @@ function componentResponseNameOf(resp: ResponseObject | ReferenceObject): string
 function componentResponseModelName(componentName: string): string {
   const base = toPascalCase(componentName);
   return cleanSchemaName(base.endsWith('Response') ? base : base + 'Response');
+}
+
+/**
+ * The model name each component response's inline body is shared under:
+ * `componentResponseModelName`, unless a component schema (or a model a
+ * component field mints) already owns that name, or two components derive the
+ * same one — `OwnerCard` beside a schema `OwnerCardResponse`, or beside a
+ * component response `OwnerCardResponse`. Such a component is left out of the
+ * map, and its body is named per operation (`<Op>Response`) as it was before
+ * component responses were resolved: a shared name of another shape would
+ * otherwise be folded by the later merge, which compares field names, onto a
+ * model with other field types, silently.
+ */
+function resolveComponentResponseModelNames(
+  componentResponses: Record<string, Record<string, unknown>> | undefined,
+  takenModels: readonly Model[],
+): ReadonlyMap<string, string> {
+  const taken = new Set(takenModels.map((model) => model.name));
+  const derived = new Map<string, string>();
+  const owners = new Map<string, number>();
+  for (const componentName of Object.keys(componentResponses ?? {})) {
+    const name = componentResponseModelName(componentName);
+    derived.set(componentName, name);
+    owners.set(name, (owners.get(name) ?? 0) + 1);
+  }
+  const names = new Map<string, string>();
+  for (const [componentName, name] of derived) {
+    if (!taken.has(name) && owners.get(name) === 1) names.set(componentName, name);
+  }
+  return names;
 }
 
 /**
@@ -3215,7 +3267,12 @@ function extractResponses(
     // Set when the response came from a component: its inline body is then
     // named after the component, shared by every operation that returns it.
     const componentName = code >= 200 ? componentResponseNameOf(rawResponse) : undefined;
-    const componentModelName = componentName === undefined ? undefined : componentResponseModelName(componentName);
+    const componentModelName =
+      componentName === undefined
+        ? undefined
+        : ctx.componentResponseModelNames
+          ? ctx.componentResponseModelNames.get(componentName)
+          : componentResponseModelName(componentName);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
     // response, which no branch below keeps, declares none worth
