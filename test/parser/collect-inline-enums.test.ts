@@ -9,6 +9,7 @@ import {
   collectModelTypeRefs,
   collectResponseBodyTypes,
   collectResponseHeaders,
+  collectWebhookTypeRefs,
 } from '../../src/ir/types.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
@@ -32,12 +33,13 @@ const json = (schema: SchemaObject) => ({ content: { 'application/json': { schem
 const petId = [{ name: 'petId', in: 'path', required: true, schema: str }];
 const noContent = { '204': { description: 'ok' } };
 
-function doc(paths: Doc, schemas: Record<string, SchemaObject> = {}): Doc {
+function doc(paths: Doc, schemas: Record<string, SchemaObject> = {}, extra: Doc = {}): Doc {
   return {
     openapi: '3.1.0',
     info: { title: 'inline body enums', version: '1' },
     paths,
     components: { schemas },
+    ...extra,
   };
 }
 
@@ -113,18 +115,23 @@ function operationTypeRefs(op: Operation): TypeRef[] {
 }
 
 /**
- * Every `ModelRef` and `EnumRef` reachable from an operation or a model names
- * a model or enum of the IR, and no model or enum besides a component is
- * left unreferenced.
+ * Every `ModelRef` and `EnumRef` reachable from an operation, a webhook or a
+ * model names a model or enum of the IR; no model and enum share a name; and
+ * no model or enum besides a component is left unreferenced.
  */
 function expectSound(ir: ApiSpec, componentNames: string[] = []): void {
   const models = new Set(ir.models.map((m) => m.name));
   const enums = new Set(enumNames(ir));
-  const refs = [...operationsOf(ir).flatMap(operationTypeRefs), ...ir.models.flatMap(collectModelTypeRefs)];
+  const refs = [
+    ...operationsOf(ir).flatMap(operationTypeRefs),
+    ...(ir.webhooks ?? []).flatMap(collectWebhookTypeRefs),
+    ...ir.models.flatMap(collectModelTypeRefs),
+  ];
   const referencedModels = new Set(refs.flatMap(collectModelRefs));
   const referencedEnums = new Set(refs.flatMap(collectEnumRefs));
   expect([...referencedModels].filter((name) => !models.has(name))).toEqual([]);
   expect([...referencedEnums].filter((name) => !enums.has(name))).toEqual([]);
+  expect([...models].filter((name) => enums.has(name))).toEqual([]);
   const orphan = (name: string): boolean =>
     !componentNames.includes(name) && !referencedModels.has(name) && !referencedEnums.has(name);
   expect([...models].filter(orphan)).toEqual([]);
@@ -427,6 +434,7 @@ describe('a body enum whose name is taken', () => {
     expect(operation(ir, 'getPetKind').response).toEqual(inlineEnum('GetPetKindResponse', ['cat', 'dog']));
     expect(enumNames(ir)).toEqual(['GetPetKindResponse']);
     expect(enumValues(ir, 'GetPetKindResponse')).toEqual(['dog', 'cat']);
+    expectSound(ir, ['GetPetKindResponse']);
   });
 
   it('a request body steps around a component enum of the same name and other members', async () => {
@@ -473,5 +481,149 @@ describe('a body enum whose name is taken', () => {
     expect(operation(ir, 'getPetKind').response).toEqual(inlineEnum('GetPetKindResponse3', ['cat', 'dog']));
     expect(enumNames(ir)).toEqual(['GetPetKindResponse', 'GetPetKindResponse3']);
     expectSound(ir, ['GetPetKindResponse', 'GetPetKindResponse2']);
+  });
+});
+
+// PR #332 review: `collectDistinctEnums` consulted `modelNames` only for the
+// name it stepped to, so a model alone — an object component owning the very
+// name an inline enum derives, with no enum of that name — never triggered a
+// rename, and a model and an enum reached the emitters under one name. Every
+// site that promotes an inline enum now checks the original name against
+// the models too.
+describe('an inline enum never takes a name a model owns', () => {
+  const owner: SchemaObject = { type: 'object', properties: { name: str } };
+  const modelNames = (ir: ApiSpec): string[] => ir.models.map((m) => m.name);
+
+  it('a lone response body beside an object component of its name is numbered', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getPetKind({ '200': { description: 'kind', ...json(kind) } }), { GetPetKindResponse: owner }),
+    );
+    expect(operation(ir, 'getPetKind').response).toEqual(inlineEnum('GetPetKindResponse2', ['cat', 'dog']));
+    expect(modelNames(ir)).toEqual(['GetPetKindResponse']);
+    expect(enumNames(ir)).toEqual(['GetPetKindResponse2']);
+    expectSound(ir, ['GetPetKindResponse']);
+  });
+
+  it('a request body beside an object component of its name is numbered', async () => {
+    const ir = await parseWithoutWarnings(doc(setMood(json(en(['calm', 'busy']))), { SetMoodRequest: owner }));
+    expect(operation(ir, 'setMood').requestBody).toEqual(inlineEnum('SetMoodRequest2', ['calm', 'busy']));
+    expect(modelNames(ir)).toEqual(['SetMoodRequest']);
+    expect(enumNames(ir)).toEqual(['SetMoodRequest2']);
+    expectSound(ir, ['SetMoodRequest']);
+  });
+
+  it('an error body beside an object component of its name steps to …Body', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({
+          '200': { description: 'kind', ...json(str) },
+          '404': { description: 'nf', ...json(en(['gone', 'missing'])) },
+        }),
+        { GetPetKindError404: owner },
+      ),
+    );
+    expect(operation(ir, 'getPetKind').errors[0].type).toEqual(
+      inlineEnum('GetPetKindError404Body', ['gone', 'missing']),
+    );
+    expect(modelNames(ir)).toEqual(['GetPetKindError404']);
+    expect(enumNames(ir)).toEqual(['GetPetKindError404Body']);
+    expectSound(ir, ['GetPetKindError404']);
+  });
+
+  it('a response header beside an object component of its name is numbered', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({
+          '200': { description: 'kind', ...json(str), headers: { 'X-Kind': { schema: kind } } },
+        }),
+        { PetsXKind: owner },
+      ),
+    );
+    expect(operation(ir, 'getPetKind').responseHeaders?.[0].type).toEqual(inlineEnum('PetsXKind2', ['cat', 'dog']));
+    expect(modelNames(ir)).toEqual(['PetsXKind']);
+    expect(enumNames(ir)).toEqual(['PetsXKind2']);
+    expectSound(ir, ['PetsXKind']);
+  });
+
+  it('a query parameter beside an object component of its name is numbered', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'kind', in: 'query', schema: kind }],
+              responses: { '200': { description: 'pets', ...json(str) } },
+            },
+          },
+        },
+        { PetsKind: owner },
+      ),
+    );
+    expect(operation(ir, 'listPets').queryParams[0].type).toEqual(inlineEnum('PetsKind2', ['cat', 'dog']));
+    expect(modelNames(ir)).toEqual(['PetsKind']);
+    expect(enumNames(ir)).toEqual(['PetsKind2']);
+    expectSound(ir, ['PetsKind']);
+  });
+
+  it('a default body beside an object component of its name is numbered', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({ '200': { description: 'kind', ...json(str) }, default: { description: 'kind', ...json(kind) } }),
+        { GetPetKindDefaultResponse: owner },
+      ),
+    );
+    expect(operation(ir, 'getPetKind').defaultResponse?.type).toEqual(
+      inlineEnum('GetPetKindDefaultResponse2', ['cat', 'dog']),
+    );
+    expect(modelNames(ir)).toEqual(['GetPetKindDefaultResponse']);
+    expect(enumNames(ir)).toEqual(['GetPetKindDefaultResponse2']);
+    expectSound(ir, ['GetPetKindDefaultResponse']);
+  });
+
+  it("a component field's enum beside an object component of its name is numbered at extraction", async () => {
+    const ir = await parseWithoutWarnings(doc({}, { Pet: { type: 'object', properties: { kind } }, PetKind: owner }));
+    const pet = ir.models.find((m) => m.name === 'Pet');
+    expect(pet?.fields.map(({ name, type }) => `${name}: ${ref(type)}`)).toEqual(['kind: enum PetKind2']);
+    expect(modelNames(ir)).toEqual(['Pet', 'PetKind']);
+    expect(enumNames(ir)).toEqual(['PetKind2']);
+    expectSound(ir, ['Pet', 'PetKind']);
+  });
+
+  it('a webhook parameter beside an object component of its name is moved by the stem reservation first', async () => {
+    // `resolveWebhookModelStems` hashes a stem whose minted names collide with
+    // a component or operation name (`PetAdoptedB4A950`, the documented SHA-1
+    // prefix of `petAdopted`), so the enum reaches the webhook collector under
+    // the moved stem and nothing shares the component's name.
+    const ir = await parseWithoutWarnings(
+      doc(
+        {},
+        { PetAdoptedXSource: owner },
+        {
+          webhooks: {
+            petAdopted: {
+              post: {
+                parameters: [{ name: 'X-Source', in: 'header', schema: en(['app', 'api']) }],
+                responses: { '200': { description: 'ok' } },
+              },
+            },
+          },
+        },
+      ),
+    );
+    expect(ir.webhooks?.[0].headerParams[0].type).toEqual(inlineEnum('PetAdoptedB4A950XSource', ['app', 'api']));
+    expect(modelNames(ir)).toEqual(['PetAdoptedXSource']);
+    expect(enumNames(ir)).toEqual(['PetAdoptedB4A950XSource']);
+    expectSound(ir, ['PetAdoptedXSource']);
+  });
+
+  it('a model owning the stem and an enum of other members together send the body to the next free suffix', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(setMood(json(en(['calm', 'busy']))), { SetMoodRequest: owner, SetMoodRequest2: en(['old', 'new']) }),
+    );
+    expect(operation(ir, 'setMood').requestBody).toEqual(inlineEnum('SetMoodRequest3', ['calm', 'busy']));
+    expect(modelNames(ir)).toEqual(['SetMoodRequest']);
+    expect(enumNames(ir)).toEqual(['SetMoodRequest2', 'SetMoodRequest3']);
+    expectSound(ir, ['SetMoodRequest', 'SetMoodRequest2']);
   });
 });

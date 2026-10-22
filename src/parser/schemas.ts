@@ -844,9 +844,12 @@ export function extractSchemas(
     }
   }
 
-  // Collect inline enums from model fields and named-union variants
+  // Collect inline enums from model fields and named-union variants. One
+  // whose name a model extracted here owns (`Pet.kind` beside a `PetKind`
+  // object) is left on its ref: `collectInlineEnumsFromModels` promotes it
+  // under a distinct name once every model is known, as it does any clash.
   for (const model of models) {
-    collectInlineEnums(model, enums);
+    collectInlineEnums(model, enums, modelNames);
   }
 
   // NOTE: activeSchemaNameTransform is intentionally NOT cleared here.
@@ -897,13 +900,20 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
 
 /**
  * Walk a model's type refs (its fields' types and, for a named union, its
- * variants) and extract inline enum refs as top-level enum definitions.
+ * variants) and extract inline enum refs as top-level enum definitions,
+ * skipping one whose name is in `modelNames`: a model and an enum must never
+ * share a name, and the collision-aware model pass
+ * (`collectInlineEnumsFromModels`) renames and promotes that one later.
  * This ensures type alias files are generated for inline enums.
  */
-function collectInlineEnums(model: Model, enums: Enum[]): void {
+function collectInlineEnums(model: Model, enums: Enum[], modelNames: ReadonlySet<string>): void {
   const seen = new Set(enums.map((e) => e.name));
   for (const ref of collectModelTypeRefs(model)) {
-    collectInlineEnumFromRef(ref, enums, seen);
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (!modelNames.has(r.name)) collectInlineEnumFromRef(r, enums, seen);
+      },
+    });
   }
 }
 
