@@ -2,6 +2,7 @@ import type { Enum, EnumValue, Model, Operation, ResponseHeader, Service, TypeRe
 import {
   walkTypeRef,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectModelRefs,
   collectWebhookTypeRefs,
@@ -38,9 +39,9 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 /**
  * Collect inline enum definitions from operation parameters (query, path,
  * header, cookie), list-envelope companion fields, response headers, the
- * request body, every success body, error bodies, and secondary and fallback
- * response bodies, and promote them to top-level enums so emitters can
- * generate typed enum files.
+ * request body, every success body, error bodies, secondary and fallback
+ * response bodies, and secondary request bodies, and promote them to
+ * top-level enums so emitters can generate typed enum files.
  *
  * Every kind is collected collision-aware (`collectDistinctEnums`): a
  * parameter enum is named from the service and parameter name alone, so a
@@ -146,6 +147,13 @@ export function collectInlineEnumsFromOperations(
       // (`ListPetsDefaultResponse`); a clash with a different value set falls
       // back to a numeric suffix.
       for (const { type } of collectResponseBodyTypes(op)) {
+        collectThroughModels(type, undefined);
+      }
+      // A request body declared only for a secondary media type (`text/csv`
+      // next to `application/json`) is typed like one, with its name already
+      // operation-qualified (`ReplaceWidgetTextCsvRequest`), so its inline
+      // enums are promoted the same way.
+      for (const { type } of collectRequestBodyTypes(op)) {
         collectThroughModels(type, undefined);
       }
     }

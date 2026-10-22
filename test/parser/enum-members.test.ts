@@ -375,6 +375,71 @@ describe('a component `oneOf`/`anyOf` of consts is an enum', () => {
     expectEnumsConsistent(spec);
   });
 
+  it('keeps the restriction inline when it leaves one member or none, as the component path does (Greptile)', async () => {
+    const union = [{ const: 'a', description: 'Kept' }, { const: 'b' }, { type: 'null' }];
+    const spec = await parseDocument(
+      specDoc(
+        {
+          One: { enum: ['a'], oneOf: union },
+          OneNullable: { enum: ['a', null], oneOf: union },
+          None: { enum: ['z'], oneOf: union },
+          Pet: {
+            type: 'object',
+            properties: {
+              one: { enum: ['a'], oneOf: union },
+              one_nullable: { enum: ['a', null], oneOf: union },
+              // The list drops no member and still forbids `null`.
+              one_of_one: { enum: ['a'], oneOf: [{ const: 'a' }, { type: 'null' }] },
+              none: { enum: ['z'], oneOf: union },
+              none_nullable: { enum: ['z', null], oneOf: union },
+            },
+          },
+        },
+        { '/pets': getOp('listPets', { $ref: '#/components/schemas/Pet' }) },
+      ),
+    );
+
+    const members = (name: string) => enumByName(spec, name).values;
+    expect(members('One')).toEqual([{ name: 'A', value: 'a', description: 'Kept' }]);
+    expect(members('OneNullable')).toEqual([{ name: 'A', value: 'a', description: 'Kept' }]);
+    expect(members('None')).toEqual([]);
+    // Inline, the same members and the same nullability: never the union of `a` and `b` the list forbade.
+    expect(members('PetOne')).toEqual([{ name: 'A', value: 'a', description: 'Kept' }]);
+    expect(members('PetOneNullable')).toEqual([{ name: 'A', value: 'a', description: 'Kept' }]);
+    expect(members('PetOneOfOne')).toEqual([{ name: 'A', value: 'a' }]);
+    expect(members('PetNone')).toEqual([]);
+    expect(members('PetNoneNullable')).toEqual([]);
+    expect(spec.models[0].fields.map((f) => f.type)).toEqual([
+      { kind: 'enum', name: 'PetOne', values: ['a'] },
+      { kind: 'nullable', inner: { kind: 'enum', name: 'PetOneNullable', values: ['a'] } },
+      { kind: 'enum', name: 'PetOneOfOne', values: ['a'] },
+      { kind: 'enum', name: 'PetNone', values: [] },
+      { kind: 'nullable', inner: { kind: 'enum', name: 'PetNoneNullable', values: [] } },
+    ]);
+    expectEnumsConsistent(spec);
+  });
+
+  it('leaves a const union with no `enum:` list of fewer than two consts as it was', async () => {
+    const spec = await parseDocument(
+      specDoc(
+        {
+          Pet: {
+            type: 'object',
+            properties: {
+              lone: { oneOf: [{ const: 'a' }] },
+              lone_nullable: { oneOf: [{ const: 'a' }, { type: 'null' }] },
+            },
+          },
+        },
+        { '/pets': getOp('listPets', { $ref: '#/components/schemas/Pet' }) },
+      ),
+    );
+    expect(spec.models[0].fields.map((f) => f.type)).toEqual([
+      { kind: 'union', compositionKind: 'oneOf', variants: [{ kind: 'literal', value: 'a' }] },
+      { kind: 'nullable', inner: { kind: 'literal', value: 'a' } },
+    ]);
+  });
+
   it('carries a `type: null` variant as nullability on the reference, never as a member', async () => {
     const spec = await parseDocument(
       specDoc(

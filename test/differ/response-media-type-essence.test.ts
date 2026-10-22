@@ -287,3 +287,161 @@ describe('diffOperations — response media types are compared by essence (issue
     expect(diffOperations('Pets', [lone], [withAdded200])).toEqual([]);
   });
 });
+
+describe('parser to differ — a secondary inline body under a respelled key (Greptile round 1)', () => {
+  /** `getReport`: a `Report` JSON primary plus one secondary YAML inline object, under the given key and schema. */
+  const report = (yamlKey: string, yamlProperties: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'Reports', version: '1' },
+    paths: {
+      '/report': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+                [yamlKey]: { schema: { type: 'object', properties: yamlProperties } },
+              },
+            },
+          },
+        },
+      },
+    },
+    components: { schemas: { Report: { type: 'object', properties: { id: { type: 'string' } } } } },
+  });
+  const diffDocuments = async (before: Record<string, unknown>, after: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-279-yaml-'));
+    try {
+      const oldPath = join(dir, 'old.json');
+      const newPath = join(dir, 'new.json');
+      writeFileSync(oldPath, JSON.stringify(before));
+      writeFileSync(newPath, JSON.stringify(after));
+      return diffSpecs(await parseSpec(oldPath), await parseSpec(newPath));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const title = { title: { type: 'string' } };
+
+  it('reports no change when only the key respells itself: the model is named from the essence on both sides', async () => {
+    const { changes, summary } = await diffDocuments(
+      report('application/yaml', title),
+      report('application/yaml; charset=utf-8', title),
+    );
+    expect(changes).toEqual([]);
+    expect(summary.breaking).toBe(0);
+  });
+
+  it('still reports a schema change under a respelled key: the model is modified, and the body is not retyped', async () => {
+    const { changes } = await diffDocuments(
+      report('application/yaml', title),
+      report('application/yaml; charset=utf-8', { ...title, summary: { type: 'string' } }),
+    );
+    // The model keeps its name, so the differ sees one modified model — not
+    // a model removed and another added, and not a retyped media type.
+    expect(changes.map((c) => c.kind)).toEqual(['model-modified']);
+    expect(changes[0]).toMatchObject({
+      kind: 'model-modified',
+      name: 'GetReportApplicationYamlResponse',
+      classification: 'additive',
+    });
+  });
+
+  it('reports a body retyped under a respelled key when its type really changed', async () => {
+    const before = report('application/yaml', title);
+    const after = report('application/yaml; charset=utf-8', title);
+    // The YAML body now points at the component instead of an inline object.
+    after.paths['/report'].get.responses['200'].content['application/yaml; charset=utf-8'] = {
+      schema: { $ref: '#/components/schemas/Report' },
+    } as never;
+    const { changes } = await diffDocuments(before, after);
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-removed', 'operation-modified']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/yaml; charset=utf-8'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports no change when two spellings of one essence only swap places: each keeps the model its parameters name (Greptile round 2)', async () => {
+    const twoYaml = (keys: [string, string]) => {
+      const bodies: Record<string, unknown> = {
+        'application/yaml': { schema: { type: 'object', properties: title } },
+        'application/yaml; charset=utf-8': { schema: { type: 'object', properties: { summary: { type: 'string' } } } },
+      };
+      const content: Record<string, unknown> = {
+        'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      };
+      for (const key of keys) content[key] = bodies[key];
+      const doc = report('application/yaml', title);
+      doc.paths['/report'].get.responses['200'].content = content as never;
+      return doc;
+    };
+    const { changes } = await diffDocuments(
+      twoYaml(['application/yaml', 'application/yaml; charset=utf-8']),
+      twoYaml(['application/yaml; charset=utf-8', 'application/yaml']),
+    );
+    expect(changes).toEqual([]);
+  });
+});
+
+describe('pairing a lone 2xx: the entry spelled as it is wins over one that only matches by essence (Greptile round 2)', () => {
+  const reportModel: TypeRef = { kind: 'model', name: 'Report' };
+  const oldYaml: TypeRef = { kind: 'model', name: 'OldYaml' };
+  const newYaml: TypeRef = { kind: 'model', name: 'NewYaml' };
+  /** A lone `201`: JSON `Report` and `application/yaml` → `OldYaml`. */
+  const lone201 = card(
+    [
+      ['application/json', reportModel],
+      ['application/yaml', oldYaml],
+    ],
+    { name: 'getReport', response: reportModel },
+  );
+  /** That `201` unchanged, beside a `200` with the same JSON body and `application/yaml; version=2` → `NewYaml`. */
+  const added200 = (): Operation => {
+    const two = contents([
+      ['application/json', reportModel],
+      ['application/yaml; version=2', newYaml],
+    ]);
+    const one = contents([
+      ['application/json', reportModel],
+      ['application/yaml', oldYaml],
+    ]);
+    return card([], {
+      name: 'getReport',
+      response: reportModel,
+      responseContentTypes: two.map((c) => c.contentType),
+      responseContents: two,
+      successResponses: [
+        { statusCode: 200, type: reportModel, contentTypes: two.map((c) => c.contentType), contents: two },
+        { statusCode: 201, type: reportModel, contentTypes: one.map((c) => c.contentType), contents: one },
+      ],
+    });
+  };
+
+  it('pairs the lone 201 with the unchanged 201, not with the added 200 that matches it by essence', () => {
+    expect(diffOperations('Reports', [lone201], [added200()])).toEqual([]);
+  });
+
+  it('pairs a new lone 201 with the old 201 and reports the removed 200 with its formats, not a retype', () => {
+    expect(diffOperations('Reports', [added200()], [lone201])).toMatchObject([
+      {
+        responseChanged: false,
+        responseContentTypeChanges: [
+          {
+            statusCode: 200,
+            added: [],
+            removed: ['application/json', 'application/yaml; version=2'],
+            retyped: [],
+            classification: 'breaking',
+          },
+        ],
+        classification: 'breaking',
+      },
+    ]);
+  });
+});

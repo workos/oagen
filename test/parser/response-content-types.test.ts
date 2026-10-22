@@ -2066,6 +2066,130 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expectSound(spec, [PLAIN]);
   });
 
+  it('shares a body whose nested titled variant was renamed under its root, the 201 replaying the rename (Greptile)', async () => {
+    // A component `Circle` of another shape owns the title; the 200's body
+    // renames its nested `Circle` to `…ResponseCircle` (no stem reaches a
+    // variant below the top level). The identical 201 body replays that
+    // rename before comparing, so it shares every model rather than
+    // settling on `…Response201` with a `…Response201Circle` of its own.
+    const warn = silence();
+    const withShape = obj({ shape: shapes({ radius: str }) });
+    const spec = await parseDocument(
+      document(createPet({ '200': withVendor(withShape), '201': withVendor(withShape, 'created') }), {
+        Circle: obj({ other: str }),
+      }),
+    );
+
+    expect(modelsOf(spec).sort()).toEqual([
+      'Circle { other }',
+      `${PLAIN} { shape }`,
+      `${PLAIN}Circle { kind, radius }`,
+      'CreatePetResponse { id }',
+      'Square { kind, side }',
+    ]);
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN]);
+    expect(spec.models.find((m) => m.name === PLAIN)?.fields[0].type).toMatchObject({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: `${PLAIN}Circle` },
+        { kind: 'model', name: 'Square' },
+      ],
+    });
+    expectSound(spec, ['Circle']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  describe('beside the parameter-based names of side-by-side spellings (#330 round 2)', () => {
+    // A secondary body's bare name comes from its media type's essence, plus
+    // its own parameters only when another key of that essence sits beside
+    // it (`mediaTypeNameFragment`). The sibling record is keyed by that bare
+    // name, so which keys share across status codes follows from which keys
+    // derive one name.
+    const YAML = 'CreatePetApplicationYamlResponse';
+    const YAML_CHARSET = 'CreatePetApplicationYamlCharsetUtf8Response';
+    const withYaml = (keys: Record<string, unknown>, description = 'ok') => ({
+      description,
+      content: { 'application/json': { schema: obj({ id: str }) }, ...keys },
+    });
+    const yamlEntries = (op: Operation) =>
+      op.successResponses!.map(
+        ({ contents, statusCode }) =>
+          `${statusCode}: ${contents!
+            .filter((c) => c.contentType !== 'application/json')
+            .map(({ contentType, type }) => `${contentType} → ${name(type)}`)
+            .join(', ')}`,
+      );
+
+    it('shares across status codes under a key respelled without parameters, since both derive one bare name', async () => {
+      // `application/yaml; charset=utf-8` is the only YAML key of the 200, so
+      // its parameters are not in the name; the 201's `application/yaml`
+      // derives the same `…ApplicationYamlResponse`, which a component owns
+      // with another shape — the 201 tries the `…Response200` the 200 took.
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withYaml({ 'application/yaml; charset=utf-8': { schema: obj({ name: str }) } }),
+            '201': withYaml({ 'application/yaml': { schema: obj({ name: str }) } }, 'created'),
+          }),
+          { [YAML]: obj({ other: str }) },
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual([`${YAML} { other }`, 'CreatePetResponse { id }', `${YAML}200 { name }`]);
+      expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
+        `200: application/yaml; charset=utf-8 → ${YAML}200`,
+        `201: application/yaml → ${YAML}200`,
+      ]);
+      expectSound(spec, [YAML]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('shares one model between two keys of one response that differ only in case and shape alike', async () => {
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withYaml({
+              'application/yaml': { schema: obj({ name: str }) },
+              'Application/YAML': { schema: obj({ name: str }) },
+            }),
+          }),
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${YAML} { name }`]);
+      expect(
+        findOp(spec, 'createPet')
+          .responseContents!.slice(1)
+          .map((c) => name(c.type)),
+      ).toEqual([YAML, YAML]);
+      expectSound(spec, []);
+    });
+
+    it('never shares between two spellings told apart by their parameters, but shares each across status codes', async () => {
+      // Side by side, `application/yaml` and `application/yaml; charset=utf-8`
+      // derive two names, so their identical bodies are two models on the 200;
+      // the 201 declares the same two keys, and each shares the 200's model
+      // of its own name — two models in all, not four.
+      const warn = silence();
+      const keys = () => ({
+        'application/yaml': { schema: obj({ name: str }) },
+        'application/yaml; charset=utf-8': { schema: obj({ name: str }) },
+      });
+      const spec = await parseDocument(
+        document(createPet({ '200': withYaml(keys()), '201': withYaml(keys(), 'created') })),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${YAML} { name }`, `${YAML_CHARSET} { name }`]);
+      expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
+        `200: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
+        `201: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
+      ]);
+      expectSound(spec, []);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
   describe('a replaced application/json body', () => {
     const json = (schema: unknown, description = 'ok') => ({
       description,
