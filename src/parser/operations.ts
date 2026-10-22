@@ -1785,6 +1785,7 @@ function buildOperation(
 
   // Per-operation security requirements; undefined means "inherit ApiSpec.security"
   const security = extractSecurityRequirements(op.security, opLabel);
+  const tags = extractTags(op.tags);
 
   // Extract mutually-exclusive parameter groups (query/path/header/cookie)
   const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
@@ -1843,6 +1844,9 @@ function buildOperation(
     async: op['x-oagen-async'],
     security,
     parameterGroups,
+    // Present only when the document declares at least one usable tag, as on
+    // a webhook; absent, not undefined, otherwise.
+    ...(tags && { tags }),
   };
 
   // Where the models came from, so a merge pass that must rename one — a
@@ -1923,6 +1927,18 @@ export function buildDescription(summary: string | undefined, description: strin
 /** The text itself when it has non-whitespace content, otherwise `undefined`. */
 export function presentText(text: string | undefined): string | undefined {
   return typeof text === 'string' && text.trim() !== '' ? text : undefined;
+}
+
+/**
+ * An operation's `tags` as the IR carries them, on an `Operation` and on a
+ * `Webhook` alike: the list in document order with every entry that is not a
+ * non-empty string dropped, or `undefined` when nothing remains (or the
+ * keyword is not a list), so the key is omitted rather than set to `[]`.
+ */
+export function extractTags(tags: unknown): string[] | undefined {
+  if (!Array.isArray(tags)) return undefined;
+  const kept = tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '');
+  return kept.length > 0 ? kept : undefined;
 }
 
 export function extractParams(

@@ -3056,3 +3056,24 @@ describe('extractOperations – path-named services skip the API root (issue #20
     ]);
   });
 });
+
+describe('extractOperations – Operation.tags (issue #273)', () => {
+  const responses = { '200': { description: 'ok' } };
+  const operation = (op: Record<string, unknown>) =>
+    extractOperations({ '/pets': { get: { operationId: 'listPets', responses, ...op } } }).services[0].operations[0];
+
+  it('carries every tag in document order, as a webhook does', () => {
+    expect(operation({ tags: ['Pets', 'Store'] }).tags).toEqual(['Pets', 'Store']);
+  });
+
+  it('drops entries that are not non-empty strings and keeps the rest', () => {
+    expect(operation({ tags: ['Pets', '', 3, null, 'Store'] }).tags).toEqual(['Pets', 'Store']);
+  });
+
+  it('omits the key when the operation declares no usable tag', () => {
+    expect(operation({})).not.toHaveProperty('tags');
+    expect(operation({ tags: [] })).not.toHaveProperty('tags');
+    expect(operation({ tags: ['', 3] })).not.toHaveProperty('tags');
+    expect(operation({ tags: 'Pets' })).not.toHaveProperty('tags');
+  });
+});

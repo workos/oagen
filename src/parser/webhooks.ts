@@ -9,6 +9,7 @@ import {
   HTTP_METHODS,
   buildDescription,
   extractParams,
+  extractTags,
   operationIdModelBase,
   presentText,
   resolveParameterRef,
@@ -638,9 +639,7 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
   const { headerParams, queryParams, cookieParams, requestBody, requestBodyEncoding } = minted;
   const summary = presentText(op.summary);
   const description = buildDescription(summary, op.description);
-  const tags = Array.isArray(op.tags)
-    ? op.tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '')
-    : [];
+  const tags = extractTags(op.tags);
   const security = extractSecurityRequirements(op.security, label);
 
   return {
@@ -650,7 +649,7 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     ...(summary !== undefined ? { summary } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(op.deprecated === true ? { deprecated: true } : {}),
-    ...(tags.length > 0 ? { tags } : {}),
+    ...(tags !== undefined ? { tags } : {}),
     headerParams,
     queryParams,
     ...(cookieParams.length > 0 ? { cookieParams } : {}),

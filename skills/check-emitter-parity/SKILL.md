@@ -111,6 +111,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
 - `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
 - `cookieParams` — Cookie parameter handling
+- `tags` — The operation's tags in document order, present only when at least one usable entry remains; for grouping or doc comments
 - `servers` — Operation-level servers (own, else the Path Item's), present only when they differ from `ApiSpec.servers`; a request goes to `op.servers ?? spec.servers`
 
 #### Parameter
