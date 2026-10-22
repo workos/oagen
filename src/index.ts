@@ -11,6 +11,11 @@ export type {
   SecurityRequirementSet,
   SuccessResponse,
   ResponseHeader,
+  ResponseContent,
+  ResponseBodyType,
+  DefaultResponse,
+  RangeResponse,
+  StatusRange,
   PaginationMeta,
   HttpMethod,
   Parameter,
@@ -32,6 +37,8 @@ export type {
   Enum,
   EnumValue,
   ErrorResponse,
+  Webhook,
+  WebhookResponse,
 } from './ir/types.js';
 
 export {
@@ -45,6 +52,9 @@ export {
   validateModelHints,
   collectRequestBodyModels,
   collectResponseHeaders,
+  collectResponseBodyTypes,
+  collectFallbackResponseTypes,
+  collectWebhookTypeRefs,
 } from './ir/types.js';
 
 // Operation resolution
@@ -126,6 +136,9 @@ export type {
   OperationAdded,
   OperationRemoved,
   OperationModified,
+  WebhookAdded,
+  WebhookRemoved,
+  WebhookModified,
   ParamChange,
   BaseUrlChanged,
   ServerAdded,
