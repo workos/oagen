@@ -117,9 +117,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     );
   }
 
+  // The whole document goes along so the rules that read every inline schema
+  // of a root at once see the operations' and webhooks' schemas too, not
+  // only the components' (`SchemaExtractionOptions.document`).
   const { models, enums } = extractSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-    { schemaNameTransform: options?.schemaNameTransform },
+    { schemaNameTransform: options?.schemaNameTransform, document: transformed },
   );
 
   // Before the operations: an operation carries its own `servers` only when

@@ -309,6 +309,33 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
     }
   });
 
+  it('reads a custom method after a colon as the segment it is written on followed by the verb', () => {
+    expect(
+      names({
+        '/v1/pets/{petId}:status': { get: item('petId') },
+        '/v1/pets/{petId}:adopt': { get: item('petId'), post: item('petId') },
+        '/v1/pets:bulkDelete': { delete: ok },
+      }),
+    ).toEqual([
+      'Pets.getPetAdopt               GET    /v1/pets/{petId}:adopt',
+      'Pets.adoptPet                  POST   /v1/pets/{petId}:adopt',
+      'Pets.getPetStatus              GET    /v1/pets/{petId}:status',
+      'Pets.bulkDelete                DELETE /v1/pets:bulkDelete',
+    ]);
+  });
+
+  it('qualifies colliding custom-method singletons by the parameter alone, never by the verb written after it', () => {
+    expect(
+      names({
+        '/v1/pets/{petId}:history': { get: item('petId') },
+        '/v1/{orgId}/pets/{petId}:history': { get: item('petId') },
+      }),
+    ).toEqual([
+      'Pets.getPetHistory             GET    /v1/pets/{petId}:history',
+      'Pets.getPetHistoryByOrgId      GET    /v1/{orgId}/pets/{petId}:history',
+    ]);
+  });
+
   it('is not consulted for an operation with an operationId', () => {
     expect(
       names({
