@@ -416,15 +416,16 @@ describe('fallback operation names (issue #210)', () => {
       'adoptPet                     POST   /shop/pets/{id}/adopt',
       'adoptPetRescue               POST   /shop/rescue/pets/{id}/adopt',
     ]);
-    // Under an API root (#224) the parameters tell the paths apart (#227).
+    // Under an API root (#224) the parameters tell the paths apart (#227);
+    // one every path carries, `petId`, adds nothing (#258).
     expect(
       names({
         '/api/v1/pets/{petId}/adopt': { post: item('petId') },
         '/api/v1/{orgId}/pets/{petId}/adopt': { post: item('petId') },
       }),
     ).toEqual([
-      'adoptPetByPetId              POST   /api/v1/pets/{petId}/adopt',
-      'adoptPetByOrgIdByPetId       POST   /api/v1/{orgId}/pets/{petId}/adopt',
+      'adoptPet                     POST   /api/v1/pets/{petId}/adopt',
+      'adoptPetByOrgId              POST   /api/v1/{orgId}/pets/{petId}/adopt',
     ]);
   });
 
@@ -433,9 +434,10 @@ describe('fallback operation names (issue #210)', () => {
       '/api/v1/pets/{petId}': { get: item('petId') },
       '/api/v1/{orgId}/pets/{petId}': { get: item('petId') },
     } as Parameters<typeof extractOperations>[0]);
+    // `petId` is on both paths, so only `orgId` qualifies (#258).
     expect(services.flatMap((s) => s.operations.map((op) => `${s.name}.${op.name} ${op.path}`)).sort()).toEqual([
-      'Pets.getByOrgIdByPetId /api/v1/{orgId}/pets/{petId}',
-      'Pets.getByPetId /api/v1/pets/{petId}',
+      'Pets.get /api/v1/pets/{petId}',
+      'Pets.getByOrgId /api/v1/{orgId}/pets/{petId}',
     ]);
   });
 

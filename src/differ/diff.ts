@@ -10,6 +10,7 @@ import type {
 import { deprecationDetails, deprecationFlip } from './classify.js';
 import { buildDirectionIndex } from './direction.js';
 import { diffModels } from './models.js';
+import { diffServers } from './servers.js';
 import { diffServices } from './services.js';
 import { diffWebhooks } from './webhooks.js';
 
@@ -19,6 +20,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
   const directions = buildDirectionIndex(oldSpec, newSpec);
 
   const changes: Change[] = [
+    // Where the client sends requests comes first: it is the one change that
+    // touches every operation.
+    ...diffServers(oldSpec, newSpec),
     ...diffModels(oldSpec.models, newSpec.models, directions),
     ...diffEnums(oldSpec.enums, newSpec.enums),
     ...diffServices(oldSpec.services, newSpec.services),
@@ -228,7 +232,9 @@ function summarize(changes: Change[]) {
   for (const c of changes) {
     if (c.kind.endsWith('-added')) added++;
     else if (c.kind.endsWith('-removed')) removed++;
-    else if (c.kind.endsWith('-modified')) modified++;
+    // `base-url-changed` is a modification of the document root, so every
+    // change lands in exactly one of the three counts.
+    else if (c.kind.endsWith('-modified') || c.kind.endsWith('-changed')) modified++;
 
     if (c.classification === 'breaking') breaking++;
     else additive++;
