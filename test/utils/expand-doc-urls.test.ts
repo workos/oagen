@@ -263,6 +263,27 @@ describe('expandDocUrls response descriptions', () => {
     expect(op.errors[1]).not.toHaveProperty('description');
   });
 
+  it('expands relative links in default and range response descriptions (Greptile)', () => {
+    const spec = minimalSpec({
+      services: [
+        {
+          name: 'Users',
+          operations: [
+            {
+              ...operation,
+              defaultResponse: { type: { kind: 'model', name: 'Error' }, description: 'See [errors](/errors).' },
+              rangeResponses: [{ range: '5XX', description: 'See [errors](/errors).' }, { range: '2XX' }],
+            },
+          ],
+        },
+      ],
+    });
+    const op = expandDocUrls(spec, 'https://workos.com/docs').services[0].operations[0];
+    expect(op.defaultResponse?.description).toBe('See [errors](https://workos.com/docs/errors).');
+    expect(op.rangeResponses?.[0].description).toBe('See [errors](https://workos.com/docs/errors).');
+    expect(op.rangeResponses?.[1]).not.toHaveProperty('description');
+  });
+
   it('leaves the keys absent on an operation whose responses have no descriptions', () => {
     const spec = minimalSpec({
       services: [{ name: 'Users', operations: [{ ...operation, errors: [{ statusCode: 404 }] }] }],

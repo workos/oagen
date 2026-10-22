@@ -1,6 +1,5 @@
 import type {
   ApiSpec,
-  ErrorResponse,
   ExternalDocs,
   Field,
   Operation,
@@ -8,7 +7,6 @@ import type {
   Parameter,
   ParameterGroup,
   ResponseHeader,
-  SuccessResponse,
 } from '../ir/types.js';
 
 /**
@@ -88,7 +86,7 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
 
   // A response's `description` and `headers` are optional keys, absent (not
   // undefined) when the document declares none; both stay absent.
-  function response<T extends SuccessResponse | ErrorResponse>(entry: T): T {
+  function response<T extends { description?: string; headers?: ResponseHeader[] }>(entry: T): T {
     return {
       ...entry,
       ...expandText(entry, 'description'),
@@ -134,6 +132,10 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
       ...(op.responseHeaders ? { responseHeaders: headers(op.responseHeaders) } : {}),
       ...(op.successResponses ? { successResponses: op.successResponses.map(response) } : {}),
       errors: op.errors.map(response),
+      // The `default` and range responses carry `description` and `headers`
+      // exactly as a status entry does, and stay absent when undeclared.
+      ...(op.defaultResponse ? { defaultResponse: response(op.defaultResponse) } : {}),
+      ...(op.rangeResponses ? { rangeResponses: op.rangeResponses.map(response) } : {}),
       ...(op.pagination ? { pagination: pagination(op.pagination) } : {}),
     };
   }

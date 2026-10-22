@@ -19,6 +19,52 @@ function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   };
 }
 
+describe('specDerivedNames — response content types', () => {
+  it('counts a type reached only through a secondary media type as spec-derived', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Things',
+          operations: [
+            {
+              name: 'getThing',
+              httpMethod: 'get',
+              path: '/things/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'primitive', type: 'string' },
+              responseContentTypes: ['text/html', 'application/vnd.api+json'],
+              responseContents: [
+                { contentType: 'text/html', type: { kind: 'primitive', type: 'string' } },
+                { contentType: 'application/vnd.api+json', type: { kind: 'model', name: 'ThingDocument' } },
+              ],
+              errors: [
+                {
+                  statusCode: 500,
+                  contentTypes: ['application/problem+json'],
+                  contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+                },
+              ],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('ThingDocument')).toBe(true);
+    expect(names.has('Problem')).toBe(true);
+  });
+});
+
 describe('diffSurfaces', () => {
   it('returns 100% score for identical surfaces', () => {
     const surface = emptySurface({
@@ -735,5 +781,47 @@ describe('specDerivedNames — response headers', () => {
     const names = specDerivedNames(spec, nodeHints);
     expect(names.has('DownloadMeta')).toBe(true);
     expect(names.has('ThrottleInfo')).toBe(true);
+  });
+
+  it('counts a type reached only through a default or range response as spec-derived', () => {
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Documents',
+          operations: [
+            {
+              name: 'getDocument',
+              httpMethod: 'get',
+              path: '/documents/{id}',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              response: { kind: 'primitive', type: 'string' },
+              errors: [],
+              defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+              rangeResponses: [
+                { range: '5XX', type: { kind: 'array', items: { kind: 'model', name: 'Outage' } } },
+                {
+                  range: '4XX',
+                  headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'RejectionMeta' }, required: false }],
+                },
+              ],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('ApiError')).toBe(true);
+    expect(names.has('Outage')).toBe(true);
+    expect(names.has('RejectionMeta')).toBe(true);
   });
 });
