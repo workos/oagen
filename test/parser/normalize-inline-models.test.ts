@@ -2,6 +2,88 @@ import { describe, it, expect, vi } from 'vitest';
 import { collapseJsonSuffixModels, mergeFieldInlineModels } from '../../src/parser/normalize-inline-models.js';
 import type { Model, Service } from '../../src/ir/types.js';
 
+describe('collapseJsonSuffixModels — response content types', () => {
+  it('rewrites primary, alternate-success, and error content refs when a Json-suffix model collapses', () => {
+    const models: Model[] = [
+      { name: 'Meta', fields: [{ name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false }] },
+      {
+        name: 'MetaJson',
+        fields: [
+          { name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false },
+          { name: 'version', type: { kind: 'primitive', type: 'integer' }, required: false },
+        ],
+      },
+    ];
+    // The primary list is shared with its successResponses entry, as the parser builds it.
+    const primaryType = { kind: 'primitive' as const, type: 'string' as const };
+    const primaryContents = [
+      { contentType: 'text/plain', type: primaryType },
+      { contentType: 'application/vnd.meta+json', type: { kind: 'model' as const, name: 'MetaJson' } },
+    ];
+    const services: Service[] = [
+      {
+        name: 'Widgets',
+        operations: [
+          {
+            name: 'getWidget',
+            httpMethod: 'get',
+            path: '/widgets/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: primaryType,
+            responseContentTypes: ['text/plain', 'application/vnd.meta+json'],
+            responseContents: primaryContents,
+            successResponses: [
+              {
+                statusCode: 200,
+                type: primaryType,
+                contentTypes: ['text/plain', 'application/vnd.meta+json'],
+                contents: primaryContents,
+              },
+              {
+                statusCode: 202,
+                type: { kind: 'primitive', type: 'unknown' },
+                contentTypes: ['application/vnd.meta+json'],
+                contents: [
+                  {
+                    contentType: 'application/vnd.meta+json',
+                    type: { kind: 'array', items: { kind: 'model', name: 'MetaJson' } },
+                  },
+                ],
+              },
+            ],
+            errors: [
+              {
+                statusCode: 429,
+                contentTypes: ['application/problem+json'],
+                contents: [
+                  {
+                    contentType: 'application/problem+json',
+                    type: { kind: 'nullable', inner: { kind: 'model', name: 'MetaJson' } },
+                  },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+
+    const result = collapseJsonSuffixModels(models, services);
+
+    expect(result.map((m) => m.name)).toEqual(['Meta']);
+    const op = services[0].operations[0];
+    expect(op.responseContents?.[1].type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(op.successResponses?.[1].contents?.[0].type).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'Meta' },
+    });
+    expect(op.errors[0].contents?.[0].type).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Meta' } });
+  });
+});
+
 describe('collapseJsonSuffixModels', () => {
   it('rewrites model field refs when collapsing Json suffix models', () => {
     const models: Model[] = [
@@ -311,6 +393,66 @@ describe('collapseJsonSuffixModels — response headers', () => {
       items: { kind: 'model', name: 'Meta' },
     });
     expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Meta' } });
+  });
+
+  it('rewrites default and range response body and header refs when a Json-suffix model collapses', () => {
+    const models: Model[] = [
+      { name: 'Meta', fields: [{ name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false }] },
+      {
+        name: 'MetaJson',
+        fields: [
+          { name: 'etag', type: { kind: 'primitive', type: 'string' }, required: false },
+          { name: 'version', type: { kind: 'primitive', type: 'integer' }, required: false },
+        ],
+      },
+    ];
+    const services: Service[] = [
+      {
+        name: 'Widgets',
+        operations: [
+          {
+            name: 'getWidget',
+            httpMethod: 'get',
+            path: '/widgets/{id}',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'primitive', type: 'string' },
+            errors: [],
+            defaultResponse: {
+              type: { kind: 'model', name: 'MetaJson' },
+              headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'MetaJson' }, required: false }],
+            },
+            rangeResponses: [
+              { range: '5XX', type: { kind: 'array', items: { kind: 'model', name: 'MetaJson' } } },
+              {
+                range: '4XX',
+                headers: [
+                  {
+                    name: 'X-Meta',
+                    type: { kind: 'nullable', inner: { kind: 'model', name: 'MetaJson' } },
+                    required: false,
+                  },
+                ],
+              },
+            ],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+
+    const result = collapseJsonSuffixModels(models, services);
+
+    expect(result.map((m) => m.name)).toEqual(['Meta']);
+    const op = services[0].operations[0];
+    expect(op.defaultResponse?.type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(op.defaultResponse?.headers?.[0].type).toEqual({ kind: 'model', name: 'Meta' });
+    expect(op.rangeResponses?.[0].type).toEqual({ kind: 'array', items: { kind: 'model', name: 'Meta' } });
+    expect(op.rangeResponses?.[1].headers?.[0].type).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'model', name: 'Meta' },
+    });
   });
 });
 

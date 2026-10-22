@@ -11,6 +11,7 @@ import { deprecationDetails, deprecationFlip } from './classify.js';
 import { buildDirectionIndex } from './direction.js';
 import { diffModels } from './models.js';
 import { diffServices } from './services.js';
+import { diffWebhooks } from './webhooks.js';
 
 export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
   // Both specs seed the index so a model that was request-facing in either one
@@ -21,6 +22,7 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
     ...diffModels(oldSpec.models, newSpec.models, directions),
     ...diffEnums(oldSpec.enums, newSpec.enums),
     ...diffServices(oldSpec.services, newSpec.services),
+    ...diffWebhooks(oldSpec.webhooks ?? [], newSpec.webhooks ?? []),
   ];
 
   const behaviorChanges = collectBehaviorChanges(changes);
