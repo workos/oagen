@@ -250,6 +250,49 @@ paths:
     expect(warnings()).toEqual([]);
   });
 
+  it('keeps an override that drops a port after a placeholder whose enum choice carries a path (Greptile)', async () => {
+    const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+servers:
+  - url: https://{host}:443/v2
+    variables:
+      host: { default: api.example.com, enum: [api.example.com, api.example.com/v1] }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: https://{host}/v2
+          variables:
+            host: { default: api.example.com, enum: [api.example.com, api.example.com/v1] }
+      ${ok}
+  /pets:
+    get:
+      operationId: listPets
+      servers:
+        - url: https://api.example.com:443/v2
+      ${ok}
+`);
+
+    // With the defaults both resolve to https://api.example.com/v2, but a
+    // caller choosing `api.example.com/v1` gets `/v1:443/v2` from the document
+    // and `/v1/v2` from the operation: the override stays.
+    expect(operation(ir, 'listNotes').servers).toEqual([
+      {
+        url: 'https://{host}/v2',
+        description: undefined,
+        variables: { host: { default: 'api.example.com', enum: ['api.example.com', 'api.example.com/v1'] } },
+      },
+    ]);
+    // A literal spelling of the document's default address is still a different
+    // template from `https://{host}:443/v2`, so it is kept too.
+    expect(operation(ir, 'listPets').servers).toEqual([
+      { url: 'https://api.example.com:443/v2', description: undefined },
+    ]);
+    expect(warnings()).toEqual([]);
+  });
+
   it('treats a different description, variable or order as a different list', async () => {
     const ir = await parseYaml(`
 openapi: '3.1.0'
@@ -719,6 +762,45 @@ paths:
 
       expect(ir.baseUrl).toBe('/');
       expect(operation(ir, 'listNotes').servers).toEqual([{ url: 'https://notes.example.com' }]);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('keeps a named host alone under a document that lists `/` before it: position decides the default host', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+servers:
+  - url: /
+  - url: https://notes.example.com
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: https://notes.example.com
+      ${ok}
+`);
+
+      expect(ir.baseUrl).toBe('/');
+      expect(operation(ir, 'listNotes').servers).toEqual([{ url: 'https://notes.example.com' }]);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('leaves the key absent when the operation writes `/` out twice under a document without servers', async () => {
+      const ir = await parseYaml(`
+openapi: 3.1.0
+info: { title: repro, version: '1' }
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      servers:
+        - url: /
+        - url: /
+      ${ok}
+`);
+
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
       expect(warnings()).toEqual([]);
     });
 

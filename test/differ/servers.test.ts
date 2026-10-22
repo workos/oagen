@@ -568,11 +568,11 @@ describe('diffServers', () => {
 
     it('reports a server matched across spellings with the new spelling, and its variable changes', () => {
       const old = server('https://{region}.api.example.com', { region: { default: 'eu', enum: ['eu', 'us'] } });
-      const next = server('https://{region}.API.example.com:443/', { region: { default: 'eu', enum: ['eu'] } });
+      const next = server('HTTPS://{region}.api.example.com', { region: { default: 'eu', enum: ['eu'] } });
       expect(diffServers(spec([old]), spec([next]))).toEqual([
         {
           kind: 'server-modified',
-          url: 'https://{region}.API.example.com:443/',
+          url: 'HTTPS://{region}.api.example.com',
           variableChanges: [
             { kind: 'variable-enum-value-removed', variableName: 'region', value: 'us', classification: 'breaking' },
           ],
@@ -596,8 +596,8 @@ describe('diffServers', () => {
       const url = 'https://{region}.api.example.com';
       const old = [server(url, { region: { default: 'eu' } }), server(url, { region: { default: 'us' } })];
       const next = [
-        server('https://{region}.API.example.com', { region: { default: 'us' } }),
-        server('https://{region}.api.example.com/', { region: { default: 'eu' } }),
+        server('HTTPS://{region}.api.example.com', { region: { default: 'us' } }),
+        server('Https://{region}.api.example.com', { region: { default: 'eu' } }),
       ];
       // Identical variables pair each entry with its twin, so only the first
       // entry's move is reported.
@@ -605,7 +605,7 @@ describe('diffServers', () => {
         {
           kind: 'base-url-changed',
           oldBaseUrl: 'https://eu.api.example.com',
-          newBaseUrl: 'https://us.API.example.com',
+          newBaseUrl: 'HTTPS://us.api.example.com',
           classification: 'breaking',
         },
       ]);
@@ -617,8 +617,8 @@ describe('diffServers', () => {
         server('https://{region}.api.example.com', { region: { default: 'ap' }, port: { default: '443' } }),
       ];
       const next = [
-        server('https://{region}.API.example.com', { region: { default: 'ap' }, port: { default: '8443' } }),
-        server('https://{region}.API.example.com', { region: { default: 'eu' }, port: { default: '9443' } }),
+        server('HTTPS://{region}.api.example.com', { region: { default: 'ap' }, port: { default: '8443' } }),
+        server('HTTPS://{region}.api.example.com', { region: { default: 'eu' }, port: { default: '9443' } }),
       ];
       // `baseUrl` is the first entry resolved: eu vs ap, a move. The pairs are
       // found by resolved URL (host case aside) and each reports its own port.
@@ -644,6 +644,25 @@ describe('diffServers', () => {
         { kind: 'server-added', url: 'https://api.example.com{basePath}/', classification: 'additive' },
         { kind: 'server-removed', url: 'https://api.example.com{basePath}', classification: 'breaking' },
       ]);
+    });
+
+    it('still reports a port dropped after a placeholder that may supply a path, on a non-first server (Greptile)', () => {
+      const host = { host: { default: 'api.example.com/v1' } };
+      const withPort = server('https://{host}:443/v2', host);
+      const without = server('https://{host}/v2', host);
+      // Resolved: `/v1:443/v2` vs `/v1/v2`. After a placeholder the authority
+      // is kept as written, so these are two templates.
+      expect(diffServers(spec([staging, withPort]), spec([staging, without]))).toEqual([
+        { kind: 'server-added', url: 'https://{host}/v2', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://{host}:443/v2', classification: 'breaking' },
+      ]);
+      // The same two spellings with no placeholder are one server.
+      expect(
+        diffServers(
+          spec([staging, server('https://api.example.com:443/v2')]),
+          spec([staging, server('https://api.example.com/v2')]),
+        ),
+      ).toEqual([]);
     });
 
     it('reports nothing for a baseUrl that only changed spelling while the template did not', () => {
@@ -815,19 +834,55 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
     ]);
   });
 
-  it('still treats `/` beside a named host as a server of its own', () => {
-    expect(diffServers(spec([root, staging]), spec([staging]))).toEqual([
-      {
-        kind: 'base-url-changed',
-        oldBaseUrl: '/',
-        newBaseUrl: 'https://staging.api.example.com',
-        classification: 'breaking',
-      },
-      { kind: 'server-removed', url: '/', classification: 'breaking' },
-    ]);
-    expect(diffServers(spec([staging, root]), spec([staging]))).toEqual([
-      { kind: 'server-removed', url: '/', classification: 'breaking' },
-    ]);
+  describe('`/` beside another server (Greptile, round 2)', () => {
+    const extra = server('https://extra.example');
+
+    it('reports only the server added when `/` gains a named host beside it: the address `/` has not moved', () => {
+      expect(diffServers(spec([root]), spec([root, extra]))).toEqual([
+        { kind: 'server-added', url: 'https://extra.example', classification: 'additive' },
+      ]);
+      expect(diffSpecs(spec([root]), spec([root, extra])).summary).toEqual({
+        added: 1,
+        removed: 0,
+        modified: 0,
+        breaking: 0,
+        additive: 1,
+        behaviorChanges: 0,
+      });
+    });
+
+    it('reports only the server removed when `/` loses the named host beside it', () => {
+      expect(diffServers(spec([root, extra]), spec([root]))).toEqual([
+        { kind: 'server-removed', url: 'https://extra.example', classification: 'breaking' },
+      ]);
+    });
+
+    it('reports the same against a document without servers, since that is `/` too', () => {
+      expect(diffServers(spec(), spec([root, extra]))).toEqual([
+        { kind: 'server-added', url: 'https://extra.example', classification: 'additive' },
+      ]);
+      expect(diffServers(spec([root, extra]), spec())).toEqual([
+        { kind: 'server-removed', url: 'https://extra.example', classification: 'breaking' },
+      ]);
+    });
+
+    it('never reports `/` itself as added or removed, in either position', () => {
+      expect(diffServers(spec([root, staging]), spec([staging]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '/',
+          newBaseUrl: 'https://staging.api.example.com',
+          classification: 'additive',
+        },
+      ]);
+      expect(diffServers(spec([staging, root]), spec([staging]))).toEqual([]);
+      expect(diffServers(spec([staging]), spec([staging, root]))).toEqual([]);
+    });
+
+    it('treats `/` written out twice as the default too', () => {
+      expect(diffServers(spec([root, root]), spec())).toEqual([]);
+      expect(diffServers(spec([root]), spec([root, root]))).toEqual([]);
+    });
   });
 
   it('treats `/` with a variable as the default too: `/` references no variable, so none can move it (#292)', () => {
@@ -835,13 +890,24 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
     expect(diffServers(spec([rootWithPort]), spec())).toEqual([]);
     expect(diffServers(spec(), spec([rootWithPort]))).toEqual([]);
     expect(diffServers(spec([root]), spec([rootWithPort]))).toEqual([]);
+    // Beside a named host it is left out of the matching like any `/` entry.
+    expect(diffServers(spec([rootWithPort, staging]), spec([staging]))).toEqual([
+      {
+        kind: 'base-url-changed',
+        oldBaseUrl: '/',
+        newBaseUrl: 'https://staging.api.example.com',
+        classification: 'additive',
+      },
+    ]);
   });
 
-  it('still treats a template that merely resolves to `/` as a server of its own', () => {
+  it('still treats a template that merely resolves to `/` as a server of its own, at an address that has not moved', () => {
     const rootTemplate = server('{root}', { root: { default: '/' } });
     expect(diffServers(spec(), spec([rootTemplate]))).toEqual([
-      { kind: 'base-url-changed', oldBaseUrl: '', newBaseUrl: '/', classification: 'additive' },
       { kind: 'server-added', url: '{root}', classification: 'additive' },
+    ]);
+    expect(diffServers(spec([rootTemplate]), spec([root]))).toEqual([
+      { kind: 'server-removed', url: '{root}', classification: 'breaking' },
     ]);
   });
 

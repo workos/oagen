@@ -230,11 +230,12 @@ describe('normalizeServerUrl', () => {
   });
 
   it('keeps every placeholder as written, wherever it sits', () => {
-    expect(normalizeServerUrl('https://{region}.API.example.com/{version}')).toBe(
-      'https://{region}.api.example.com/{version}',
+    // After the first placeholder in the authority nothing is folded.
+    expect(normalizeServerUrl('HTTPS://{region}.API.example.com/{version}')).toBe(
+      'https://{region}.API.example.com/{version}',
     );
-    expect(normalizeServerUrl('https://{Region}.api.example.com')).toBe('https://{Region}.api.example.com/');
-    expect(normalizeServerUrl('https://{region}.API.example.com/')).toBe('https://{region}.api.example.com/');
+    expect(normalizeServerUrl('https://{Region}.api.example.com')).toBe('https://{Region}.api.example.com');
+    expect(normalizeServerUrl('HTTPS://API.example.com{basePath}')).toBe('https://api.example.com{basePath}');
     expect(normalizeServerUrl('https://{Region}.api.example.com')).not.toBe(
       normalizeServerUrl('https://{region}.api.example.com'),
     );
@@ -253,7 +254,7 @@ describe('normalizeServerUrl', () => {
     expect(normalizeServerUrl('{scheme}://api.example.com:443')).toBe('{scheme}://api.example.com:443/');
   });
 
-  it('adds no `/` after an authority that ends in a placeholder, which may supply the path itself (Greptile)', () => {
+  it('keeps the authority as written from its first placeholder on, which may supply a port or a path (Greptile)', () => {
     // `basePath` defaulting to `/v1` makes these resolve to `/v1` and `/v1/`.
     expect(normalizeServerUrl('https://api.example.com{basePath}')).toBe('https://api.example.com{basePath}');
     expect(normalizeServerUrl('https://api.example.com{basePath}/')).toBe('https://api.example.com{basePath}/');
@@ -262,10 +263,17 @@ describe('normalizeServerUrl', () => {
     );
     expect(normalizeServerUrl('https://{host}')).toBe('https://{host}');
     expect(normalizeServerUrl('https://API.example.com:{port}?x=1')).toBe('https://api.example.com:{port}?x=1');
-    // Literal host text after the placeholder means it cannot be a path, so
-    // the usual rule applies.
-    expect(normalizeServerUrl('https://{region}.api.example.com')).toBe('https://{region}.api.example.com/');
-    expect(normalizeServerUrl('https://{host}:8443')).toBe('https://{host}:8443/');
+    // `host` defaulting to `api.example.com/v1` makes `:443` path text, so no
+    // port is dropped and no `/` added after a placeholder.
+    expect(normalizeServerUrl('https://{host}:443/v2')).toBe('https://{host}:443/v2');
+    expect(normalizeServerUrl('https://{host}:443/v2')).not.toBe(normalizeServerUrl('https://{host}/v2'));
+    expect(normalizeServerUrl('https://{host}:443')).not.toBe(normalizeServerUrl('https://{host}:443/'));
+    expect(normalizeServerUrl('https://{region}.API.example.com:443')).toBe('https://{region}.API.example.com:443');
+    expect(normalizeServerUrl('https://{host}:8443')).toBe('https://{host}:8443');
+    // A `@` after the placeholder makes the text before it userinfo: kept as written.
+    expect(normalizeServerUrl('https://USER{x}@HOST.example.com')).toBe('https://USER{x}@HOST.example.com');
+    // The same literal spellings still fold.
+    expectSame('https://api.example.com/v2', ['https://api.example.com:443/v2', 'https://api.example.com/v2']);
     // A bare literal authority, and one under a placeholder scheme, still get `/`.
     expectSame('https://api.example.com/', ['https://api.example.com', 'https://api.example.com/']);
     expectSame('{scheme}://api.example.com/', ['{scheme}://api.example.com', '{scheme}://api.example.com/']);
@@ -301,8 +309,8 @@ describe('normalizeServerUrl', () => {
       '{scheme}://{host}:{port}/v1',
     ]) {
       // Every placeholder the scan finds survives normalisation as written,
-      // and nothing else is treated as one (the literal braces are folded
-      // along with the host they sit in).
+      // and nothing else is treated as one (a literal brace is a character
+      // like any other).
       const normalized = normalizeServerUrl(url);
       for (const name of serverUrlPlaceholders(url)) expect(normalized).toContain(`{${name}}`);
       expect(serverUrlPlaceholders(normalized)).toEqual(serverUrlPlaceholders(url));
