@@ -192,7 +192,11 @@ describe('singularizePathSegment', () => {
     // -yses → -ysis writes two letters; they take the case of the es they replace.
     expect(singularizePathSegment('Analyses')).toBe('Analysis');
     expect(singularizePathSegment('ANALYSES')).toBe('ANALYSIS');
-    // An `-is` singular is left alone, as before.
+    // The singulars those rules produce are left alone, like `-is`, `-us`
+    // and `-ss` words, so stemming is idempotent.
+    expect(singularizePathSegment('alias')).toBe('alias');
+    expect(singularizePathSegment('bias')).toBe('bias');
+    expect(singularizePathSegment('Alias')).toBe('Alias');
     expect(singularizePathSegment('analysis')).toBe('analysis');
   });
 
@@ -203,11 +207,116 @@ describe('singularizePathSegment', () => {
     // (`premises`, `cheeses`).
     expect(singularizePathSegment('crises')).toBe('crise');
     expect(singularizePathSegment('theses')).toBe('these');
-    // A singular ending in `-as` or `-ns` looks like the plural of an `-a` or
-    // `-n` noun (`areas`, `tokens`), so its `s` is dropped, as before.
-    expect(singularizePathSegment('alias')).toBe('alia');
+    // A singular ending in `-as` other than `-ias`, or in `-ns`, looks like
+    // the plural of an `-a` or `-n` noun (`areas`, `tokens`), so its `s` is
+    // dropped, as before.
     expect(singularizePathSegment('canvas')).toBe('canva');
     expect(singularizePathSegment('lens')).toBe('len');
+    // The plural of an `-ia` noun is kept, the price of keeping `alias`.
+    expect(singularizePathSegment('utopias')).toBe('utopias');
+  });
+
+  it('is idempotent on every input above: a singular it produces comes back unchanged', () => {
+    const inputs = [
+      // the plurals each rule handles
+      'pets',
+      'users',
+      'keys',
+      'ids',
+      'organizations',
+      'directories',
+      'policies',
+      'pies',
+      'addresses',
+      'processes',
+      'statuses',
+      'buses',
+      'boxes',
+      'indexes',
+      'batches',
+      'branches',
+      'hashes',
+      'responses',
+      'licenses',
+      'releases',
+      'cases',
+      'warehouses',
+      'uses',
+      'archives',
+      'aliases',
+      'biases',
+      'email_aliases',
+      'analyses',
+      'paralyses',
+      'risk_analyses',
+      'api_keys',
+      'auth-factors',
+      'email_addresses',
+      'authFactors',
+      'Directories',
+      'DIRECTORIES',
+      'PIES',
+      'ADDRESSES',
+      'Addresses',
+      'STATUSES',
+      'Statuses',
+      'BOXES',
+      'Boxes',
+      'BATCHES',
+      'Batches',
+      'HASHES',
+      'Hashes',
+      'RESPONSES',
+      'Responses',
+      'PETS',
+      'Pets',
+      'API_KEYS',
+      'Aliases',
+      'ALIASES',
+      'Analyses',
+      'ANALYSES',
+      // what it leaves alone
+      'pet',
+      'adopt',
+      'status',
+      'address',
+      'access',
+      'analysis',
+      'radius',
+      'alias',
+      'bias',
+      'Alias',
+      'is',
+      's',
+      '',
+      'series',
+      'time_series',
+      'species',
+      'news',
+      'STATUS',
+      'SERIES',
+      // the documented limits
+      'people',
+      'children',
+      'data',
+      'menus',
+      'apis',
+      'canvases',
+      'crises',
+      'theses',
+      'canvas',
+      'lens',
+      'utopias',
+      'cookies',
+      'heroes',
+      'caches',
+      'excuses',
+      'sms',
+    ];
+    for (const input of inputs) {
+      const once = singularizePathSegment(input);
+      expect(singularizePathSegment(once), `${input} → ${once}`).toBe(once);
+    }
   });
 
   it('drops only the s when the stem itself ends in e', () => {

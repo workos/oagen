@@ -826,6 +826,13 @@ export interface Field {
 /** Enum definition */
 export interface Enum {
   name: string;
+  /**
+   * The component enum schema's own `description`, as `Model.description`
+   * is a component model's. Present only when it has non-whitespace
+   * content. An enum lifted from an inline schema carries none: that
+   * schema's text is the field's or parameter's description.
+   */
+  description?: string;
   values: EnumValue[];
   /** Spec-level default value (the value of `default:` on the schema). Optional. */
   default?: string | number;
