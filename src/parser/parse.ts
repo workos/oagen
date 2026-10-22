@@ -178,7 +178,14 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // one) takes a name nothing else has or will have, in either pass.
   const naming: InlineModelNaming = {
     bundles: [...inlineModelBundles],
-    reserved: reservedTypeNames(models, enums, [...inlineModels, ...webhookInlineModels], fieldInlineModels, services, webhooks),
+    reserved: reservedTypeNames(
+      models,
+      enums,
+      [...inlineModels, ...webhookInlineModels],
+      fieldInlineModels,
+      services,
+      webhooks,
+    ),
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
   // The field models' sites, resolved now that the response merge may have
