@@ -344,5 +344,68 @@ describe('materializeInlineSchema — the stems earlier sites of the same bare n
       expect(fieldTypes(models, 'BodyCircle')).toMatchObject({ r: num });
       expect(fieldTypes(models, 'Body').shape).toMatchObject({ variants: [{ kind: 'model', name: 'Circle' }, {}] });
     });
+
+    it('skips a replayed rename the later site cannot take safely — its inline Circle beside a $ref to component Circle — instead of failing (Greptile round 2)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // The component `Circle` as the extractor builds it from a titled variant,
+      // so the later site's inline `Circle` of that very shape can share it.
+      const seed: Model[] = [];
+      materializeInlineSchema(
+        {
+          type: 'object',
+          properties: {
+            shape: {
+              oneOf: [
+                titled('Circle', 'circle', { radius: { type: 'number' } }),
+                titled('Square', 'square', { side: { type: 'number' } }),
+              ],
+            },
+          },
+        },
+        { stem: () => 'Seed', registry: new Map(), models: seed },
+      );
+      const registry: InlineModelRegistry = new Map([
+        ['Circle', { fingerprint: modelFingerprint(seed.find((m) => m.name === 'Circle')!) }],
+      ]);
+      const models: Model[] = [];
+      const siblings: SiblingSites = [];
+      // The 201: `Circle` of the component's shape, beside a `$ref` to it.
+      const later = {
+        type: 'object',
+        properties: {
+          shape: {
+            oneOf: [
+              titled('Circle', 'circle', { radius: { type: 'number' } }),
+              titled('Square', 'square', { side: { type: 'number' } }),
+            ],
+          },
+          original: { $ref: '#/components/schemas/Circle' },
+        },
+      };
+
+      expect(materializeInlineSchema(body, { stem: byCode(200), siblings, registry, models })).toEqual({
+        kind: 'model',
+        name: 'Body',
+      });
+      expect(siblings).toEqual([settled('Body', [['Circle', 'BodyCircle']])]);
+      const type = materializeInlineSchema(later, { stem: byCode(201), siblings, registry, models });
+
+      // The replay of `Circle → BodyCircle` would rewrite the `$ref` too, so it
+      // is skipped: the inline `Circle` shares the component, the root differs
+      // from the 200's and takes the 201's own name, nothing is renamed.
+      expect(type).toEqual({ kind: 'model', name: 'Body201' });
+      expect(names(models)).toEqual(['Body', 'Body201', 'BodyCircle', 'Square']);
+      expect(fieldTypes(models, 'Body201')).toMatchObject({
+        shape: {
+          variants: [
+            { kind: 'model', name: 'Circle' },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+        original: { kind: 'model', name: 'Circle' },
+      });
+      expect(siblings).toEqual([settled('Body', [['Circle', 'BodyCircle']]), settled('Body201')]);
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });

@@ -11,10 +11,10 @@
  * `materializeInlineSchema`).
  */
 import type { Model, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
+import { schemaToTypeRef, isComponentModelRef } from './schemas.js';
 import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
 
 // The model-shape fingerprint lives beside the schema-shape key in
@@ -171,9 +171,13 @@ const MAX_RENAME_ROUNDS = 64;
  * parent that matched a registered model before and differs from it now
  * moves to the next free stem with its children, instead of being dropped at
  * commit as already defined. That rewrite cannot tell an inline model's
- * reference from a `$ref` to a component of the same name, so a schema that
- * both inlines a clashing `Circle` and references component `Circle` fails
- * loudly instead.
+ * reference from a `$ref` to a component model of the same name, so a schema
+ * that both inlines a clashing `Circle` and references component model
+ * `Circle` fails loudly instead; a `$ref` to a component enum of that name is
+ * typed `{ kind: 'enum' }` and left alone by the rewrite, so it does not
+ * stand in the way (`componentModelRefTargets`). A rename replayed from an
+ * earlier site that the same `$ref` would make unsafe is skipped, not failed
+ * (`runTrial`).
  *
  * The stems are tried in the order `candidateStem` gives: the caller's bare
  * name, then the stems earlier sites of the same bare name settled on
@@ -283,11 +287,16 @@ interface Trial {
  * Extract the schema under the candidate's stem and compare every model with
  * the registry. The candidate's renames — an earlier site's, see
  * `SettledSite` — are replayed first, each only where it applies: the model
- * to move must be among the trial's and the name moved to free in it, so a
- * schema that differs from the earlier site's (no `Circle` to move, or a
- * model of its own already named `BodyCircle`) is compared as extracted and
- * settles on its own merits. A replayed rename rewrites the type as the
- * settling pass does, so the type is kept with the trial.
+ * to move must be among the trial's, the name moved to free in it, and the
+ * name moved not one this schema `$ref`s as a component model
+ * (`renameModel`), so a schema that differs from the earlier site's (no
+ * `Circle` to move, a model of its own already named `BodyCircle`, or an
+ * inline `Circle` beside a `$ref` to component `Circle`, which the rewrite
+ * could not tell apart) is compared as extracted and settles on its own
+ * merits — an inline `Circle` of the component's shape shares the component,
+ * and the root takes the site's own next candidate — rather than failing the
+ * parse. A replayed rename rewrites the type as the settling pass does, so
+ * the type is kept with the trial.
  */
 function runTrial(
   schema: SchemaObject,
@@ -309,12 +318,11 @@ function runTrial(
   const renames: Array<readonly [string, string]> = [];
   let type: TypeRef | undefined;
   if (candidate.renames.length > 0) {
-    const rootName = qualifyInlineModelName(toPascalCase(propertyName), options.parentName);
-    const referenced = componentRefTargets(schema);
     const rewritten = schemaToTypeRef(schema, propertyName, options.parentName, undefined, reserved);
+    const referenced = componentModelRefTargets(rewritten, models);
     for (const [from, to] of candidate.renames) {
       if (!models.some((model) => model.name === from) || models.some((model) => model.name === to)) continue;
-      renameModel(models, rewritten, referenced, rootName, from, to);
+      if (!renameModel(models, rewritten, referenced, from, to)) continue;
       renames.push([from, to]);
     }
     if (renames.length > 0) type = rewritten;
@@ -372,25 +380,21 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
  * every reference to it — in the models' fields, in `type`, and in the inline
  * enums named from it (`CircleStatus` → `BodyCircleStatus`, since a component
  * enum `CircleStatus` of other values would otherwise be collected first and
- * the renamed model's field would point at it). A name the schema also
- * `$ref`s cannot be rewritten safely, since the rewrite cannot tell the inline
- * reference from the `$ref` (see `materializeInlineSchema`), and fails
- * loudly; `rootName` names the site in the message.
+ * the renamed model's field would point at it). Returns `false`, having
+ * changed nothing, when `from` is a name the schema also `$ref`s as a
+ * component model (`referenced`, see `componentModelRefTargets`): the rewrite
+ * cannot tell the inline reference from the `$ref`, so the rename is unsafe
+ * and the caller decides — the settling pass fails loudly, a sibling's replay
+ * skips it (`runTrial`).
  */
 function renameModel(
   models: readonly Model[],
   type: TypeRef,
   referenced: ReadonlySet<string>,
-  rootName: string,
   from: string,
   to: string,
-): void {
-  if (referenced.has(from)) {
-    throw new Error(
-      `Inline schema "${from}" under ${rootName} has another shape than component "${from}", which the same ` +
-        `schema also references; rename the inline schema's title or the component so the two can be told apart.`,
-    );
-  }
+): boolean {
+  if (referenced.has(from)) return false;
   for (const model of models) {
     if (model.name === from) {
       model.name = to;
@@ -399,6 +403,7 @@ function renameModel(
     for (const field of model.fields) rewriteModelRef(field.type, from, to);
   }
   rewriteModelRef(type, from, to);
+  return true;
 }
 
 /**
@@ -425,8 +430,8 @@ function renameModel(
  * Every new name is one nothing owns and nothing in the trial uses, so a
  * renamed model can never clash again, a shared model never changes and so
  * never starts a round, and the rounds end within the trial's size. A name
- * the schema also `$ref`s cannot be rewritten safely (see
- * `materializeInlineSchema`) and fails loudly.
+ * the schema also `$ref`s as a component model cannot be rewritten safely
+ * (see `materializeInlineSchema`) and fails loudly.
  *
  * `candidateAt` gives the stems in the order the loop tried them
  * (`candidateStem`), so a moved root takes the next free one of those; the
@@ -445,10 +450,10 @@ function renameClashing(
     qualifyInlineModelName(toPascalCase(propertyName), options.parentName);
   let rootName = rootOf(trial.propertyName);
   let settledStem = trial.settledStem;
-  const referenced = componentRefTargets(trial.schema);
   // A trial that replayed an earlier site's renames carries its rewritten type.
   const type =
     trial.type ?? schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
+  const referenced = componentModelRefTargets(type, trial.models);
   const taken = new Set([...registry.keys(), ...trial.models.map((m) => m.name)]);
 
   /** `candidate(1)`, `candidate(2)`, ... until one nothing owns or uses; claimed. */
@@ -460,7 +465,12 @@ function renameClashing(
     return name;
   };
   const rename = (from: string, to: string): void => {
-    renameModel(trial.models, type, referenced, rootName, from, to);
+    if (!renameModel(trial.models, type, referenced, from, to)) {
+      throw new Error(
+        `Inline schema "${from}" under ${rootName} has another shape than component "${from}", which the same ` +
+          `schema also references; rename the inline schema's title or the component so the two can be told apart.`,
+      );
+    }
     trial.renames.push([from, to]);
   };
 
@@ -564,24 +574,26 @@ function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
   }
 }
 
-/** The component model names a schema references anywhere below it. */
-function componentRefTargets(schema: SchemaObject): Set<string> {
+/**
+ * The names of the component models `type` and the fields of `models`
+ * reference: every `ModelRef` that `schemaToTypeRef` built from a `$ref`
+ * (`isComponentModelRef`, an identity mark). Only such a reference is
+ * indistinguishable from an inline model's own references once the inline
+ * model is renamed, so only these block a rename. A `$ref` to a component
+ * enum is an `EnumRef`, which `rewriteModelRef` leaves alone, so it is never
+ * collected. One predicate for both renames — the settling pass and a
+ * sibling's replay — so the two agree on which `$ref` a rename could hit.
+ */
+function componentModelRefTargets(type: TypeRef, models: readonly Model[]): Set<string> {
   const targets = new Set<string>();
-  const seen = new Set<object>();
-  const visit = (value: unknown): void => {
-    if (!value || typeof value !== 'object' || seen.has(value)) return;
-    seen.add(value);
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    if (typeof record['$ref'] === 'string') {
-      const segments = record['$ref'].split('/');
-      targets.add(resolveSchemaName(segments[segments.length - 1]));
-    }
-    Object.values(record).forEach(visit);
+  const collect = (ref: TypeRef): void => {
+    walkTypeRef(ref, {
+      model: (r) => {
+        if (isComponentModelRef(r)) targets.add(r.name);
+      },
+    });
   };
-  visit(schema);
+  collect(type);
+  for (const model of models) for (const ref of collectModelTypeRefs(model)) collect(ref);
   return targets;
 }
