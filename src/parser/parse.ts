@@ -206,8 +206,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     ),
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
-  // The field models' sites, resolved now that the response merge may have
-  // replaced a component's fields.
+  // The field models' sites, resolved against the models as the response
+  // merge left them.
   naming.bundles.push(...fieldInlineModelBundles(fieldInlineModelGroups, responseNormalizedModels));
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);

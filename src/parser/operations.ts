@@ -548,38 +548,12 @@ export function extractOperations(
   // for a tagged operation, whose service is its tag.
   const rootLengthOf = (op: Operation) => (tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot));
 
-  // Split services when a single tag groups operations from multiple path prefixes.
-  // Example: /organizations and /organization_domains both tagged "organizations"
-  // should become separate services based on their first path segment.
-  // The segment compared is the one the service would be named from without
-  // the tag (see serviceSegmentIndex): the first for a tagged operation, the
-  // first past the API root for an untagged one, so `/notes` and
-  // `/api/v1/notes` stay together in `Notes` rather than the latter being
-  // moved to `Api` after its name was shortened for `Notes`.
-  for (const [serviceName, operations] of serviceMap) {
-    const pathGroups = new Map<string, Operation[]>();
-    for (const op of operations) {
-      const segments = pathSegments(op.path);
-      const firstSeg = segments[serviceSegmentIndex(segments, rootLengthOf(op))] ?? '';
-      const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
-      const group = pathGroups.get(groupKey) ?? [];
-      group.push(op);
-      pathGroups.set(groupKey, group);
-    }
-    // Only split if there are multiple distinct path-prefix groups AND
-    // at least one group name differs from the current service name
-    if (pathGroups.size > 1) {
-      const needsSplit = [...pathGroups.keys()].some((k) => k !== serviceName);
-      if (needsSplit) {
-        serviceMap.delete(serviceName);
-        for (const [groupName, groupOps] of pathGroups) {
-          const existing = serviceMap.get(groupName) ?? [];
-          existing.push(...groupOps);
-          serviceMap.set(groupName, existing);
-        }
-      }
-    }
-  }
+  // Split a tagged service whose tag groups operations from several first
+  // path segments — `/organizations` and `/organization_domains` both tagged
+  // `organizations` — into one service per segment. Decided over the tagged
+  // operations alone, so an untagged operation the service picked up by path
+  // never moves its tagged siblings (see splitTaggedServices).
+  splitTaggedServices(serviceMap, tagServiceByOperation);
 
   // Disambiguate operation names within each service.
   // Multiple operations can get the same name (e.g., several "list" endpoints
@@ -847,6 +821,99 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
+}
+
+/**
+ * The service a tagged operation is split off to, named from its first path
+ * segment: `/organization_domains/{id}` → `OrganizationDomains`. A path whose
+ * first segment is a parameter, or that has no segment at all (`/`), has
+ * nothing to be split on and names the service it is already in, so
+ * `/{tenant}/notes` beside `/notes` under one tag stays put.
+ */
+function splitSegmentService(op: Operation, serviceName: string): string {
+  const first = pathSegments(op.path)[0];
+  return first === undefined || first.startsWith('{') ? serviceName : toPascalCase(first);
+}
+
+/**
+ * The service an operation lands in once the service it was grouped under
+ * (`serviceName`: its tag, else the segment its path named) is known in full.
+ *
+ * A tagged operation moves to the service its own first segment names (see
+ * splitSegmentService) only when the operations carrying its tag sit under
+ * more than one first segment — `segmentServices`, the first-segment services
+ * of that service's tagged operations alone. A tag whose operations all share
+ * one first segment keeps them together even when that segment is not the
+ * tag: `/api/v1/notes` tagged `notes` stays in `Notes`, not `Api`.
+ *
+ * An untagged operation keeps the service its path named: the segment it
+ * would be split on is the one it was named from, so it can neither cause
+ * nor prevent a split, nor be moved by one.
+ */
+function resolveServiceName(
+  op: Operation,
+  serviceName: string,
+  tagged: boolean,
+  segmentServices: ReadonlySet<string>,
+): string {
+  if (!tagged || segmentServices.size <= 1) return serviceName;
+  return splitSegmentService(op, serviceName);
+}
+
+/**
+ * Split each service whose tag groups operations from several first path
+ * segments into one service per segment: `/organizations` and
+ * `/organization_domains` both tagged `organizations` become `Organizations`
+ * and `OrganizationDomains`. A part named like a service that already exists
+ * — another tag's, or one named from a path — joins it.
+ *
+ * Every operation's destination is decided by resolveServiceName from the
+ * grouping as it stands before any service is split, over each service's
+ * tagged operations alone. So an untagged operation a tagged service picked
+ * up by path — `/api/v1/notes/{noteId}/export` beside `/api/v1/notes` tagged
+ * `notes` — does not add a second segment to the tag's set and move the
+ * tagged operations into `Api` (issue #287), and operations a split moves
+ * into another tag's service do not add a segment to that tag's set either,
+ * whichever service the document lists first.
+ *
+ * Mutates `serviceMap`: a split service is removed and each of its parts is
+ * appended under its own name, or merged into the existing service of that
+ * name, in the order the parts first appear.
+ */
+function splitTaggedServices(
+  serviceMap: Map<string, Operation[]>,
+  tagServiceByOperation: ReadonlyMap<Operation, string>,
+): void {
+  // The grouping before any split, read in full before the map is changed.
+  const grouped = Array.from(serviceMap);
+  const resolved = new Map<Operation, string>();
+  for (const [serviceName, operations] of grouped) {
+    const segmentServices = new Set<string>();
+    for (const op of operations) {
+      if (tagServiceByOperation.has(op)) segmentServices.add(splitSegmentService(op, serviceName));
+    }
+    for (const op of operations) {
+      resolved.set(op, resolveServiceName(op, serviceName, tagServiceByOperation.has(op), segmentServices));
+    }
+  }
+  // A part that joins a service listed later lands in that service's array,
+  // which is read below with the operations already resolved to it.
+  for (const [serviceName, operations] of grouped) {
+    const parts = new Map<string, Operation[]>();
+    for (const op of operations) {
+      const name = resolved.get(op) ?? serviceName;
+      const part = parts.get(name) ?? [];
+      part.push(op);
+      parts.set(name, part);
+    }
+    if (parts.size <= 1) continue;
+    serviceMap.delete(serviceName);
+    for (const [name, ops] of parts) {
+      const existing = serviceMap.get(name) ?? [];
+      existing.push(...ops);
+      serviceMap.set(name, existing);
+    }
+  }
 }
 
 /**
@@ -3118,10 +3185,12 @@ interface ResponseTypingContext {
  * Name and materialize every deferred header, secondary-body, fallback-body
  * and error-body schema, now that every primary model is known. The registry
  * holds the component models first (with the inline models their fields
- * mint), then every inline model the operations minted — request bodies,
- * primary response bodies with their nested objects and union variants,
- * envelope companions — so no deferred schema can take one of their names
- * for a different shape, whichever operation minted it; each resolved
+ * mint), each seeded with the model itself so it shares its name with every
+ * shape it admits (`ownerShares`), then every inline model the operations
+ * minted — request bodies, primary response bodies with their nested objects
+ * and union variants, envelope companions — shared on an identical shape
+ * only, so no deferred schema can take one of their names for a shape the
+ * owner does not share, whichever operation minted it; each resolved
  * schema's own models join it in turn, in document order (path order, then
  * the response keys as written; a response's headers before its error body
  * and its secondary bodies, a fallback's body before its headers), so the
@@ -3140,7 +3209,7 @@ function resolveDeferredInlineTypes(
 ): { models: Model[]; bundles: InlineModelBundle[] } {
   const registry: ModelShapeRegistry = new Map();
   for (const model of componentModels) {
-    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
   }
   for (const model of inlineModels) {
     if (registry.has(model.name)) continue;
@@ -3170,7 +3239,7 @@ function resolveDeferredInlineTypes(
  * body's model, a companion's, an earlier deferred model — takes the name and
  * mints nothing, so its reference is not among the owner's roots, and a merge
  * pass that renames the owner (a deprecated copy named like a live one,
- * `separateDeprecatedCopies`) would leave the `default` response or header on
+ * `settleSharedNames`) would leave the `default` response or header on
  * the old name, which the live copy then takes. The first site to mint a
  * name owns it, as the registry decided; the references the deferred site's
  * roots and its own models' fields make to that name are added to the
@@ -3250,9 +3319,10 @@ function attachSharedDeferredRefs(
  * within an operation each has a bare name of its own and no sibling to try.
  *
  * Both the type and the models come from the same property name, so nested
- * models (`DocumentsXMeta429Origin`) line up by construction. A shape
- * identical to the name's current owner shares it and materializes nothing
- * new, which is also how a header reuses a matching component model. A
+ * models (`DocumentsXMeta429Origin`) line up by construction. A shape the
+ * name's current owner shares — identical to an operation's model, or one a
+ * component admits (`ownerShares`) — takes the name and materializes nothing
+ * new, which is how a header reuses a component model. A
  * title-mapped union variant (`Circle`) is named from its title whatever the
  * property name, so `materializeInlineSchema` reserves every taken name and
  * such a variant falls back to its context-qualified name
@@ -4249,9 +4319,10 @@ function typeFallbackBody(
  * `schemaToTypeRef` references it by, by construction, and checked against
  * the spec-wide registry: a name a component schema, a model nested in one
  * (`GetPet.error404` owns `GetPetError404`), a header or another operation's
- * body already owns with a different shape moves the whole body to the next
- * free name (`GetPetError404Body`, `…Body2`), nested models and ref together;
- * an identical shape shares it. A titled variant that clashes (`Circle`) is
+ * body already owns with a shape it does not share moves the whole body to
+ * the next free name (`GetPetError404Body`, `…Body2`), nested models and ref
+ * together; a shape the owner shares (`ownerShares`) takes the name. A
+ * titled variant that clashes (`Circle`) is
  * reserved and qualified (`CircleGetPetError400`), as under any deferred
  * kind. A body that is itself an inline enum, or an array of one, mints no
  * model and is promoted to `spec.enums` by `collectInlineEnumsFromOperations`.
