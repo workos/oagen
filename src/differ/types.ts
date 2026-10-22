@@ -567,7 +567,9 @@ export interface WebhookModified {
    * read from, with its shape — is not one the old spec declared with that
    * shape, so the handler decodes a wire format it never saw; additive when
    * the old spec already declared it. A payload without media-type lists
-   * reads as breaking.
+   * reads as breaking. Compared only while both specs declare a payload, as
+   * on an operation: a payload appearing or disappearing is `payload added`
+   * / `payload removed` in `details` and carries neither field.
    */
   oldRequestBodyEncoding?: RequestBodyEncoding;
   newRequestBodyEncoding?: RequestBodyEncoding;

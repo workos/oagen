@@ -127,10 +127,12 @@ export function diffWebhooks(
  *   `sameShape` through `shapes`), so the handler decodes a wire format it
  *   never saw; additive when the old spec already declared it (a media type
  *   dropped beside a kept one). A payload without media-type lists reads as
- *   breaking. Read through `requestBodyEncodingShift`, the
- *   function `diffOperations` reads an operation's body encoding with, and
- *   carried as `encoding` beside the `details` string so the change can
- *   report both sides.
+ *   breaking. Read through `requestBodyEncodingShift`, the function
+ *   `diffOperations` reads an operation's body encoding with — so, as on an
+ *   operation, compared only while both sides carry a payload: one
+ *   appearing or disappearing takes its encoding with it and is `payload
+ *   added` / `payload removed` alone — and carried as `encoding` beside the
+ *   `details` string so the change can report both sides.
  * - required → optional: breaking — a handler that assumed a body may get none.
  * - optional → required: additive — the body is now always there.
  * - media types changed, both sides declaring a payload: one the sender can

@@ -99,8 +99,9 @@ export function diffOperations(
     const requestBodyRequiredChanged =
       bothCarryBody && (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
     // The wire format the SDK serializes the body as, read through the
-    // function `diffWebhooks` reads a payload's encoding with.
-    const encoding = bothCarryBody ? requestBodyEncodingShift(oldOp, newOp) : undefined;
+    // function `diffWebhooks` reads a payload's encoding with, which
+    // compares only while both sides carry a body, likewise.
+    const encoding = requestBodyEncodingShift(oldOp, newOp);
     const requestBodyEncodingChanged = encoding !== undefined;
     // The media types callers may send the body as, only while both sides
     // declare a body, likewise; judged from the caller's side, which sends
