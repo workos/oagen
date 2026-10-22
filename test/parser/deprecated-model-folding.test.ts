@@ -633,6 +633,91 @@ describe('`<Name>Json` folding (issue #260)', () => {
   });
 });
 
+describe('a reference a deferred body shares with a renamed copy follows it (Greptile, after the merge with main)', () => {
+  // `getLegacyWidget` mints the deprecated `Widget`; `getWidget` the live one
+  // (which also requires `a`); `getThing`'s `default` body has a titled
+  // `Widget` variant of the deprecated shape, named after every primary
+  // model. Today the registry reserves a taken title, so the variant takes
+  // `WidgetGetThingDefaultResponse` rather than sharing the deprecated copy;
+  // should it ever share it, the deferred site is bundled with the copy's and
+  // the rename repoints the `default` response too. Either way it must never
+  // be left on `Widget`, the live copy's name.
+  const legacy = getOp('getLegacyWidget', {
+    type: 'object',
+    deprecated: true,
+    properties: { object: { type: 'string', const: 'widget' }, a: { type: 'string' } },
+  });
+  const live = getOp('getWidget', {
+    type: 'object',
+    required: ['a'],
+    properties: { object: { type: 'string', const: 'widget' }, a: { type: 'string' } },
+  });
+  const thing = {
+    get: {
+      operationId: 'getThing',
+      responses: {
+        '200': { description: 'OK', content: { 'application/json': { schema: { type: 'string' } } } },
+        default: {
+          description: 'Anything else',
+          content: {
+            'application/json': {
+              schema: {
+                oneOf: [
+                  {
+                    title: 'Widget',
+                    type: 'object',
+                    deprecated: true,
+                    properties: { object: { type: 'string', const: 'widget' }, a: { type: 'string' } },
+                  },
+                  { title: 'Note', type: 'object', properties: { n: { type: 'string' } } },
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  it('repoints the default response to the renamed deprecated copy, in either order of the copies', async () => {
+    const results = await parseBothOrders('deferred-shared', {}, [
+      ['/legacy-widgets/{id}', legacy],
+      ['/things/{id}', thing],
+      ['/widgets/{id}', live],
+    ]);
+    for (const { order, spec } of results) {
+      const ops = opsOf(spec);
+      expect(unresolvedReferences(spec), order).toEqual([]);
+      expect(ops.getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      const liveModel = spec.models.find((m) => m.name === 'Widget');
+      expect(liveModel?.deprecated, order).toBeUndefined();
+      expect(
+        liveModel?.fields.filter((f) => f.required).map((f) => f.name),
+        order,
+      ).toEqual(['a']);
+      const fallback = ops.getThing?.defaultResponse?.type;
+      expect(fallback?.kind, order).toBe('union');
+      const variant = fallback?.kind === 'union' ? fallback.variants[0] : undefined;
+      expect(variant?.kind, order).toBe('model');
+      const name = variant?.kind === 'model' ? variant.name : '';
+      // Never the live copy: whichever name the deprecated shape ended up
+      // under, the `default` response points at a model of that shape.
+      expect(name, order).not.toBe('Widget');
+      const shared = spec.models.find((m) => m.name === name);
+      expect(shared?.deprecated, order).toBe(true);
+      expect(
+        shared?.fields.map((f) => f.name),
+        order,
+      ).toEqual(['object', 'a']);
+      expect(
+        shared?.fields.filter((f) => f.required),
+        order,
+      ).toEqual([]);
+      expect(ops.getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+    }
+  });
+});
+
 describe('a rename repoints references by identity, never by name (review round 1)', () => {
   const str = { type: 'string' };
   const refName = (ref: TypeRef | undefined): string => {

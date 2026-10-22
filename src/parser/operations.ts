@@ -40,7 +40,7 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
 } from './schemas.js';
-import { collectResponseHeaders } from '../ir/types.js';
+import { collectResponseHeaders, collectModelRefs } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import { detectPagination, paginatedItemType } from './pagination.js';
 import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
@@ -446,13 +446,24 @@ export function extractOperations(
   // not among `componentModels`, see parseSpec), every request body, primary
   // response and companion model — so none of them takes a name one of those
   // owns, whichever comes first in the document.
-  inlineModels.push(
-    ...resolveDeferredInlineTypes(
-      deferred,
-      [...(componentModels ?? []), ...(componentFieldModels ?? [])],
-      inlineModels,
-      operationOf,
-    ),
+  const deferredTypes = resolveDeferredInlineTypes(
+    deferred,
+    [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+    inlineModels,
+    operationOf,
+  );
+  inlineModels.push(...deferredTypes.models);
+  // Each deferred schema is a site of its own (the references it wrote, the
+  // models it minted), and a reference it wrote by sharing another site's
+  // model — the registry matched the shape of a primary body's model or a
+  // companion's — joins that site's roots, so a merge pass that renames the
+  // model (a deprecated copy named like a live one) repoints the `default`
+  // response or header that shares it along with the site's own references.
+  inlineModelBundles.push(...deferredTypes.bundles);
+  attachSharedDeferredRefs(
+    deferredTypes.bundles,
+    inlineModelBundles,
+    new Set([...(componentModels ?? []), ...(componentFieldModels ?? [])].map((model) => model.name)),
   );
 
   // Split services when a single tag groups operations from multiple path prefixes.
@@ -2308,7 +2319,7 @@ function resolveDeferredInlineTypes(
   componentModels: readonly Model[],
   inlineModels: readonly Model[],
   operationOf: ReadonlyMap<Model, string>,
-): Model[] {
+): { models: Model[]; bundles: InlineModelBundle[] } {
   const registry: ModelShapeRegistry = new Map();
   for (const model of componentModels) {
     if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
@@ -2318,11 +2329,51 @@ function resolveDeferredInlineTypes(
     registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
   }
   const models: Model[] = [];
+  const bundles: InlineModelBundle[] = [];
   for (const item of deferred) {
+    const minted = models.length;
     const type = materializeDeferredType(item, registry, models);
     for (const target of item.targets) target.type = type;
+    // The one TypeRef every target shares is the site's root; the models
+    // minted for it are the site's own (a shape that shared another site's
+    // model minted nothing here, see `attachSharedDeferredRefs`).
+    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
   }
-  return models;
+  return { models, bundles };
+}
+
+/**
+ * Give each reference a deferred schema wrote by sharing another site's model
+ * to that site. A deferred shape identical to a name's owner — a primary
+ * body's model, a companion's, an earlier deferred model — takes the name and
+ * mints nothing, so its reference is not among the owner's roots, and a merge
+ * pass that renames the owner (a deprecated copy named like a live one,
+ * `separateDeprecatedCopies`) would leave the `default` response or header on
+ * the old name, which the live copy then takes. The first site to mint a
+ * name owns it, as the registry decided; the references the deferred site's
+ * roots and its own models' fields make to that name are added to the
+ * owner's roots, so they are repointed with the owner's own. A component is
+ * never renamed, so a reference to one is left alone.
+ */
+function attachSharedDeferredRefs(
+  deferredBundles: readonly InlineModelBundle[],
+  bundles: readonly InlineModelBundle[],
+  componentNames: ReadonlySet<string>,
+): void {
+  const siteOf = new Map<string, InlineModelBundle>();
+  for (const bundle of bundles) {
+    for (const model of bundle.models) if (!siteOf.has(model.name)) siteOf.set(model.name, bundle);
+  }
+  for (const bundle of deferredBundles) {
+    const refs = [...bundle.roots, ...bundle.models.flatMap((model) => model.fields.map((field) => field.type))];
+    for (const ref of refs) {
+      for (const name of collectModelRefs(ref)) {
+        if (componentNames.has(name)) continue;
+        const site = siteOf.get(name);
+        if (site && site !== bundle && !site.roots.includes(ref)) site.roots.push(ref);
+      }
+    }
+  }
 }
 
 /**
