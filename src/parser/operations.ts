@@ -73,6 +73,7 @@ import {
   modelFingerprint,
   type InlineModelRegistry,
   type InlineModelOwner,
+  type SiblingStems,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -1463,23 +1464,40 @@ function collidingGroups(operations: Operation[]): Operation[][] {
  * remain are then joined where they overlap the end of the name: `listNotes`
  * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
  * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
- * on the camelCase boundary, case-insensitively and by their singular form
- * (singularizePathSegment), so a noun the name ends with is not repeated in
- * the other number either: `listNotes` + `Note`, the deeper context of
- * `/orgs/notes/{id}/notes`, stays `listNotes`. The name's own words are
- * never touched.
+ * on the camelCase boundary, case-insensitively and as nouns (sameNoun), so
+ * a noun the name ends with is not repeated in the other number either:
+ * `listNotes` + `Note` and `listAliases` + `Alias`, the deeper contexts of
+ * `/orgs/notes/{id}/notes` and `/org/aliases/{id}/aliases`, stay `listNotes`
+ * and `listAliases`. The name's own words are never touched.
  */
 function appendQualifier(name: string, qualifier: string | null): string {
   if (!qualifier) return name;
-  const word = (w: string) => singularizePathSegment(w.toLowerCase());
-  const have = splitWords(name).map(word);
-  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || word(w) !== word(all[i - 1]));
-  const want = words.map(word);
+  const have = splitWords(name).map((w) => w.toLowerCase());
+  const words = splitWords(qualifier).filter(
+    (w, i, all) => i === 0 || !sameNoun(w.toLowerCase(), all[i - 1].toLowerCase()),
+  );
+  const want = words.map((w) => w.toLowerCase());
   // The longest run of words that both ends the name and starts the qualifier.
   let overlap = Math.min(have.length, want.length);
-  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
+  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => sameNoun(w, have[have.length - overlap + i]))) {
+    overlap--;
+  }
   const rest = words.slice(overlap);
   return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
+}
+
+/**
+ * Whether two lowercase words name one noun: they are the same word, or
+ * their singular forms (singularizePathSegment) are — `notes` and `note`,
+ * `aliases` and `alias`, `analyses` and `analysis`. singularizePathSegment
+ * is idempotent, so a word that is already singular is its own singular
+ * form and is never shortened a second time on one side only (`alias`
+ * compares as `alias`, not `alia`, against the `alias` that `aliases`
+ * becomes). Two words the stemmer cannot relate, `canvases` and `canvas`,
+ * are different nouns here, as they are everywhere else.
+ */
+function sameNoun(a: string, b: string): boolean {
+  return a === b || singularizePathSegment(a) === singularizePathSegment(b);
 }
 
 /**
@@ -2705,12 +2723,14 @@ function extractRequestBody(
       undefined,
       objectVariantNames,
     );
-    for (const [variant, context] of variantContexts) {
+    for (const [variant, { context, reserved }] of variantContexts) {
       extractInlineModelsFromProperties(
         { properties: { [context]: unwrapNullableField(variant) } },
         inlineModels,
         undefined,
         componentSchemas,
+        undefined,
+        reserved,
       );
     }
 
@@ -2722,10 +2742,13 @@ function extractRequestBody(
         // skip null variant in union, handle separately
       } else {
         const variantName = objectVariantNames.get(variant);
+        const entry = variantContexts.get(variant);
         variants.push(
           variantName !== undefined
             ? { kind: 'model', name: variantName }
-            : schemaToTypeRef(variant, variantContexts.get(variant) ?? contextName),
+            : entry
+              ? schemaToTypeRef(variant, entry.context, undefined, undefined, entry.reserved)
+              : schemaToTypeRef(variant, contextName),
         );
       }
     }
@@ -3026,8 +3049,12 @@ interface ResponseTypingContext {
  * schema's own models join it in turn, in document order (path order, then
  * the response keys as written; a response's headers before its error body
  * and its secondary bodies, a fallback's body before its headers), so the
- * first owner of a name keeps it. Returns the models materialized, having set
- * each target's `type`.
+ * first owner of a name keeps it. The sites that derive from one bare name
+ * — one kind, parent and name: the same header on several status codes or
+ * operations, one media type's body on several status codes — share a
+ * record of the stems they settled on, so a later one shares an identical
+ * shape under whichever name the earlier took (`materializeInlineSchema`).
+ * Returns the models materialized, having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -3045,9 +3072,13 @@ function resolveDeferredInlineTypes(
   }
   const models: Model[] = [];
   const bundles: InlineModelBundle[] = [];
+  const siblingsByBareName = new Map<string, SiblingStems>();
   for (const item of deferred) {
+    const bareName = `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
+    let siblings = siblingsByBareName.get(bareName);
+    if (!siblings) siblingsByBareName.set(bareName, (siblings = []));
     const minted = models.length;
-    const type = materializeDeferredType(item, registry, models);
+    const type = materializeDeferredType(item, registry, models, siblings);
     for (const target of item.targets) target.type = type;
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
@@ -3131,6 +3162,17 @@ function attachSharedDeferredRefs(
  *             2. a `Body` suffix              `GetPetError404Body`
  *             3. a numbered `Body` suffix     `GetPetError404Body2`, `…Body3`, …
  *
+ * Between the bare name and the kind's own qualifiers come the stems the
+ * earlier sites of the same kind, parent and bare name settled on
+ * (`siblings`, kept by `resolveDeferredInlineTypes`): the `X-Meta` header of
+ * a 429 tries the `DocumentsXMeta200` its 200 took before `DocumentsXMeta429`,
+ * and the `application/vnd.pet+json` body of a 201 tries the `…Response200`
+ * its 200 took before `…Response201`, so an identical shape shares the
+ * earlier site's model under whichever name that site settled on, and a
+ * different shape steps past it to its own qualifier. A fallback body's bare
+ * name carries the response's label and an error body's its status code, so
+ * within an operation each has a bare name of its own and no sibling to try.
+ *
  * Both the type and the models come from the same property name, so nested
  * models (`DocumentsXMeta429Origin`) line up by construction. A shape
  * identical to the name's current owner shares it and materializes nothing
@@ -3149,9 +3191,15 @@ function attachSharedDeferredRefs(
  * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
  * path uses.
  */
-function materializeDeferredType(item: DeferredInlineType, registry: ModelShapeRegistry, models: Model[]): TypeRef {
+function materializeDeferredType(
+  item: DeferredInlineType,
+  registry: ModelShapeRegistry,
+  models: Model[],
+  siblings: SiblingStems,
+): TypeRef {
   return materializeInlineSchema(item.schema, {
     stem: deferredNamingStem(item),
+    siblings,
     parentName: item.parentName,
     componentSchemas: item.componentSchemas,
     registry,
@@ -4486,7 +4534,14 @@ function extractResponses(
   // the primary's definition — the one `response` points at — goes first and
   // wins; the other bodies follow in status order.
   // A dropped model whose shape differs from the kept one is warned about,
-  // since its status then points at a shape it did not declare.
+  // since its status then points at a shape it did not declare. The models
+  // only that dropped copy referenced go with it (`reachedModels`): the
+  // primary's models are all read — `response`, the paging fields and their
+  // companions — while another status is read only through its
+  // `successResponses` entry, so of its models only those the entry's type
+  // still reaches are kept; `CreatePetResponseOwner` under a 201
+  // `CreatePetResponse` the 200's `{ id }` replaced is not, rather than kept
+  // with nothing referencing it.
   const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
     if (a === primaryStatus) return -1;
     if (b === primaryStatus) return 1;
@@ -4494,7 +4549,10 @@ function extractResponses(
   });
   const keptByName = new Map<string, { model: Model; status: number }>();
   for (const [status, result] of bodiesByPrimacy) {
+    const reached =
+      status === primaryStatus ? undefined : reachedModels(result.response, result.inlineModels, keptByName);
     for (const model of result.inlineModels) {
+      if (reached && !reached.has(model)) continue;
       const kept = keptByName.get(model.name);
       if (!kept) {
         keptByName.set(model.name, { model, status });
@@ -4559,6 +4617,41 @@ function extractResponses(
     overrideItemType,
     envelopeCompanions,
   };
+}
+
+/**
+ * The models of `own` — one 2xx body's — that `root`, the body's type, still
+ * reaches once every name an earlier status kept resolves to that status's
+ * model. A reached name's own model is in the set whatever the name's
+ * fate, so a copy another status's model replaces is still compared with it
+ * (and warned about when the shapes differ); the walk then continues through
+ * the model the name resolves to — the kept one when there is one, since its
+ * fields are what the reference reads — so a model only the replaced copy
+ * referenced is not reached. A name no body minted is a component's and is
+ * not followed; every own model of a name is read, so two of one name would
+ * both be reached.
+ */
+function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<string, { model: Model }>): Set<Model> {
+  const ownByName = new Map<string, Model[]>();
+  for (const model of own) {
+    const models = ownByName.get(model.name);
+    if (models) models.push(model);
+    else ownByName.set(model.name, [model]);
+  }
+  const reached = new Set<Model>();
+  const visited = new Set<string>();
+  const queue = collectModelRefs(root);
+  while (queue.length > 0) {
+    const name = queue.pop()!;
+    if (visited.has(name)) continue;
+    visited.add(name);
+    const ownModels = ownByName.get(name) ?? [];
+    for (const model of ownModels) reached.add(model);
+    const resolved = kept.get(name)?.model ?? ownModels[0];
+    if (!resolved) continue;
+    for (const field of resolved.fields) queue.push(...collectModelRefs(field.type));
+  }
+  return reached;
 }
 
 /**

@@ -359,7 +359,10 @@ describe('response media types are matched by essence (issue #237)', () => {
       const names = inlineModels.map((m) => m.name);
       expect(new Set(names).size).toBe(names.length);
       expect(names).toContain('GetPetResponseOwner');
-      expect(names.some((n) => n.startsWith('GetPetResponseTag'))).toBe(true);
+      // The 201's `tags` item model was referenced only by the 201's own
+      // `GetPetResponse`, which the 200's replaced, so it goes with it rather
+      // than staying behind with nothing referencing it (issue #280).
+      expect(names.some((n) => n.startsWith('GetPetResponseTag'))).toBe(false);
       expectClosed(op, inlineModels);
     });
 

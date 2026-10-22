@@ -33,8 +33,9 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 }
 
 /**
- * Collect inline enum definitions from operation parameters (query, path, header)
- * list-envelope companion fields, response headers, error bodies and secondary
+ * Collect inline enum definitions from operation parameters (query, path,
+ * header, cookie), list-envelope companion fields, response headers, the
+ * request body, every success body, error bodies, and secondary and fallback
  * response bodies, and promote them to top-level enums so emitters can
  * generate typed enum files.
  *
@@ -106,6 +107,21 @@ export function collectInlineEnumsFromOperations(
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
         for (const header of headers) collectThroughModels(header.type, qualifier);
+      }
+      // The request body and each success body are typed by `schemaToTypeRef`
+      // under the operation's `<Op>Request` / `<Op>Response` name, so one that
+      // is itself an inline enum, or an array of one, reaches no model and is
+      // promoted here — neither `collectResponseBodyTypes` nor the error loop
+      // below yields it (workos/oagen#281). Every `successResponses` entry is
+      // walked on its own under its status code, as its headers are: the 200
+      // and the 202 derive the same name, so a second body with other members
+      // steps to `CheckPetKindResponse202`, while identical members share. A
+      // lone success response, and the request body, carry no code and fall
+      // back to a numeric suffix (`GetPetKindResponse2`). An enum nested in a
+      // body's model is collected with every other model's
+      // (`collectInlineEnumsFromModels`).
+      for (const { type, qualifier } of requestAndSuccessBodies(op)) {
+        collectDistinctEnums(type, qualifier, enums, enumNames, modelNames);
       }
       // An error body that is itself an inline enum, or an array of one, is
       // typed by `schemaToTypeRef` and reaches no model, so it is promoted
@@ -190,6 +206,28 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
 }
 
 /**
+ * The bodies `collectResponseBodyTypes` leaves out because each is reached
+ * through the entry's own `type`: the request body, then every success body,
+ * each with the qualifier that keeps a colliding enum name apart. When
+ * `successResponses` exists its entries are walked under their own status
+ * codes — the primary's `type` is the very ref its entry carries, so
+ * `response` is not walked again; a lone 2xx or 3xx response carries no
+ * status code in the IR (`successResponses` is set only for more than one),
+ * so `response` gets no qualifier, and neither does the request body. Error
+ * bodies are walked by the caller under their own qualifier.
+ */
+function requestAndSuccessBodies(op: Operation): Array<{ type: TypeRef; qualifier?: string }> {
+  const bodies: Array<{ type: TypeRef; qualifier?: string }> = [];
+  if (op.requestBody) bodies.push({ type: op.requestBody });
+  if (op.successResponses) {
+    for (const entry of op.successResponses) bodies.push({ type: entry.type, qualifier: String(entry.statusCode) });
+  } else {
+    bodies.push({ type: op.response });
+  }
+  return bodies;
+}
+
+/**
  * Promote the inline enums under a type reference — a response header's, a
  * secondary media type's or fallback response's body, a webhook parameter's
  * — without letting a taken name mislead. A response-header enum is named
@@ -226,10 +264,12 @@ function collectDistinctEnums(
 }
 
 /**
- * The first name not taken by a different member set, nor by a model: the
- * base qualified by the status code (`DocumentsXPolicy429`), then numeric
- * suffixes (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...). Deterministic for
- * a given spec, since it depends only on declaration order. The collectors
+ * A name the base was already stepped to that holds the same members
+ * (`isNumericStep`), else the first name not taken by a different member set,
+ * nor by a model: the base qualified by the status code
+ * (`DocumentsXPolicy429`), then numeric suffixes (`DocumentsXPolicy2`,
+ * `DocumentsXPolicy3`, ...). Deterministic for a given spec, since it depends
+ * only on declaration order. The collectors
  * run after every model is named, and the merge passes mint against every
  * enum name an `EnumRef` carries (`reservedTypeNames`) — but not against the
  * names chosen here, so this is the side that steps around the other: a
@@ -250,8 +290,25 @@ function distinctEnumName(
     const taken = enums.find((e) => e.name === name);
     return !taken || sameEnumShape(taken.values, values);
   };
+  // A name this stem already stepped to for the same members — another
+  // status code's body or header (`…200` when this is the 202's), or an
+  // earlier numeric step — is shared before a new one is minted, so
+  // identical members on two status codes never become two enums once their
+  // plain name is taken. Only a digit-qualified name is a step of this stem:
+  // `…Body` and the fallback labels (`…Default`) qualify other sites.
+  const stepped = enums.find(
+    (e) => isNumericStep(e.name, base) && !modelNames.has(e.name) && sameEnumShape(e.values, values),
+  );
+  if (stepped) return stepped.name;
   if (qualifier && isUsable(`${base}${qualifier}`)) return `${base}${qualifier}`;
   let suffix = 2;
   while (!isUsable(`${base}${suffix}`)) suffix++;
   return `${base}${suffix}`;
+}
+
+/** Whether `name` is `base` followed by one or more digits: a status-code or numeric-suffix step of the stem. */
+function isNumericStep(name: string, base: string): boolean {
+  if (name.length <= base.length || !name.startsWith(base)) return false;
+  for (const char of name.slice(base.length)) if (char < '0' || char > '9') return false;
+  return true;
 }

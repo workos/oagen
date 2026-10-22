@@ -268,7 +268,9 @@ export interface Operation {
    * only when it declares a schema; then `application/octet-stream`, then
    * `text/plain`, with or without one (a schema-less binary body is a binary
    * string, a schema-less text body a string). An inline object body is
-   * materialized as `<Op>Request`. Absent when the operation declares no
+   * materialized as `<Op>Request`; an inline enum body, or an array of one,
+   * is promoted to `spec.enums` under that name, numbered on a clash with an
+   * enum of other members. Absent when the operation declares no
    * body, or one none of whose media types is read — which the parser warns
    * about once, so a body is never dropped silently.
    */
@@ -306,7 +308,9 @@ export interface Operation {
    * `responseDescription`, and an emitter should take the success body
    * from `rangeResponses` (`2XX`), then `defaultResponse` — the same order
    * it resolves any status: the explicit entry, then the matching range,
-   * then the default.
+   * then the default. A body that is itself an inline enum, or an array of
+   * one, is promoted to `spec.enums` as `<Op>Response` (see
+   * `SuccessResponse.type` for one of several success bodies).
    */
   response: TypeRef;
   /**
@@ -861,6 +865,13 @@ export interface Field {
 /** Enum definition */
 export interface Enum {
   name: string;
+  /**
+   * The component enum schema's own `description`, as `Model.description`
+   * is a component model's. Present only when it has non-whitespace
+   * content. An enum lifted from an inline schema carries none: that
+   * schema's text is the field's or parameter's description.
+   */
+  description?: string;
   values: EnumValue[];
   /** Spec-level default value (the value of `default:` on the schema). Optional. */
   default?: string | number;
@@ -1369,7 +1380,11 @@ export interface ErrorResponse {
 
 /**
  * One entry of `Operation.successResponses`: a declared 2xx or 3xx response.
- * A 3xx entry's `type` is always `unknown`.
+ * A 3xx entry's `type` is always `unknown`. A 2xx body that is itself an
+ * inline enum, or an array of one, is promoted to `spec.enums` as
+ * `<Op>Response`; every entry derives that same name, so a second body with
+ * other members is qualified with its status code (`CreatePetResponse202`),
+ * while identical members share one enum.
  */
 export interface SuccessResponse {
   statusCode: number;

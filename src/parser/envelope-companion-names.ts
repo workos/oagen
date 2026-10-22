@@ -1,7 +1,7 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, renameModelRefs, walkTypeRef } from '../ir/types.js';
 import type { InlineModelBundle } from './inline-models.js';
-import { enumValueShapeKey, enumValuesOf } from './enum-members.js';
+import { enumShapeKey, enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { unionRulesKey, unionShapeKey } from './union-shape.js';
 
 /**
@@ -347,7 +347,7 @@ function fingerprintType(ref: TypeRef, local: Map<string, Model>, visiting: Set<
         .sort()
         .join(',')}>`;
     case 'enum':
-      return ref.values ? `e<${enumValuesOf(ref).map(enumValueShapeKey).sort().join('|')}>` : `e:${ref.name}`;
+      return ref.values ? `e<${enumShapeKey(enumValuesOf(ref))}>` : `e:${ref.name}`;
     case 'model': {
       const nested = local.get(ref.name);
       return nested ? fingerprintModel(nested, local, visiting) : `ref:${ref.name}`;
