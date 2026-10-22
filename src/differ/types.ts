@@ -603,7 +603,8 @@ export interface ServerModified {
  * in the template, so the resolved URL a caller built on moves) and additive
  * when it does not: a variable the template never references cannot reach
  * any resolved URL, so nothing a caller relied on is taken away. In that
- * additive case `details` says so.
+ * additive case — those four kinds only — `details` says so; the three kinds
+ * that are additive for any variable keep their shape.
  */
 export interface ServerVariableChange {
   kind:
