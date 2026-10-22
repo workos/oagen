@@ -15,7 +15,7 @@ import { toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef } from './schemas.js';
-import { extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
+import { cloneTypeRef, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
   HTTP_METHODS,
   extractParams,
@@ -181,7 +181,9 @@ export function extractWebhooks(
   // Document order of the entries, not of the groups: a shared operation's
   // second key keeps its own place. A group's owner takes the minted
   // parameters and payload as they are; every other member gets its own
-  // copy, so no two webhooks share IR nodes.
+  // copy, so no two webhooks share IR nodes — a copy that keeps each
+  // reference's provenance (`cloneMintedShape`), so a `$ref` to a component
+  // stays one on every member when a merge pass renames the group's models.
   const result: Webhook[] = [];
   const webhooksByGroup = new Map<WebhookGroup, Webhook[]>();
   for (const entry of entries) {
@@ -197,7 +199,7 @@ export function extractWebhooks(
       requestBodyContentTypes: minted.requestBodyContentTypes,
       requestBodyContents: minted.requestBodyContents,
     };
-    const webhook = buildWebhook(entry, entry === group.owner ? shape : structuredClone(shape), components);
+    const webhook = buildWebhook(entry, entry === group.owner ? shape : cloneMintedShape(shape), components);
     result.push(webhook);
     webhooksByGroup.set(group, [...(webhooksByGroup.get(group) ?? []), webhook]);
   }
@@ -611,6 +613,26 @@ function mintWebhook(entry: WebhookEntry, stem: string, components: WebhookCompo
     for (const name of own) names.add(name);
   }
   return minted;
+}
+
+/**
+ * A copy of a minted shape for a second member of a group: every type
+ * reference through `cloneTypeRef`, so it keeps the marks the merge passes
+ * read (a `$ref` to a component, an inherited reference, an inline enum's
+ * members), and everything else structurally.
+ */
+function cloneMintedShape(shape: MintedShape): MintedShape {
+  const cloneParameter = ({ type, ...rest }: Parameter): Parameter => ({
+    ...structuredClone(rest),
+    type: cloneTypeRef(type),
+  });
+  return {
+    headerParams: shape.headerParams.map(cloneParameter),
+    queryParams: shape.queryParams.map(cloneParameter),
+    cookieParams: shape.cookieParams.map(cloneParameter),
+    ...(shape.requestBody ? { requestBody: cloneTypeRef(shape.requestBody) } : {}),
+    ...(shape.requestBodyEncoding !== undefined ? { requestBodyEncoding: shape.requestBodyEncoding } : {}),
+  };
 }
 
 /** What one schema minted under one synthetic property: its reference, its models, and every name among them. */
