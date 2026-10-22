@@ -2639,7 +2639,10 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     ).toEqual({
       'GET /orgs/teams/members': 'listMembersTeams',
       'GET /orgs/{orgId}/teams/members': 'listMembersTeamsByOrgId',
-      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersTeamsByOrgIdByTeamId',
+      // `teams/{teamId}` addresses one team, so its deeper context is the
+      // singular `Team` (#268), which no longer collides with the other two;
+      // the parameters are never reached for it.
+      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersTeam',
     });
   });
 
@@ -3008,8 +3011,8 @@ describe('extractOperations – path-named services skip the API root (issue #20
     expect(layout(rooted).map((line) => line.replace(' /api/v1/', ' /'))).toEqual(layout(bare));
     expect(layout(rooted)).toMatchInlineSnapshot(`
       [
-        "Admin.listDocumentTypesBillingCompanies GET /api/v1/admin/billing/companies/{id}/document_types",
-        "Admin.listDocumentTypesSupportCompanies GET /api/v1/admin/support/companies/{id}/document_types",
+        "Admin.listDocumentTypesBillingCompany GET /api/v1/admin/billing/companies/{id}/document_types",
+        "Admin.listDocumentTypesSupportCompany GET /api/v1/admin/support/companies/{id}/document_types",
         "Core.listPermissionsAuth GET /api/v1/core/auth/permissions",
         "Core.listPermissionsGlobal GET /api/v1/core/global/permissions",
         "Documents.delete DELETE /api/v1/documents/{id}",

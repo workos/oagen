@@ -90,7 +90,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `description` — API-level description for the root client class doc comment
 - `externalDocs` — The document's link to fuller documentation (`url`, optional `description`), for a `@see`-style doc tag
 - `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults)
-- `webhooks` — Requests the API sends to its users (OpenAPI 3.1 `webhooks`), each with a payload type and the headers it carries
+- `webhooks` — Requests the API sends to its users (OpenAPI 3.1 `webhooks`), each with a payload type, the headers it carries, and the `summary`, `description` and `externalDocs` an operation has
 
 #### Service
 
@@ -99,7 +99,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### Operation
 
-- `description` — Method-level description
+- `description` — Method-level description (the operation's own `summary` and `description`, each falling back to its Path Item's)
 - `externalDocs` — The operation's link, for the method doc comment
 - `deprecated` — Deprecation marker on methods (the Operation Object's own keyword)
 - `async` — Async operation marker
@@ -151,8 +151,8 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### EnumValue
 
-- `description` — Enum value doc comment
-- `deprecated` — Deprecation marker on enum values (declared in the IR; the parser does not set it today, so it only arrives from an overlay or plugin)
+- `description` — Enum value doc comment (a `oneOf`-of-`const` member's own `description`, else the value's `x-enum-descriptions` / `x-enumDescriptions` entry)
+- `deprecated` — Deprecation marker on one enum value (`true` when the value's `const` member says `deprecated: true`; a plain `enum:` list never sets it)
 
 ## Step 3: Read Emitter Generators
 
@@ -250,33 +250,33 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 
 ### MEDIUM priority suggestions
 
-| IR Field                     | What to Generate                                                                                                                                |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ApiSpec.description`        | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                     |
-| `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
-| `ApiSpec.webhooks`           | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                      |
-| `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
-| `Operation.successResponses` | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                        |
-| `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
-| `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                      |
-| `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
-| `Operation.servers`          | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                 |
-| `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
-| `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Service` and `ApiSpec` carry the same |
-| `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
-| `Model.deprecated`           | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                     |
-| `Enum.deprecated`            | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                        |
-| `Enum.default`               | Document the enum's default value                                                                                                               |
-| `Parameter.default`          | Document default value                                                                                                                          |
-| `Parameter.example`          | Document example value                                                                                                                          |
-| `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                     |
-| `Field.readOnly`             | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust) |
-| `Field.writeOnly`            | Write-only annotation in doc comments                                                                                                           |
-| `Field.default`              | Document default value                                                                                                                          |
-| `Field.example`              | Document example value                                                                                                                          |
-| `Field.examples`             | Document every example value (e.g. one `@example` tag each)                                                                                     |
-| `Field.constraints`          | Document limits ("at most 100 characters") or validate before serializing                                                                       |
-| `Parameter.constraints`      | Document limits on method arguments or validate before sending                                                                                  |
+| IR Field                     | What to Generate                                                                                                                                           |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ApiSpec.description`        | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                                |
+| `ApiSpec.servers`            | Server URL constants or configuration                                                                                                                      |
+| `ApiSpec.webhooks`           | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                                 |
+| `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                                    |
+| `Operation.successResponses` | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                                   |
+| `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                                         |
+| `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                                 |
+| `Operation.cookieParams`     | Document cookie parameters                                                                                                                                 |
+| `Operation.servers`          | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                            |
+| `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                                 |
+| `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Webhook`, `Service` and `ApiSpec` carry the same |
+| `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                                       |
+| `Model.deprecated`           | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                                |
+| `Enum.deprecated`            | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                                   |
+| `Enum.default`               | Document the enum's default value                                                                                                                          |
+| `Parameter.default`          | Document default value                                                                                                                                     |
+| `Parameter.example`          | Document example value                                                                                                                                     |
+| `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                                |
+| `Field.readOnly`             | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust)            |
+| `Field.writeOnly`            | Write-only annotation in doc comments                                                                                                                      |
+| `Field.default`              | Document default value                                                                                                                                     |
+| `Field.example`              | Document example value                                                                                                                                     |
+| `Field.examples`             | Document every example value (e.g. one `@example` tag each)                                                                                                |
+| `Field.constraints`          | Document limits ("at most 100 characters") or validate before serializing                                                                                  |
+| `Parameter.constraints`      | Document limits on method arguments or validate before sending                                                                                             |
 
 Include the specific file and approximate location where each fix should be applied.
 

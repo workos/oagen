@@ -143,13 +143,15 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
     };
   }
 
-  // A webhook's prose and parameters follow the same rules as an operation's;
-  // its responses carry a description each. Every optional key stays absent.
+  // A webhook's prose, link and parameters follow the same rules as an
+  // operation's; its responses carry a description each. Every optional key
+  // stays absent.
   function webhook(hook: Webhook): Webhook {
     return {
       ...hook,
       ...expandText(hook, 'summary'),
       ...expandText(hook, 'description'),
+      ...expandExternalDocs(hook),
       headerParams: parameters(hook.headerParams),
       queryParams: parameters(hook.queryParams),
       ...(hook.cookieParams ? { cookieParams: parameters(hook.cookieParams) } : {}),
