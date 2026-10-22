@@ -2629,7 +2629,7 @@ describe('fallback operation names stay unique within a service (issue #208)', (
     });
   });
 
-  it('appends one By<Param> per parameter, in path order, after the deeper path context', () => {
+  it('appends one By<Param> per parameter, in path order, when the deeper path context tells nothing apart', () => {
     expect(
       names({
         '/orgs/teams/members': { get: ok },
@@ -2637,12 +2637,13 @@ describe('fallback operation names stay unique within a service (issue #208)', (
         '/orgs/{orgId}/teams/{teamId}/members': { get: withParam('orgId') },
       }),
     ).toEqual({
-      'GET /orgs/teams/members': 'listMembersTeams',
-      'GET /orgs/{orgId}/teams/members': 'listMembersTeamsByOrgId',
-      // `teams/{teamId}` addresses one team, so its deeper context is the
-      // singular `Team` (#268), which no longer collides with the other two;
-      // the parameters are never reached for it.
-      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersTeam',
+      // `teams` sits between the service and the resource of all three paths,
+      // as `Teams` or, after `{teamId}`, as the singular `Team` (#268): one
+      // noun, which tells none of them apart and is not added (#288). The
+      // parameters are what differ, one `By<Param>` each in path order.
+      'GET /orgs/teams/members': 'listMembers',
+      'GET /orgs/{orgId}/teams/members': 'listMembersByOrgId',
+      'GET /orgs/{orgId}/teams/{teamId}/members': 'listMembersByOrgIdByTeamId',
     });
   });
 
