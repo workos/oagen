@@ -113,12 +113,13 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `name` — PascalCase enum name
   - `values` — `EnumValue[]`
   - `default?` — the schema's `default:` value (`string | number`)
-  - `externalDocs?` — the component enum schema's link, when usable; inline enums carry none
+  - `externalDocs?` — the enum schema's link, when usable: a component enum's own, or the inline schema's an enum was lifted from
   - `deprecated?` — present and `true` when the component enum schema says `deprecated: true`
 - Each `EnumValue` has:
   - `name` — UPPER_SNAKE_CASE display name
   - `value` — the spec's value, `string | number` (numeric enums keep numbers)
-  - `description?`, `deprecated?`
+  - `description?` — the value's own documentation: a `oneOf`-of-`const` member's `description`, else its `x-enum-descriptions` / `x-enumDescriptions` entry; absent otherwise
+  - `deprecated?` — present and `true` when the value's `const` member says `deprecated: true` (a plain `enum:` list never sets it); emit the language's deprecation marker on that member
 - Output: One file per enum, using the exact enum pattern from the design doc
 
 ---
@@ -143,13 +144,13 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `requestBody?` — `TypeRef` of the request body
   - `requestBodyEncoding?` — `json` | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization
   - `requestBodyRequired?` — whether the caller must send the body; present exactly when `requestBody` is
-  - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`string` when the operation declares neither)
+  - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`unknown` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
   - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag
   - `responseContentTypes?`, `responseContents?` — the media types the primary response declares, as written and in document order, with a `TypeRef` per media type (the entry `response` was read from shares its `TypeRef`); present only when it declares at least one, so an `Accept` header or a per-format decoder can be offered
   - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`, `contentTypes?`, `contents?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
   - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; the two lists only when they say something `type` does not)
-  - `defaultResponse?`, `rangeResponses?` — the `default` response and the `1XX`–`5XX` range responses (`type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; a range entry also carries `range`), present only when declared. Resolve a status as the explicit entry, then its range, then `defaultResponse`: an operation declaring only `2XX` or `default` keeps `response` as `string`, and its real body type lives here
+  - `defaultResponse?`, `rangeResponses?` — the `default` response and the `1XX`–`5XX` range responses (`type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; a range entry also carries `range`), present only when declared. Resolve a status as the explicit entry, then its range, then `defaultResponse`: an operation declaring only `2XX` or `default` has `response` as `unknown`, and its real body type lives here
   - `pagination?` — `PaginationMeta` when the operation is paginated: `strategy` (`cursor` | `offset` | `link-header`), `param`, `limitParam?`, `dataPath?`, `dataDescription?`, `itemType`, `envelopeFields?`
   - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header
   - `deprecated?`, `async?` — method markers
