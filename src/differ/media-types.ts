@@ -1,5 +1,5 @@
 import type { RequestBodyContent, ResponseContent, TypeRef } from '../ir/types.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
+import { mediaTypeEssence, parseMediaType } from '../utils/media-type.js';
 import type { RequestBodyContentTypesChange } from './types.js';
 import { sameShape, type DocumentShapes } from './shapes.js';
 
@@ -65,31 +65,21 @@ export function mediaTypeBodies(
 
 /**
  * A media type's parameters other than `charset`, in one form whatever the
- * spelling: each `name=value` with its name lower-cased, its value as
- * written but unquoted, whitespace around it dropped, sorted by name and
- * joined with `; ` — so `application/pdf; version=1.7` reads `version=1.7`,
- * `text/html; Charset=UTF-8` and `text/html` both read `` (empty), and
- * `; a=1; b=2` is `; b=2 ;a=1`. `charset` is left out because it never
- * selects another representation of a JSON or text body (RFC 8259 §8.1 has
- * no charset for JSON at all); any other parameter — `version`, `profile`
- * — may, which is what `reparameterized` reports.
+ * spelling: each parameter as `parseMediaType` reads it — name lower-cased,
+ * quoted value decoded, so a `;` inside the quotes is part of the value and
+ * `profile="print"` is `profile=print` — sorted and joined with `; `. So
+ * `application/pdf; version=1.7` reads `version=1.7`, `text/html;
+ * Charset=UTF-8` and `text/html` both read `` (empty), and `; a=1; b=2` is
+ * `; b=2 ;a=1`. `charset` is left out because it never selects another
+ * representation of a JSON or text body (RFC 8259 §8.1 has no charset for
+ * JSON at all); any other parameter — `version`, `profile` — may, which is
+ * what `reparameterized` reports.
  */
 export function mediaTypeParameters(contentType: string): string {
-  return contentType
-    .split(';')
-    .slice(1)
-    .map((parameter) => parameter.trim())
-    .filter((parameter) => parameter.length > 0)
-    .map((parameter) => {
-      const separator = parameter.indexOf('=');
-      const name = (separator === -1 ? parameter : parameter.slice(0, separator)).trim().toLowerCase();
-      const value = separator === -1 ? '' : parameter.slice(separator + 1).trim();
-      const unquoted = value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
-      return { name, text: separator === -1 ? name : `${name}=${unquoted}` };
-    })
-    .filter((parameter) => parameter.name !== 'charset')
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.text < b.text ? -1 : a.text > b.text ? 1 : 0))
-    .map((parameter) => parameter.text)
+  return parseMediaType(contentType)
+    .parameters.filter((parameter) => parameter.name !== 'charset')
+    .map((parameter) => (parameter.value.length > 0 ? `${parameter.name}=${parameter.value}` : parameter.name))
+    .sort()
     .join('; ');
 }
 

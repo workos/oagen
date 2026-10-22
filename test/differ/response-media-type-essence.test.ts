@@ -185,6 +185,31 @@ describe('diffOperations — response media types are compared by essence (issue
       ],
       classification: 'additive',
     });
+    // A `;` inside the quoted profile is part of it, not a parameter boundary (Greptile round 4).
+    const quoted = (profile: string): Operation =>
+      card([[`application/ld+json; profile="${profile}"`, report]], { name: 'getGraph', response: report });
+    expect(
+      diffOperations(
+        'Graphs',
+        [quoted('https://example.com/a;charset=one;z')],
+        [quoted('https://example.com/a;charset=two;z')],
+      )[0],
+    ).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [
+            {
+              from: 'application/ld+json; profile="https://example.com/a;charset=one;z"',
+              to: 'application/ld+json; profile="https://example.com/a;charset=two;z"',
+            },
+          ],
+          classification: 'additive',
+        },
+      ],
+    });
+    expect(diffOperations('Graphs', [quoted('https://example.com/a;b')], [quoted('https://example.com/a;b')])).toEqual(
+      [],
+    );
     expect(
       diffOperations(
         'Pets',
