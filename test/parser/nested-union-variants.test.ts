@@ -262,6 +262,8 @@ describe('every other variant that mints a name under the field context is typed
     type: (base: string) => string;
     models: (base: string) => Record<string, string[]>;
     enums?: (base: string) => string[];
+    /** A site whose base model is not `siteBases`' for this schema. */
+    bases?: Partial<typeof siteBases>;
   }> = [
     {
       label: 'a nullable wrapper around an inline object',
@@ -347,15 +349,18 @@ describe('every other variant that mints a name under the field context is typed
         [`${base}Variant2`]: ['type', 'a'],
         [`B${base}Variant2`]: ['type', 'b'],
       }),
+      // An array response body's items are `<Op>Item` whatever their shape (#282).
+      bases: { response: 'CreateThingItem' },
     },
   ];
 
-  it.each(cases)('$label', async ({ label, schema, type, models, enums }) => {
+  it.each(cases)('$label', async ({ label, schema, type, models, enums, bases: caseBases }) => {
+    const bases = { ...siteBases, ...caseBases };
     const { spec, warnings } = await parse(label.replace(/\W+/g, '-'), everySite(schema));
     expect(siteTypes(spec)).toEqual(
-      Object.fromEntries(Object.entries(siteBases).map(([site, base]) => [site, type(base)])),
+      Object.fromEntries(Object.entries(bases).map(([site, base]) => [site, type(base)])),
     );
-    for (const base of Object.values(siteBases)) {
+    for (const base of Object.values(bases)) {
       for (const [name, fields] of Object.entries(models(base))) expect(fieldsOf(spec, name)).toEqual(fields);
     }
     // An inline enum under an error body or a component field is promoted to

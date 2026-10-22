@@ -143,12 +143,13 @@ describe('classifyAndExtractResponse — array response without type', () => {
     ).toEqual(expected);
   });
 
-  it('yields to a oneOf beside `type: array` too, so a nullable array composed that way keeps its null', () => {
+  it('reads a nullable array written as a oneOf beside `type: array` as the array it is, null kept', () => {
     // `{ type: 'array', items, oneOf: [{ type: 'array', items }, { type: 'null' }] }`
     // is a union to `classifyInlineSchema` — a nullable array to
-    // `schemaToTypeRef` — whether or not `type: 'array'` is spelled out, so
-    // the array branch must not claim it; the fall-through keeps the null
-    // and creates the item model under the name the reference carries.
+    // `schemaToTypeRef` — whether or not `type: 'array'` is spelled out. The
+    // response path reads the array under the wrapper (`arraySchemaOf`,
+    // #282), so the items are `<Op>Item` as under `type: ['array', 'null']`
+    // and the null is kept.
     for (const type of ['array', undefined]) {
       const result = classifyAndExtractResponse(
         { ...(type && { type }), items: petItems, oneOf: [{ type: 'array', items: petItems }, { type: 'null' }] },
@@ -156,35 +157,37 @@ describe('classifyAndExtractResponse — array response without type', () => {
       );
       expect(result.response, String(type)).toEqual({
         kind: 'nullable',
-        inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsResponse' } },
+        inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } },
       });
       expect(result.inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
-        ['ListPetsResponse', ['name']],
+        ['ListPetsItem', ['name']],
       ]);
     }
   });
 
-  it('materializes the inline object variants of `items.oneOf`, typed or not', () => {
+  it('materializes the inline object variants of `items.oneOf` under `<Op>Item`, typed or not', () => {
     const untyped = classifyAndExtractResponse({ items: shapeVariants }, 'ListShapesResponse');
     const typed = classifyAndExtractResponse({ type: 'array', items: shapeVariants }, 'ListShapesResponse');
 
+    // The items of an array body are typed as `<Op>Item` whatever their
+    // shape (#282: `typeInlineItems`), as a list envelope's data items are.
     expect(untyped.response).toEqual({
       kind: 'array',
       items: {
         kind: 'union',
         variants: [
-          { kind: 'model', name: 'ListShapesResponse' },
-          { kind: 'model', name: 'ListShapesResponseWithSide' },
+          { kind: 'model', name: 'ListShapesItem' },
+          { kind: 'model', name: 'ListShapesItemWithSide' },
         ],
         compositionKind: 'oneOf',
       },
     });
-    expect(untyped.inlineModels.map((m) => m.name)).toEqual(['ListShapesResponse', 'ListShapesResponseWithSide']);
+    expect(untyped.inlineModels.map((m) => m.name)).toEqual(['ListShapesItem', 'ListShapesItemWithSide']);
     expect(untyped.inlineModels.map((m) => m.fields.map((f) => f.name))).toEqual([['radius'], ['side']]);
     expect(typed).toEqual(untyped);
   });
 
-  it('materializes nullable object items under the name the array references', () => {
+  it('materializes nullable object items under `<Op>Item`, the name the array references', () => {
     const result = classifyAndExtractResponse(
       { items: { type: ['object', 'null'], properties: { name: { type: 'string' } } } },
       'ListPetsResponse',
@@ -192,9 +195,9 @@ describe('classifyAndExtractResponse — array response without type', () => {
 
     expect(result.response).toEqual({
       kind: 'array',
-      items: { kind: 'nullable', inner: { kind: 'model', name: 'ListPetsResponse' } },
+      items: { kind: 'nullable', inner: { kind: 'model', name: 'ListPetsItem' } },
     });
-    expect(result.inlineModels.map((m) => m.name)).toEqual(['ListPetsResponse']);
+    expect(result.inlineModels.map((m) => m.name)).toEqual(['ListPetsItem']);
   });
 
   it('leaves a prefixItems-only tuple as unknown, referencing no model', () => {
@@ -886,9 +889,10 @@ describe('parseSpec — arrays without type', () => {
         'SessionRevoked',
         'ListPetsItem',
         'ListNullableItem',
-        'ListShapesResponse',
-        'ListShapesResponseWithSide',
-        'ListNullableItemsResponse',
+        // An array body's items are `<Op>Item` whatever their shape (#282).
+        'ListShapesItem',
+        'ListShapesItemWithSide',
+        'ListNullableItemsItem',
         'ListEventsItem',
         'ListMarksItem',
         'ListMarksItemWithSide',

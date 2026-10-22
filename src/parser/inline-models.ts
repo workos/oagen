@@ -20,6 +20,8 @@ import {
   resolveSchemaName,
   titleMappedVariantNames,
   variantMemberSchemas,
+  foldSiblingProperties,
+  foldedVariantOrigin,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
 import { shapeWithEnumFlags } from './enum-members.js';
@@ -367,9 +369,14 @@ function stableStringify(value: unknown): string {
  */
 let contestedTitledVariants = new WeakSet<SchemaObject>();
 
-/** Whether `variant` is a title-mapped union variant whose title another shape takes under the same root (see `markContestedTitles`). */
+/**
+ * Whether `variant` is a title-mapped union variant whose title another
+ * shape takes under the same root (see `markContestedTitles`). The marks are
+ * on the document's variants; a folded copy of one (`foldSiblingProperties`)
+ * is read through its origin.
+ */
 export function isContestedTitle(variant: SchemaObject): boolean {
-  return contestedTitledVariants.has(variant);
+  return contestedTitledVariants.has(foldedVariantOrigin(variant) ?? variant);
 }
 
 /**
@@ -584,12 +591,16 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
     if (visited.has(schema)) return;
     visited.add(schema);
     if (schema.$ref) return;
-    for (const [variant, title] of titleMappedVariantNames(schema)) {
+    // The shapes are the ones the variants are named and built with: with
+    // `properties` written beside the union folded into them
+    // (`foldSiblingProperties`). The marks go on the document's variants,
+    // which every later fold's copies are read through (`isContestedTitle`).
+    for (const [variant, title] of titleMappedVariantNames(foldSiblingProperties(schema))) {
       if (claims.has(title)) continue;
       claims.add(title);
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
       entry.shapes.add(schemaShapeKey(variant));
-      entry.variants.push(variant);
+      entry.variants.push(foldedVariantOrigin(variant) ?? variant);
       byTitle.set(title, entry);
     }
     // The group continues through what `mintedInlineNameEntries` reads for a

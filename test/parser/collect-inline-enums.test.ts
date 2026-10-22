@@ -265,11 +265,13 @@ describe('every shape a body enum takes is promoted', () => {
     const ir = await parseWithoutWarnings(
       doc(getPetKind({ '200': { description: 'kinds', ...json({ type: 'array', items: kind }) } })),
     );
+    // An array body's items are typed as `<Op>Item` whatever their shape
+    // (#282), so the enum is `GetPetKindItem`, as a list envelope's would be.
     expect(operation(ir, 'getPetKind').response).toEqual({
       kind: 'array',
-      items: inlineEnum('GetPetKindResponse', ['cat', 'dog']),
+      items: inlineEnum('GetPetKindItem', ['cat', 'dog']),
     });
-    expect(enumNames(ir)).toEqual(['GetPetKindResponse']);
+    expect(enumNames(ir)).toEqual(['GetPetKindItem']);
     expectSound(ir);
   });
 
