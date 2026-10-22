@@ -2650,8 +2650,9 @@ describe('fallback operation names stay unique within a service (issue #208)', (
         '/orgs/{x}/notes/{id}/notes': { get: withParam('x') },
       }),
     ).toEqual({
-      'GET /orgs/notes/{id}/notes': 'listNotesById',
-      'GET /orgs/{x}/notes/{id}/notes': 'listNotesByXById',
+      // Both paths carry `{id}`, so only `{x}` qualifies (#250).
+      'GET /orgs/notes/{id}/notes': 'listNotes',
+      'GET /orgs/{x}/notes/{id}/notes': 'listNotesByX',
     });
   });
 
