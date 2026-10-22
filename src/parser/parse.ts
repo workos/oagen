@@ -110,6 +110,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     { schemaNameTransform: options?.schemaNameTransform },
   );
 
+  // Before the operations: an operation carries its own `servers` only when
+  // they differ from the document's, so the document's list is needed first.
+  const { servers, baseUrl } = extractServers(spec.servers);
+
   // Extract inline models from model field definitions (objects/arrays with properties).
   // schemaNameTransform is kept active so inline child names use the
   // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
@@ -135,6 +139,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
     spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
     fieldInlineModels,
+    servers,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -172,8 +177,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   collectInlineEnumsFromWebhooks(webhooks, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
-
-  const { servers, baseUrl } = extractServers(spec.servers);
 
   const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',

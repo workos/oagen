@@ -25,7 +25,7 @@ interface ApiSpec {
   description?: string; // From info.description
   externalDocs?: ExternalDocs; // The document's top-level externalDocs, when usable
   baseUrl: string; // servers[0].url with each variable's default filled in
-  servers?: ServerEntry[]; // All servers from the spec
+  servers?: ServerEntry[]; // The document's servers; every operation inherits them unless it carries its own
   services: Service[]; // Grouped operations
   webhooks?: Webhook[]; // Top-level `webhooks` map (OpenAPI 3.1); absent when the document has none
   models: Model[]; // Schema objects
@@ -36,11 +36,17 @@ interface ApiSpec {
 }
 ```
 
-The `servers` array contains all server entries from the OpenAPI spec. `baseUrl` is always the first server's URL, resolved: each `{name}` placeholder is replaced by that variable's `default`, so a client built on `baseUrl` requests `https://eu.api.example.com/v1`, not `https://{region}.api.example.com/v1`.
+The `servers` array contains the document-level server entries from the OpenAPI spec — the ones every operation uses unless it carries `servers` of its own (see "Operation-level servers" below). `baseUrl` is always the first document server's URL, resolved: each `{name}` placeholder is replaced by that variable's `default`, so a client built on `baseUrl` requests `https://eu.api.example.com/v1`, not `https://{region}.api.example.com/v1`.
 
 **Server variables.** `ServerEntry.url` keeps the template as written and `variables` carries what the document declares for it (same shape in OpenAPI 3.0 and 3.1), so an emitter can offer the choice — an environment or region picker — rather than only the default. There is no `resolvedUrl` on `ServerEntry`: `resolveServerUrl(server)` from `src/ir/server-url.ts` (exported from the package) returns `{ url, unresolved }` for any entry, which is exactly how the parser produced `baseUrl`. It is plain string scanning: a variable may appear more than once, the substituted value is not scanned again, and no pattern is built from the variable names.
 
-The parser checks every server, not only the first, and reports each problem once with an `[oagen] Warning:`: a variable without a usable `default` is omitted from `variables` (the IR requires one) and its placeholder stays in the URL; a placeholder that names no declared variable stays in the URL; a `default` outside the variable's `enum` is kept as written. A declared variable the URL never uses is kept without comment. `default` and `enum` entries are strings; a number or boolean (YAML reads `default: 8443` as a number) is carried as its text. `variables`, `enum` and `description` are absent, not `undefined`, when the document does not declare them.
+The parser checks every server, not only the first, and reports each problem once with an `[oagen] Warning:` that names where the list sits (the document, a path item, an operation): a variable without a usable `default` is omitted from `variables` (the IR requires one) and its placeholder stays in the URL; a placeholder that names no declared variable stays in the URL; a `default` outside the variable's `enum` is kept as written. A declared variable the URL never uses is kept without comment. `default` and `enum` entries are strings; a number or boolean (YAML reads `default: 8443` as a number) is carried as its text. `variables`, `enum` and `description` are absent, not `undefined`, when the document does not declare them.
+
+**Operation-level servers.** A Path Item and an Operation can declare `servers` of their own, and OpenAPI gives the operation's precedence over the Path Item's, which takes precedence over the document's. `Operation.servers` carries the winning list — the same `ServerEntry` shape, variables included, normalised by the same code as the document's, so `resolveServerUrl` works on it too — and only when it differs from `ApiSpec.servers`: an operation that declares nothing at either level, or whose winning list restates the document's, has no `servers` key and inherits. "Differs" is structural, by `serverListsEqual` (exported from the package): the two lists must have the same length and, position by position, the same `url`, `description` and `variables` (same names, each with the same `default`, `enum` in the same order, and `description`); a different description alone is a difference. Precedence is applied before the comparison, so an operation that restates the document's servers under a Path Item that diverges inherits. To find where a request goes, take `op.servers ?? spec.servers`; `baseUrl` is always the document's first server, resolved, whatever any operation declares.
+
+Edge cases: `servers: []` at path or operation level is treated as absent — OpenAPI defines an empty list only at the document level (where it means `/`), not as an override — so the operation falls through to the next level; the same goes for a list whose entries are all unusable (not an object, no `url`, or a blank `url`), while the usable entries of a mixed list are kept. A document with no `servers` compares as an empty list, so an operation that declares usable servers under it carries them, and `baseUrl` stays `''`. The parser does not resolve a Path Item written as a `$ref` (its operations are not extracted at all), so there is no Path Item `servers` to carry for one. The operations of one Path Item that inherit its list share the same array.
+
+The differ reports a change as `serversChanged` on an `operation-modified` change, always breaking (the operation's requests go elsewhere). It judges where the operation is actually served from, `op.servers ?? spec.servers` on each side, not whether the field is set: a document that moves to where an operation already pointed (so the operation's override disappears) is not a change to that operation, and an operation that inherits on both sides is never reported here even when the document's own list moved — that is the document-level diff's. The comparison follows the document-level rule rather than `serverListsEqual`: the two effective lists are matched as multisets on `url` template plus variables (names, defaults, enum values as a set), so position, `description` on a server or a variable, and enum order do not count; a reorder counts only when it moves the first entry's resolved URL, the operation's default host. Any other variable difference counts, including one the document-level diff would call additive, since one boolean cannot carry that distinction.
 
 `security` is the document-level `security` list, in the same shape as `Operation.security`; every operation that declares no `security` of its own inherits it. It is `undefined` when the document declares none.
 
@@ -265,6 +271,7 @@ interface Operation {
   externalDocs?: ExternalDocs; // The operation's own externalDocs, when usable
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
+  servers?: ServerEntry[]; // The operation's own servers, else its Path Item's; only when they differ from ApiSpec.servers
   pathParams: Parameter[];
   // Excludes `in: query` params that a POST/PUT/PATCH request body also declares;
   // those travel body-only and are kept in bodyOwnedQueryParams instead.

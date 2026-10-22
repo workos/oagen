@@ -236,6 +236,19 @@ export interface OperationModified {
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
   /**
+   * The servers the operation is actually served from changed, so its
+   * requests go elsewhere. Always breaking. Each side is `op.servers ??`
+   * that document's servers (`diffSpecs` supplies them), compared by the rule
+   * the document-level diff uses: matched on `url` template plus variables
+   * (names, defaults, enum values as a set), ignoring position, descriptions
+   * and enum order — except that a reorder that moves the first entry's
+   * resolved URL counts, as `base-url-changed` does for the document. Absent
+   * on both sides is unchanged: the operation inherits twice, and a moved
+   * document is the document-level diff's to report. So a document that moves
+   * to where an operation already pointed is not a change to that operation.
+   */
+  serversChanged: boolean;
+  /**
    * The operation's own `deprecated` flipped. Additive either way: the
    * signature is unchanged. A parameter's flag flipping is a
    * `param-deprecated-changed` entry in `paramChanges` instead.

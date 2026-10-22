@@ -154,6 +154,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header
   - `deprecated?`, `async?` — method markers
   - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
+  - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
 - Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `default?`, `example?`, `examples?`, `style?`, `explode?`, `constraints?`
 - Output: One file per service/resource

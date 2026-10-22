@@ -111,6 +111,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
 - `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
 - `cookieParams` — Cookie parameter handling
+- `servers` — Operation-level servers (own, else the Path Item's), present only when they differ from `ApiSpec.servers`; a request goes to `op.servers ?? spec.servers`
 
 #### Parameter
 
@@ -259,6 +260,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                      |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
+| `Operation.servers`          | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                 |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
 | `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Service` and `ApiSpec` carry the same |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |

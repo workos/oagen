@@ -23,11 +23,32 @@ export interface ExtractedServers {
  * `ServerEntry.url` stays as written — placeholders included — so an emitter
  * can offer the variables; `baseUrl` is `servers[0]` resolved with
  * `resolveServerUrl`, which fills each `{name}` with the variable's `default`
- * (OpenAPI requires one). Server variables are the same shape in OpenAPI 3.0
- * and 3.1.
+ * (OpenAPI requires one). The list itself is normalised by
+ * `extractServerList`, the same way a Path Item's or an Operation's is.
+ */
+export function extractServers(rawServers: unknown): ExtractedServers {
+  const servers = extractServerList(rawServers, 'the document');
+  const baseUrl = servers ? resolveServerUrl(servers[0]).url : '';
+  return { servers, baseUrl };
+}
+
+/**
+ * Normalise a `servers` list — the document's, a Path Item's or an
+ * Operation's — into `ServerEntry[]`, or `undefined` when it declares nothing
+ * usable. All three levels go through here so they come out identical: the
+ * same handling of non-object entries, blank URLs, `variables` and
+ * prototype-named keys, and the same warnings, each naming `context` ("the
+ * document", "path item /pets", "operation listPets").
  *
- * Every server is checked, not only the first, because an emitter may resolve
- * any of them, and each problem is reported once with an `[oagen] Warning:`:
+ * A non-array, an empty list, and a list whose entries are all unusable (not
+ * an object, no `url`, or an empty `url`) all yield `undefined`. OpenAPI gives
+ * `servers: []` no meaning as an override — only the document-level default
+ * of `/` is defined for an empty list — so at path and operation level
+ * `undefined` means "inherit".
+ *
+ * Server variables are the same shape in OpenAPI 3.0 and 3.1. Every server is
+ * checked, not only the first, because an emitter may resolve any of them,
+ * and each problem is reported once with an `[oagen] Warning:`:
  *
  * - A variable without a usable `default` has no IR representation
  *   (`ServerVariable.default` is required) and is omitted; its placeholder
@@ -41,19 +62,17 @@ export interface ExtractedServers {
  * is carried as its text, anything else is ignored. An empty `enum`, which
  * the specification forbids, is treated as undeclared.
  */
-export function extractServers(rawServers: unknown): ExtractedServers {
+export function extractServerList(rawServers: unknown, context: string): ServerEntry[] | undefined {
+  if (!Array.isArray(rawServers)) return undefined;
   const servers: ServerEntry[] = [];
-  if (Array.isArray(rawServers)) {
-    for (const raw of rawServers) {
-      const entry = buildServerEntry(raw);
-      if (entry) servers.push(entry);
-    }
+  for (const raw of rawServers) {
+    const entry = buildServerEntry(raw, context);
+    if (entry) servers.push(entry);
   }
-  const baseUrl = servers.length > 0 ? resolveServerUrl(servers[0]).url : '';
-  return { servers: servers.length > 0 ? servers : undefined, baseUrl };
+  return servers.length > 0 ? servers : undefined;
 }
 
-function buildServerEntry(raw: unknown): ServerEntry | undefined {
+function buildServerEntry(raw: unknown, context: string): ServerEntry | undefined {
   if (!isRecord(raw) || typeof raw.url !== 'string' || raw.url === '') return undefined;
   const url = raw.url;
   const entry: ServerEntry = { url, description: typeof raw.description === 'string' ? raw.description : undefined };
@@ -66,7 +85,7 @@ function buildServerEntry(raw: unknown): ServerEntry | undefined {
   // see nothing unusual.
   const variables = new Map<string, ServerVariable>();
   for (const [name, value] of Object.entries(declared)) {
-    const variable = buildServerVariable(url, name, value);
+    const variable = buildServerVariable(url, context, name, value);
     if (variable) variables.set(name, variable);
   }
   // Absent, not `undefined`, when the document declares none (or none usable).
@@ -76,18 +95,18 @@ function buildServerEntry(raw: unknown): ServerEntry | undefined {
     // A declared variable that was omitted above has already been reported.
     if (Object.hasOwn(declared, name)) continue;
     console.warn(
-      `[oagen] Warning: Server URL "${url}" uses {${name}} but declares no such variable; the placeholder stays in the URL`,
+      `[oagen] Warning: Server URL "${url}" on ${context} uses {${name}} but declares no such variable; the placeholder stays in the URL`,
     );
   }
   return entry;
 }
 
-function buildServerVariable(url: string, name: string, raw: unknown): ServerVariable | undefined {
+function buildServerVariable(url: string, context: string, name: string, raw: unknown): ServerVariable | undefined {
   const declared: Record<string, unknown> = isRecord(raw) ? raw : {};
   const defaultValue = scalarText(declared.default);
   if (defaultValue === undefined) {
     console.warn(
-      `[oagen] Warning: Server variable "${name}" of "${url}" has no default (a string is required) and is omitted from spec.servers; its placeholder stays in the URL`,
+      `[oagen] Warning: Server variable "${name}" of "${url}" on ${context} has no default (a string is required) and is omitted; its placeholder stays in the URL`,
     );
     return undefined;
   }
@@ -100,7 +119,7 @@ function buildServerVariable(url: string, name: string, raw: unknown): ServerVar
     variable.enum = enumValues;
     if (!enumValues.includes(defaultValue)) {
       console.warn(
-        `[oagen] Warning: Server variable "${name}" of "${url}" defaults to "${defaultValue}", which is not one of its enum values (${enumValues.join(', ')}); kept as written`,
+        `[oagen] Warning: Server variable "${name}" of "${url}" on ${context} defaults to "${defaultValue}", which is not one of its enum values (${enumValues.join(', ')}); kept as written`,
       );
     }
   }

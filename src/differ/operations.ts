@@ -1,9 +1,35 @@
-import type { ErrorResponse, Operation, ResponseContent, StatusRange, TypeRef } from '../ir/types.js';
+import type {
+  ApiSpec,
+  ErrorResponse,
+  Operation,
+  ResponseContent,
+  ServerEntry,
+  StatusRange,
+  TypeRef,
+} from '../ir/types.js';
+import { resolveServerUrl } from '../ir/server-url.js';
+import { diffServers } from './servers.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
 import { classifyParamChange, deprecationDetails, deprecationFlip } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
-export function diffOperations(serviceName: string, oldOps: Operation[], newOps: Operation[]): Change[] {
+/**
+ * The two documents' `servers`, so `diffOperations` can resolve what an
+ * operation is actually served from (`op.servers ?? document servers`).
+ * `diffSpecs` supplies it; a direct caller may leave it out, in which case an
+ * operation that inherits is compared as having no servers at all.
+ */
+export interface DocumentServers {
+  old: ServerEntry[] | undefined;
+  new: ServerEntry[] | undefined;
+}
+
+export function diffOperations(
+  serviceName: string,
+  oldOps: Operation[],
+  newOps: Operation[],
+  documentServers?: DocumentServers,
+): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldOps.map((o) => [o.name, o]));
   const newByName = new Map(newOps.map((o) => [o.name, o]));
@@ -58,6 +84,15 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     // changelog has to say it, so a flipped flag alone is a change.
     const deprecation = deprecationFlip(oldOp, newOp);
     const deprecatedChanged = deprecation !== undefined;
+    // `servers` is set only when the operation's effective servers differ from
+    // the document's. Absent on both sides is "inherits" twice — a moved
+    // document is the document-level diff's to report. Otherwise the lists the
+    // operation is actually served from are compared, so a document that moves
+    // to where the operation already pointed (its override vanishes) is no
+    // change to the operation.
+    const serversChanged =
+      (!!oldOp.servers || !!newOp.servers) &&
+      effectiveServersChanged(oldOp.servers ?? documentServers?.old ?? [], newOp.servers ?? documentServers?.new ?? []);
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -71,7 +106,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       errorsChanged ||
       responseContentTypesChanged ||
       fallbackResponsesChanged ||
-      deprecatedChanged;
+      deprecatedChanged ||
+      serversChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -95,6 +131,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
       const fallbackBreaking = fallbackDiff === 'breaking';
 
+      // servers: any change is breaking (the operation's requests go elsewhere)
       const hasBreaking =
         responseChanged ||
         requestBodyBreaking ||
@@ -106,6 +143,7 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         errorsBreaking ||
         responseContentTypesBreaking ||
         fallbackBreaking ||
+        serversChanged ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
         kind: 'operation-modified',
@@ -125,12 +163,34 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         fallbackResponsesChanged,
         deprecatedChanged,
         ...deprecation,
+        serversChanged,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
   }
 
   return changes;
+}
+
+/**
+ * Whether an operation's effective server list changed in a way a caller
+ * notices: the document-level diff's own answer (`diffServers`, #255), read
+ * off the two lists as if each were a document — `baseUrl` is the first
+ * entry resolved, as the parser sets it. Anything it reports flips the flag:
+ * a moved default host (`base-url-changed`, so a reorder counts exactly when
+ * it moves the first entry's resolved URL), a server added or removed by
+ * `url` template, and any variable change — the additive ones included (a
+ * new enum value, a new variable, a lifted enum), since one boolean cannot
+ * carry that distinction. Descriptions on a server or a variable, enum order,
+ * a repeated enum value and position do not count there, so they do not here.
+ */
+function effectiveServersChanged(oldServers: ServerEntry[], newServers: ServerEntry[]): boolean {
+  return diffServers(asDocument(oldServers), asDocument(newServers)).length > 0;
+}
+
+/** A server list as the document-level diff reads a document: `baseUrl` is its first entry resolved, `''` without one. */
+function asDocument(servers: ServerEntry[]): Pick<ApiSpec, 'baseUrl' | 'servers'> {
+  return { baseUrl: servers.length > 0 ? resolveServerUrl(servers[0]).url : '', servers };
 }
 
 /**
