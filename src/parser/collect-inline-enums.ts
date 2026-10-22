@@ -24,9 +24,19 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 
 /**
  * Collect inline enum definitions from operation parameters (query, path, header)
- * list-envelope companion fields, response headers and secondary response
- * bodies, and promote them to top-level enums so emitters can generate typed
- * enum files.
+ * list-envelope companion fields, response headers, error bodies and secondary
+ * response bodies, and promote them to top-level enums so emitters can
+ * generate typed enum files.
+ *
+ * Every kind is collected collision-aware (`collectDistinctEnums`): a
+ * parameter enum is named from the service and parameter name alone, so a
+ * query parameter `error404` of a later operation derives the very name an
+ * earlier operation's inline 404 enum body or `Error404` response header was
+ * promoted under (`GetPetError404`), and whichever was collected first would
+ * otherwise hand its values to the other's reference. A different value set
+ * is renamed to a distinct name before it is promoted (`GetPetError4042`);
+ * identical members are shared, as a parameter repeated across the
+ * operations of a service always was.
  *
  * `models` lets the walk continue into the models a header or secondary body
  * references — the ones the parser materialized for them, never a component
@@ -64,10 +74,10 @@ export function collectInlineEnumsFromOperations(
         ...op.headerParams,
         ...(op.cookieParams ?? []),
       ]) {
-        collectInlineEnumFromRef(param.type, enums, enumNames);
+        collectDistinctEnums(param.type, undefined, enums, enumNames);
       }
       for (const field of op.pagination?.envelopeFields ?? []) {
-        collectInlineEnumFromRef(field.type, enums, enumNames);
+        collectDistinctEnums(field.type, undefined, enums, enumNames);
       }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at

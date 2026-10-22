@@ -1541,3 +1541,93 @@ describe('review round 1: a 2xx body reserves what it mints before any error bod
     expectConsistent(ir);
   });
 });
+
+describe('review round 2 (Greptile, after the port): a parameter enum is kept apart from an earlier error or header enum', () => {
+  const en = (values: string[]): SchemaObject => ({ type: 'string', enum: values });
+  const enumValues = (ir: ApiSpec, name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+  const byName = (ir: ApiSpec) => Object.fromEntries(operationsOf(ir).map((op) => [op.name, op]));
+  // Service `GetPet` + an inline 404 enum body → `GetPetError404`; service
+  // `GetPet` + a query parameter `error404` → the very same derived name.
+  // Parameter collection used to skip a name already seen without comparing
+  // members, so the parameter's reference silently took the error's values.
+  const getPetWithEnum404 = {
+    get: {
+      tags: ['getPet'],
+      operationId: 'getPet',
+      responses: { ...ok, '404': { description: 'nf', ...json(en(['gone', 'missing'])) } },
+    },
+  };
+  const listPetsWithParam = (values: string[]) => ({
+    get: {
+      tags: ['getPet'],
+      operationId: 'listPets',
+      parameters: [{ name: 'error404', in: 'query', schema: en(values) }],
+      responses: ok,
+    },
+  });
+
+  it.each([
+    // Whichever is collected first keeps the bare name; the other steps: the
+    // parameter to a numeric suffix, the error body to `Body`.
+    [
+      'error first',
+      { '/a': getPetWithEnum404, '/b': listPetsWithParam(['brief', 'full']) },
+      'GetPetError404',
+      'GetPetError4042',
+    ],
+    [
+      'parameter first',
+      { '/a': listPetsWithParam(['brief', 'full']), '/b': getPetWithEnum404 },
+      'GetPetError404Body',
+      'GetPetError404',
+    ],
+  ])(
+    "Greptile's case: an error enum and a parameter enum of the same derived name keep their own values (%s)",
+    async (_, paths, errorName, paramName) => {
+      const ir = await parseWithoutWarnings(doc(paths));
+      const { getPet, listPets } = byName(ir);
+      expect(getPet.errors[0].type).toEqual({ kind: 'enum', name: errorName, values: ['gone', 'missing'] });
+      expect(listPets.queryParams[0].type).toEqual({ kind: 'enum', name: paramName, values: ['brief', 'full'] });
+      expect(enumValues(ir, errorName)).toEqual(['gone', 'missing']);
+      expect(enumValues(ir, paramName)).toEqual(['brief', 'full']);
+      expect(enumNames(ir).sort()).toEqual([errorName, paramName].sort());
+      expectConsistent(ir);
+    },
+  );
+
+  it("a header enum of an earlier operation never hands its values to a later operation's parameter", async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        '/a': {
+          get: {
+            tags: ['getPet'],
+            operationId: 'getPet',
+            responses: {
+              '200': { description: 'ok', ...json(petRef), headers: { Error404: { schema: en(['a', 'b']) } } },
+            },
+          },
+        },
+        '/b': listPetsWithParam(['brief', 'full']),
+      }),
+    );
+    const { getPet, listPets } = byName(ir);
+    expect(getPet.responseHeaders?.[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['a', 'b'] });
+    expect(listPets.queryParams[0].type).toEqual({ kind: 'enum', name: 'GetPetError4042', values: ['brief', 'full'] });
+    expect(enumValues(ir, 'GetPetError404')).toEqual(['a', 'b']);
+    expect(enumValues(ir, 'GetPetError4042')).toEqual(['brief', 'full']);
+    expect(enumNames(ir)).toEqual(['GetPetError404', 'GetPetError4042']);
+    expectConsistent(ir);
+  });
+
+  it('identical members, in any order, are still shared under the one name', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({ '/a': getPetWithEnum404, '/b': listPetsWithParam(['missing', 'gone']) }),
+    );
+    const { getPet, listPets } = byName(ir);
+    expect(getPet.errors[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['gone', 'missing'] });
+    expect(listPets.queryParams[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['missing', 'gone'] });
+    expect(enumNames(ir)).toEqual(['GetPetError404']);
+    expect(enumValues(ir, 'GetPetError404')).toEqual(['gone', 'missing']);
+    expectConsistent(ir);
+  });
+});
