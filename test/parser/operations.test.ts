@@ -2720,9 +2720,12 @@ describe('fallback operation names stay unique within a service (issue #208)', (
 
   it('allocates suffixes in name order when two groups reach the same suffixed name, whatever the document order', () => {
     // Twelve spellings that all flatten to `listNotes`, whose suffixes run up to
-    // `listNotes12`, and two that flatten to `listNotes1`, whose first suffix is
-    // also `listNotes12`. The `listNotes` group is served first by name, so the
-    // second `listNotes1` path gets `listNotes13` however the document is ordered.
+    // `listNotes12`; two that flatten to `listNotes1`, which ends in a digit, so
+    // the second takes `listNotes1No2` rather than `listNotes12` (#289); and two
+    // that flatten to `listNotes1No`, whose first suffix is that same
+    // `listNotes1No2`. The `listNotes1` group is served first by name, so the
+    // second `listNotes1No` path gets `listNotes1No3` however the document is
+    // ordered.
     const twelve = [
       '/x/notes',
       '/x/Notes',
@@ -2738,20 +2741,24 @@ describe('fallback operation names stay unique within a service (issue #208)', (
       '/x/notes..',
     ];
     const two = ['/x/notes1', '/x/notes_1'];
+    const twoMore = ['/x/notes1No', '/x/notes1_no'];
     const entries = (paths: string[]) => paths.map((path) => [path, { get: ok }] as const);
     const orders = [
-      [...entries(twelve), ...entries(two)],
-      [...entries(two), ...entries(twelve)],
-      [...entries(twelve), ...entries(two)].reverse(),
+      [...entries(twelve), ...entries(two), ...entries(twoMore)],
+      [...entries(twoMore), ...entries(two), ...entries(twelve)],
+      [...entries(twelve), ...entries(two), ...entries(twoMore)].reverse(),
     ];
 
     const results = orders.map((order) => names(Object.fromEntries(order)));
     expect(results[1]).toEqual(results[0]);
     expect(results[2]).toEqual(results[0]);
-    expect(new Set(Object.values(results[0])).size).toBe(14);
+    expect(new Set(Object.values(results[0])).size).toBe(16);
     expect(results[0]['GET /x/-notes']).toBe('listNotes');
+    expect(Object.values(results[0])).toContain('listNotes12');
     expect(results[0]['GET /x/notes1']).toBe('listNotes1');
-    expect(results[0]['GET /x/notes_1']).toBe('listNotes13');
+    expect(results[0]['GET /x/notes_1']).toBe('listNotes1No2');
+    expect(results[0]['GET /x/notes1No']).toBe('listNotes1No');
+    expect(results[0]['GET /x/notes1_no']).toBe('listNotes1No3');
   });
 
   it('keeps same-path PUT and PATCH on one name while a third path gets the suffix', () => {
