@@ -322,6 +322,54 @@ describe('collapseJsonSuffixModels — pagination envelope fields', () => {
       name: 'ListMetadata',
     });
   });
+
+  it('rewrites the iterator item type when its Json-suffix model collapses (Greptile)', () => {
+    // Under `x-pagination: { dataPath }` the body stays a wrapper and the
+    // item type is a reference nothing else in the IR holds.
+    const models: Model[] = [
+      { name: 'Wrapper', fields: [{ name: 'total', type: { kind: 'primitive', type: 'integer' }, required: false }] },
+      { name: 'Item', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      {
+        name: 'ItemJson',
+        fields: [
+          { name: 'id', type: { kind: 'primitive', type: 'string' }, required: true },
+          { name: 'name', type: { kind: 'primitive', type: 'string' }, required: false },
+        ],
+      },
+    ];
+    const services: Service[] = [
+      {
+        name: 'Widgets',
+        operations: [
+          {
+            name: 'listWidgets',
+            httpMethod: 'get',
+            path: '/widgets',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            response: { kind: 'model', name: 'Wrapper' },
+            errors: [],
+            injectIdempotencyKey: false,
+            pagination: {
+              strategy: 'page',
+              param: 'page',
+              dataPath: 'records',
+              itemType: { kind: 'nullable', inner: { kind: 'model', name: 'ItemJson' } },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = collapseJsonSuffixModels(models, services);
+
+    expect(result.map((m) => m.name)).toEqual(['Wrapper', 'Item']);
+    expect(services[0].operations[0].pagination?.itemType).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'model', name: 'Item' },
+    });
+  });
 });
 
 describe('collapseJsonSuffixModels — response headers', () => {

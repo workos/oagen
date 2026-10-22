@@ -15,9 +15,11 @@ import type {
   Model,
   Field,
   PaginationMeta,
+  PaginationEndOfIteration,
   ExternalDocs,
   ServerEntry,
 } from '../ir/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 import { serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
@@ -43,8 +45,16 @@ import {
   collapsedNullableBranch,
 } from './schemas.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
-import { detectPagination, paginatedItemType } from './pagination.js';
-import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
+import {
+  detectPagination,
+  derivePageStart,
+  paginatedItemType,
+  resolvePaginationOverride,
+  resolveOverrideParams,
+  applyPaginationOverride,
+  resolveDataPathItemType,
+} from './pagination.js';
+import { classifyAndExtractResponse, resolveDataPathFromSchema, STATUS_RANGE_LABELS } from './responses.js';
 import type { ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
@@ -90,6 +100,8 @@ export interface OperationObject {
   responses?: Record<string, ResponseObject>;
   deprecated?: boolean;
   'x-oagen-async'?: boolean;
+  /** Explicit pagination override; validated by `applyPaginationOverrides`. */
+  'x-pagination'?: unknown;
   security?: RawSecurityRequirements;
   /** The operation's own `servers`, narrowed entry by entry by `extractServerList`. */
   servers?: unknown;
@@ -332,6 +344,7 @@ export function extractOperations(
   componentFieldModels?: Model[],
   documentServers?: ServerEntry[],
   openapiVersion?: string,
+  operationHints?: Record<string, OperationHint>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
@@ -431,6 +444,9 @@ export function extractOperations(
         servers,
         refSiblingDescriptions,
         componentResponseModelNames,
+        // Same "METHOD /path" key the operation resolver uses for the rest of the hint.
+        operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
+        componentModels,
       );
       inlineModels.push(...opModels);
       for (const model of opModels) operationOf.set(model, operationQualifier);
@@ -1486,6 +1502,9 @@ function extractBodyParameterGroups(
   return groups.length > 0 ? groups : undefined;
 }
 
+/** A response placeholder for detecting a strategy from the query parameters alone. */
+const UNKNOWN_RESPONSE: TypeRef = { kind: 'primitive', type: 'unknown' };
+
 function buildOperation(
   method: HttpMethod,
   path: string,
@@ -1505,6 +1524,8 @@ function buildOperation(
   servers?: ServerEntry[],
   refSiblingDescriptions: 'override' | 'ignore' = 'override',
   componentResponseModelNames?: ReadonlyMap<string, string>,
+  paginationHint?: unknown,
+  componentModels?: Model[],
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -1599,6 +1620,37 @@ function buildOperation(
   // Names this operation's models in the shape registry, and qualifies a
   // deferred model's name when one of them is taken across operations.
   const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
+
+  // The page parameter's first value is read from its schema as written, so a
+  // `default`/`minimum` behind `allOf: [{ $ref }]` or a nullable wrapper —
+  // which the IR parameter's own `default` does not carry — still counts.
+  const querySchemas = new Map(wireParams.filter((p) => p.in === 'query').map((p) => [p.name, p.schema]));
+  const pageStartOf = (param: Parameter | undefined): number =>
+    derivePageStart(param, param && querySchemas.get(param.name), componentSchemas);
+
+  // The explicit pagination override — config hint over `x-pagination` — is
+  // validated before the response is classified: `strategy: 'none'` must keep
+  // a list envelope from being unwrapped into a bare array, and an explicit
+  // `dataPath` is resolved against the response while its schema is at hand.
+  let paginationOverride = resolvePaginationOverride({ extension: op['x-pagination'], hint: paginationHint }, opLabel);
+  const paginationDisabled = paginationOverride?.hint.strategy === 'none';
+  // Whether the override can apply is decided here, before the response is
+  // read: one that would be rejected (a `param` the operation does not
+  // declare, no strategy from anywhere) must not keep an envelope as a
+  // wrapper that detection then reads as the list. What it is checked
+  // against is the pagination the query parameters alone yield — the
+  // envelope fallback's invented `after` never makes an override usable.
+  if (paginationOverride && !paginationDisabled) {
+    const resolved = resolveOverrideParams(
+      detectPagination(UNKNOWN_RESPONSE, queryParams, undefined, { pageStartOf }) ?? undefined,
+      paginationOverride.hint,
+      queryParams,
+    );
+    if ('problem' in resolved) {
+      console.warn(`[oagen] Warning: ${paginationOverride.source} on ${opLabel}${resolved.problem}`);
+      paginationOverride = undefined;
+    }
+  }
   const {
     response,
     responseHeaders,
@@ -1615,36 +1667,82 @@ function buildOperation(
     dataDescription: responseDataDescription,
     itemType: responseItemType,
     envelopeFields,
+    endOfIteration: responseEndOfIteration,
+    overrideItemType,
     envelopeCompanions,
-  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
-    componentHeaders,
+  } = extractResponses(
+    op.responses,
+    op,
+    pathModelBaseName,
+    path,
+    method,
     componentSchemas,
-    componentResponses,
-    serviceName: opContext,
-    operationQualifier,
-    deferred,
-    refSiblingDescriptions,
-    componentResponseModelNames,
-  });
+    {
+      componentHeaders,
+      componentSchemas,
+      componentResponses,
+      serviceName: opContext,
+      operationQualifier,
+      deferred,
+      refSiblingDescriptions,
+      componentResponseModelNames,
+    },
+    {
+      disabled: paginationDisabled,
+      dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
+      componentModels,
+    },
+  );
   inlineModels.push(...reqBodyModels);
 
-  // Build structured pagination metadata from response classification and query param detection
-  const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
-  let pagination: PaginationMeta | undefined;
+  // An explicit `dataPath` that does not reach an array cannot type the
+  // iterator's items, so the whole override falls back to detection, as
+  // every other unusable override does.
+  if (
+    paginationOverride &&
+    !paginationDisabled &&
+    paginationOverride.hint.dataPath !== undefined &&
+    !overrideItemType
+  ) {
+    console.warn(
+      `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: dataPath "${paginationOverride.hint.dataPath}" ` +
+        'does not resolve to an array in the response — ignoring the override',
+    );
+    paginationOverride = undefined;
+  }
+
+  // Build structured pagination metadata from response classification and
+  // query param detection, then let the override correct or disable it.
+  const paginationFromParams = detectPagination(response, queryParams, responseDataPath, { pageStartOf });
+  let detectedPagination: PaginationMeta | undefined;
   if (isPaginated) {
     const itemType = responseItemType ?? paginatedItemType(response);
-    pagination = {
+    detectedPagination = {
       strategy: paginationFromParams?.strategy ?? 'cursor',
       param: paginationFromParams?.param ?? 'after',
       limitParam: paginationFromParams?.limitParam,
+      ...(paginationFromParams?.pageStart !== undefined && { pageStart: paginationFromParams.pageStart }),
       dataPath: responseDataPath ?? paginationFromParams?.dataPath,
       ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
       itemType,
       envelopeFields,
+      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
     };
   } else if (paginationFromParams) {
-    pagination = paginationFromParams;
+    // A stop field is also read from an envelope kept as a wrapper under an
+    // explicit `dataPath` (see `ResponseClassificationOptions.dataPathOverride`).
+    detectedPagination = {
+      ...paginationFromParams,
+      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
+    };
   }
+  const pagination = applyPaginationOverride(detectedPagination, paginationOverride, queryParams, response, opLabel, {
+    overrideItemType,
+    // Read from the response above, so an override that creates the iterator
+    // where detection found none still stops on it.
+    endOfIteration: responseEndOfIteration,
+    pageStartOf,
+  });
 
   // Per-operation security requirements; undefined means "inherit ApiSpec.security"
   const security = extractSecurityRequirements(op.security, opLabel);
@@ -2975,6 +3073,55 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
 }
 
 /**
+ * Element type of the array an overridden `dataPath` names in one response
+ * body. The IR answers first — the detected data array itself, an envelope
+ * companion's field (companion models included, so the parser's own item
+ * model is reused and follows any later renaming), or the response model's
+ * fields — and the document (`schema`, classified under `contextName`)
+ * answers when the path crosses a model the parser has not materialized,
+ * minting inline items under a path-derived name.
+ */
+function resolveOverrideItemType(
+  result: ResponseExtractionResult,
+  schema: SchemaObject,
+  contextName: string,
+  dataPath: string,
+  componentModels: Model[],
+  componentSchemas?: Record<string, SchemaObject>,
+): { itemType: TypeRef; inlineModels: Model[] } | undefined {
+  if (dataPath === result.dataPath && result.itemType) return { itemType: result.itemType, inlineModels: [] };
+
+  const pool = [
+    ...result.inlineModels,
+    ...(result.envelopeCompanions ?? []).flatMap((companion) => companion.models),
+    ...componentModels,
+  ];
+  let fromIr: TypeRef | undefined;
+  if (result.envelopeFields) {
+    // The envelope was unwrapped, so its companions — not `result.response`,
+    // which is already the data array — are where the path starts.
+    const [head, ...rest] = dataPath.split('.');
+    const companion = result.envelopeFields.find((field) => field.name === head);
+    if (companion) fromIr = resolveDataPathItemType(companion.type, rest.join('.'), pool);
+  } else {
+    fromIr = resolveDataPathItemType(result.response, dataPath, pool);
+  }
+  if (fromIr) return { itemType: fromIr, inlineModels: [] };
+
+  return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas);
+}
+
+/** What the explicit pagination override asks of response extraction. */
+interface PaginationExtractionOptions {
+  /** `strategy: 'none'`: keep a list envelope as a plain response model instead of unwrapping it. */
+  disabled?: boolean;
+  /** An explicit `dataPath` to resolve to the element type of the array it names. */
+  dataPath?: string;
+  /** Component models, so the IR walk can follow a `$ref` wrapper's fields. */
+  componentModels?: Model[];
+}
+
+/**
  * The `components/responses` entry a response is written as a `$ref` to, or
  * undefined for an inline response. Only the outermost ref counts: it is the
  * name the operation uses, and the name a chain resolves through
@@ -3506,6 +3653,7 @@ function extractResponses(
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
   ctx: ResponseTypingContext = { operationQualifier: '', deferred: [] },
+  pagination: PaginationExtractionOptions = {},
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
@@ -3524,6 +3672,9 @@ function extractResponses(
   dataDescription?: string;
   itemType?: TypeRef;
   envelopeFields?: Field[];
+  endOfIteration?: PaginationEndOfIteration;
+  /** Element type of the array the override's `dataPath` names; unset when it does not resolve. */
+  overrideItemType?: TypeRef;
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
@@ -3538,6 +3689,8 @@ function extractResponses(
   let dataDescription: string | undefined;
   let itemType: TypeRef | undefined;
   let envelopeFields: Field[] | undefined;
+  let endOfIteration: PaginationEndOfIteration | undefined;
+  let overrideItemType: TypeRef | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
 
   if (!responses) return { response, errors, inlineModels, isPaginated };
@@ -3553,6 +3706,9 @@ function extractResponses(
   // media type and the entry's role (`RenderPetCard` + `TextHtml` + `Response`).
   const contentModelBase = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
   const fallback: FallbackResponseSink = { op, pathModelBaseName, opLabel, ctx, rangeResponses: [] };
+  // Each classified body's schema, for resolving an overridden `dataPath`
+  // through the document when the IR cannot answer.
+  const bodySchemas = new Map<number, SchemaObject>();
 
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // `default` and `1XX`–`5XX` never parse as a status code (`parseInt('2XX')`
@@ -3612,9 +3768,22 @@ function extractResponses(
       if (pick.type) extractedType = pick.type;
       if (bodySchema) {
         const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
-        const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
+        // An explicit `dataPath` is handed to classification only when it
+        // reaches an array in this body; one that does not is left for the
+        // override's own warning, and detection stands.
+        const dataPathOverride =
+          pagination.disabled ||
+          pagination.dataPath === undefined ||
+          !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
+            ? undefined
+            : pagination.dataPath;
+        const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
+          paginationDisabled: pagination.disabled,
+          dataPathOverride,
+        });
         extractedType = result.response;
         bodyResults.set(code, result);
+        bodySchemas.set(code, bodySchema);
       }
       const contents = extractResponseContents(
         resp.content,
@@ -3726,6 +3895,7 @@ function extractResponses(
     dataDescription = primaryBody.dataDescription;
     itemType = primaryBody.itemType;
     envelopeFields = primaryBody.envelopeFields;
+    endOfIteration = primaryBody.endOfIteration;
     envelopeCompanions = primaryBody.envelopeCompanions;
   }
 
@@ -3756,6 +3926,36 @@ function extractResponses(
     }
   }
 
+  // An explicit `dataPath` names the array the iterator yields from, so its
+  // element type — not the wrapper — must become `itemType`. It is resolved
+  // against the primary body, whose models (companions included) are the
+  // ones retained above, so the item type it selects always has its model.
+  const primarySchema = primaryStatus === undefined ? undefined : bodySchemas.get(primaryStatus);
+  if (
+    primaryStatus !== undefined &&
+    primaryBody &&
+    primarySchema &&
+    pagination.dataPath !== undefined &&
+    !pagination.disabled
+  ) {
+    const resolved = resolveOverrideItemType(
+      primaryBody,
+      primarySchema,
+      deriveResponseName(op, pathModelBaseName),
+      pagination.dataPath,
+      pagination.componentModels ?? [],
+      componentSchemas,
+    );
+    if (resolved) {
+      overrideItemType = resolved.itemType;
+      for (const model of resolved.inlineModels) {
+        if (keptByName.has(model.name)) continue;
+        keptByName.set(model.name, { model, status: primaryStatus });
+        inlineModels.push(model);
+      }
+    }
+  }
+
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
   return {
@@ -3774,6 +3974,8 @@ function extractResponses(
     dataDescription,
     itemType,
     envelopeFields,
+    endOfIteration,
+    overrideItemType,
     envelopeCompanions,
   };
 }

@@ -64,7 +64,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### Operation
 
-- `pagination` — Auto-paging iterator generation (cursor, offset, link-header strategies)
+- `pagination` — Auto-paging iterator generation (cursor, offset, page, link-header strategies; optional `endOfIteration` stop field)
 - `requestBodyEncoding` — Content-type handling: json, form-data, form-urlencoded, binary, text
 - `requestBodyRequired` — Whether the body argument is mandatory or optional
 - `injectIdempotencyKey` — Whether to inject an idempotency key header
@@ -239,7 +239,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | Missing TypeRef kinds            | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                             |
 | `ApiSpec.auth`                   | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                |
-| `Operation.pagination`           | Auto-paging iterator/generator that handles cursor, offset, or link-header strategies                                           |
+| `Operation.pagination`           | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`       |
 | `Operation.requestBodyEncoding`  | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                     |
 | `Operation.requestBodyRequired`  | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out |
 | `Operation.injectIdempotencyKey` | Generate and attach `Idempotency-Key` header on applicable requests                                                             |

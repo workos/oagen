@@ -101,6 +101,10 @@ function rewriteModelRefs(
       if (op.requestBody) {
         rewriteModelRef(op.requestBody, oldName, newName);
       }
+      // The iterator's item type is its own reference when an explicit
+      // `dataPath` typed it from the document (`resolveDataPathFromSchema`),
+      // not the one `response` holds, so it is rewritten on its own.
+      if (op.pagination) rewriteModelRef(op.pagination.itemType, oldName, newName);
       for (const field of op.pagination?.envelopeFields ?? []) {
         rewriteModelRef(field.type, oldName, newName);
       }

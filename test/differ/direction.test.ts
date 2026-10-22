@@ -58,6 +58,36 @@ describe('buildDirectionIndex — response content types', () => {
   });
 });
 
+describe('buildDirectionIndex — pagination', () => {
+  it('marks a model reached only through the iterator item type as response-facing', () => {
+    // Under `x-pagination: { dataPath }` the body stays a wrapper, and the
+    // array it holds is a component the parser keeps as an empty model, so
+    // the item type is reached from nothing but `pagination.itemType`.
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'Wrapper', fields: [{ name: 'records', type: { kind: 'model', name: 'PetList' }, required: false }] },
+          { name: 'PetList', fields: [] },
+          { name: 'Record', fields: [] },
+        ],
+        [
+          op({
+            response: { kind: 'model', name: 'Wrapper' },
+            pagination: {
+              strategy: 'page',
+              param: 'page',
+              dataPath: 'records',
+              itemType: { kind: 'model', name: 'Record' },
+            },
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'Record')).toBe('response');
+    expect(directionOf(index, 'Wrapper')).toBe('response');
+  });
+});
+
 describe('buildDirectionIndex', () => {
   it('marks a model reached only from a response as response-facing', () => {
     const index = buildDirectionIndex(

@@ -178,6 +178,8 @@ Configure hints and mount rules in `oagen.config.ts`:
 export default {
   operationHints: {
     'GET /sso/authorize': { name: 'get_authorization_url' },
+    // Correct a mis-detected pagination strategy (same shape as the spec's x-pagination extension)
+    'GET /pets': { pagination: { strategy: 'page' } },
     'POST /user_management/authenticate': {
       split: [
         { name: 'authenticate_with_password', targetVariant: 'PasswordRequest', ... },

@@ -2,6 +2,7 @@ import type {
   ApiSpec,
   ErrorResponse,
   Operation,
+  PaginationEndOfIteration,
   ResponseContent,
   ServerEntry,
   StatusRange,
@@ -73,6 +74,19 @@ export function diffOperations(
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
     const paginatedChanged = !!oldOp.pagination !== !!newOp.pagination;
+    // Only comparable when both versions paginate; presence is paginatedChanged's job.
+    const oldPagination = oldOp.pagination;
+    const newPagination = newOp.pagination;
+    const bothPaginated = !!oldPagination && !!newPagination;
+    const paginationFieldChanged = (field: 'strategy' | 'param' | 'limitParam' | 'dataPath' | 'pageStart'): boolean =>
+      bothPaginated && oldPagination?.[field] !== newPagination?.[field];
+    const paginationStrategyChanged = paginationFieldChanged('strategy');
+    const paginationParamChanged = paginationFieldChanged('param');
+    const paginationLimitParamChanged = paginationFieldChanged('limitParam');
+    const paginationDataPathChanged = paginationFieldChanged('dataPath');
+    const paginationPageStartChanged = paginationFieldChanged('pageStart');
+    const paginationEndOfIterationChanged =
+      bothPaginated && !endOfIterationEqual(oldPagination?.endOfIteration, newPagination?.endOfIteration);
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
@@ -102,6 +116,12 @@ export function diffOperations(
       httpMethodChanged ||
       pathChanged ||
       paginatedChanged ||
+      paginationStrategyChanged ||
+      paginationParamChanged ||
+      paginationLimitParamChanged ||
+      paginationDataPathChanged ||
+      paginationPageStartChanged ||
+      paginationEndOfIterationChanged ||
       injectIdempotencyKeyChanged ||
       errorsChanged ||
       responseContentTypesChanged ||
@@ -113,6 +133,10 @@ export function diffOperations(
       // paginated: false→true is additive (SDK gains pagination helper)
       // paginated: true→false is breaking (SDK loses pagination helper)
       const paginatedBreaking = paginatedChanged && !newOp.pagination;
+      // endOfIteration: unset→set is additive (the iterator stops one request
+      // sooner); set→changed or set→unset is breaking (it stops at a different
+      // point than callers observed before)
+      const paginationEndOfIterationBreaking = paginationEndOfIterationChanged && !!oldPagination?.endOfIteration;
       // injectIdempotencyKey: false→true is additive (SDK gains idempotency key)
       // injectIdempotencyKey: true→false is breaking (SDK loses idempotency key)
       const injectIdempotencyKeyBreaking = injectIdempotencyKeyChanged && !newOp.injectIdempotencyKey;
@@ -139,6 +163,14 @@ export function diffOperations(
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
+        // The iterator sends a different parameter, page size or first page,
+        // or reads a different array: a behavior change for every caller.
+        paginationStrategyChanged ||
+        paginationParamChanged ||
+        paginationLimitParamChanged ||
+        paginationDataPathChanged ||
+        paginationPageStartChanged ||
+        paginationEndOfIterationBreaking ||
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
         responseContentTypesBreaking ||
@@ -156,6 +188,12 @@ export function diffOperations(
         httpMethodChanged,
         pathChanged,
         paginatedChanged,
+        paginationStrategyChanged,
+        paginationParamChanged,
+        paginationLimitParamChanged,
+        paginationDataPathChanged,
+        paginationPageStartChanged,
+        paginationEndOfIterationChanged,
         injectIdempotencyKeyChanged,
         errorsChanged,
         responseContentTypesChanged,
@@ -170,6 +208,15 @@ export function diffOperations(
   }
 
   return changes;
+}
+
+function endOfIterationEqual(
+  a: PaginationEndOfIteration | undefined,
+  b: PaginationEndOfIteration | undefined,
+): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.kind === b.kind && a.path === b.path;
 }
 
 /**

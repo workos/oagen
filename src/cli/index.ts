@@ -92,6 +92,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      operationHints: configOperationHints,
     });
   });
 
@@ -140,6 +141,7 @@ program
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
       docUrl: configDocUrl,
+      operationHints: configOperationHints,
     }).catch(handleError);
   });
 

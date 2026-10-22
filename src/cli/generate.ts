@@ -38,6 +38,7 @@ export async function generateCommand(opts: {
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
     fieldHints: opts.fieldHints,
+    operationHints: opts.operationHints,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);

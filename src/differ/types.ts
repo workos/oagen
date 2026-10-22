@@ -250,6 +250,26 @@ export interface OperationModified {
   httpMethodChanged: boolean;
   pathChanged: boolean;
   paginatedChanged: boolean;
+  /**
+   * Both versions paginate but `pagination.strategy` differs. Breaking: the
+   * iterator must advance differently (an offset by items received, a page
+   * number by one, a cursor from the response).
+   */
+  paginationStrategyChanged: boolean;
+  /** Both versions paginate but the parameter the iterator advances (`pagination.param`) differs. Breaking. */
+  paginationParamChanged: boolean;
+  /** Both versions paginate but the page-size parameter (`pagination.limitParam`) differs, gained or lost. Breaking. */
+  paginationLimitParamChanged: boolean;
+  /** Both versions paginate but the data array's location (`pagination.dataPath`) differs. Breaking. */
+  paginationDataPathChanged: boolean;
+  /** Both versions paginate but the first page number (`pagination.pageStart`) differs. Breaking. */
+  paginationPageStartChanged: boolean;
+  /**
+   * Both versions paginate but `pagination.endOfIteration` differs. Additive
+   * when a stop field appears for the first time (the iterator merely stops
+   * one request sooner); breaking when an existing one changes or disappears.
+   */
+  paginationEndOfIterationChanged: boolean;
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
   /**

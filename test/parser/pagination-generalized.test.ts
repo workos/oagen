@@ -23,7 +23,7 @@ describe('generalized pagination detection', () => {
     it('detects page + per_page as offset pagination', () => {
       const result = detectPagination(arrayResponse, [makeParam('page'), makeParam('per_page')]);
       expect(result).not.toBeNull();
-      expect(result!.strategy).toBe('offset');
+      expect(result!.strategy).toBe('page');
       expect(result!.param).toBe('page');
       expect(result!.limitParam).toBe('per_page');
     });

@@ -82,6 +82,15 @@ export function collectInlineEnumsFromOperations(
       ]) {
         collectDistinctEnums(param.type, undefined, enums, enumNames);
       }
+      // The iterator's item type is reached through `response` when detection
+      // unwrapped the data array, but an explicit `dataPath` can type it from
+      // the document — an inline enum, or an array or union holding one — on
+      // a body kept as a wrapper, where nothing else references it. It is
+      // walked on its own, like the envelope companions, under the name the
+      // path gave it (`ListPetsRecord`); one a component enum owns with other
+      // members falls back to a numeric suffix. A model it names is walked
+      // like a body's, so an enum nested in one is reached the same way.
+      if (op.pagination) collectThroughModels(op.pagination.itemType, undefined);
       for (const field of op.pagination?.envelopeFields ?? []) {
         collectDistinctEnums(field.type, undefined, enums, enumNames);
       }
