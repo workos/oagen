@@ -109,6 +109,10 @@ export {
   serversBeyondDefault,
 } from './ir/server-url.js';
 
+// Parameter identity: location + name, a header's name case-folded
+export type { ParameterLocation } from './ir/parameter-key.js';
+export { foldHeaderName, foldParameterName, parameterKey } from './ir/parameter-key.js';
+
 // Errors
 export {
   OagenError,
@@ -154,6 +158,8 @@ export type {
   WebhookModified,
   ParamChange,
   ParamLocation,
+  ResponseContentTypesChange,
+  ResponseHeaderChange,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,

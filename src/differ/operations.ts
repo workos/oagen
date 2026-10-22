@@ -4,19 +4,23 @@ import type {
   Operation,
   PaginationEndOfIteration,
   ResponseContent,
+  ResponseHeader,
   ServerEntry,
   StatusRange,
   TypeRef,
 } from '../ir/types.js';
+import { foldHeaderName } from '../ir/parameter-key.js';
 import { resolveServerUrl } from '../ir/server-url.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 import { diffServers } from './servers.js';
-import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange } from './types.js';
+import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange, ResponseHeaderChange } from './types.js';
 import { locatedParams, paramKey } from './params.js';
 import {
   classifyParamChange,
+  classifyResponseHeaderChange,
   deprecationDetails,
   deprecationFlip,
+  parameterNameShift,
   requestBodyEncodingShift,
   tagsShift,
 } from './classify.js';
@@ -114,6 +118,10 @@ export function diffOperations(
     const errorsChanged = errorsDiff !== 'none';
     const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp);
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
+    // The headers each response entry declares, which an SDK may expose as
+    // typed accessors on a response wrapper (#296).
+    const responseHeaderChanges = diffResponseHeaders(oldOp, newOp);
+    const responseHeadersChanged = responseHeaderChanges.length > 0;
     const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
     // Additive either way: the operation's signature is unchanged, but a
@@ -157,6 +165,7 @@ export function diffOperations(
       injectIdempotencyKeyChanged ||
       errorsChanged ||
       responseContentTypesChanged ||
+      responseHeadersChanged ||
       fallbackResponsesChanged ||
       deprecatedChanged ||
       serversChanged ||
@@ -187,6 +196,10 @@ export function diffOperations(
       // A media type callers could ask for that is gone, or a secondary body
       // that changed shape, breaks them; one they can newly ask for does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
+      // A header the SDK exposed that is gone, retyped or no longer always
+      // sent breaks the code that read it; one added, respelled, deprecated
+      // or now always sent does not.
+      const responseHeadersBreaking = responseHeaderChanges.some((c) => c.classification === 'breaking');
       const fallbackBreaking = fallbackDiff === 'breaking';
       // security: breaking when a request built for the old requirements no
       // longer satisfies the new ones, read from the caller's side.
@@ -217,6 +230,7 @@ export function diffOperations(
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
         responseContentTypesBreaking ||
+        responseHeadersBreaking ||
         fallbackBreaking ||
         serversChanged ||
         securityBreaking ||
@@ -244,6 +258,8 @@ export function diffOperations(
         errorsChanged,
         responseContentTypesChanged,
         responseContentTypeChanges,
+        responseHeadersChanged,
+        responseHeaderChanges,
         fallbackResponsesChanged,
         deprecatedChanged,
         ...deprecation,
@@ -298,11 +314,15 @@ function asDocument(servers: ServerEntry[]): Pick<ApiSpec, 'baseUrl' | 'servers'
 }
 
 /**
- * One response entry's media types, with what the parser left off restored
- * so the two specs' entries compare alike: an error that declares only
- * `application/json` with a schema carries no lists in the IR, so its
- * implicit JSON entry is restored from `type`; a response without content
- * has no bodies.
+ * One response entry's media types and headers, with what the parser left
+ * off restored so the two specs' entries compare alike: an error that
+ * declares only `application/json` with a schema carries no lists in the IR,
+ * so its implicit JSON entry is restored from `type`; a response without
+ * content has no bodies; one without `headers` has none. `contentEntries`
+ * is the differ's one walk of every response kind an operation declares,
+ * and `pairContentEntries` its one rule for which entry of the other spec
+ * each is, so the media-type diff and the header diff compare the same
+ * pairs.
  */
 interface ContentEntry {
   key: string;
@@ -313,6 +333,8 @@ interface ContentEntry {
   isPrimary: boolean;
   /** The entry's media types, one per `contentTypes` entry, in document order. */
   bodies: MediaTypeBody[];
+  /** The headers the entry declares, in document order; `[]` when it declares none. */
+  headers: ResponseHeader[];
   /**
    * Whether another comparison reports a change to the own body when this
    * entry is paired with one of its own kind: `responseChanged` for the
@@ -402,11 +424,15 @@ function contentEntries(op: Operation): ContentEntry[] {
       (op.responseContents !== undefined && entry.contents === op.responseContents) ||
       typeRefsEqual(entry.type, op.response),
   );
+  // The primary's headers are `responseHeaders`, the same array as its
+  // `successResponses` entry's when both exist (how the parser builds it);
+  // a hand-built IR that sets only the entry's is read from the entry.
   entries.push({
     key: primaryEntry ? `success:${primaryEntry.statusCode}` : 'primary',
     ...(primaryEntry ? { statusCode: primaryEntry.statusCode } : {}),
     isPrimary: true,
     bodies: mediaTypeBodies(op.responseContentTypes ?? [], op.responseContents ?? [], op.response),
+    headers: op.responseHeaders ?? primaryEntry?.headers ?? [],
     ownCoveredElsewhere: true,
   });
   for (const entry of successes) {
@@ -416,6 +442,7 @@ function contentEntries(op: Operation): ContentEntry[] {
       statusCode: entry.statusCode,
       isPrimary: false,
       bodies: mediaTypeBodies(entry.contentTypes ?? [], entry.contents ?? [], entry.type),
+      headers: entry.headers ?? [],
       ownCoveredElsewhere: false,
     });
   }
@@ -431,12 +458,16 @@ function contentEntries(op: Operation): ContentEntry[] {
         error.type,
         JSON_MEDIA_TYPE,
       ),
+      headers: error.headers ?? [],
       ownCoveredElsewhere: true,
     });
   }
   // A fallback's own body is its JSON entry, whose retype `fallbackResponsesChanged` reports.
   const fallbacks: Array<
-    ['default' | StatusRange, { type?: TypeRef; contentTypes?: string[]; contents?: ResponseContent[] }]
+    [
+      'default' | StatusRange,
+      { type?: TypeRef; contentTypes?: string[]; contents?: ResponseContent[]; headers?: ResponseHeader[] },
+    ]
   > = [];
   if (op.defaultResponse) fallbacks.push(['default', op.defaultResponse]);
   for (const range of op.rangeResponses ?? []) fallbacks.push([range.range, range]);
@@ -446,6 +477,7 @@ function contentEntries(op: Operation): ContentEntry[] {
       fallback,
       isPrimary: false,
       bodies: mediaTypeBodies(entry.contentTypes ?? [], entry.contents ?? [], entry.type),
+      headers: entry.headers ?? [],
       ownCoveredElsewhere: true,
     });
   }
@@ -453,23 +485,27 @@ function contentEntries(op: Operation): ContentEntry[] {
 }
 
 /**
- * Which body of the old entry each body of the new entry is, so the two
- * entries' media types compare by essence the way the parser types them —
- * `Text/HTML` is `text/html`, `application/problem+json; charset=utf-8` is
- * `application/problem+json` — without two keys of one essence declared side
+ * Which item of the old list each item of the new list is, for two lists
+ * whose items are matched by a folded name: an entry's media types by
+ * essence, the way the parser types them — `Text/HTML` is `text/html`,
+ * `application/problem+json; charset=utf-8` is `application/problem+json` —
+ * and its headers by case-folded name, as HTTP compares them —
+ * `X-Rate-Limit` is `x-rate-limit`. Two names of one folding declared side
  * by side (`application/json` beside `application/json; charset=utf-8`)
- * collapsing into one. A new body claims the old body spelled exactly as it
- * is, else the first old body of its essence that nothing claimed, in
+ * never collapse into one: a new item claims the old item spelled exactly
+ * as it is, else the first old item of its folding that nothing claimed, in
  * document order. What is left on the new side was `added`; what is left on
- * the old side was `removed`. Every pair is in the new entry's order.
+ * the old side was `removed`. Every pair is in the new list's order.
  */
-function pairMediaTypeBodies(
-  oldBodies: MediaTypeBody[],
-  newBodies: MediaTypeBody[],
-): { pairs: Array<[MediaTypeBody, MediaTypeBody]>; added: MediaTypeBody[]; removed: MediaTypeBody[] } {
-  const unclaimed = new Set(oldBodies);
-  const claim = (matches: (old: MediaTypeBody) => boolean): MediaTypeBody | undefined => {
-    for (const old of oldBodies) {
+function pairByName<T>(
+  oldItems: T[],
+  newItems: T[],
+  written: (item: T) => string,
+  folded: (item: T) => string,
+): { pairs: Array<[T, T]>; added: T[]; removed: T[] } {
+  const unclaimed = new Set(oldItems);
+  const claim = (matches: (old: T) => boolean): T | undefined => {
+    for (const old of oldItems) {
       if (!unclaimed.has(old) || !matches(old)) continue;
       unclaimed.delete(old);
       return old;
@@ -477,20 +513,136 @@ function pairMediaTypeBodies(
     return undefined;
   };
   // Exact spellings claim first, whatever their position, so a respelled
-  // key never takes the old body an unchanged key still names.
-  const bySpelling = new Map<MediaTypeBody, MediaTypeBody>();
-  for (const body of newBodies) {
-    const old = claim((candidate) => candidate.mediaType === body.mediaType);
-    if (old) bySpelling.set(body, old);
+  // name never takes the old item an unchanged name still names.
+  const bySpelling = new Map<T, T>();
+  for (const item of newItems) {
+    const old = claim((candidate) => written(candidate) === written(item));
+    if (old) bySpelling.set(item, old);
   }
-  const pairs: Array<[MediaTypeBody, MediaTypeBody]> = [];
-  const added: MediaTypeBody[] = [];
-  for (const body of newBodies) {
-    const old = bySpelling.get(body) ?? claim((candidate) => candidate.essence === body.essence);
-    if (old) pairs.push([old, body]);
-    else added.push(body);
+  const pairs: Array<[T, T]> = [];
+  const added: T[] = [];
+  for (const item of newItems) {
+    const old = bySpelling.get(item) ?? claim((candidate) => folded(candidate) === folded(item));
+    if (old) pairs.push([old, item]);
+    else added.push(item);
   }
-  return { pairs, added, removed: oldBodies.filter((old) => unclaimed.has(old)) };
+  return { pairs, added, removed: oldItems.filter((old) => unclaimed.has(old)) };
+}
+
+/** `pairByName` over an entry's media types: spelled as written, folded to their essence. */
+function pairMediaTypeBodies(
+  oldBodies: MediaTypeBody[],
+  newBodies: MediaTypeBody[],
+): { pairs: Array<[MediaTypeBody, MediaTypeBody]>; added: MediaTypeBody[]; removed: MediaTypeBody[] } {
+  return pairByName(
+    oldBodies,
+    newBodies,
+    (body) => body.mediaType,
+    (body) => body.essence,
+  );
+}
+
+/** `pairByName` over an entry's headers: spelled as written, folded as HTTP compares header names. */
+function pairResponseHeaders(
+  oldHeaders: ResponseHeader[],
+  newHeaders: ResponseHeader[],
+): { pairs: Array<[ResponseHeader, ResponseHeader]>; added: ResponseHeader[]; removed: ResponseHeader[] } {
+  return pairByName(
+    oldHeaders,
+    newHeaders,
+    (header) => header.name,
+    (header) => foldHeaderName(header.name),
+  );
+}
+
+/**
+ * Per response entry both specs have, the headers the new spec added,
+ * removed, retyped, re-required, respelled or deprecated, each change
+ * carrying the entry's `statusCode` or `fallback`. Entries pair as
+ * `diffResponseContentTypes` pairs them (`pairContentEntries`), so the entry
+ * whose media types are compared with another's is the one whose headers
+ * are; within an entry, headers pair by case-folded name
+ * (`pairResponseHeaders`), so a header that only changed case is one header,
+ * reported `header-name-changed`. A 2xx the old spec declared and the new
+ * does not has no other diff to report it, so each of its headers is
+ * reported `header-removed`, as its media types are reported removed; an
+ * error or fallback entry only one spec declares is the errors or fallback
+ * diff's business, and a 2xx the new spec adds is no header change. A
+ * webhook's accepted responses carry no headers in the IR, so `diffWebhooks`
+ * has nothing of the kind to compare.
+ */
+function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeaderChange[] {
+  const oldEntries = contentEntries(oldOp);
+  const newEntries = contentEntries(newOp);
+  const pairs = pairContentEntries(oldEntries, newEntries);
+  const paired = new Set<ContentEntry>();
+  const changes: ResponseHeaderChange[] = [];
+  // Every change says which response entry it is about, in the position
+  // `ResponseContentTypesChange` reports an entry: a status code, or the
+  // fallback key, or neither for a lone 2xx.
+  const at = (entry: ContentEntry, change: ResponseHeaderChange): ResponseHeaderChange => {
+    const { kind, headerName, ...rest } = change;
+    return {
+      kind,
+      headerName,
+      ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
+      ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
+      ...rest,
+    };
+  };
+  for (const entry of newEntries) {
+    const old = pairs.get(entry);
+    if (!old) continue;
+    paired.add(old);
+    const { pairs: headers, added, removed } = pairResponseHeaders(old.headers, entry.headers);
+    for (const header of added) changes.push(at(entry, classifyResponseHeaderChange('header-added', header.name)));
+    for (const header of removed) changes.push(at(entry, classifyResponseHeaderChange('header-removed', header.name)));
+    for (const [before, after] of headers) {
+      for (const change of headerChanges(before, after)) changes.push(at(entry, change));
+    }
+  }
+  for (const old of oldEntries) {
+    if (paired.has(old) || !old.key.startsWith('success:')) continue;
+    for (const header of old.headers)
+      changes.push(at(old, classifyResponseHeaderChange('header-removed', header.name)));
+  }
+  return changes;
+}
+
+/**
+ * What changed about one header both specs declare, in the order
+ * `diffParams` reports a parameter's: its spelling, its type, its
+ * requiredness, its `deprecated` flag. Each kind is classified from the
+ * reader's side by `classifyResponseHeaderChange`; the name is the new
+ * spec's spelling.
+ */
+function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseHeaderChange[] {
+  const changes: ResponseHeaderChange[] = [];
+  const name = after.name;
+  const respelled = parameterNameShift(before, after);
+  if (respelled) changes.push({ ...classifyResponseHeaderChange('header-name-changed', name), ...respelled });
+  if (!typeRefsEqual(before.type, after.type)) {
+    if (primitivesDifferOnlyByFormat(before.type, after.type)) {
+      changes.push({
+        ...classifyResponseHeaderChange('header-format-changed', name),
+        details: formatChangeDetails(before.type, after.type),
+      });
+    } else {
+      changes.push(classifyResponseHeaderChange('header-type-changed', name));
+    }
+  }
+  if (before.required !== after.required) {
+    changes.push(classifyResponseHeaderChange('header-required-changed', name, after.required));
+  }
+  const deprecation = deprecationFlip(before, after);
+  if (deprecation) {
+    changes.push({
+      ...classifyResponseHeaderChange('header-deprecated-changed', name),
+      ...deprecation,
+      details: deprecationDetails(deprecation.newDeprecated),
+    });
+  }
+  return changes;
 }
 
 /**
@@ -669,7 +821,10 @@ function classifyKeyedResponsesChange<K>(
 /**
  * Diff an operation's parameters in every location it carries them — path,
  * query, header and cookie, through `locatedParams` — matched by location
- * and name (`paramKey`) and classified from the caller's side by
+ * and name (`paramKey`, which folds a header's name, so `X-Pet-Token` on
+ * one side and `x-pet-token` on the other are one parameter, compared like
+ * any other and reported as `param-name-changed` rather than as a removal
+ * beside an addition — #295) and classified from the caller's side by
  * `classifyParamChange`. Cookie parameters were left out of this walk until
  * #294, so a change to one came out as no change.
  */
@@ -701,6 +856,11 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     if (!oldEntry) continue;
     const name = newEntry.p.name;
     const loc = newEntry.loc;
+
+    const renamed = parameterNameShift(oldEntry.p, newEntry.p);
+    if (renamed) {
+      changes.push({ ...at(classifyParamChange('param-name-changed', name), loc), ...renamed });
+    }
 
     if (!typeRefsEqual(oldEntry.p.type, newEntry.p.type)) {
       if (primitivesDifferOnlyByFormat(oldEntry.p.type, newEntry.p.type)) {

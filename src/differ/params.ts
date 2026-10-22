@@ -1,4 +1,5 @@
 import type { Parameter } from '../ir/types.js';
+import { parameterKey } from '../ir/parameter-key.js';
 import type { ParamLocation } from './types.js';
 
 /** A parameter tagged with where it lives, as `locatedParams` yields it. */
@@ -47,8 +48,12 @@ export function locatedParams(node: ParamCarrier): LocatedParam[] {
  * The key a parameter is matched on between two specs. OpenAPI allows a path
  * `id` beside a query `id` on one operation, and a webhook's header and query
  * parameters may share a name, so the name alone does not identify one
- * (#261): the location is joined to it.
+ * (#261): the location is joined to it. Header names are case-insensitive
+ * (RFC 9110 §5.1), so a header's name is folded before it is joined (#295).
+ * The rule is `parameterKey` in `ir/parameter-key.ts`, the identity the
+ * parser merges a path item's parameters with an operation's on, so what the
+ * parser reads as one parameter the differ pairs as one.
  */
 export function paramKey(loc: ParamLocation, name: string): string {
-  return `${loc}:${name}`;
+  return parameterKey(loc, name);
 }

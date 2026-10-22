@@ -4,6 +4,7 @@ import { locatedParams, paramKey } from './params.js';
 import {
   deprecationDetails,
   deprecationFlip,
+  parameterNameShift,
   requestBodyEncodingDetails,
   requestBodyEncodingShift,
   tagsShift,
@@ -179,11 +180,14 @@ function diffWebhookResponses(oldWebhook: Webhook, newWebhook: Webhook): { chang
  * `diffParams` uses too — from the receiver's side, which inverts the
  * request-side rules `classifyParamChange` applies to an operation: the
  * receiver reads these values and never supplies them. Parameters are
- * matched by location and name (`paramKey`), since OpenAPI lets a header and
- * a query parameter share a name, and every change carries its
- * `paramLocation`.
+ * matched by location and name (`paramKey`, a header's name case-folded),
+ * since OpenAPI lets a header and a query parameter share a name, and every
+ * change carries its `paramLocation`.
  *
  * - added: additive, required or not — the sender simply starts carrying it.
+ * - name changed: only a header's case can (`X-Pet-Signature` →
+ *   `x-pet-signature`); additive, as on an operation — the wire reads it
+ *   the same (RFC 9110 §5.1).
  * - removed: breaking — handler code that read it has nothing to read.
  * - type changed: breaking; format-only changes are additive, as elsewhere.
  * - optional → required: additive (now always present);
@@ -215,6 +219,17 @@ function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChang
     if (!oldEntry) continue;
     const oldParam = oldEntry.p;
     const name = newParam.name;
+
+    const renamed = parameterNameShift(oldParam, newParam);
+    if (renamed) {
+      changes.push({
+        kind: 'param-name-changed',
+        paramName: name,
+        classification: 'additive',
+        paramLocation: loc,
+        ...renamed,
+      });
+    }
 
     if (!typeRefsEqual(oldParam.type, newParam.type)) {
       if (primitivesDifferOnlyByFormat(oldParam.type, newParam.type)) {

@@ -1,4 +1,5 @@
-import type { Operation, SecurityRequirementSet } from '../ir/types.js';
+import type { Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
+import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
   oldVersion: string;
@@ -71,6 +72,17 @@ export type DeprecatedNode =
       operationName: string;
       paramName: string;
       paramLocation: ParamLocation;
+    }
+  | {
+      node: 'response-header';
+      serviceName: string;
+      operationName: string;
+      /** The header's name as written in the new spec. */
+      headerName: string;
+      /** The response entry's status code; unset for a fallback response and for a lone 2xx, as on `ResponseHeaderChange`. */
+      statusCode?: number;
+      /** Set instead of `statusCode` for the `default` or a range response. */
+      fallback?: 'default' | StatusRange;
     }
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
@@ -344,7 +356,9 @@ export interface OperationModified {
   /**
    * The operation's own `deprecated` flipped. Additive either way: the
    * signature is unchanged. A parameter's flag flipping is a
-   * `param-deprecated-changed` entry in `paramChanges` instead.
+   * `param-deprecated-changed` entry in `paramChanges` instead, and a
+   * response header's a `header-deprecated-changed` entry in
+   * `responseHeaderChanges`.
    */
   deprecatedChanged: boolean;
   /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
@@ -383,9 +397,84 @@ export interface OperationModified {
    */
   responseContentTypesChanged: boolean;
   responseContentTypeChanges: ResponseContentTypesChange[];
+  /**
+   * True when a response entry gained, lost, retyped, re-required, renamed
+   * or deprecated one of the headers it declares; `responseHeaderChanges`
+   * says which.
+   */
+  responseHeadersChanged: boolean;
+  responseHeaderChanges: ResponseHeaderChange[];
   /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
   fallbackResponsesChanged: boolean;
   classification: 'additive' | 'breaking';
+}
+
+/**
+ * A change to one header a response declares — `Operation.responseHeaders`
+ * on the primary success response, `headers` on each other `SuccessResponse`,
+ * on each `ErrorResponse`, on the `DefaultResponse` and on each
+ * `RangeResponse` — between two specs. The SDK reads these headers off the
+ * response and never sends them, so each kind is classified from the
+ * reader's side, as a webhook's parameters are: a header added is additive,
+ * required or not (the server simply starts sending it); one removed is
+ * breaking (an accessor the SDK exposed is gone); a type change is breaking,
+ * a format-only change additive, as elsewhere; optional → required is
+ * additive (the header is now always present) and required → optional
+ * breaking (code that assumed it breaks); a `deprecated` flip and a
+ * respelling are additive.
+ *
+ * Response entries pair up between the two specs exactly as they do for
+ * `responseContentTypeChanges`: by status code — every 2xx entry, the
+ * primary among them, and every error — with `statusCode` set; a lone 2xx,
+ * which carries no code in the IR, with the entry of the other spec that
+ * offers its media types, else with that spec's primary, reported with
+ * `statusCode` unset when it is the new spec's lone entry; the `default` and
+ * range responses by key, with `fallback` set. Within an entry, headers pair
+ * by name case-insensitively (RFC 9110 §5.1, `foldHeaderName`), so
+ * `X-Rate-Limit` and `x-rate-limit` are one header: a pair whose written
+ * names differ is reported as `header-name-changed` with `oldName`/`newName`
+ * beside it, additive, since an emitter may derive an identifier from the
+ * name as written. Two names of one folding declared side by side (a
+ * hand-built IR; the parser keeps one) stay two headers: each pairs with the
+ * one spelled the same way on the other side, else with the other side's
+ * next unpaired name of its folding, and one left over is added or removed.
+ * A 2xx entry the old spec declared and the new does not has no other diff
+ * to report its headers, so each is reported `header-removed`; an error or
+ * fallback entry only one spec declares is the errors or fallback diff's
+ * business, and so is a 2xx the new spec adds. A webhook's accepted
+ * responses (`WebhookResponse`) carry no headers in the IR, so a
+ * `webhook-modified` change has no such list.
+ */
+export interface ResponseHeaderChange {
+  kind:
+    | 'header-added'
+    | 'header-removed'
+    | 'header-type-changed'
+    | 'header-format-changed'
+    | 'header-required-changed'
+    | 'header-name-changed'
+    | 'header-deprecated-changed';
+  /** The header's name as written in the spec that declares it: the new spec's for a header both declare. */
+  headerName: string;
+  /** The response entry's status code; unset for a fallback response and for a lone 2xx, which carries no code in the IR. */
+  statusCode?: number;
+  /** Set instead of `statusCode` for the `default` or a `1XX`–`5XX` range response, which carry no code. */
+  fallback?: 'default' | StatusRange;
+  classification: 'additive' | 'breaking';
+  /** For `header-name-changed`: the name as written in the old spec. */
+  oldName?: string;
+  /** For `header-name-changed`: the name as written in the new spec (the same as `headerName`). */
+  newName?: string;
+  /** For `header-deprecated-changed`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
+  /**
+   * What changed, in words: `format <old> → <new>` for `header-format-changed`,
+   * `optional → required` or `required → optional` for
+   * `header-required-changed`, `name <old> → <new>` for `header-name-changed`,
+   * `live → deprecated` or `deprecated → live` for `header-deprecated-changed`.
+   */
+  details?: string;
 }
 
 /**
@@ -454,7 +543,9 @@ export interface WebhookRemoved {
  * body that may now be absent breaks a handler that assumed one, and
  * parameter changes are classified the way a response's would be (see
  * `diffWebhookParams`). Every `ParamChange` carries its `paramLocation`,
- * since a header and a query parameter may share a name. A parameter's
+ * since a header and a query parameter may share a name; a header's name is
+ * matched case-insensitively, as on an operation, so a header whose name
+ * only changed case is a `param-name-changed` entry. A parameter's
  * `deprecated` flipping is a `param-deprecated-changed` entry there, as on
  * an operation. The security the request carries is read from the
  * receiver's side too: a credential the sender stops presenting, or an
@@ -518,14 +609,23 @@ export interface WebhookModified {
  * `cookieParams`); a webhook carries `header`, `query` and `cookie` ones.
  * `locatedParams` in `params.ts` tags every parameter a node carries with
  * its location, and `paramKey` there joins it to the name to identify one.
+ * The same four locations `ParameterLocation` in `ir/parameter-key.ts`
+ * names, since the parser merges parameters on the same identity.
  */
-export type ParamLocation = 'path' | 'query' | 'header' | 'cookie';
+export type ParamLocation = ParameterLocation;
 
 /**
  * A change to one parameter of an operation or a webhook, in any location it
- * carries one. Parameters are matched by location and name — OpenAPI allows
- * a path `id` beside a query `id` on one operation — so every entry carries
- * `paramLocation` to say which one it is.
+ * carries one. Parameters are matched by location and name (`paramKey` in
+ * `params.ts`, which is `parameterKey` in `ir/parameter-key.ts`) — OpenAPI
+ * allows a path `id` beside a query `id` on one operation — so every entry
+ * carries `paramLocation` to say which one it is. A header's name is
+ * compared case-insensitively (RFC 9110 §5.1): a header written
+ * `X-Pet-Token` on one side and `x-pet-token` on the other is one parameter,
+ * and the spelling change is a `param-name-changed` entry (additive, with
+ * `oldName`/`newName`) beside whatever else changed about it, not a
+ * `param-removed` beside a `param-added`. Path, query and cookie names are
+ * case-sensitive. `paramName` is the name as the new spec writes it.
  */
 export interface ParamChange {
   kind:
@@ -535,9 +635,14 @@ export interface ParamChange {
     | 'param-format-changed'
     | 'param-required-changed'
     | 'param-default-changed'
-    | 'param-deprecated-changed';
+    | 'param-deprecated-changed'
+    | 'param-name-changed';
   paramName: string;
   classification: 'additive' | 'breaking';
+  /** For `param-name-changed`: the name as the old spec wrote it. */
+  oldName?: string;
+  /** For `param-name-changed`: the name as the new spec writes it (also `paramName`). */
+  newName?: string;
   /** For `param-default-changed`: serialized old default value, or `null` if previously unset. */
   oldDefault?: string | null;
   /** For `param-default-changed`: serialized new default value, or `null` if now unset. */
@@ -552,7 +657,10 @@ export interface ParamChange {
    * parameters may share a name).
    */
   paramLocation?: ParamLocation;
-  /** For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
+  /**
+   * For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`.
+   * For `param-name-changed`: `name X-Pet-Token → x-pet-token`.
+   */
   details?: string;
 }
 
