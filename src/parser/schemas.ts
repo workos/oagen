@@ -1860,9 +1860,14 @@ function isNullVariantSchema(schema: SchemaObject): boolean {
  * (`warnOnUncarriedProperties`).
  *
  * Applies only when the schema's `type` admits an object (`object`, a type
- * list naming it, or none) and the composition is what types the schema —
- * an `allOf` or `oneOf` of bare limits beside `properties` leaves the schema
- * the object it is. Returns the schema itself when nothing folds, else a
+ * list naming it, or none), it declares at least one property of its own
+ * (`hasFoldableProperties`: an empty `properties: {}` leaves the schema as
+ * written, so `{ properties: {}, allOf: [map] }` stays the map and
+ * `{ properties: {}, oneOf: [...] }` the union as before) and the
+ * composition is what types the schema — an `allOf` or `oneOf` of bare
+ * limits beside `properties` leaves the schema the object it is. A property
+ * is matched by its own name only (`Object.hasOwn`), so a field named
+ * `constructor` or `toString` is a field. Returns the schema itself when nothing folds, else a
  * copy with no `properties` or `required` of its own, every other keyword —
  * `description`, `nullable`, limits, `discriminator`, `additionalProperties`
  * — kept; so folding a folded schema changes nothing. A folded variant is a
@@ -1883,9 +1888,15 @@ export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
     : { ...rest, anyOf: (schema.anyOf ?? []).map(conjoin) };
 }
 
-/** Whether `schema` declares `properties` of its own that a composition beside them could carry (see `foldSiblingProperties`). */
+/**
+ * Whether `schema` declares at least one property of its own that a
+ * composition beside them could carry (see `foldSiblingProperties`). An
+ * empty `properties: {}` declares none: folded, it would add an empty object
+ * member that types the schema as a model the extractor builds nothing for
+ * (`{ properties: {}, allOf: [map] }` is the map, as written).
+ */
 function hasFoldableProperties(schema: SchemaObject): boolean {
-  if (schema.$ref || schema.properties === undefined) return false;
+  if (schema.$ref || schema.properties === undefined || Object.keys(schema.properties).length === 0) return false;
   const { type } = schema;
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
 }
@@ -1900,7 +1911,7 @@ function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): Sch
   if (!isInlineObjectSchema(variant)) return variant;
   const properties: Record<string, SchemaObject | undefined> = { ...own.properties };
   for (const [name, property] of Object.entries(variant.properties ?? {})) {
-    if (!(name in properties)) properties[name] = property;
+    if (!Object.hasOwn(properties, name)) properties[name] = property;
   }
   const required = [...new Set([...(own.required ?? []), ...(variant.required ?? [])])];
   const folded: SchemaObject = { ...variant, properties, ...(required.length > 0 && { required }) };
@@ -2931,7 +2942,7 @@ function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObje
   const visit = (s: SchemaObject): void => {
     if (s.properties) {
       for (const [k, v] of Object.entries(s.properties)) {
-        if (!(k in props) && v) props[k] = v;
+        if (!Object.hasOwn(props, k) && v) props[k] = v;
       }
     }
     if (s.allOf) {
@@ -3107,7 +3118,7 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
   const collect = (s: SchemaObject): void => {
     if (s.properties) {
       for (const [k, v] of Object.entries(s.properties)) {
-        if (!(k in mergedProperties) && v) mergedProperties[k] = v;
+        if (!Object.hasOwn(mergedProperties, k) && v) mergedProperties[k] = v;
       }
     }
     if (s.required) {
@@ -3138,8 +3149,8 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
         if (s) schemas.push(s);
       }
       const merged = mergeBranchPropertySchemas(schemas);
-      if (!(key in mergedProperties)) mergedProperties[key] = merged;
-      const inAllBranches = flatBranches.every((b) => b.properties && key in b.properties);
+      if (!Object.hasOwn(mergedProperties, key)) mergedProperties[key] = merged;
+      const inAllBranches = flatBranches.every((b) => b.properties !== undefined && Object.hasOwn(b.properties, key));
       const requiredInAll = inAllBranches && flatBranches.every((b) => (b.required ?? []).includes(key));
       if (requiredInAll) mergedRequired.add(key);
     }

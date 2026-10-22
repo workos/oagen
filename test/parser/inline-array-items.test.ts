@@ -900,6 +900,193 @@ describe('review round 1', () => {
   });
 });
 
+describe('review round 2', () => {
+  it('keeps a property named like an `Object.prototype` member at every merge', async () => {
+    const { spec, warnings } = await parse(
+      'prototype-names',
+      specDoc(
+        {
+          '/things': {
+            get: {
+              operationId: 'getThing',
+              responses: ok(obj({ toString: str, id: str }, { allOf: [{ $ref: '#/components/schemas/Base' }] })),
+            },
+          },
+        },
+        {
+          Base: obj({ constructor: { type: 'integer' }, name: str }),
+          Holder: obj({
+            thing: obj({ id: str }, { oneOf: [obj({ constructor: str }, { required: ['constructor'] }), note] }),
+            merged: obj({ hasOwnProperty: str }, { allOf: [obj({ valueOf: str })] }),
+          }),
+        },
+      ),
+    );
+    // The response merges its own `toString` and the member's `constructor`.
+    expect(modelOf(spec, 'GetThingResponse').fields.map((f) => f.name)).toEqual([
+      'toString',
+      'id',
+      'constructor',
+      'name',
+    ]);
+    // The variant keeps its required `constructor` beside the folded `id`.
+    const variant = modelOf(spec, 'HolderThing');
+    expect(variant.fields.map((f) => [f.name, f.required])).toEqual([
+      ['id', false],
+      ['constructor', true],
+    ]);
+    expect(fieldsOf(spec, 'HolderThingWithText')).toEqual(['id', 'text']);
+    expect(fieldsOf(spec, 'HolderMerged')).toEqual(['hasOwnProperty', 'valueOf']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Base', 'Holder']);
+  });
+
+  it('leaves an empty `properties: {}` beside a composition as written', async () => {
+    const map: SchemaObject = { type: 'object', additionalProperties: str };
+    const { spec, warnings } = await parse(
+      'empty-properties',
+      specDoc(
+        {
+          '/things': {
+            get: { operationId: 'getThing', responses: ok({ type: 'object', properties: {}, allOf: [Pet] }) },
+            post: {
+              operationId: 'createThing',
+              requestBody: json({ type: 'object', properties: {}, allOf: [Pet] }),
+              responses: ok({ type: 'object', properties: {}, oneOf: [pet, note] }),
+            },
+            put: {
+              operationId: 'replaceThing',
+              requestBody: json({ type: 'object', properties: {}, oneOf: [pet, note] }),
+              responses: ok({ type: 'object', properties: {} }),
+            },
+          },
+        },
+        {
+          Pet: pet,
+          Holder: obj({
+            meta: { properties: {}, allOf: [map] },
+            pet: { properties: {}, allOf: [Pet] },
+            either: { properties: {}, oneOf: [pet, note] },
+            nested: { properties: {}, allOf: [{ oneOf: [pet, note] }] },
+          }),
+        },
+      ),
+    );
+    const holder = modelOf(spec, 'Holder');
+    const typeOf = (name: string) => show(holder.fields.find((f) => f.name === name)!.type);
+    expect(typeOf('meta')).toBe('map<string>');
+    expect(typeOf('pet')).toBe('Pet');
+    expect(typeOf('either')).toBe('(HolderEither | HolderEitherWithText)');
+    expect(typeOf('nested')).toBe('(HolderNested | HolderNestedWithText)');
+    expect(fieldsOf(spec, 'HolderEither')).toEqual(['name']);
+    // At a body root the composition is read too, never an empty model: an
+    // `allOf` response is the merge it always was, a `oneOf` the union, and a
+    // request body the reference or union a field of the same schema is.
+    const ops = opsOf(spec);
+    expect(show(ops.getThing.response)).toBe('GetThingResponse');
+    expect(fieldsOf(spec, 'GetThingResponse')).toEqual(['name']);
+    expect(show(ops.createThing.requestBody!)).toBe('Pet');
+    expect(show(ops.createThing.response)).toBe('(CreateThingResponse | CreateThingResponseWithText)');
+    expect(fieldsOf(spec, 'CreateThingResponse')).toEqual(['name']);
+    expect(show(ops.replaceThing.requestBody!)).toBe('(ReplaceThingRequest | ReplaceThingRequestWithText)');
+    expect(fieldsOf(spec, 'ReplaceThingRequestWithText')).toEqual(['text']);
+    // An empty object with no composition is still the empty model it was.
+    expect(show(ops.replaceThing.response)).toBe('ReplaceThingResponse');
+    expect(fieldsOf(spec, 'ReplaceThingResponse')).toEqual([]);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Holder', 'Pet']);
+  });
+
+  it('settles `<Op>Item` against a component of the same name: another shape steps, an identical one shares', async () => {
+    const shapes = { oneOf: [obj({ radius: str }), obj({ side: str })] };
+    const { spec, warnings } = await parse(
+      'item-vs-component',
+      specDoc(
+        {
+          // A component `ListShapesItem { id }` owns the bare name: the items step to `ListShapesResponseItem`.
+          '/shapes': { get: { operationId: 'listShapes', responses: ok({ type: 'array', items: shapes }) } },
+          // The same, inside a list envelope.
+          '/marks': {
+            get: {
+              operationId: 'listMarks',
+              parameters: [{ name: 'after', in: 'query', schema: str }],
+              responses: ok(obj({ data: { type: 'array', items: shapes }, list_metadata: obj({ after: str }) })),
+            },
+          },
+          // Items identical to the component share it: no inline model, the response references `ListPetsItem`.
+          '/pets': { get: { operationId: 'listPets', responses: ok({ type: 'array', items: pet }) } },
+          // A plain object of another shape steps too (#242 named it `ListNotesItem` and lost to the component).
+          '/notes': { get: { operationId: 'listNotes', responses: ok({ type: 'array', items: note }) } },
+        },
+        {
+          ListShapesItem: obj({ id: str }),
+          ListMarksItem: obj({ id: str }),
+          ListPetsItem: pet,
+          ListNotesItem: obj({ id: str }),
+        },
+      ),
+    );
+    const ops = opsOf(spec);
+    expect(show(ops.listShapes.response)).toBe('(ListShapesResponseItem | ListShapesResponseItemWithSide)[]');
+    expect(fieldsOf(spec, 'ListShapesResponseItem')).toEqual(['radius']);
+    expect(fieldsOf(spec, 'ListShapesResponseItemWithSide')).toEqual(['side']);
+    expect(fieldsOf(spec, 'ListShapesItem')).toEqual(['id']);
+    expect(show(ops.listMarks.response)).toBe('(ListMarksResponseItem | ListMarksResponseItemWithSide)[]');
+    expect(ops.listMarks.pagination?.itemType).toEqual({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'ListMarksResponseItem' },
+        { kind: 'model', name: 'ListMarksResponseItemWithSide' },
+      ],
+      compositionKind: 'oneOf',
+    });
+    expect(fieldsOf(spec, 'ListMarksItem')).toEqual(['id']);
+    expect(show(ops.listPets.response)).toBe('ListPetsItem[]');
+    expect(spec.models.filter((m) => m.name === 'ListPetsItem')).toHaveLength(1);
+    expect(show(ops.listNotes.response)).toBe('ListNotesResponseItem[]');
+    expect(fieldsOf(spec, 'ListNotesResponseItem')).toEqual(['text']);
+    expect(fieldsOf(spec, 'ListNotesItem')).toEqual(['id']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['ListShapesItem', 'ListMarksItem', 'ListPetsItem', 'ListNotesItem']);
+  });
+
+  it('settles `<Op>Item` against an earlier operation and a component enum, in document order', async () => {
+    const { spec, warnings } = await parse(
+      'item-vs-earlier',
+      specDoc(
+        {
+          // `getListShapesItem` mints `ListShapesItem` for a nested field before `listShapes` is read…
+          '/shapes/item': {
+            get: {
+              operationId: 'getListShapesItem',
+              responses: ok(obj({ list_shapes_item: obj({ id: str }) })),
+            },
+          },
+          // … so the items step; and `ListKindsItem` is a component enum, which no model may take.
+          '/shapes': {
+            get: { operationId: 'listShapes', responses: ok({ type: 'array', items: obj({ radius: str }) }) },
+          },
+          '/kinds': { get: { operationId: 'listKinds', responses: ok({ type: 'array', items: obj({ label: str }) }) } },
+        },
+        { ListKindsItem: { type: 'string', enum: ['a', 'b'] } },
+      ),
+    );
+    const ops = opsOf(spec);
+    expect(show(ops.getListShapesItem.response)).toBe('GetListShapesItemResponse');
+    expect(fieldsOf(spec, 'GetListShapesItemResponse')).toEqual(['list_shapes_item']);
+    expect(show(modelOf(spec, 'GetListShapesItemResponse').fields[0].type)).toBe(
+      'GetListShapesItemResponseListShapesItem',
+    );
+    expect(show(ops.listShapes.response)).toBe('ListShapesItem[]');
+    expect(fieldsOf(spec, 'ListShapesItem')).toEqual(['radius']);
+    expect(show(ops.listKinds.response)).toBe('ListKindsResponseItem[]');
+    expect(fieldsOf(spec, 'ListKindsResponseItem')).toEqual(['label']);
+    expect(spec.enums.map((e) => e.name)).toEqual(['ListKindsItem']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['ListKindsItem']);
+  });
+});
+
 describe('(3) a nullable array is the array it is, however the null is written', () => {
   const spellings: Record<string, SchemaObject> = {
     typeList: { type: ['array', 'null'], items: pet },

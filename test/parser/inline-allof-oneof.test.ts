@@ -1065,3 +1065,40 @@ describe('round 2: keywords the declarations of a combined property agree on', (
     ]);
   });
 });
+
+describe('properties are matched by own name', () => {
+  it('keeps a property named constructor, toString or __proto__ through the merge, from a member or a variant', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({
+              allOf: [
+                { type: 'object', properties: { constructor: { type: 'string' } }, required: ['constructor'] },
+                {
+                  oneOf: [
+                    { properties: { toString: { type: 'string' } } },
+                    // A computed key: the plain `__proto__: …` spelling would set the literal's prototype.
+                    { properties: { ['__proto__']: { type: 'object', properties: { x: { type: 'string' } } } } },
+                  ],
+                },
+              ],
+            }),
+            responses: { '204': { description: 'done' } },
+          },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['CreatePetRequest'])).toEqual([
+      'constructor: string',
+      'toString?: string',
+      '__proto__?: CreatePetRequestProto',
+    ]);
+    expect(fieldsOf(models['CreatePetRequestProto'])).toEqual(['x?: string']);
+    expectSound(ir, []);
+  });
+});

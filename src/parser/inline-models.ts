@@ -1615,8 +1615,10 @@ export function materializeMergedAllOf(
   const merged = mergeAllOfMembers(schema, componentSchemas);
   if (merged.properties.length === 0) return false;
   results.push(buildMergedModel(name, merged, componentSchemas));
-  const own: Record<string, SchemaObject> = {};
-  for (const p of merged.properties) if (p.origin === null) own[p.name] = p.schema;
+  // Properties are matched by own name throughout the merge (a `Map` there,
+  // `Object.fromEntries` here), so a property named `constructor`,
+  // `toString` or `__proto__` is kept and re-entered like any other.
+  const own = Object.fromEntries(merged.properties.filter((p) => p.origin === null).map((p) => [p.name, p.schema]));
   const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
   extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
   return true;
