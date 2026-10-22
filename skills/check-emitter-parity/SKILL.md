@@ -151,8 +151,8 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### EnumValue
 
-- `description` — Enum value doc comment
-- `deprecated` — Deprecation marker on enum values (declared in the IR; the parser does not set it today, so it only arrives from an overlay or plugin)
+- `description` — Enum value doc comment (a `oneOf`-of-`const` member's own `description`, else the value's `x-enum-descriptions` / `x-enumDescriptions` entry)
+- `deprecated` — Deprecation marker on one enum value (`true` when the value's `const` member says `deprecated: true`; a plain `enum:` list never sets it)
 
 ## Step 3: Read Emitter Generators
 
