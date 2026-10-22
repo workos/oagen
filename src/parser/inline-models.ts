@@ -190,8 +190,14 @@ export function reservedInlineNames(
   return reserved;
 }
 
-/** Documentation keywords that do not shape a model; ignored by `schemaShapeKey` at a schema's own level. */
-const DOC_KEYWORDS = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs', 'deprecated']);
+/**
+ * Documentation keywords that do not shape a model; ignored by
+ * `schemaShapeKey` at a schema's own level. `deprecated` is not one of them:
+ * a deprecated copy never shares a live model's name, and a `const` member
+ * deprecated on one side only makes a different enum, so `deprecated: true`
+ * is shape at every level (a `false` is dropped, like `nullable: false`).
+ */
+const DOC_KEYWORDS = new Set(['description', 'title', 'example', 'examples', 'summary', 'externalDocs']);
 /** Keywords whose value maps NAMES (not keywords) to schemas: names are kept verbatim, values recurse as schemas. */
 const NAMED_SCHEMA_MAPS = new Set(['properties', 'patternProperties', 'dependentSchemas', '$defs', 'definitions']);
 /** Keywords whose value is a single schema. */
@@ -247,6 +253,7 @@ export function schemaShapeKey(schema: SchemaObject): string {
       const v = value[keyword];
       if (DOC_KEYWORDS.has(keyword) || keyword.startsWith('x-')) continue;
       if (keyword === 'nullable' && v === false) continue;
+      if (keyword === 'deprecated' && v !== true) continue;
       if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(v)) {
         const named: Record<string, unknown> = {};
         for (const name of Object.keys(v).sort()) named[name] = schemaKey(v[name]);

@@ -176,6 +176,7 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
     })),
     enums: spec.enums.map((e) => ({
       ...e,
+      ...expandText(e, 'description'),
       ...expandExternalDocs(e),
       values: e.values.map((v) => ({ ...v, ...expandText(v, 'description') })),
     })),
