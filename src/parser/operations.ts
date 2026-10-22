@@ -9,6 +9,7 @@ import type {
   SuccessResponse,
   ResponseHeader,
   ResponseContent,
+  RequestBodyContent,
   DefaultResponse,
   RangeResponse,
   Model,
@@ -29,7 +30,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
+import { mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -1861,23 +1862,27 @@ function buildOperation(
         )
       : [];
 
+  // Names this operation's models in the shape registry, and qualifies a
+  // deferred model's name when one of them is taken across operations.
+  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
+
   const reqBodyModels: Model[] = [];
-  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
-    requestBodyObject,
-    op,
-    pathModelBaseName,
-    reqBodyModels,
+  const {
+    body: requestBody,
+    encoding: requestBodyEncoding,
+    contentType: requestBodyContentType,
+    contentTypes: requestBodyContentTypes,
+    contents: requestBodyContents,
+  } = extractRequestBody(requestBodyObject, op, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
+    deferred,
+    operationQualifier,
     componentSchemas,
-    opLabel,
-  );
+  });
   // Read off the resolved body so a `components/requestBodies` ref's flag
   // counts. Only `true` makes the body required: OpenAPI defaults the flag
   // to `false`, and a non-boolean value is not a declaration of requiredness.
   // Set exactly when a body is, so the two fields can be read together.
   const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
-  // Names this operation's models in the shape registry, and qualifies a
-  // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
 
   // The page parameter's first value is read from its schema as written, so a
   // `default`/`minimum` behind `allOf: [{ $ref }]` or a nullable wrapper —
@@ -2044,9 +2049,15 @@ function buildOperation(
     cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
     requestBody,
     requestBodyEncoding,
+    // The picked media type's essence, what an emitter sends as Content-Type;
+    // set exactly when the body is.
+    ...(requestBodyContentType && { requestBodyContentType }),
     // Added only when the operation has a body so bodiless operations keep
     // their shape.
     ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    // Every media type the body declares, present only when there is one —
+    // the request-side twin of `responseContentTypes` / `responseContents`.
+    ...(requestBodyContentTypes && { requestBodyContentTypes, requestBodyContents }),
     response,
     // Added only when present so operations without headers keep their shape.
     ...(responseHeaders && { responseHeaders }),
@@ -2432,10 +2443,31 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
   { matches: (essence) => essence === 'text/plain', encoding: 'text', schemaRequired: false },
 ];
 
-/** The content entry a request body is read from: the key as written, its wire encoding and its schema. */
+/** The wire encoding a media type implies by essence (`REQUEST_BODY_MEDIA_TYPES`); `undefined` for one the pick never reads. */
+function requestBodyEncodingOf(contentType: string): RequestBodyEncoding | undefined {
+  const essence = mediaTypeEssence(contentType);
+  return REQUEST_BODY_MEDIA_TYPES.find(({ matches }) => matches(essence))?.encoding;
+}
+
+/**
+ * The type of a request content entry that declares no schema, by media type
+ * essence: a binary string for `application/octet-stream`, a string for
+ * `text/plain` (`schemalessRequestBodyType`), and `unknown` for anything
+ * else — a JSON or form media type included, since the pick reads those only
+ * with a schema. How a secondary entry of `requestBodyContents` is typed, on
+ * an operation and on a webhook alike.
+ */
+export function schemalessRequestContentType(contentType: string): TypeRef {
+  const encoding = requestBodyEncodingOf(contentType);
+  return (encoding && schemalessRequestBodyType(encoding)) ?? { kind: 'primitive', type: 'unknown' };
+}
+
+/** The content entry a request body is read from: the key as written, its essence, its wire encoding and its schema. */
 export interface SelectedRequestBodyContent {
   /** The `content` key the body was read from, exactly as written (`application/json; charset=utf-8`). */
   contentType: string;
+  /** The essence of `contentType` (`application/json`): what an emitter sends as the `Content-Type` (`Operation.requestBodyContentType`). */
+  essence: string;
   encoding: RequestBodyEncoding;
   /** Absent only for a binary or text body that declares none. */
   schema?: SchemaObject;
@@ -2461,30 +2493,33 @@ export function selectRequestBodyContent(body: RequestBodyObject | undefined): S
     const match = entries.find(
       ([contentType, media]) => matches(mediaTypeEssence(contentType)) && (!schemaRequired || media?.schema),
     );
-    if (match) return { contentType: match[0], encoding, schema: match[1]?.schema };
+    if (match) {
+      return { contentType: match[0], essence: mediaTypeEssence(match[0]), encoding, schema: match[1]?.schema };
+    }
   }
   return undefined;
 }
 
 /**
- * Warn that a request body is dropped: it declares at least one media type
- * and `selectRequestBodyContent` reads none, so no `requestBody` is set.
- * Called once per operation (`extractRequestBody`) and once per webhook
- * (where its entry is built: a webhook is minted twice, so the mint itself
- * must not report), while the passes that re-read the pick for an operation
- * (the body-owned query names, the const prefixes, the body parameter
- * groups) stay silent — so a dropped body is reported once, and never
- * silently. A body with no `content`, or an empty map, declares nothing and
- * is not reported.
+ * Warn that a request body is not read as `requestBody`: it declares at
+ * least one media type and `selectRequestBodyContent` reads none, so
+ * `requestBody` and `requestBodyEncoding` stay unset and the body reaches an
+ * emitter through `requestBodyContents` alone. Called once per operation
+ * (`extractRequestBody`) and once per webhook (where its entry is built: a
+ * webhook is minted twice, so the mint itself must not report), while the
+ * passes that re-read the pick for an operation (the body-owned query names,
+ * the const prefixes, the body parameter groups) stay silent — so such a
+ * body is reported once, and never silently. A body with no `content`, or an
+ * empty map, declares nothing and is not reported.
  */
-export function warnDroppedRequestBody(body: RequestBodyObject | undefined, label: string): void {
+export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label: string): void {
   const declared = Object.keys(body?.content ?? {});
   if (declared.length === 0 || selectRequestBodyContent(body)) return;
   console.warn(
-    `[oagen] Warning: Request body of ${label} is dropped: none of its media types (${declared.join(', ')}) ` +
-      `is read. A body is read from application/json or a +json media type, multipart/form-data or ` +
-      `application/x-www-form-urlencoded when it declares a schema, and from application/octet-stream or ` +
-      `text/plain with or without one, parameters and case aside.`,
+    `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
+      `(${declared.join(', ')}) is one the parser reads — application/json or a +json media type, ` +
+      `multipart/form-data or application/x-www-form-urlencoded with a schema, application/octet-stream or ` +
+      `text/plain with or without one, parameters and case aside. It is carried in requestBodyContents only.`,
   );
 }
 
@@ -2561,6 +2596,58 @@ function collectBodyPropertyNames(
   return names;
 }
 
+/** What request body typing needs beyond the body: where deferred schemas go and how their names are qualified. */
+interface RequestTypingContext {
+  /** Collects every secondary-body schema, named after the operations loop (`resolveDeferredInlineTypes`). */
+  deferred: DeferredInlineType[];
+  /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
+  operationQualifier: string;
+  /** Lets inline models resolve `$ref` siblings and augmentations the way fields do. */
+  componentSchemas?: Record<string, SchemaObject>;
+}
+
+/** The request body an operation carries: the picked entry typed, and every declared media type with its type. */
+interface ExtractedRequestBody {
+  body?: TypeRef;
+  encoding?: RequestBodyEncoding;
+  /** The picked entry's essence (`Operation.requestBodyContentType`); set exactly when `body` is. */
+  contentType?: string;
+  contentTypes?: string[];
+  contents?: RequestBodyContent[];
+}
+
+/**
+ * The name an operation's inline request body is materialized under:
+ * `<Op>Request` from the `operationId` (`operationIdModelName`), else the
+ * path-derived prefix plus `Request` (see derivePathModelBaseName) so two
+ * operations without an `operationId` never share one inline body model —
+ * every operationId-less body used to be `RequestBody`, and only the largest
+ * survived deduplication, leaving every other operation pointing at a model
+ * with someone else's fields.
+ */
+function requestModelName(op: OperationObject | undefined, pathModelBaseName: string): string {
+  return op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
+}
+
+/**
+ * The stem a secondary request body's model is named from: the primary
+ * body's name without its `Request` suffix, followed by the media type and
+ * `Request` — `ReplaceWidgetTextCsvRequest` beside `ReplaceWidgetRequest` —
+ * the way a secondary response body's stem is the primary response's name
+ * without `Response`.
+ */
+function requestModelStem(op: OperationObject | undefined, pathModelBaseName: string): string {
+  return requestModelName(op, pathModelBaseName).replace(/Request$/, '');
+}
+
+/**
+ * Read an operation's request body: the content entry the pick chooses
+ * (`selectRequestBodyContent`) typed as `body` with its `encoding`, and every
+ * media type the body declares as `contentTypes` / `contents`, the picked
+ * entry sharing `body`'s TypeRef (`extractRequestBodyContents`). A body none
+ * of whose media types is read is reported once and carried in `contents`
+ * alone.
+ */
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
@@ -2568,28 +2655,112 @@ function extractRequestBody(
   inlineModels: Model[],
   componentSchemas: Record<string, SchemaObject> | undefined,
   opLabel: string,
-): { body?: TypeRef; encoding?: RequestBodyEncoding } {
+  ctx: RequestTypingContext,
+): ExtractedRequestBody {
   const selected = selectRequestBodyContent(body);
-  if (!selected) {
-    // No content, or no media type the parser reads: no body, reported once.
-    warnDroppedRequestBody(body, opLabel);
-    return {};
-  }
-  const { encoding } = selected;
+  if (!selected) warnUnreadRequestBody(body, opLabel);
+  const primary = selected ? typeRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas) : {};
+  const contents = extractRequestBodyContents(
+    body?.content,
+    selected?.contentType,
+    primary.body,
+    requestModelStem(op, pathModelBaseName),
+    ctx,
+  );
+  return { ...primary, ...contents };
+}
+
+/**
+ * Read a request body's `content` map into the media types it declares — in
+ * document order and verbatim, parameters and vendor suffixes included — with
+ * a type for each, as `extractResponseContents` reads a response's. The entry
+ * for `primaryContentType` (the one the pick read `primaryType` from) carries
+ * that very TypeRef; every other entry goes through
+ * `typeSecondaryRequestContent`. `undefined` when the body declares no media
+ * type at all, so the caller leaves both keys off.
+ */
+function extractRequestBodyContents(
+  content: Record<string, { schema?: SchemaObject }> | undefined,
+  primaryContentType: string | undefined,
+  primaryType: TypeRef | undefined,
+  stem: string,
+  ctx: RequestTypingContext,
+): { contentTypes: string[]; contents: RequestBodyContent[] } | undefined {
+  if (!content) return undefined;
+  const contentTypes = Object.keys(content);
+  if (contentTypes.length === 0) return undefined;
+  const contents = contentTypes.map((contentType) => {
+    const entry: RequestBodyContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+    entry.type =
+      primaryType !== undefined && contentType === primaryContentType
+        ? primaryType
+        : typeSecondaryRequestContent(contentType, content[contentType]?.schema, stem, ctx, entry);
+    return entry;
+  });
+  return { contentTypes, contents };
+}
+
+/**
+ * Type a media type the request body pick did not choose, as it would be
+ * typed were it the only one declared: from its schema when it has one — an
+ * inline object materialized as `<Op><MediaType>Request`
+ * (`ReplaceWidgetTextCsvRequest`), named once every primary model is known
+ * (`resolveDeferredInlineTypes`), so the schema is deferred and the
+ * placeholder returned here is filled in then — else as
+ * `schemalessRequestContentType` types it.
+ */
+function typeSecondaryRequestContent(
+  contentType: string,
+  schema: SchemaObject | undefined,
+  stem: string,
+  ctx: RequestTypingContext,
+  target: RequestBodyContent,
+): TypeRef {
+  if (!schema) return schemalessRequestContentType(contentType);
+  ctx.deferred.push({
+    kind: 'request',
+    schema,
+    // Named from the media type's essence (`mediaTypeNameFragment`), so two
+    // spellings of one media type derive one name and the second steps to
+    // the next free one through the registry.
+    name: `${stem}${mediaTypeNameFragment(contentType)}Request`,
+    operationQualifier: ctx.operationQualifier,
+    componentSchemas: ctx.componentSchemas,
+    targets: [target],
+  });
+  return target.type;
+}
+
+/**
+ * The picked content entry typed as `Operation.requestBody`, with its
+ * encoding and its essence (`Operation.requestBodyContentType`), and its
+ * inline models pushed to `inlineModels`.
+ */
+function typeRequestBody(
+  selected: SelectedRequestBodyContent,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  inlineModels: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): { body?: TypeRef; encoding?: RequestBodyEncoding; contentType?: string } {
+  const typed = typePickedRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas);
+  return typed ? { body: typed, encoding: selected.encoding, contentType: selected.essence } : {};
+}
+
+/** The picked content entry's type: a primitive for a schema-less binary or text body, else typed from its schema. */
+function typePickedRequestBody(
+  selected: SelectedRequestBodyContent,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  inlineModels: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): TypeRef | undefined {
   let schema = selected.schema;
 
-  if (!schema) {
-    // Only a binary or text pick comes without a schema; it is a primitive.
-    const primitive = schemalessRequestBodyType(encoding);
-    return primitive ? { body: primitive, encoding } : {};
-  }
+  // Only a binary or text pick comes without a schema; it is a primitive.
+  if (!schema) return schemalessRequestBodyType(selected.encoding);
 
-  // Without an operationId, name the body from the operation's path-derived
-  // prefix (see derivePathModelBaseName) so two operations don't share one
-  // inline body model. Every operationId-less body used to be `RequestBody`,
-  // and only the largest survived deduplication — every other operation was
-  // left pointing at a model with someone else's fields.
-  const contextName = op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
+  const contextName = requestModelName(op, pathModelBaseName);
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
@@ -2626,7 +2797,7 @@ function extractRequestBody(
     // schemas are handled in extractInlineModelsFromSchemas — otherwise the
     // generated body model references a model that never gets generated.
     extractInlineModelsFromProperties(schema, inlineModels, contextName, componentSchemas);
-    return { body: { kind: 'model', name: contextName }, encoding };
+    return { kind: 'model', name: contextName };
   }
 
   // If the request body is a oneOf, extract each variant as an inline model
@@ -2732,8 +2903,7 @@ function extractRequestBody(
           }
         : {}),
     };
-    const body = hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
-    return { body, encoding };
+    return hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
   }
 
   // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
@@ -2750,7 +2920,7 @@ function extractRequestBody(
     undefined,
     componentSchemas,
   );
-  return { body: schemaToTypeRef(schema, contextName), encoding };
+  return schemaToTypeRef(schema, contextName);
 }
 
 /**
@@ -2951,16 +3121,17 @@ type ModelShapeRegistry = InlineModelRegistry;
  * then the target carries a placeholder.
  */
 interface DeferredInlineType {
-  kind: 'header' | 'content' | 'fallback' | 'error';
+  kind: 'header' | 'content' | 'request' | 'fallback' | 'error';
   schema: SchemaObject;
   /**
    * The bare name the models derive from: the header name, the response stem
-   * + media type + role, a fallback body's `<Op><Label>Response` or an error
-   * body's `<Op>Error<code>`.
+   * + media type + role, a secondary request body's `<Op><MediaType>Request`,
+   * a fallback body's `<Op><Label>Response` or an error body's
+   * `<Op>Error<code>`.
    */
   name: string;
-  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
-  statusCode: number | string;
+  /** A status code, or the label of a fallback response (`Default`, `ClientError`); a request body has none. */
+  statusCode?: number | string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
   /** Qualifies a header's names (`Documents` + `X-Meta` → `DocumentsXMeta`); a body has none. */
@@ -3002,18 +3173,19 @@ interface ResponseTypingContext {
 }
 
 /**
- * Name and materialize every deferred header, secondary-body, fallback-body
- * and error-body schema, now that every primary model is known. The registry
- * holds the component models first (with the inline models their fields
- * mint), then every inline model the operations minted — request bodies,
- * primary response bodies with their nested objects and union variants,
- * envelope companions — so no deferred schema can take one of their names
- * for a different shape, whichever operation minted it; each resolved
- * schema's own models join it in turn, in document order (path order, then
- * the response keys as written; a response's headers before its error body
- * and its secondary bodies, a fallback's body before its headers), so the
- * first owner of a name keeps it. Returns the models materialized, having set
- * each target's `type`.
+ * Name and materialize every deferred header, secondary request-body,
+ * secondary response-body, fallback-body and error-body schema, now that
+ * every primary model is known. The registry holds the component models
+ * first (with the inline models their fields mint), then every inline model
+ * the operations minted — request bodies, primary response bodies with their
+ * nested objects and union variants, envelope companions — so no deferred
+ * schema can take one of their names for a different shape, whichever
+ * operation minted it; each resolved schema's own models join it in turn, in
+ * document order (path order, then an operation's secondary request bodies
+ * in content order, then the response keys as written; a response's headers
+ * before its error body and its secondary bodies, a fallback's body before
+ * its headers), so the first owner of a name keeps it. Returns the models
+ * materialized, having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -3111,6 +3283,8 @@ function attachSharedDeferredRefs(
  *   content   1. the bare name                `RenderPetCardTextHtmlResponse`
  *             2. the status code              `RenderPetCardTextHtmlResponse201`
  *             3. a numeric suffix             `…Response2`, `…Response3`, …
+ *   request   1. the bare name                `ReplaceWidgetTextCsvRequest`
+ *             2. a numeric suffix             `ReplaceWidgetTextCsvRequest2`, `…3`, …
  *   fallback  1. the bare name                `ListPetsDefaultResponse`
  *             2. a numeric suffix             `ListPetsDefaultResponse2`, `…3`, …
  *   error     1. the bare name                `GetPetError404`
@@ -3148,7 +3322,7 @@ function materializeDeferredType(item: DeferredInlineType, registry: ModelShapeR
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
-  const { name, statusCode, operationQualifier } = item;
+  const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
   const byOperation = `${operationQualifier}${name}`;
   const byBoth = `${operationQualifier}${name}${statusCode}`;
@@ -3168,6 +3342,7 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
       };
     case 'content':
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
+    case 'request':
     case 'fallback':
       return (index) => (index === 0 ? name : numbered(index - 1));
     case 'error':

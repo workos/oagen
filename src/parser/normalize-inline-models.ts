@@ -3,6 +3,7 @@ import {
   walkTypeRef,
   collectResponseHeaders,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
   renameModelRefs,
@@ -100,6 +101,7 @@ export function reservedTypeNames(
       if (op.pagination) visit(op.pagination.itemType);
       for (const header of collectResponseHeaders(op)) visit(header.type);
       for (const { type } of collectResponseBodyTypes(op)) visit(type);
+      for (const { type } of collectRequestBodyTypes(op)) visit(type);
     }
   }
   for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) visit(ref);
@@ -399,6 +401,9 @@ function rewriteModelRefs(
         rewriteModelRef(header.type, oldName, newName);
       }
       for (const { type } of collectResponseBodyTypes(op)) {
+        rewriteModelRef(type, oldName, newName);
+      }
+      for (const { type } of collectRequestBodyTypes(op)) {
         rewriteModelRef(type, oldName, newName);
       }
     }
