@@ -590,10 +590,12 @@ export interface DocumentSecurityChanged {
   /** The new document's list; `[]` when it declares none. */
   newSecurity: SecurityRequirementSet[];
   /**
-   * Read from the caller's side, as for an operation: breaking when a
-   * request built for the old list no longer satisfies the new one. When a
-   * webhook in either document inherits the default, read from the
-   * receiver's side as well, and breaking if either side breaks.
+   * Read from each side that inherits the default, by the rule the
+   * inheriting node would be read by (`classifySecurityChange`): the
+   * caller's when an operation in either document declares no `security`
+   * of its own, the receiver's when a webhook does; breaking if any such
+   * side breaks. When nothing inherits it, no request reads the default,
+   * so the change is additive.
    */
   classification: 'additive' | 'breaking';
 }

@@ -434,7 +434,10 @@ export function extractOperations(
       const op = pathItem[method];
       if (!op) continue;
 
-      const tag = op.tags?.[0];
+      // The first usable tag — `Operation.tags[0]`, read by the same helper —
+      // so the service and the list the IR carries never disagree, and an
+      // entry that is not a string (`42`) never reaches PascalCasing.
+      const tag = extractTags(op.tags)?.[0];
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
@@ -745,10 +748,10 @@ function pathRootLength(segments: readonly string[]): number {
 function documentApiRoot(paths: Record<string, PathItem>): string[] {
   const contributions: string[][] = [];
   for (const [path, pathItem] of Object.entries(paths)) {
-    // Same truthiness check as inferServiceName: a first tag names the service.
+    // Same read as the service naming above: a first usable tag names the service.
     const hasUntaggedOperation = HTTP_METHODS.some((method) => {
       const op = pathItem[method];
-      return Boolean(op) && !op?.tags?.[0];
+      return Boolean(op) && extractTags(op?.tags) === undefined;
     });
     if (!hasUntaggedOperation) continue;
     const segments = pathSegments(path);
@@ -2314,12 +2317,17 @@ export function presentText(text: string | undefined): string | undefined {
 /**
  * An operation's `tags` as the IR carries them, on an `Operation` and on a
  * `Webhook` alike: the list in document order with every entry that is not a
- * non-empty string dropped, or `undefined` when nothing remains (or the
- * keyword is not a list), so the key is omitted rather than set to `[]`.
+ * non-empty string dropped and a repeated entry folded onto its first
+ * occurrence, or `undefined` when nothing remains (or the keyword is not a
+ * list), so the key is omitted rather than set to `[]`. The service an
+ * operation is grouped under is named from `[0]` of this same list.
  */
 export function extractTags(tags: unknown): string[] | undefined {
   if (!Array.isArray(tags)) return undefined;
-  const kept = tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '');
+  const kept: string[] = [];
+  for (const tag of tags) {
+    if (typeof tag === 'string' && tag !== '' && !kept.includes(tag)) kept.push(tag);
+  }
   return kept.length > 0 ? kept : undefined;
 }
 

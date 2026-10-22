@@ -60,16 +60,22 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
  * The document-level `security` compared between the two documents: one
  * `security-changed` change when the lists differ as sets of alternatives,
  * nothing otherwise. `[]` and an undeclared list both mean no authentication
- * and compare equal. Classified from the caller's side — the list is the
- * default every operation inherits — and, when a webhook in either document
- * inherits it, from the receiver's side as well, breaking if either breaks.
+ * and compare equal. Classified from each side that actually reads the
+ * default: the caller's when an operation in either document declares no
+ * `security` of its own, the receiver's when a webhook does — breaking if
+ * any such side breaks. When nothing inherits it, no request reads the
+ * default, so the change is additive.
  */
 function diffDocumentSecurity(oldSpec: ApiSpec, newSpec: ApiSpec): Change[] {
   const oldSecurity = oldSpec.security ?? [];
   const newSecurity = newSpec.security ?? [];
   if (securityEqual(oldSecurity, newSecurity)) return [];
-  const inherits = (spec: ApiSpec): boolean => (spec.webhooks ?? []).some((w) => w.security === undefined);
-  const sides: SecuritySide[] = inherits(oldSpec) || inherits(newSpec) ? ['caller', 'receiver'] : ['caller'];
+  const inherits = (nodes: Array<{ security?: SecurityRequirementSet[] }>): boolean =>
+    nodes.some((node) => node.security === undefined);
+  const operations = (spec: ApiSpec) => spec.services.flatMap((service) => service.operations);
+  const sides: SecuritySide[] = [];
+  if (inherits(operations(oldSpec)) || inherits(operations(newSpec))) sides.push('caller');
+  if (inherits(oldSpec.webhooks ?? []) || inherits(newSpec.webhooks ?? [])) sides.push('receiver');
   const breaking = sides.some((side) => classifySecurityChange(oldSecurity, newSecurity, side) === 'breaking');
   return [{ kind: 'security-changed', oldSecurity, newSecurity, classification: breaking ? 'breaking' : 'additive' }];
 }
