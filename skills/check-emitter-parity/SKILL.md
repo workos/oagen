@@ -67,6 +67,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `pagination` — Auto-paging iterator generation (cursor, offset, page, link-header strategies; optional `endOfIteration` stop field)
 - `requestBodyEncoding` — Content-type handling: json (`application/json` and any `+json` media type), form-data, form-urlencoded, binary, text
 - `requestBodyRequired` — Whether the body argument is mandatory or optional
+- `requestBodyContentType` — The media type to send as `Content-Type` (the picked entry's essence, `application/merge-patch+json`)
 - `injectIdempotencyKey` — Whether to inject an idempotency key header
 
 #### UnionType
@@ -107,6 +108,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits); each carries `description`, `deprecated` and `externalDocs`
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
+- `requestBodyContentTypes` — Media types the request body accepts (`application/json` and `text/csv`), with a type per media type in `requestBodyContents`; drives a body argument or serializer per media type
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
 - `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
 - `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
@@ -173,7 +175,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.requestBodyContentType`, `\.requestBodyContentTypes`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -238,48 +240,50 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 
 ### HIGH priority suggestions
 
-| IR Field                         | What to Generate                                                                                                                |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Missing TypeRef kinds            | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                             |
-| `ApiSpec.auth`                   | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                |
-| `Operation.pagination`           | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`       |
-| `Operation.requestBodyEncoding`  | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                     |
-| `Operation.requestBodyRequired`  | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out |
-| `Operation.injectIdempotencyKey` | Generate and attach `Idempotency-Key` header on applicable requests                                                             |
-| `UnionType.discriminator`        | Tagged union deserialization using the discriminator property and mapping                                                       |
-| `UnionType.compositionKind`      | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                         |
-| `PrimitiveType.format`           | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                         |
-| `ErrorResponse.type`             | Typed exception/error classes per status code                                                                                   |
+| IR Field                           | What to Generate                                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Missing TypeRef kinds              | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                             |
+| `ApiSpec.auth`                     | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                |
+| `Operation.pagination`             | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`       |
+| `Operation.requestBodyEncoding`    | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                     |
+| `Operation.requestBodyRequired`    | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out |
+| `Operation.requestBodyContentType` | Send it as the `Content-Type` header, producing parameters such as a multipart boundary yourself                                |
+| `Operation.injectIdempotencyKey`   | Generate and attach `Idempotency-Key` header on applicable requests                                                             |
+| `UnionType.discriminator`          | Tagged union deserialization using the discriminator property and mapping                                                       |
+| `UnionType.compositionKind`        | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                         |
+| `PrimitiveType.format`             | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                         |
+| `ErrorResponse.type`               | Typed exception/error classes per status code                                                                                   |
 
 ### MEDIUM priority suggestions
 
-| IR Field                     | What to Generate                                                                                                                                           |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ApiSpec.description`        | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                                |
-| `ApiSpec.servers`            | Server URL constants or configuration                                                                                                                      |
-| `ApiSpec.webhooks`           | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                                 |
-| `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                                    |
-| `Operation.successResponses` | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                                   |
-| `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                                         |
-| `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                                 |
-| `Operation.cookieParams`     | Document cookie parameters                                                                                                                                 |
-| `Operation.servers`          | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                            |
-| `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                                 |
-| `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Webhook`, `Service` and `ApiSpec` carry the same |
-| `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                                       |
-| `Model.deprecated`           | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                                |
-| `Enum.deprecated`            | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                                   |
-| `Enum.default`               | Document the enum's default value                                                                                                                          |
-| `Parameter.default`          | Document default value                                                                                                                                     |
-| `Parameter.example`          | Document example value                                                                                                                                     |
-| `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                                |
-| `Field.readOnly`             | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust)            |
-| `Field.writeOnly`            | Write-only annotation in doc comments                                                                                                                      |
-| `Field.default`              | Document default value                                                                                                                                     |
-| `Field.example`              | Document example value                                                                                                                                     |
-| `Field.examples`             | Document every example value (e.g. one `@example` tag each)                                                                                                |
-| `Field.constraints`          | Document limits ("at most 100 characters") or validate before serializing                                                                                  |
-| `Parameter.constraints`      | Document limits on method arguments or validate before sending                                                                                             |
+| IR Field                        | What to Generate                                                                                                                                           |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ApiSpec.description`           | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                                |
+| `ApiSpec.servers`               | Server URL constants or configuration                                                                                                                      |
+| `ApiSpec.webhooks`              | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                                 |
+| `Operation.async`               | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                                    |
+| `Operation.successResponses`    | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                                   |
+| `Operation.responseHeaders`     | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                                         |
+| `Operation.responseContents`    | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                                 |
+| `Operation.requestBodyContents` | A body argument or serializer per media type (`requestBodyContentTypes`) when a body accepts several                                                       |
+| `Operation.cookieParams`        | Document cookie parameters                                                                                                                                 |
+| `Operation.servers`             | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                            |
+| `Parameter.description`         | Document query/header/cookie params in method doc comments                                                                                                 |
+| `Parameter.externalDocs`        | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Webhook`, `Service` and `ApiSpec` carry the same |
+| `Parameter.deprecated`          | Mark parameter as deprecated in docs                                                                                                                       |
+| `Model.deprecated`              | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                                |
+| `Enum.deprecated`               | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                                   |
+| `Enum.default`                  | Document the enum's default value                                                                                                                          |
+| `Parameter.default`             | Document default value                                                                                                                                     |
+| `Parameter.example`             | Document example value                                                                                                                                     |
+| `Parameter.examples`            | Document every example value (e.g. one `@example` tag each)                                                                                                |
+| `Field.readOnly`                | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust)            |
+| `Field.writeOnly`               | Write-only annotation in doc comments                                                                                                                      |
+| `Field.default`                 | Document default value                                                                                                                                     |
+| `Field.example`                 | Document example value                                                                                                                                     |
+| `Field.examples`                | Document every example value (e.g. one `@example` tag each)                                                                                                |
+| `Field.constraints`             | Document limits ("at most 100 characters") or validate before serializing                                                                                  |
+| `Parameter.constraints`         | Document limits on method arguments or validate before sending                                                                                             |
 
 Include the specific file and approximate location where each fix should be applied.
 
