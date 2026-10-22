@@ -13,9 +13,12 @@
  * change is mirrored into `behaviorChanges`. Tags are compared in document
  * order and are additive always.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
+import type { DocumentSecurityChanged, SecurityChanged, SecurityNode } from '../../src/index.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffWebhooks } from '../../src/differ/webhooks.js';
 import { tagsShift } from '../../src/differ/classify.js';
@@ -131,6 +134,7 @@ describe('issue #273 repro: security and tags on an operation and a webhook', ()
         requestBodyChanged: false,
         requestBodyRequiredChanged: false,
         requestBodyEncodingChanged: false,
+        requestBodyContentTypesChanged: false,
         httpMethodChanged: false,
         pathChanged: false,
         paginatedChanged: false,
@@ -146,6 +150,7 @@ describe('issue #273 repro: security and tags on an operation and a webhook', ()
         responseContentTypeChanges: [],
         responseHeadersChanged: false,
         responseHeaderChanges: [],
+        responseStatusCodeChanged: false,
         fallbackResponsesChanged: false,
         serversChanged: false,
         deprecatedChanged: false,
@@ -639,6 +644,166 @@ describe('tags on an operation and a webhook', () => {
       pathChanged: true,
       classification: 'breaking',
     });
+  });
+});
+
+describe('a first-tag change that renames the service is a service move, not a tags change (Greptile)', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  async function writeSpec(name: string, doc: unknown): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-diff-security-tags-'));
+    dirs.push(dir);
+    const file = path.join(dir, name);
+    await fs.writeFile(file, JSON.stringify(doc));
+    return file;
+  }
+
+  const responses = { '204': { description: 'ok' } };
+  const document = (paths: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'repro', version: '1' },
+    paths,
+  });
+
+  it('reports swapping the first two tags on a document’s only operation as service-removed and service-added, exit 2', async () => {
+    // The parser files `listPets` under `Store` now, so there is no `Pets`
+    // service to match it in and no `operation-modified` to carry
+    // `tagsChanged`. The webhook belongs to no service, so the same swap on
+    // it is a plain `tagsChanged`.
+    const doc = JSON.parse(await fs.readFile(path.join(fixtures, 'security-tags-after.json'), 'utf8'));
+    doc.paths['/pets'].get.tags = ['Store', 'Pets'];
+    doc.webhooks.petAdopted.post.tags = ['Store', 'Pets'];
+    const before = await parseSpec(path.join(fixtures, 'security-tags-after.json'));
+    const after = await parseSpec(await writeSpec('swapped.json', doc));
+    expect(after.services.map((s) => s.name)).toEqual(['Store']);
+
+    const diff = diffSpecs(before, after);
+    expect(diff.changes).toEqual([
+      { kind: 'service-added', name: 'Store', classification: 'additive' },
+      { kind: 'service-removed', name: 'Pets', classification: 'breaking' },
+      {
+        kind: 'webhook-modified',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramChanges: [],
+        requestBodyChanged: false,
+        responsesChanged: false,
+        deprecatedChanged: false,
+        securityChanged: false,
+        tagsChanged: true,
+        oldTags: ['Pets', 'Store'],
+        newTags: ['Store', 'Pets'],
+        classification: 'additive',
+      },
+    ]);
+    // `oagen diff` exits 2 on any breaking change.
+    expect(diff.summary).toEqual({ added: 1, removed: 1, modified: 1, breaking: 1, additive: 2, behaviorChanges: 0 });
+  });
+
+  const pets = { get: { operationId: 'listPets', tags: ['Pets'], responses } };
+  const pet = { get: { operationId: 'getPet', tags: ['Pets'], responses } };
+  const movedToStore = { get: { ...pets.get, tags: ['Store'] } };
+
+  it('reports a first tag that files the operation under a service of another name as the move, breaking', async () => {
+    // `/pets` tagged Store is the only `Store` operation, so it becomes the
+    // `Store` service while `getPet` keeps `Pets`: nothing is matched by name
+    // within one service, and no `operation-modified` carries `tagsChanged`.
+    const before = await parseSpec(await writeSpec('before.json', document({ '/pets': pets, '/pets/{id}': pet })));
+    const after = await parseSpec(
+      await writeSpec('after.json', document({ '/pets': movedToStore, '/pets/{id}': pet })),
+    );
+    expect(after.services.map((s) => [s.name, s.operations.map((o) => o.name)])).toEqual([
+      ['Store', ['listPets']],
+      ['Pets', ['getPet']],
+    ]);
+
+    const { changes, summary } = diffSpecs(before, after);
+    expect(changes).toEqual([
+      { kind: 'service-added', name: 'Store', classification: 'additive' },
+      { kind: 'operation-removed', serviceName: 'Pets', operationName: 'listPets', classification: 'breaking' },
+    ]);
+    expect(summary.breaking).toBe(1);
+  });
+
+  it('reports a first tag the path-prefix split files back under the same service as tagsChanged, additive', async () => {
+    // With `/store` also tagged Store, the Store tag spans two first segments
+    // and the split carves `/pets` back out as `Pets`, so `listPets` stays
+    // where it was and the edit is a plain `tagsChanged`.
+    const store = { get: { operationId: 'getStore', tags: ['Store'], responses } };
+    const before = await parseSpec(
+      await writeSpec('before.json', document({ '/pets': pets, '/pets/{id}': pet, '/store': store })),
+    );
+    const after = await parseSpec(
+      await writeSpec('after.json', document({ '/pets': movedToStore, '/pets/{id}': pet, '/store': store })),
+    );
+    expect(after.services.map((s) => [s.name, s.operations.map((o) => o.name).sort()])).toEqual([
+      ['Pets', ['getPet', 'listPets']],
+      ['Store', ['getStore']],
+    ]);
+
+    const { changes, summary } = diffSpecs(before, after);
+    expect(changes).toMatchObject([
+      {
+        kind: 'operation-modified',
+        serviceName: 'Pets',
+        operationName: 'listPets',
+        tagsChanged: true,
+        oldTags: ['Pets'],
+        newTags: ['Store'],
+        classification: 'additive',
+      },
+    ]);
+    expect(summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 0 });
+  });
+
+  it('reports a first tag respelled to the same service name as tagsChanged, additive', async () => {
+    const before = await parseSpec(
+      await writeSpec(
+        'lower.json',
+        document({ '/pets': { get: { operationId: 'listPets', tags: ['pets'], responses } } }),
+      ),
+    );
+    const after = await parseSpec(
+      await writeSpec(
+        'upper.json',
+        document({ '/pets': { get: { operationId: 'listPets', tags: ['Pets'], responses } } }),
+      ),
+    );
+    expect(before.services[0].name).toBe('Pets');
+    expect(after.services[0].name).toBe('Pets');
+
+    const { changes, summary } = diffSpecs(before, after);
+    expect(changes).toMatchObject([
+      {
+        kind: 'operation-modified',
+        serviceName: 'Pets',
+        operationName: 'listPets',
+        tagsChanged: true,
+        oldTags: ['pets'],
+        newTags: ['Pets'],
+        classification: 'additive',
+      },
+    ]);
+    expect(summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 0 });
+  });
+});
+
+describe('the new diff types are part of the package’s public surface', () => {
+  it('exports SecurityChanged, SecurityNode and DocumentSecurityChanged from the package index', () => {
+    const diff = diffSpecs(spec({ security: undefined }), spec({ security: apiKey }));
+    const change = diff.changes[0];
+    if (change.kind !== 'security-changed') throw new Error(`expected security-changed, got ${change.kind}`);
+    const documentChange: DocumentSecurityChanged = change;
+    expect(documentChange.classification).toBe('breaking');
+
+    const entry = diff.behaviorChanges[0];
+    if (entry.kind !== 'security-changed') throw new Error(`expected security-changed, got ${entry.kind}`);
+    const mirrored: SecurityChanged = entry;
+    const node: SecurityNode = { node: 'document' };
+    expect(mirrored.node).toBe(node.node);
   });
 });
 

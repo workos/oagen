@@ -1,5 +1,11 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
-import { normalizeServerUrl, resolveServerUrl, serverUrlPlaceholders, serversBeyondDefault } from '../ir/server-url.js';
+import {
+  baseUrlBeyondDefault,
+  normalizeServerUrl,
+  resolveServerUrl,
+  serverUrlPlaceholders,
+  serversBeyondDefault,
+} from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
 /**
@@ -36,13 +42,21 @@ import type { Change, ServerVariableChange } from './types.js';
  * the differ.
  *
  * OpenAPI's default server is one thing however a document spells it (#291):
- * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (no variables;
- * a description does not count) are read through `serversBeyondDefault` and
- * all compare as a document with no server and no default host. Nothing is
- * reported between two such documents, and a document that moves from any of
- * them to a named host gains that host as additive, with no `server-removed`
- * for `/`. `oldBaseUrl` and `newBaseUrl` still carry `ApiSpec.baseUrl` as
- * the parser set it, `/` included.
+ * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (description and
+ * variables aside: `/` references no variable, so one declared on it changes
+ * nothing — #292) all compare as a document with no server and no default
+ * host, and nothing is reported between two such documents. A `/`
+ * entry is left out of the matching wherever it sits
+ * (`serversBeyondDefault`), so it is never a `server-added` or a
+ * `server-removed`: `/` gaining a named host beside it is one `server-added`
+ * and losing that host one `server-removed`, and a document that moves from
+ * `/` to a named host gains it as additive. The default address is compared
+ * through `baseUrlBeyondDefault`, which reads `''` and `/` as one, so a
+ * document whose first server merely resolves to `/` has not moved, while a
+ * `baseUrl` naming a host with no `servers` beside it — an IR built by hand,
+ * which the parser never produces — is compared as written. `oldBaseUrl` and
+ * `newBaseUrl` still carry `ApiSpec.baseUrl` as the parser set it, `/`
+ * included.
  */
 export function diffServers(
   oldSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
@@ -50,12 +64,15 @@ export function diffServers(
 ): Change[] {
   const changes: Change[] = [];
 
+  // A `/` entry is OpenAPI's default server, not a host a caller picks: it is
+  // left out of the matching on both sides, so it is never added or removed.
   const oldServers = serversBeyondDefault(oldSpec.servers);
   const newServers = serversBeyondDefault(newSpec.servers);
-  // A document with only the default server has no default host: its
-  // `baseUrl` (`''` or `/`) compares as `''`.
-  const oldBaseUrl = oldServers.length > 0 ? oldSpec.baseUrl : '';
-  const newBaseUrl = newServers.length > 0 ? newSpec.baseUrl : '';
+  // `''` and `/` are one address — the default — on either side, so only a
+  // move to or from somewhere else is a change. Any other `baseUrl` is
+  // compared as written, even with no `servers` beside it.
+  const oldBaseUrl = baseUrlBeyondDefault(oldSpec.baseUrl);
+  const newBaseUrl = baseUrlBeyondDefault(newSpec.baseUrl);
 
   if (normalizeServerUrl(oldBaseUrl) !== normalizeServerUrl(newBaseUrl)) {
     changes.push({
