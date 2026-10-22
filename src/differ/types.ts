@@ -406,9 +406,14 @@ export interface ResponseContentTypesChange {
   /** Media types the old spec declared and the new does not: a representation callers could ask for is gone. */
   removed: string[];
   /**
-   * Media types declared by both whose body type changed, other than the one
-   * the entry's own `type` is read from, which `responseChanged` and
-   * `errorsChanged` already report.
+   * Media types declared by both whose body's shape changed — two model
+   * refs are compared field by field through the two specs' models, nested
+   * models and enums included, so a model that was only renamed (a
+   * parameter edit on a key declared beside another spelling of its essence
+   * renames the model the parser mints for it) is no retype and surfaces as
+   * `model-removed` + `model-added` instead — other than the one the entry's
+   * own `type` is read from, which `responseChanged` and `errorsChanged`
+   * already report.
    */
   retyped: string[];
   /** `breaking` when anything was removed or retyped, else `additive`. */
@@ -437,8 +442,13 @@ export interface RequestBodyContentTypesChange {
   /** Media types the old spec declared and the new does not: a representation the caller could send is gone. */
   removed: string[];
   /**
-   * Media types declared by both whose body type changed, other than the
-   * one `requestBody` is read from, which `requestBodyChanged` reports.
+   * Media types declared by both whose body's shape changed — two model
+   * refs are compared field by field through the two specs' models, nested
+   * models and enums included, so a model that was only renamed (a
+   * parameter edit on a key declared beside another spelling of its essence
+   * renames the model the parser mints for it) is no retype and surfaces as
+   * `model-removed` + `model-added` instead — other than the one
+   * `requestBody` is read from, which `requestBodyChanged` reports.
    */
   retyped: string[];
   /**

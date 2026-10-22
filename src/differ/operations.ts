@@ -17,6 +17,7 @@ import {
   retypedBodies,
   type MediaTypeBody,
 } from './media-types.js';
+import type { DocumentShapes } from './shapes.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
 import { classifyParamChange, deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
@@ -45,6 +46,7 @@ export function diffOperations(
   newOps: Operation[],
   documentServers?: DocumentServers,
   documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
 ): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldOps.map((o) => [o.name, o]));
@@ -88,7 +90,7 @@ export function diffOperations(
       (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
     // Only while both sides declare a body, likewise; judged from the
     // caller's side, which sends it.
-    const requestBodyContentTypeChange = diffRequestBodyContentTypes(oldOp, newOp, 'caller');
+    const requestBodyContentTypeChange = diffRequestBodyContentTypes(oldOp, newOp, 'caller', shapes);
     const requestBodyContentTypesChanged = requestBodyContentTypeChange !== undefined;
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
@@ -109,7 +111,7 @@ export function diffOperations(
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
-    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp);
+    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp, shapes);
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
     const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
@@ -405,7 +407,11 @@ function contentEntries(op: Operation): ContentEntry[] {
  * media types are reported as removed: the formats callers could ask for
  * under that code are gone.
  */
-function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
+function diffResponseContentTypes(
+  oldOp: Operation,
+  newOp: Operation,
+  shapes?: DocumentShapes,
+): ResponseContentTypesChange[] {
   const oldEntries = contentEntries(oldOp);
   const newEntries = contentEntries(newOp);
   const pairs = pairContentEntries(oldEntries, newEntries);
@@ -416,7 +422,7 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
     if (!old) continue;
     paired.add(old);
     const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies);
-    const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere);
+    const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
     if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
     changes.push({
       ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
