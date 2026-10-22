@@ -38,6 +38,27 @@ describe('serverListsEqual', () => {
     expect(serverListsEqual([{ url: '/v1', description: 'a' }], [{ url: '/v1' }])).toBe(false);
   });
 
+  it('compares urls through normalizeServerUrl (issue #293)', () => {
+    const api: ServerEntry = { url: 'https://api.example.com' };
+    expect(serverListsEqual([api], [{ url: 'https://API.example.com' }])).toBe(true);
+    expect(serverListsEqual([api], [{ url: 'HTTPS://api.example.com' }])).toBe(true);
+    expect(serverListsEqual([api], [{ url: 'https://api.example.com:443' }])).toBe(true);
+    expect(serverListsEqual([api], [{ url: 'https://api.example.com/' }])).toBe(true);
+    // The path is case-sensitive, and a template is not what it resolves to.
+    expect(serverListsEqual([{ url: 'https://api.example.com/v1' }], [{ url: 'https://api.example.com/V1' }])).toBe(
+      false,
+    );
+    expect(serverListsEqual([regional], [{ ...regional, url: 'https://{Region}.api.example.com' }])).toBe(false);
+    expect(serverListsEqual([regional], [{ ...regional, url: 'https://eu.api.example.com' }])).toBe(false);
+    // Variable values stay as written.
+    expect(
+      serverListsEqual(
+        [regional],
+        [{ ...regional, variables: { region: { default: 'EU', enum: ['eu', 'us'], description: 'The region.' } } }],
+      ),
+    ).toBe(false);
+  });
+
   it('is false on a different variable name, default, enum, enum order or description', () => {
     const variant = (variables: ServerEntry['variables']): ServerEntry[] => [{ ...regional, variables }];
     expect(serverListsEqual([regional], variant({ zone: regional.variables!.region }))).toBe(false);

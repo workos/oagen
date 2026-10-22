@@ -277,7 +277,9 @@ function endOfIterationEqual(
  * `url` template, and any variable change — the additive ones included (a
  * new enum value, a new variable, a lifted enum), since one boolean cannot
  * carry that distinction. Descriptions on a server or a variable, enum order,
- * a repeated enum value and position do not count there, so they do not here.
+ * a repeated enum value and position do not count there, so they do not here;
+ * neither does a URL spelling `normalizeServerUrl` folds (scheme and host
+ * case, a default port, a bare authority's `/`).
  */
 function effectiveServersChanged(oldServers: ServerEntry[], newServers: ServerEntry[]): boolean {
   return diffServers(asDocument(oldServers), asDocument(newServers)).length > 0;
