@@ -4,6 +4,7 @@ import { deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 import { diffRequestBodyContentTypes } from './media-types.js';
+import type { DocumentShapes } from './shapes.js';
 
 /**
  * Report webhooks added, removed and modified between two specs. A webhook is
@@ -17,6 +18,7 @@ export function diffWebhooks(
   oldWebhooks: Webhook[],
   newWebhooks: Webhook[],
   documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
 ): Change[] {
   const changes: Change[] = [];
   const key = (webhook: Webhook): string => `${webhook.httpMethod} ${webhook.name}`;
@@ -50,7 +52,7 @@ export function diffWebhooks(
     if (!oldWebhook) continue;
 
     const paramChanges = diffWebhookParams(oldWebhook, newWebhook);
-    const body = diffWebhookBody(oldWebhook, newWebhook);
+    const body = diffWebhookBody(oldWebhook, newWebhook, shapes);
     const responses = diffWebhookResponses(oldWebhook, newWebhook);
     // Additive either way: the handler's signature is unchanged, but a
     // changelog has to say it, so a flipped flag alone is a change.
@@ -116,13 +118,15 @@ export function diffWebhooks(
  * - optional → required: additive — the body is now always there.
  * - media types changed, both sides declaring a payload: one the sender can
  *   newly use, or whose body changed type, is breaking — the handler must
- *   decode it; one it can no longer use is additive. Compared by essence as
- *   an operation's are (`diffRequestBodyContentTypes`), and carried
- *   structured as `mediaTypes` beside the `details` strings.
+ *   decode it; one it can no longer use, or one that only changed a
+ *   parameter other than `charset`, is additive. Compared by essence as an
+ *   operation's are (`diffRequestBodyContentTypes`), and carried structured
+ *   as `mediaTypes` beside the `details` strings.
  */
 function diffWebhookBody(
   oldWebhook: Webhook,
   newWebhook: Webhook,
+  shapes?: DocumentShapes,
 ): { changes: string[]; breaking: boolean; mediaTypes?: RequestBodyContentTypesChange } {
   const changes: string[] = [];
   let breaking = false;
@@ -149,12 +153,13 @@ function diffWebhookBody(
     if (!isRequired) breaking = true;
   }
 
-  const mediaTypes = diffRequestBodyContentTypes(oldWebhook, newWebhook, 'receiver');
+  const mediaTypes = diffRequestBodyContentTypes(oldWebhook, newWebhook, 'receiver', shapes);
   if (mediaTypes) {
     const said = (what: string, list: string[]): string[] =>
       list.length > 0 ? [`payload media type${list.length > 1 ? 's' : ''} ${list.join(', ')} ${what}`] : [];
     changes.push(...said('added', mediaTypes.added), ...said('removed', mediaTypes.removed));
     changes.push(...said('retyped', mediaTypes.retyped));
+    changes.push(...mediaTypes.reparameterized.map(({ from, to }) => `payload media type ${from} → ${to}`));
     if (mediaTypes.classification === 'breaking') breaking = true;
   }
 
