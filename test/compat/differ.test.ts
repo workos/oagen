@@ -65,6 +65,50 @@ describe('specDerivedNames — response content types', () => {
   });
 });
 
+describe('specDerivedNames — request body content types', () => {
+  it('counts a type reached only through a secondary request media type as spec-derived', () => {
+    const body = { kind: 'model' as const, name: 'ThingInput' };
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [
+        {
+          name: 'Things',
+          operations: [
+            {
+              name: 'createThing',
+              httpMethod: 'post',
+              path: '/things',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              requestBody: body,
+              requestBodyEncoding: 'json',
+              requestBodyContentType: 'application/json',
+              requestBodyContentTypes: ['application/json', 'application/xml'],
+              requestBodyContents: [
+                { contentType: 'application/json', type: body },
+                { contentType: 'application/xml', type: { kind: 'model', name: 'ThingXml' } },
+              ],
+              response: { kind: 'primitive', type: 'unknown' },
+              errors: [],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      enums: [],
+      models: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const names = specDerivedNames(spec, nodeHints);
+    expect(names.has('ThingInput')).toBe(true);
+    expect(names.has('ThingXml')).toBe(true);
+  });
+});
+
 describe('diffSurfaces', () => {
   it('returns 100% score for identical surfaces', () => {
     const surface = emptySurface({

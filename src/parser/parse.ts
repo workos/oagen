@@ -17,6 +17,7 @@ import {
   mergeFieldInlineModels,
   fieldInlineModelBundles,
   reservedTypeNames,
+  settleFieldInlineModels,
   type InlineModelNaming,
 } from './normalize-inline-models.js';
 import {
@@ -141,10 +142,25 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Each field's site is recorded too, so a merge pass that must rename one
   // of these models can repoint exactly the references that mint it.
   const fieldInlineModelGroups: FieldInlineModelGroup[] = [];
-  const fieldInlineModels = extractInlineModelsFromSchemas(
+  const extractedFieldModels = extractInlineModelsFromSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
     fieldInlineModelGroups,
   );
+  // The components' own field models are settled against the components
+  // right here, before any operation or webhook is read
+  // (`settleFieldInlineModels`): a field object named like a component that
+  // does not admit it takes its qualified name now (`PetOwner2`), and one
+  // the component admits is dropped for it, so every later reader — the
+  // operations' bodies, the shape registry, the webhooks, the merges below —
+  // sees each component referencing its children by their final names, and
+  // no parent is ever compared with a component on an unsettled child. The
+  // names are minted against everything decided so far; a reference an
+  // `allOf` merge copies from such a field later is created under the
+  // settled name (`recordInheritedModelRefs`).
+  const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
+    bundles: fieldInlineModelBundles(fieldInlineModelGroups, models),
+    reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
+  });
 
   const { services, inlineModels, inlineModelBundles } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
@@ -161,6 +177,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     servers,
     version,
     options?.operationHints,
+    enums,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -168,7 +185,11 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Their models are named last, against every model and enum decided so far —
   // components, operations, and the components' own inline field models — so
   // a webhook never takes a name another pass has already minted.
-  const { webhooks, inlineModels: webhookInlineModels } = extractWebhooks(
+  const {
+    webhooks,
+    inlineModels: webhookInlineModels,
+    inlineModelBundles: webhookInlineModelBundles,
+  } = extractWebhooks(
     spec.webhooks,
     {
       schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
@@ -191,11 +212,19 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   clearSchemaNameTransform();
 
   // Every name in play — component models and enums, every inline model of
-  // either pass, and every inline enum the collectors below will lift — so a
-  // copy a merge pass must rename (a deprecated response named like a live
-  // one) takes a name nothing else has or will have, in either pass.
+  // every pass, and every inline enum the collectors below will lift — so a
+  // copy a merge pass must rename (a response named like a component that
+  // does not admit it, a deprecated response named like a live one) takes a
+  // name nothing else has or will have, in either pass. Every site is here:
+  // the operations', the webhooks', and the component fields' — read again,
+  // with the references the operations' and webhooks' `allOf` merges have
+  // copied from component fields since the fields were settled.
   const naming: InlineModelNaming = {
-    bundles: [...inlineModelBundles],
+    bundles: [
+      ...inlineModelBundles,
+      ...webhookInlineModelBundles,
+      ...fieldInlineModelBundles(fieldInlineModelGroups, models),
+    ],
     reserved: reservedTypeNames(
       models,
       enums,
@@ -206,9 +235,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     ),
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
-  // The field models' sites, resolved against the models as the response
-  // merge left them.
-  naming.bundles.push(...fieldInlineModelBundles(fieldInlineModelGroups, responseNormalizedModels));
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);
