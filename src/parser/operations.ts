@@ -2254,8 +2254,7 @@ interface ResponseTypingContext {
   refSiblingDescriptions?: 'override' | 'ignore';
   /**
    * The model name each component response's inline body is shared under
-   * (`resolveComponentResponseModelNames`); a component absent from the map
-   * names its body per operation. Absent altogether, every component keeps
+   * (`resolveComponentResponseModelNames`). Absent, every component keeps
    * `componentResponseModelName`.
    */
   componentResponseModelNames?: ReadonlyMap<string, string>;
@@ -2578,8 +2577,6 @@ function resolvePathModelBaseNames(
   // construction, under whatever media type the body is declared (the same
   // fixed-order pick, `primaryBodySchema`); a chain of refs is followed to the
   // body silently, since the operation declaring the ref warns when it reads it.
-  // A component that names its body per operation (absent from the map)
-  // reserves nothing: its models start with the operations' own stems.
   for (const [componentName, modelName] of componentResponseModelNames) {
     const component = componentResponses?.[componentName];
     if (!component) continue;
@@ -2826,31 +2823,37 @@ function componentResponseModelName(componentName: string): string {
 }
 
 /**
- * The model name each component response's inline body is shared under:
- * `componentResponseModelName`, unless a component schema (or a model a
- * component field mints) already owns that name, or two components derive the
- * same one — `OwnerCard` beside a schema `OwnerCardResponse`, or beside a
- * component response `OwnerCardResponse`. Such a component is left out of the
- * map, and its body is named per operation (`<Op>Response`) as it was before
- * component responses were resolved: a shared name of another shape would
- * otherwise be folded by the later merge, which compares field names, onto a
- * model with other field types, silently.
+ * The model name each component response's inline body is shared under,
+ * decided once for the document: `componentResponseModelName`, stepped to the
+ * first free numbered form (`OwnerCardResponse2`, `…3`) when a component
+ * schema (or a model a component field mints) already owns the name, or when
+ * another component response derives it — `OwnerCard` beside a schema
+ * `OwnerCardResponse`, or beside a component response `OwnerCardResponse`.
+ * A shared name of another shape would otherwise be folded by the later
+ * merge, which compares field names, onto a model with other field types,
+ * silently; and naming such a body per operation instead would hand two
+ * shared bodies of one operation (`OwnerCard` at 200, `NewOwner` at 201) the
+ * same `<Op>Response`. A component already named like its derived name
+ * (`OwnerCardResponse` → `OwnerCardResponse`) keeps it ahead of one that
+ * only derives it; the rest are decided in document order, so the outcome
+ * never depends on which operation is read first. Every component ends up in
+ * the map, so every operation that returns it shares the one model.
  */
 function resolveComponentResponseModelNames(
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   takenModels: readonly Model[],
 ): ReadonlyMap<string, string> {
   const taken = new Set(takenModels.map((model) => model.name));
-  const derived = new Map<string, string>();
-  const owners = new Map<string, number>();
-  for (const componentName of Object.keys(componentResponses ?? {})) {
-    const name = componentResponseModelName(componentName);
-    derived.set(componentName, name);
-    owners.set(name, (owners.get(name) ?? 0) + 1);
-  }
+  const componentNames = Object.keys(componentResponses ?? {});
+  const exact = componentNames.filter((name) => componentResponseModelName(name) === name);
+  const ordered = [...exact, ...componentNames.filter((name) => !exact.includes(name))];
   const names = new Map<string, string>();
-  for (const [componentName, name] of derived) {
-    if (!taken.has(name) && owners.get(name) === 1) names.set(componentName, name);
+  for (const componentName of ordered) {
+    const base = componentResponseModelName(componentName);
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = `${base}${n}`;
+    taken.add(name);
+    names.set(componentName, name);
   }
   return names;
 }
