@@ -159,6 +159,32 @@ describe('the split is decided over the tagged operations of each service alone'
     expect(byName(reversed(paths))).toEqual(byName(paths));
   });
 
+  it('carries the parts that joined a service into the part that keeps its name when that service splits too', () => {
+    // `organizations` sends its `/organization_domains` operation into
+    // `OrganizationDomains`, whose own tag spans two first segments and
+    // splits as well. The joined operation stays in `OrganizationDomains`
+    // rather than being dropped with the array the split replaces, in both
+    // document orders.
+    const paths: Paths = {
+      '/organizations': tagged('organizations'),
+      '/organization_domains': tagged('organizations'),
+      '/organization_domains/{id}': tagged('organization_domains', { parameters: [pathParam('id')] }),
+      '/domain_checks': tagged('organization_domains'),
+    };
+    const byName = (p: Paths) => Object.fromEntries(services(p).map((s) => [s.name, [...s.operations].sort()]));
+    expect(byName(paths)).toEqual({
+      Organizations: ['list: GET /organizations'],
+      OrganizationDomains: ['get: GET /organization_domains/{id}', 'list: GET /organization_domains'],
+      DomainChecks: ['list: GET /domain_checks'],
+    });
+    expect(byName(reversed(paths))).toEqual(byName(paths));
+    // The joined operation comes after the service's own kept operation.
+    expect(services(paths).find((s) => s.name === 'OrganizationDomains')!.operations).toEqual([
+      'get: GET /organization_domains/{id}',
+      'list: GET /organization_domains',
+    ]);
+  });
+
   it('keeps a tagged operation whose path has no first segment to be split on', () => {
     // `/` has no segment: it stays in its tag instead of founding a service
     // with an empty name, exactly as `/{id}` stays beside `/notes`.
@@ -182,5 +208,63 @@ describe('the split is decided over the tagged operations of each service alone'
       '/{id}': { get: { operationId: 'getById', parameters: [pathParam('id')], ...ok } },
     };
     expect(services(paths)).toEqual([{ name: 'Default', operations: ['getRoot: GET /', 'getById: GET /{id}'] }]);
+  });
+});
+
+describe('an operationId and a path-derived name that now meet in one service resolve by the collision rules', () => {
+  // Review on #337: the one rename the fix causes beyond a service move. A
+  // name taken from an operationId is kept as written and the path-named
+  // operation is the one qualified, so `Notes.list`, which was the untagged
+  // path in its own service, is now the tagged operation.
+  it('keeps the operationId and restores the noun to the untagged path-named operation', () => {
+    const paths: Paths = { '/api/notes': tagged('notes', { operationId: 'list' }), '/api/v1/notes': get };
+    expect(services(paths)).toEqual([
+      { name: 'Notes', operations: ['list: GET /api/notes', 'listNotes: GET /api/v1/notes'] },
+    ]);
+    expect(services(reversed(paths))).toEqual([
+      { name: 'Notes', operations: ['listNotes: GET /api/v1/notes', 'list: GET /api/notes'] },
+    ]);
+  });
+
+  it('does the same for an item operation', () => {
+    const paths: Paths = {
+      '/api/notes/{noteId}': tagged('notes', { operationId: 'get', parameters: [pathParam('noteId')] }),
+      '/api/v1/notes/{noteId}': { get: { parameters: [pathParam('noteId')], ...ok } },
+    };
+    expect(services(paths)).toEqual([
+      { name: 'Notes', operations: ['get: GET /api/notes/{noteId}', 'getNote: GET /api/v1/notes/{noteId}'] },
+    ]);
+    expect(services(reversed(paths))).toEqual([
+      { name: 'Notes', operations: ['getNote: GET /api/v1/notes/{noteId}', 'get: GET /api/notes/{noteId}'] },
+    ]);
+  });
+
+  it('qualifies the tagged path-named operation when the operationId is on the untagged one', () => {
+    // The tagged `/api/notes` has no operationId and already carries the
+    // noun, so the numeric suffix is what remains for it.
+    const paths: Paths = {
+      '/api/notes': tagged('notes'),
+      '/api/v1/notes': { get: { operationId: 'listNotes', ...ok } },
+    };
+    expect(services(paths)).toEqual([
+      { name: 'Notes', operations: ['listNotes2: GET /api/notes', 'listNotes: GET /api/v1/notes'] },
+    ]);
+    expect(services(reversed(paths))).toEqual([
+      { name: 'Notes', operations: ['listNotes: GET /api/v1/notes', 'listNotes2: GET /api/notes'] },
+    ]);
+  });
+
+  it('suffixes the untagged export when a tagged sibling takes its name as an operationId', () => {
+    const paths: Paths = {
+      '/api/v1/notes/{noteId}': tagged('notes', { operationId: 'getNoteExport', parameters: [pathParam('noteId')] }),
+      '/api/v1/notes/{noteId}/export': { get: { parameters: [pathParam('noteId')], ...ok } },
+    };
+    expect(services(paths)).toEqual([
+      {
+        name: 'Notes',
+        operations: ['getNoteExport: GET /api/v1/notes/{noteId}', 'getNoteExport2: GET /api/v1/notes/{noteId}/export'],
+      },
+    ]);
+    expect(services(reversed(paths)).map((s) => s.name)).toEqual(['Notes']);
   });
 });
