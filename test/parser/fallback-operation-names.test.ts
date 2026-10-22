@@ -530,16 +530,18 @@ describe('plural path names (issue #268)', () => {
     }
   });
 
-  it('keeps the plural of statuses beside status, and stems aliases and analyses', () => {
+  it('keeps the plural of statuses beside status and of aliases beside alias, and stems analyses', () => {
     expect(
       names({
         '/org/statuses/{id}': { get: item('id') },
         '/org/status/{id}': { get: item('id') },
         '/org/aliases/{id}': { get: item('id') },
+        '/org/alias/{id}': { get: item('id') },
         '/org/analyses/{id}': { get: item('id') },
       }),
     ).toEqual([
-      'getAlias                     GET    /org/aliases/{id}',
+      'getAlias                     GET    /org/alias/{id}',
+      'getAliases                   GET    /org/aliases/{id}',
       'getAnalysis                  GET    /org/analyses/{id}',
       'getStatus                    GET    /org/status/{id}',
       'getStatuses                  GET    /org/statuses/{id}',
@@ -631,6 +633,17 @@ describe('plural path names (issue #268)', () => {
     ).toEqual([
       'listNotes                    GET    /orgs/notes',
       'listNotesById                GET    /orgs/notes/{id}/notes',
+    ]);
+    // The same for a noun whose singular ends in `s`: `aliases` and `alias`
+    // are one noun, and `alias` is not shortened a second time to `alia`.
+    expect(
+      names({
+        '/org/aliases': { get: ok },
+        '/org/aliases/{id}/aliases': { get: item('id') },
+      }),
+    ).toEqual([
+      'listAliases                  GET    /org/aliases',
+      'listAliasesById              GET    /org/aliases/{id}/aliases',
     ]);
     // With no deeper context to tell them apart, one `By<Param>` per
     // parameter of its own, in path order.
