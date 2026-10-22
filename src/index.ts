@@ -146,6 +146,7 @@ export type {
   WebhookRemoved,
   WebhookModified,
   ParamChange,
+  ParamLocation,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,
