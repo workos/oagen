@@ -43,6 +43,8 @@ import {
   constraintsEntry,
   deprecatedEntry,
   collapsedNullableBranch,
+  nonObjectVariantContexts,
+  unwrapNullableField,
 } from './schemas.js';
 import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
@@ -2313,45 +2315,77 @@ function extractRequestBody(
     // nullable or not, is not collapsed: every variant is built as written.
     const branch = collapsedNullableBranch(schema);
 
+    // The inline object variants are named and built first, in order, so the
+    // other variants' contexts can step around their names and their
+    // children's (`nonObjectVariantContexts`).
+    const objectVariantNames = new Map<SchemaObject, string>();
+    for (const variant of inlineObjectVariants) {
+      const named = deriveOneOfVariantName(
+        variant,
+        contextName,
+        inlineModels,
+        inlineObjectVariants,
+        contentNamed,
+        Boolean(op?.operationId),
+      );
+      const variantName = named.name;
+      if (named.fromContent) contentNamed.push(variantName);
+      objectVariantNames.set(variant, variantName);
+      const source = branch ?? variant;
+      const requiredSet = new Set(source.required ?? []);
+      const siblings = collectProperties(source);
+      const fields: Field[] = [];
+      for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
+        if (!fieldSchema) continue;
+        fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings));
+      }
+      inlineModels.push({
+        name: variantName,
+        description: source.description,
+        ...externalDocsEntry(source.externalDocs),
+        fields,
+        ...deprecatedEntry(source),
+        ...constraintsEntry(source),
+      });
+      extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
+    }
+    // Every other variant that mints a name — an array or map, a nested
+    // union, a nullable wrapper around an object, an `allOf`, an inline enum
+    // — is typed under the context `nonObjectVariantContexts` gives it, apart
+    // from the object variants' names, and materialized by the field
+    // extractor under that context, so the body never references a model the
+    // parser did not create: the variants of a union nested under the body's
+    // second variant are `CreateThingRequestVariant2`,
+    // `BCreateThingRequestVariant2`, never `CreateThingRequest` again.
+    const variantContexts = nonObjectVariantContexts(
+      contextName,
+      schema.oneOf,
+      undefined,
+      undefined,
+      objectVariantNames,
+    );
+    for (const [variant, context] of variantContexts) {
+      extractInlineModelsFromProperties(
+        { properties: { [context]: unwrapNullableField(variant) } },
+        inlineModels,
+        undefined,
+        componentSchemas,
+      );
+    }
+
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
         const ref = schemaToTypeRef(variant, contextName);
         variants.push(ref);
       } else if (variant.type === 'null') {
         // skip null variant in union, handle separately
-      } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const named = deriveOneOfVariantName(
-          variant,
-          contextName,
-          inlineModels,
-          inlineObjectVariants,
-          contentNamed,
-          Boolean(op?.operationId),
-        );
-        const variantName = named.name;
-        if (named.fromContent) contentNamed.push(variantName);
-        const source = branch ?? variant;
-        const requiredSet = new Set(source.required ?? []);
-        const siblings = collectProperties(source);
-        const fields: Field[] = [];
-        for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
-          if (!fieldSchema) continue;
-          fields.push(
-            buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
-          );
-        }
-        inlineModels.push({
-          name: variantName,
-          description: source.description,
-          ...externalDocsEntry(source.externalDocs),
-          fields,
-          ...deprecatedEntry(source),
-          ...constraintsEntry(source),
-        });
-        extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
-        variants.push({ kind: 'model', name: variantName });
       } else {
-        variants.push(schemaToTypeRef(variant, contextName));
+        const variantName = objectVariantNames.get(variant);
+        variants.push(
+          variantName !== undefined
+            ? { kind: 'model', name: variantName }
+            : schemaToTypeRef(variant, variantContexts.get(variant) ?? contextName),
+        );
       }
     }
 
@@ -2371,6 +2405,20 @@ function extractRequestBody(
     return { body, encoding };
   }
 
+  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
+  // array, a map, a nullable object, …). Such a TypeRef can still reach
+  // inline models — the inline object variants of an `anyOf`, an array's
+  // inline items or the variants of an `items.oneOf`, a map's inline values,
+  // and whatever is nested under any of them, a union under a variant
+  // included — so materialize them the way an inline response does: as a
+  // property of this name under no parent, which names every nested model
+  // exactly as the TypeRef references it.
+  extractInlineModelsFromProperties(
+    { properties: { [contextName]: schema } },
+    inlineModels,
+    undefined,
+    componentSchemas,
+  );
   return { body: schemaToTypeRef(schema, contextName), encoding };
 }
 
@@ -3755,6 +3803,19 @@ function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema
   return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 
+/**
+ * The type of a body the document does not describe:
+ * `{ kind: 'primitive', type: 'unknown' }`. A 3xx entry's `type` is always
+ * this; a 2xx entry's is this until a media-type rule types it; and an
+ * operation's `response` is this when the operation declares no 2xx or 3xx
+ * response at all — only `default`, ranges or errors, an empty `responses`
+ * map, or no `responses` key — so an emitter never types a return value the
+ * document does not describe. Each call returns a new object.
+ */
+function undescribedBodyType(): TypeRef {
+  return { kind: 'primitive', type: 'unknown' };
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -3788,7 +3849,7 @@ function extractResponses(
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
-  let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let response: TypeRef = undescribedBodyType();
   let responseHeaders: ResponseHeader[] | undefined;
   let responseContentTypes: string[] | undefined;
   let responseContents: ResponseContent[] | undefined;
@@ -3803,6 +3864,9 @@ function extractResponses(
   let overrideItemType: TypeRef | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
 
+  // An operation without a `responses` object declares no success response,
+  // so `response` is `unknown` here as it is for one that declares only
+  // `default`, ranges or errors.
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
   const allSuccessResponses: SuccessResponse[] = [];
@@ -3862,7 +3926,7 @@ function extractResponses(
     const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
-      let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
+      let extractedType: TypeRef = undescribedBodyType();
       // The body schema to classify: the JSON one when a JSON media type is
       // declared (`application/json` by essence, then `+json`), else — past
       // the binary and text media types typed below without a schema — the
@@ -3922,7 +3986,7 @@ function extractResponses(
       );
       allSuccessResponses.push({
         statusCode: code,
-        type: { kind: 'primitive', type: 'unknown' },
+        type: undescribedBodyType(),
         ...(headers && { headers }),
         ...(description && { description }),
         ...contents,
@@ -3979,8 +4043,9 @@ function extractResponses(
   // Primary response = lowest status code whose type is not `unknown` (the
   // lowest 2xx with a typed body; a 3xx entry is always `unknown`), falling
   // back to the lowest declared code (an untyped 2xx, or a 3xx when there is
-  // no 2xx). With no 2xx or 3xx at all, `response` keeps its initial `string`;
-  // a `2XX` range or `default` body is never promoted into it.
+  // no 2xx). With no 2xx or 3xx at all, `response` stays `unknown` — the type
+  // of a body the document does not describe — with no headers, description
+  // or media types; a `2XX` range or `default` body is never promoted into it.
   let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);

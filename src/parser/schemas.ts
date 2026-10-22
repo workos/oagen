@@ -1,24 +1,8 @@
-import type {
-  Model,
-  ModelRef,
-  Enum,
-  EnumValue,
-  EnumRef,
-  ExternalDocs,
-  Field,
-  TypeRef,
-  Constraints,
-} from '../ir/types.js';
+import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
-import {
-  toPascalCase,
-  toUpperSnakeCase,
-  cleanSchemaName,
-  singularize,
-  stripListItemMarkers,
-  splitWords,
-} from '../utils/naming.js';
-import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
+import { toPascalCase, cleanSchemaName, singularize, stripListItemMarkers, splitWords } from '../utils/naming.js';
+import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
+import { enumValuesOf, inlineEnumExternalDocsOf, inlineEnumRef, toEnumValue, type EnumMember } from './enum-members.js';
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -41,7 +25,8 @@ let activeComponentSchemaKeys: Set<string> = new Set();
 
 /**
  * Module-level set of resolved schema names whose components/schemas entry is
- * an enum (i.e. has `enum:`). Populated by extractSchemas() so schemaToTypeRef()
+ * an enum (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
+ * string consts). Populated by extractSchemas() so schemaToTypeRef()
  * can classify a `$ref` to a top-level enum schema as `kind: 'enum'` instead of
  * `kind: 'model'`. Without this, every `$ref` was naively returned as a model
  * ref, even when the target was a shared enum like `PaginationOrder`.
@@ -94,37 +79,141 @@ interface NamedUnionMemo {
 }
 let activeNamedUnionMemo: NamedUnionMemo | null = null;
 
-/**
- * The link an inline enum schema declares, keyed by the `EnumRef` built from
- * it, so the lift pass (`collectInlineEnumFromRef`) can put it on the `Enum`
- * the way `values` reach it. A side table rather than a key on the ref: the
- * ref is the field's or parameter's *type*, which the sameness passes compare
- * by serialization, and a link is documentation, not shape — it sits beside
- * the type on the `Field`, not inside it. Keyed by identity because every
- * pass between building a ref and lifting it mutates refs in place (renames,
- * nullable wraps) and none clones them; an unreachable ref drops out on its
- * own, so unlike the sets above this needs no clearing.
- */
-const inlineEnumExternalDocs = new WeakMap<EnumRef, ExternalDocs>();
-
-/** Build an inline `EnumRef`, recording the link its schema declares (if usable) for the lift pass. */
-function inlineEnumRef(name: string, values: (string | number)[], rawExternalDocs: unknown): EnumRef {
-  const ref: EnumRef = { kind: 'enum', name, values };
-  const externalDocs = readExternalDocs(rawExternalDocs);
-  if (externalDocs) inlineEnumExternalDocs.set(ref, externalDocs);
-  return ref;
-}
-
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
 function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
   return (values ?? []).filter((v): v is string | number => v !== null);
 }
 
-/** True when an enum schema admits `null` by any OAS 3.0 / 3.1 spelling. */
+/**
+ * True when an enum schema admits `null` by any OAS 3.0 / 3.1 spelling: the
+ * `nullable: true` flag, a `type` list naming `'null'`, a `null` member in
+ * `enum:`, or — for an enum declared as a `oneOf`/`anyOf` of `const`
+ * schemas — a `type: 'null'` variant.
+ */
 function isNullableEnumSchema(schema: SchemaObject): boolean {
   if (schema.nullable === true) return true;
   if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
-  return Array.isArray(schema.enum) && schema.enum.includes(null);
+  if (Array.isArray(schema.enum) && schema.enum.includes(null)) return true;
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullVariantSchema);
+}
+
+/**
+ * Whether a component schema is an enum: it declares an `enum:` list, or it
+ * is a `oneOf`/`anyOf` whose every non-null variant is a string `const`
+ * schema (`constUnionEnumMembers`) with no `allOf` and no `properties` of
+ * its own — the OAS 3.1 spelling that documents and deprecates values one
+ * by one. Both become an `Enum` (`extractEnum`), and a `$ref` to either
+ * resolves to an `EnumRef`; the same `oneOf` written inline collapses to an
+ * inline enum (`schemaToTypeRef`), so the two spellings have one shape
+ * wherever they appear. A `oneOf` with any other variant — a `$ref`, an
+ * object, a number const — is a named union, as before.
+ */
+function isEnumComponentSchema(schema: SchemaObject): boolean {
+  return Boolean(schema.enum) || isConstUnionEnumSchema(schema);
+}
+
+/** The `oneOf`/`anyOf`-of-string-consts half of `isEnumComponentSchema`. */
+function isConstUnionEnumSchema(schema: SchemaObject): boolean {
+  if (schema.allOf || Object.keys(schema.properties ?? {}).length > 0) return false;
+  return constUnionEnumMembers(schema) !== null;
+}
+
+/**
+ * `{ description }` holding the first of `candidates` that is a string with
+ * non-whitespace content, `{}` when none is — spread into an `EnumMember`.
+ */
+function descriptionEntry(...candidates: unknown[]): { description?: string } {
+  const text = candidates.find((raw) => typeof raw === 'string' && raw.trim() !== '');
+  return typeof text === 'string' ? { description: text } : {};
+}
+
+/**
+ * The members of an enum schema in document order, each with the
+ * documentation the document attaches to that one value, from whichever
+ * spelling declares them: a `oneOf`/`anyOf` of string `const` schemas
+ * (`constUnionEnumMembers`) first, else an `enum:` list
+ * (`enumListMembers`). Null when the schema is neither.
+ */
+export function enumMembersOf(schema: SchemaObject): EnumMember[] | null {
+  return constUnionEnumMembers(schema) ?? enumListMembers(schema);
+}
+
+/**
+ * The members an `enum:` list declares: each non-null entry (a `null` marks
+ * nullability, `isNullableEnumSchema`), a number kept as one and anything
+ * else as its string form, described by the schema's `x-enum-descriptions`
+ * / `x-enumDescriptions` entry for it (`enumValueDescriptions`). No entry
+ * is deprecated: an `enum:` list has no per-value keyword. Null when the
+ * schema declares no `enum:`.
+ */
+function enumListMembers(schema: SchemaObject): EnumMember[] | null {
+  if (!schema.enum) return null;
+  const describe = enumValueDescriptions(schema);
+  const members: EnumMember[] = [];
+  schema.enum.forEach((raw, index) => {
+    if (raw === null) return;
+    const value = typeof raw === 'number' ? raw : String(raw);
+    members.push({ value, ...descriptionEntry(describe(value, index)) });
+  });
+  return members;
+}
+
+/**
+ * The members a `oneOf`/`anyOf` of string `const` schemas declares — a
+ * single-member string `enum` is the same thing — once its `type: 'null'`
+ * variants are set aside: each variant's `const`, with the variant's own
+ * `description` and, when it says `deprecated: true`, `deprecated` (the
+ * literal `true` only, as `deprecatedEntry` reads it everywhere). A member
+ * whose own `description` has no content takes the schema's
+ * `x-enum-descriptions` / `x-enumDescriptions` entry for it
+ * (`enumValueDescriptions`), the list form read at the variant's position as
+ * written. Null when the schema has no
+ * `oneOf`/`anyOf`, when every variant is `type: 'null'`, or when any
+ * variant is anything but a string const — a `$ref`, an object, a number
+ * const — since such a union is not an enum.
+ */
+function constUnionEnumMembers(schema: SchemaObject): EnumMember[] | null {
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (!variants) return null;
+  const describe = enumValueDescriptions(schema);
+  const members: EnumMember[] = [];
+  for (const [index, variant] of variants.entries()) {
+    if (isNullVariantSchema(variant)) continue;
+    const value =
+      typeof variant.const === 'string'
+        ? variant.const
+        : Array.isArray(variant.enum) && variant.enum.length === 1 && typeof variant.enum[0] === 'string'
+          ? variant.enum[0]
+          : undefined;
+    if (value === undefined) return null;
+    members.push({
+      value,
+      ...descriptionEntry(variant.description, describe(value, index)),
+      ...deprecatedEntry(variant),
+    });
+  }
+  return members.length > 0 ? members : null;
+}
+
+/**
+ * The per-value descriptions an enum schema's `x-enum-descriptions` or
+ * `x-enumDescriptions` extension declares, as a lookup by value and position.
+ * Either key may hold an object mapping each value's text form (`"5"` for a
+ * numeric `5`) to its description, or a list aligned with the members as
+ * written — the `enum:` entries, or the `oneOf`/`anyOf` variants, a `null`
+ * entry or `type: 'null'` variant counted in its place. `x-enum-descriptions`
+ * is read when it holds an object or a list, `x-enumDescriptions` otherwise;
+ * an entry that is not a string with non-whitespace content, or a value with
+ * no entry, describes nothing (`descriptionEntry`).
+ */
+function enumValueDescriptions(schema: SchemaObject): (value: string | number, index: number) => unknown {
+  const raw = [schema['x-enum-descriptions'], schema['x-enumDescriptions']].find(
+    (candidate) => typeof candidate === 'object' && candidate !== null,
+  );
+  if (raw === undefined) return () => undefined;
+  if (Array.isArray(raw)) return (_value, index) => raw[index];
+  const byValue = raw as Record<string, unknown>;
+  return (value) => (Object.hasOwn(byValue, String(value)) ? byValue[String(value)] : undefined);
 }
 
 /** Wrap `ref` in `nullable` unless it already is one, so a nullable enum `$ref` is never double-wrapped. */
@@ -679,7 +768,7 @@ export function extractSchemas(
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   for (const [name, schema] of Object.entries(schemas)) {
     const resolved = resolveSchemaName(name);
-    if (schema.enum) {
+    if (isEnumComponentSchema(schema)) {
       activeEnumSchemaNames.add(resolved);
       if (isNullableEnumSchema(schema)) activeNullableEnumSchemaNames.add(resolved);
     } else if (isNamedUnionSchema(schema) && isNullableUnionSchema(schema)) {
@@ -692,7 +781,7 @@ export function extractSchemas(
   for (const [name, schema] of Object.entries(schemas)) {
     const pascalName = resolveSchemaName(name);
 
-    if (schema.enum) {
+    if (isEnumComponentSchema(schema)) {
       enums.push(extractEnum(pascalName, schema));
     } else {
       const model = extractModel(pascalName, schema, schemas);
@@ -763,25 +852,22 @@ export function clearSchemaNameTransform(): void {
  * Walk a single TypeRef and extract inline enum refs as top-level enum definitions.
  * Shared by both schemas.ts (field-level) and parse.ts (model-level) collection passes.
  *
- * The lifted `Enum` carries the link its schema declared (see
- * `inlineEnumExternalDocs`), like a component enum. The first ref lifted
- * under a name decides the enum, link included — the same first-wins rule
- * `seen` applies to the values — so the key is absent when that schema
- * declared no usable link, even if a later same-named one does.
+ * The lifted `Enum` carries the link its schema declared and each value's
+ * own `description` and `deprecated` (recorded against the ref by
+ * `inlineEnumRef`), like a component enum. The first ref lifted under a name
+ * decides the enum, link and value documentation included — the same
+ * first-wins rule `seen` applies to the values — so the key is absent when
+ * that schema declared no usable link, even if a later same-named one does.
  */
 export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
   walkTypeRef(ref, {
     enum: (r) => {
       if (r.values && !seen.has(r.name)) {
         seen.add(r.name);
-        const externalDocs = inlineEnumExternalDocs.get(r);
+        const externalDocs = inlineEnumExternalDocsOf(r);
         enums.push({
           name: r.name,
-          values: r.values.map((v) => ({
-            name: toUpperSnakeCase(String(v)),
-            value: v,
-            description: undefined,
-          })),
+          values: enumValuesOf(r),
           ...(externalDocs ? { externalDocs } : {}),
         });
       }
@@ -852,12 +938,9 @@ function collectNestedInlineModels(
       // mint, as the field's TypeRef did, so derive that set from the same
       // sibling set `extractModel` typed the field with.
       const reserved = reservedInlineNames(fieldName, collectProperties(parentSchema, schemas), parentModelName);
-      const extracted = extractNestedSchema(
-        unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName, reserved),
-        fieldSchema,
-        schemas,
-        reserved,
-      );
+      const baseName = unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName, reserved);
+      if (baseName === null) return; // a union's non-object variant — field extractor's
+      const extracted = extractNestedSchema(baseName, fieldSchema, schemas, reserved);
       for (const m of extracted) {
         if (!modelNames.has(m.name)) {
           models.push(m);
@@ -871,10 +954,15 @@ function collectNestedInlineModels(
 
 /**
  * The base name `extractNestedSchema` should name a field's `oneOf` variants
- * from: the field's qualified inline name when naming the variants from it
- * yields `refName` (the ref the walk is resolving), else `refName` itself,
- * which is right for every non-union field and for a union whose variant 0 is
- * bare.
+ * from: `refName` itself (the ref the walk is resolving) for every non-union
+ * field, and for a union field the field's qualified inline name when naming
+ * the inline object variants from it yields `refName`. Null for a union
+ * field whose inline object variants are not named `refName`: the ref was
+ * minted for one of the union's other variants — a nullable wrapper around
+ * an object, an `allOf`, a nested union — which `schemaToTypeRef` typed under
+ * a context of its own (`nonObjectVariantContexts`) and which only the field
+ * extractor materializes; naming the union's object variants from such a ref
+ * would register variant 0's fields under the other variant's name.
  */
 function unionBaseName(
   refName: string,
@@ -882,11 +970,11 @@ function unionBaseName(
   fieldSchema: SchemaObject,
   parentModelName: string,
   reserved: ReadonlySet<string>,
-): string {
+): string | null {
   if (!fieldSchema.oneOf) return refName;
   const fromField = qualifyInlineModelName(toPascalCase(fieldName), parentModelName);
   const names = [...nameInlineVariants(fieldSchema, fromField, reserved).values()];
-  return names.includes(refName) ? fromField : refName;
+  return names.includes(refName) ? fromField : null;
 }
 
 /**
@@ -1443,66 +1531,116 @@ export function isArraySchema(schema: SchemaObject | undefined): boolean {
 }
 
 /**
- * The context each array or map variant of a `oneOf`/`anyOf` is typed and
- * extracted under, keyed by the variant: `<field>_item` for an array,
- * `<field>_value` for a map, so what its items or values mint
- * (`ReqShapesItem`, `ReqShapesValue`) can never take the name an object
- * variant of the same union keeps (`ReqShape`, `ReqShapeWithX`). When a
- * sibling property already mints that name (a real `shapes_item` object), an
- * object variant's own property does (`item` under `ReqShape` is
- * `ReqShapeItem`, see `objectVariantNames`), or an earlier collection
- * variant of the same union does, the context steps on exactly as a plain
- * array's does beside such a sibling (`firstFreeElementContext`:
- * `shapes_array_item`, `shapes_array_item2`, …), so two array variants of one
- * union never share a model, and neither do an array variant's items and an
- * object variant's child. The names minted this way are what
- * `mintedInlineNameEntries` reports for the union, so a sibling steps around
- * them in turn. Any other variant keeps the field's own context and is not in
- * the map. Each variant is read with its nullable wrapper removed, whichever
- * form it takes (`unwrapNullableSchema`), as the extractor reads it. Decided
- * in variant order, from the siblings' and the variants' content only, so
- * both sides of the parser agree.
+ * The context each variant of a `oneOf`/`anyOf` that is not an inline object
+ * is typed and extracted under, keyed by the variant. An inline object
+ * variant is named by `nameInlineVariants` (`objectVariantNames`) and is not
+ * in the map; a `null` variant marks the union nullable and a `$ref` variant
+ * mints nothing, so neither is either. Every other variant is read with its
+ * nullable wrapper removed, whichever form it takes (`unwrapNullableSchema`),
+ * as the extractor reads it, and gets a context by its kind:
+ *
+ *   - an array or map variant is typed under `<field>_item` / `<field>_value`,
+ *     so what its items or values mint (`ReqShapesItem`, `ReqShapesValue`)
+ *     can never take the name an object variant of the same union keeps
+ *     (`ReqShape`, `ReqShapeWithX`);
+ *   - a variant that would mint a model or enum name under the field's own
+ *     context — a nested `oneOf`/`anyOf` with inline object variants (its
+ *     variants are named from the field's name as the outer ones are, so its
+ *     first one would take the outer variant 0's name), a nullable wrapper
+ *     around an inline object, an `allOf`, an inline enum or a union of
+ *     string consts — keeps the field's context when nothing it mints there is
+ *     claimed (a nested union beside a primitive still names its variants
+ *     `ReqShape`, `BReqShape`; an inline enum beside a primitive keeps
+ *     `ReqShape`), and is otherwise typed under `<field>_variant_<n>`, n its
+ *     1-based position among the non-null variants, as a named union's
+ *     non-object variants are (`memberContext`): the nested union's variants
+ *     become `ReqShapeVariant2`, `BReqShapeVariant2`, an enum beside an object
+ *     variant `ReqShapeVariant2`;
+ *   - a variant that mints nothing under the field's context (a primitive, an
+ *     `allOf` of `$ref`s alone) keeps the field's context and is not in the map.
+ *
+ * A name is claimed when a sibling property mints it (a real `shapes_item`
+ * object), the caller reserved it (`reservedNames`: the set an enclosing
+ * field handed down to its array items or map values, or the names a
+ * deferred body's registry already gives another shape — the same set the
+ * object variants step around through `reservedNamesFor`), an inline object
+ * variant of the union takes it (`ReqShape` — the reason a nested union's
+ * variants step), an object variant's own property mints it (`item` under
+ * `ReqShape` is `ReqShapeItem`), or an earlier variant of this map minted it.
+ * When the context chosen by kind still mints a claimed name, it steps on
+ * exactly as a plain array's items do beside such a sibling
+ * (`firstFreeElementContext`: `shapes_array_item`, `shapes_array_item2`, …
+ * for an array; `shapes_variant_2_value`, `shapes_variant_2_member_value`, …
+ * for the rest), so no two variants of one union share a model, and neither
+ * do a variant's items and an object variant's child. The names minted this
+ * way are what `mintedInlineNameEntries` reports for the union, so a sibling
+ * steps around them in turn. Decided in variant order, from the siblings' and
+ * the variants' content only, so both sides of the parser agree:
+ * `schemaToTypeRef` types each variant under its context, the extractors
+ * re-enter with the variant as a property of that name, and
+ * `mintedInlineNameEntries` reads the names under it.
  *
  * `objectVariantNames` is the name each inline object variant's model takes
- * (`nameInlineVariants`), as the caller decided it; the names those models'
- * own properties mint are claimed before any context is chosen. One level is
- * enough: every name a child's children mint starts with the child's.
+ * (`nameInlineVariants`), as the caller decided it; those names, and the
+ * names the models' own properties mint, are claimed before any context is
+ * chosen. One level is enough: every name a child's children mint starts
+ * with the child's.
  */
-export function collectionVariantContexts(
+export function nonObjectVariantContexts(
   contextName: string | undefined,
   variants: readonly SchemaObject[],
   siblings: ReadonlyMap<string, SchemaObject> | undefined,
   parentModelName: string | undefined,
   objectVariantNames: ReadonlyMap<SchemaObject, string>,
+  reservedNames?: ReadonlySet<string>,
 ): Map<SchemaObject, string> {
   const contexts = new Map<SchemaObject, string>();
   if (contextName === undefined) return contexts;
-  const claimed = new Set<string>();
+  const claimed = new Set<string>(reservedNames);
   for (const [siblingName, siblingSchema] of siblings ?? []) {
     if (siblingName === contextName) continue;
     for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) claimed.add(minted);
   }
   for (const [variant, variantName] of objectVariantNames) {
+    claimed.add(variantName);
     for (const [property, propertySchema] of Object.entries(unwrapNullableSchema(variant).properties ?? {})) {
       if (!propertySchema) continue;
       for (const minted of mintedInlineNames(property, propertySchema, variantName)) claimed.add(minted);
     }
   }
+  let position = 0;
   for (const variant of variants) {
+    if (isNullVariantSchema(variant)) continue;
+    position++;
+    if (objectVariantNames.has(variant)) continue;
     const member = unwrapNullableSchema(variant);
     const kind = classifyInlineSchema(member);
-    if (kind !== 'array' && kind !== 'map') continue;
+    if (kind === 'ref') continue;
     const dependentNames = (candidate: string): string[] =>
       mintedInlineNameEntries(candidate, member, parentModelName)
         .filter((entry) => !entry.contextFree)
         .map((entry) => entry.name);
-    const { context } = firstFreeElementContext(
-      contextName,
-      kind === 'array' ? 'item' : 'value',
-      claimed,
-      dependentNames,
-      [],
-    );
+    const unclaimed = (names: readonly string[]): boolean => names.every((name) => !claimed.has(name));
+    let context: string;
+    if (kind === 'array' || kind === 'map') {
+      context = firstFreeElementContext(
+        contextName,
+        kind === 'array' ? 'item' : 'value',
+        claimed,
+        dependentNames,
+        [],
+      ).context;
+    } else {
+      const own = dependentNames(contextName);
+      if (own.length === 0) continue;
+      const stepped = `${contextName}_variant_${position}`;
+      const under = dependentNames(stepped);
+      context = unclaimed(own)
+        ? contextName
+        : unclaimed(under)
+          ? stepped
+          : firstFreeElementContext(stepped, 'value', claimed, dependentNames, under).context;
+    }
     contexts.set(variant, context);
     for (const name of dependentNames(context)) claimed.add(name);
   }
@@ -1685,36 +1823,13 @@ export function buildFieldFromSchema(
 }
 
 /**
- * If every non-null oneOf/anyOf variant is a string-valued const, return the
- * list of those const values so the union can collapse into a single enum.
- * Returns null when any variant isn't a pure string-const (model ref,
- * number const, nullable, etc.).
- */
-function collectLiteralStringConsts(variants: SchemaObject[]): string[] | null {
-  if (variants.length === 0) return null;
-  const values: string[] = [];
-  for (const v of variants) {
-    // A single-element enum is semantically identical to const.
-    if (typeof v.const === 'string') {
-      values.push(v.const);
-      continue;
-    }
-    if (Array.isArray(v.enum) && v.enum.length === 1 && typeof v.enum[0] === 'string') {
-      values.push(v.enum[0]);
-      continue;
-    }
-    return null;
-  }
-  return values;
-}
-
-/**
  * Build an EnumRef the same way the regular enum path does for naming. The
  * `oneOf`/`anyOf` wrapper is the schema that declares this enum, so its link
- * is the enum's (`rawExternalDocs`), as an inline `enum:` schema's is.
+ * is the enum's (`rawExternalDocs`), as an inline `enum:` schema's is; the
+ * members carry each variant's own documentation (`constUnionEnumMembers`).
  */
 function buildSyntheticEnumRef(
-  values: string[],
+  members: readonly EnumMember[],
   contextName: string | undefined,
   parentModelName: string | undefined,
   rawExternalDocs: unknown,
@@ -1726,7 +1841,7 @@ function buildSyntheticEnumRef(
   // a project-level rename map (e.g. `RadarAction` → `RadarListAction` in
   // `oagen.config.ts`) catches inline parameter enums too.
   const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-  return inlineEnumRef(finalName, values, rawExternalDocs);
+  return inlineEnumRef(finalName, members, rawExternalDocs);
 }
 
 /**
@@ -1911,15 +2026,13 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
-  // A `null` member marks the schema as nullable (OAS 3.1); it is not a
-  // value. Nullability is carried on the `$ref` side via
-  // `activeNullableEnumSchemaNames`, so drop it here instead of emitting a
-  // bogus `NULL = "null"` member.
-  const values: EnumValue[] = nonNullEnumValues(schema.enum).map((v) => ({
-    name: toUpperSnakeCase(String(v)),
-    value: typeof v === 'number' ? v : String(v),
-    description: undefined,
-  }));
+  // The members of either spelling (`enumMembersOf`), each with its own
+  // `description` and `deprecated`. A `null` member or `type: 'null'`
+  // variant marks the schema as nullable (OAS 3.1); it is not a value.
+  // Nullability is carried on the `$ref` side via
+  // `activeNullableEnumSchemaNames`, so it is dropped here instead of
+  // emitting a bogus `NULL = "null"` member.
+  const values: EnumValue[] = (enumMembersOf(schema) ?? []).map(toEnumValue);
 
   const rawDefault = schema.default;
   const def =
@@ -2053,6 +2166,8 @@ interface NamedUnionPlan {
 function isNamedUnionSchema(schema: SchemaObject): boolean {
   if (schema.allOf || (!schema.oneOf && !schema.anyOf)) return false;
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
+  // A `oneOf`/`anyOf` of string consts is an enum (`isEnumComponentSchema`), not a union.
+  if (isConstUnionEnumSchema(schema)) return false;
   const nonNull = (schema.oneOf ?? schema.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
   return !(nonNull.length === 1 && isPlainObjectSchema(nonNull[0]));
 }
@@ -2931,14 +3046,20 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    if (kind === 'union' && fieldSchema.oneOf) {
-      const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
+    const unionVariants = kind === 'union' ? (fieldSchema.oneOf ?? fieldSchema.anyOf) : undefined;
+    if (unionVariants) {
+      const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
+      // Decided once, for the object variants' models and for the other
+      // variants' contexts, which step around those models and their children.
+      const variantNames: ReadonlyMap<SchemaObject, string> =
+        inlineObjectVariants.length > 0
+          ? nameInlineVariants(
+              fieldSchema,
+              qualifyNestedInlineName(name, fieldName),
+              reservedInlineNames(fieldName, siblings, name),
+            )
+          : new Map();
       if (inlineObjectVariants.length > 0) {
-        const variantNames = nameInlineVariants(
-          fieldSchema,
-          qualifyNestedInlineName(name, fieldName),
-          reservedInlineNames(fieldName, siblings, name),
-        );
         // A nullable wrapper's one branch is built with the wrapper's
         // `deprecated` and limits, as everywhere else; a multi-variant union's
         // variants are built as written (`collapsedNullableBranch`).
@@ -2955,6 +3076,26 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
             nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }, schemas).slice(1));
           }
         }
+      }
+      // Every other variant that mints a name — an array or map, a nested
+      // union, a nullable wrapper around an object, an `allOf`, an inline
+      // enum — is typed under the context `nonObjectVariantContexts` gives
+      // it, as `buildFieldFromSchema` typed the field above; re-enter the
+      // field extractor with the variant as a property of that name, so it
+      // is materialized under exactly the name the reference uses.
+      for (const [variant, context] of nonObjectVariantContexts(
+        fieldName,
+        unionVariants,
+        siblings,
+        name,
+        variantNames,
+      )) {
+        extractInlineModelsFromProperties(
+          { properties: { [context]: unwrapNullableField(variant) } },
+          nestedModels,
+          name,
+          schemas,
+        );
       }
     }
   }
@@ -3173,10 +3314,12 @@ export function schemaToTypeRef(
     // schemas into a single enum. This turns patterns like
     //   provider: { oneOf: [{ const: "AppleOAuth" }, { const: "GitHubOAuth" }, ...] }
     // into a proper enum type with one member per variant instead of a
-    // structurally-opaque union of literal refs.
-    const literalStrings = collectLiteralStringConsts(nonNullVariants);
-    if (literalStrings !== null && literalStrings.length >= 2) {
-      const enumRef = buildSyntheticEnumRef(literalStrings, contextName, parentModelName, schema.externalDocs);
+    // structurally-opaque union of literal refs. Each member keeps its
+    // variant's `description` and `deprecated` (`constUnionEnumMembers`), the
+    // way the same `oneOf` under `components.schemas` does (`extractEnum`).
+    const constMembers = constUnionEnumMembers(schema);
+    if (constMembers !== null && constMembers.length >= 2) {
+      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
       return nullVariant ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
@@ -3267,16 +3410,19 @@ export function schemaToTypeRef(
     // name in every case, and a multi-type variant's other members are named
     // from that model, not from the mapping, so their items resolve.
     const variants: TypeRef[] = [];
-    // An array or map variant is typed under a context of its own
-    // (`collectionVariantContexts`), so the models its items or values mint
-    // never share a name with an object variant of the same union, which
-    // keeps the field's own name, nor with another collection variant's.
-    const collectionContexts = collectionVariantContexts(
+    // Every other variant that mints a name — an array or map, a nested
+    // union, a nullable wrapper around an object, an `allOf`, an inline enum
+    // — is typed under the context `nonObjectVariantContexts` gives it, so
+    // the models and enums it mints never share a name with an object
+    // variant of the same union, which keeps the field's own name, nor with
+    // another such variant's. The extractors re-enter with the same contexts.
+    const variantContexts = nonObjectVariantContexts(
       contextName,
       rawVariants,
       siblingProperties,
       parentModelName,
       inlineVariantNames,
+      reservedNames,
     );
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
@@ -3285,7 +3431,7 @@ export function schemaToTypeRef(
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
         variants.push(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName));
       } else {
-        variants.push(schemaToTypeRef(v, collectionContexts.get(v) ?? contextName, parentModelName));
+        variants.push(schemaToTypeRef(v, variantContexts.get(v) ?? contextName, parentModelName));
       }
     }
     const hasNull = !!nullVariant;
@@ -3342,14 +3488,11 @@ export function schemaToTypeRef(
     // this, `RadarAction` (built from path param `action` on the Radar
     // service) couldn't be redirected to `RadarListAction` from config.
     const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-    // The schema's link is recorded against the ref so the lifted `Enum`
-    // carries it (`collectInlineEnumFromRef`); the nullable unwraps above
-    // spread the schema, so a wrapped enum's link reaches here too.
-    const enumRef = inlineEnumRef(
-      finalName,
-      enumValues.map((v) => (typeof v === 'number' ? v : String(v))),
-      schema.externalDocs,
-    );
+    // The schema's link and each value's `x-enum-descriptions` /
+    // `x-enumDescriptions` entry are recorded against the ref so the lifted
+    // `Enum` carries them (`collectInlineEnumFromRef`); the nullable unwraps
+    // above spread the schema, so a wrapped enum's link reaches here too.
+    const enumRef = inlineEnumRef(finalName, enumListMembers(schema) ?? [], schema.externalDocs);
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 
