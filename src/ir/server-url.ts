@@ -109,3 +109,43 @@ function serverVariablesEqual(a: ServerVariable, b: ServerVariable): boolean {
   const bEnum = b.enum ?? [];
   return aEnum.length === bEnum.length && aEnum.every((value, i) => value === bEnum[i]);
 }
+
+/** The server OpenAPI gives a document that declares none: a single entry at `/`. */
+const DEFAULT_SERVER_URL = '/';
+
+/**
+ * Whether a server list means OpenAPI's default server.
+ *
+ * OpenAPI gives a document with no `servers`, or `servers: []`, a single
+ * server with `url: '/'`; a document that writes that server out declares
+ * nothing beyond it. So `undefined`, an empty list, and a list of exactly one
+ * entry whose `url` is `/` and which declares no variables (`variables`
+ * absent or empty, by own key) are all the default. The entry's `description`
+ * does not count: the default server has none, and a description changes
+ * nothing about where a request goes. A `/` entry that declares a variable, a
+ * template that merely resolves to `/`, and `/` listed beside another server
+ * are not the default.
+ *
+ * The parser (`Operation.servers`) and the differ (`base-url-changed`,
+ * `server-added`, `server-removed`, `serversChanged`) read lists through
+ * `serversBeyondDefault`, so the three spellings of the default compare
+ * equal everywhere server lists are compared (#291).
+ */
+export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
+  if (!servers || servers.length === 0) return true;
+  if (servers.length !== 1) return false;
+  const [only] = servers;
+  return only.url === DEFAULT_SERVER_URL && Object.keys(only.variables ?? {}).length === 0;
+}
+
+/**
+ * The servers a list declares beyond OpenAPI's default: `servers` itself
+ * (the same array, not a copy) when it is not the default by
+ * `isDefaultServerList`, else an empty list. A document without `servers`,
+ * one with `servers: []`, and one whose only server is `/` without variables
+ * all come out as `[]`, which is how the parser and the differ compare them
+ * as one thing.
+ */
+export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
+  return servers && !isDefaultServerList(servers) ? servers : [];
+}

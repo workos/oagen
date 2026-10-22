@@ -19,7 +19,7 @@ import type {
   ServerEntry,
 } from '../ir/types.js';
 import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
-import { serverListsEqual } from '../ir/server-url.js';
+import { serverListsEqual, serversBeyondDefault } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -3115,8 +3115,16 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * already reads both as undeclared), or the winning list restates the
  * document's. Precedence is applied before the comparison, so an operation
  * that restates the document's servers under a Path Item that diverges
- * inherits, not the Path Item's. A document without `servers` compares as an
- * empty list, so any usable list at either level is kept.
+ * inherits, not the Path Item's.
+ *
+ * Both lists go through `serversBeyondDefault` before they are compared, so
+ * OpenAPI's default server is one thing however it is spelled (#291): a
+ * document without `servers` (or with `servers: []`) and one whose only
+ * server is `/` without variables both compare as an empty list. An operation
+ * or Path Item that writes `/` out under a document that declares nothing
+ * therefore inherits — the entry's description included, since the default
+ * server has none — and any other usable list under such a document is kept,
+ * as `/` is under a document that names a host.
  */
 function operationServers(
   own: ServerEntry[] | undefined,
@@ -3125,7 +3133,9 @@ function operationServers(
 ): ServerEntry[] | undefined {
   const effective = own ?? pathLevel;
   if (!effective) return undefined;
-  return serverListsEqual(effective, documentServers ?? []) ? undefined : effective;
+  return serverListsEqual(serversBeyondDefault(effective), serversBeyondDefault(documentServers))
+    ? undefined
+    : effective;
 }
 
 /**

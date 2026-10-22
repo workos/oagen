@@ -1,5 +1,5 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
-import { resolveServerUrl } from '../ir/server-url.js';
+import { resolveServerUrl, serversBeyondDefault } from '../ir/server-url.js';
 import type { Change, ServerVariableChange } from './types.js';
 
 /**
@@ -23,6 +23,15 @@ import type { Change, ServerVariableChange } from './types.js';
  * pair, variables are matched by name and every difference is collected on one
  * `server-modified`. Descriptions are not compared, as nowhere else in the
  * differ.
+ *
+ * OpenAPI's default server is one thing however a document spells it (#291):
+ * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (no variables;
+ * a description does not count) are read through `serversBeyondDefault` and
+ * all compare as a document with no server and no default host. Nothing is
+ * reported between two such documents, and a document that moves from any of
+ * them to a named host gains that host as additive, with no `server-removed`
+ * for `/`. `oldBaseUrl` and `newBaseUrl` still carry `ApiSpec.baseUrl` as
+ * the parser set it, `/` included.
  */
 export function diffServers(
   oldSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
@@ -30,7 +39,14 @@ export function diffServers(
 ): Change[] {
   const changes: Change[] = [];
 
-  if (oldSpec.baseUrl !== newSpec.baseUrl) {
+  const oldServers = serversBeyondDefault(oldSpec.servers);
+  const newServers = serversBeyondDefault(newSpec.servers);
+  // A document with only the default server has no default host: its
+  // `baseUrl` (`''` or `/`) compares as `''`.
+  const oldBaseUrl = oldServers.length > 0 ? oldSpec.baseUrl : '';
+  const newBaseUrl = newServers.length > 0 ? newSpec.baseUrl : '';
+
+  if (oldBaseUrl !== newBaseUrl) {
     changes.push({
       kind: 'base-url-changed',
       oldBaseUrl: oldSpec.baseUrl,
@@ -38,12 +54,12 @@ export function diffServers(
       // A default host appearing where there was none leaves every existing
       // caller — who had to name a host — working; one moving or disappearing
       // does not.
-      classification: oldSpec.baseUrl === '' ? 'additive' : 'breaking',
+      classification: oldBaseUrl === '' ? 'additive' : 'breaking',
     });
   }
 
-  const oldByUrl = groupByUrl(oldSpec.servers ?? []);
-  const newByUrl = groupByUrl(newSpec.servers ?? []);
+  const oldByUrl = groupByUrl(oldServers);
+  const newByUrl = groupByUrl(newServers);
 
   const pairings = new Map<string, ServerPairing>();
   for (const url of new Set([...oldByUrl.keys(), ...newByUrl.keys()])) {
@@ -81,7 +97,7 @@ export function diffServers(
 }
 
 /** Every entry with each `url` template, keyed in declaration order of the first one. */
-function groupByUrl(servers: ServerEntry[]): Map<string, ServerEntry[]> {
+function groupByUrl(servers: readonly ServerEntry[]): Map<string, ServerEntry[]> {
   const groups = new Map<string, ServerEntry[]>();
   for (const server of servers) {
     const group = groups.get(server.url);
