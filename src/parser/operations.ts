@@ -914,9 +914,13 @@ function inferOperationName(
  * so a word is never repeated across a join:
  * `GET /companies/verification/{id}/verification-status` is
  * `getVerificationStatus`.
+ *
+ * `actions` false skips the first shape, for an operation that gave an
+ * action name up to another method on its path (demoteSamePathNames):
+ * `POST /pets/bulk-delete` is then `createBulkDelete`.
  */
-function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number): string {
-  const action = inferAction(method, path, apiRootLength);
+function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string {
+  const action = actions ? inferAction(method, path, apiRootLength) : null;
   if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
   const singleton = inferSingleton(path, apiRootLength);
   if (singleton) {
@@ -937,10 +941,10 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
  * so a non-null result always differs from the singular name.
  * disambiguateOperationNames falls back to it before a numeric suffix when
  * the singular name is an operationId's, or another path-named operation's
- * whose path differs only by that plural.
+ * whose path differs only by that plural. `actions` is fallbackOperationName's.
  */
-function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
-  if (inferAction(method, path, apiRootLength) || inferSingleton(path, apiRootLength)) return null;
+function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string | null {
+  if ((actions && inferAction(method, path, apiRootLength)) || inferSingleton(path, apiRootLength)) return null;
   const resource = inferResourceFromPath(path, apiRootLength, false);
   if (resource === null || resource === inferResourceFromPath(path, apiRootLength)) return null;
   return toCamelCase(`${inferVerb(method, path)}_${resource}`);
@@ -989,6 +993,22 @@ function inferVerb(method: HttpMethod, path: string): string {
 function methodVerbs(method: HttpMethod): string[] {
   const verbs = METHOD_VERBS[method];
   return verbs.item === verbs.collection ? [verbs.item] : [verbs.item, verbs.collection];
+}
+
+/**
+ * Whether the last segment of a path is a literal whose words include one of
+ * the method's own verbs (methodVerbs): `bulk-delete` for a DELETE, `list-all`
+ * for a GET, `update-password` for a PUT or PATCH, and not `bulk-delete` for
+ * a POST. Such a segment is the action for that method (inferAction) and
+ * keeps the action name when another method on the path would take it too
+ * (demoteSamePathNames).
+ */
+function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
+  const segments = pathSegments(path);
+  const last = segments[segments.length - 1];
+  if (last === undefined || last.startsWith('{')) return false;
+  const words = splitWords(last).map((w) => w.toLowerCase());
+  return methodVerbs(method).some((verb) => words.includes(verb));
 }
 
 /** Whether a path segment looks plural: singularizePathSegment would change it. */
@@ -1169,7 +1189,7 @@ function inferAction(
   const afterParam = segments.length >= 2 && segments[segments.length - 2].startsWith('{');
   const words = splitWords(last).map((w) => w.toLowerCase());
   const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
-  const ownVerb = methodVerbs(method).some((verb) => words.includes(verb));
+  const ownVerb = segmentCarriesVerb(method, path);
   const verbPhrase = !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
   if (!postAction && !ownVerb && !verbPhrase) return null;
 
@@ -1186,9 +1206,12 @@ function inferAction(
  * rewritten here. A name derived from the method and path (inferOperationName)
  * is only as unique as the path words it was built from, so when operations on
  * different paths share one, the path-named operations are qualified until
- * every path in the service has a name of its own. Same-name operations on
- * the same path (PUT + PATCH both "update") are left as-is since they
- * represent the same logical resource.
+ * every path in the service has a name of its own. Operations on one path
+ * share a name only when both are path-named and their methods take the same
+ * CRUD verb (PUT and PATCH both `update`); any other sharing on one path is
+ * resolved first (demoteSamePathNames), before the qualifiers below, since
+ * every consumer that keys a service's operations by name — the differ among
+ * them — would otherwise see one of the two.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1271,19 +1294,23 @@ function disambiguateOperationNames(
   };
   const byPath = (a: Operation, b: Operation) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
+  // One path first: the qualifiers below tell paths apart and leave a name
+  // shared on one path alone, so that sharing is settled before they run.
+  const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
+
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
       for (const op of group) {
         if (!pathNamed.has(op)) continue;
         const root = apiRootLengthOf(op);
-        rename(op, appendQualifier(op.name, inferResourceFromPath(qualifierPath(op, root), root)));
+        rename(op, appendQualifier(op.name, inferResourceFromPath(qualifierPath(op, root, !demoted.has(op)), root)));
       }
     },
     (group) => {
       for (const op of group) {
         if (!pathNamed.has(op)) continue;
         const root = apiRootLengthOf(op);
-        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root), root)));
+        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root, !demoted.has(op)), root)));
       }
     },
     (group) => {
@@ -1353,8 +1380,9 @@ function disambiguateOperationNames(
   const pluralOf = (op: Operation): string | null => {
     if (!pathNamed.has(op)) return null;
     const root = apiRootLengthOf(op);
-    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root)) return null;
-    return pluralFallbackName(op.httpMethod, op.path, root);
+    const actions = !demoted.has(op);
+    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root, actions)) return null;
+    return pluralFallbackName(op.httpMethod, op.path, root, actions);
   };
   for (const group of collidingGroups(operations)) {
     // Like every qualifier, only when it tells the group apart: beside an
@@ -1421,9 +1449,105 @@ function disambiguateOperationNames(
 }
 
 /**
+ * Give operations on one path distinct names when their methods take
+ * different CRUD verbs. Two operations on one path share a name only when
+ * both are path-named and their methods take the same verb (inferVerb): PUT
+ * and PATCH are both `update`, so `/pets/{id}` has one `updatePet` for the
+ * two, as it always has. Any other sharing hides one of the two from every
+ * consumer that keys a service's operations by name, such as the differ, and
+ * an action name is where it arises: `bulk-delete` is the action of a DELETE
+ * (its own verb) and of a POST (a CRUD verb last), so both would be
+ * `bulkDelete`.
+ *
+ * The name stays with one verb, and every path-named operation of another
+ * verb takes the name it has without the action rule (fallbackOperationName
+ * with `actions` false): `POST /pets/bulk-delete` beside a DELETE is
+ * `createBulkDelete`, and `POST /users/{id}/update-password` beside a PUT is
+ * the singleton `createUserUpdatePassword`. The verb that keeps the name: an
+ * operationId-named operation's, since that name is the author's and a
+ * path-named sibling steps aside whatever its verb; else the verb the segment
+ * carries (segmentCarriesVerb), `delete` for `bulk-delete`; else `create`,
+ * POST being the method an action is written on; else the verb of the first
+ * method in HTTP_METHODS order. When the name an operation falls back to is
+ * still held on the path by an operationId or by another verb — path-named
+ * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
+ * to drop — a numeric suffix free in the service is added, silently, as the
+ * numeric pass adds one (`updatePet2`). Two operationId-named operations on
+ * one path with one name are the document reusing an operationId: the first
+ * in HTTP_METHODS order keeps it and the rest are numbered with the warning
+ * the numeric pass gives that case. Paths are visited in lexical order and
+ * their operations in HTTP_METHODS order, so the result depends only on the
+ * document's paths and methods.
+ *
+ * Returns the path-named operations that gave an action name up, whose
+ * qualifiers and plural read their path as the shape they fell back to.
+ */
+function demoteSamePathNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  serviceName: string,
+  apiRootLengthOf: (op: Operation) => number,
+  rename: (op: Operation, name: string) => void,
+): Set<Operation> {
+  const demoted = new Set<Operation>();
+  const taken = new Set(operations.map((op) => op.name));
+  const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
+  const methodOrder = (a: Operation, b: Operation) =>
+    HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
+  // The verb that keeps a shared action name among path-named operations.
+  const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
+  const freeSuffixed = (base: string) => {
+    let n = 2;
+    while (taken.has(`${base}${n}`)) n++;
+    return `${base}${n}`;
+  };
+
+  const byPath = new Map<string, Operation[]>();
+  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
+  for (const path of [...byPath.keys()].sort()) {
+    const onPath = (byPath.get(path) ?? []).sort(methodOrder);
+    const byName = new Map<string, Operation[]>();
+    for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, sharing] of byName) {
+      if (sharing.length < 2) continue;
+      const explicit = sharing.filter((op) => !pathNamed.has(op));
+      for (const op of explicit.slice(1)) {
+        const next = freeSuffixed(name);
+        console.warn(
+          `[oagen] Warning: Operations ${explicit[0].httpMethod.toUpperCase()} ${explicit[0].path} and ` +
+            `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
+            `"${name}" from their operationId; the latter is renamed "${next}" — give each a distinct operationId`,
+        );
+        rename(op, next);
+        taken.add(next);
+      }
+      const keeper =
+        explicit.length > 0 ? null : [...sharing].sort((a, b) => claim(a) - claim(b) || methodOrder(a, b))[0];
+      const keptVerb = keeper === null ? null : verbOf(keeper);
+      for (const op of sharing) {
+        if (!pathNamed.has(op) || verbOf(op) === keptVerb) continue;
+        const base = fallbackOperationName(op.httpMethod, op.path, apiRootLengthOf(op), false);
+        // Still held on the path by an operationId or another verb? Number it.
+        const held = onPath.some(
+          (other) => other !== op && other.name === base && (!pathNamed.has(other) || verbOf(other) !== verbOf(op)),
+        );
+        const next = held ? freeSuffixed(base) : base;
+        if (next !== op.name) {
+          rename(op, next);
+          taken.add(next);
+        }
+        demoted.add(op);
+      }
+    }
+  }
+  return demoted;
+}
+
+/**
  * The groups of operations that share a name but not a path, in name order.
- * A name shared only by operations on one path (PUT + PATCH) is not a
- * collision and is excluded.
+ * A name shared only by operations on one path is not a collision and is
+ * excluded: after demoteSamePathNames such operations are path-named and
+ * their methods take one verb (PUT + PATCH).
  *
  * Name order, not document order: the numeric pass draws suffixed names from
  * one pool per service, and two groups can reach the same one (`listNotes` +
@@ -1488,11 +1612,12 @@ function appendQualifier(name: string, qualifier: string | null): string {
  * read as `/shop/rescue/status`, whose resource `Status` the name ends with,
  * so the same `Rescue` tells it from `/shop/pets/{id}/status` rather than
  * `Pet` coming back as `getPetStatusPet`. Every other operation is read
- * whole.
+ * whole, as is an action that gave its name up on its path
+ * (demoteSamePathNames; `actions` false), whose name is the next shape's.
  */
-function qualifierPath(op: Operation, apiRootLength: number): string {
+function qualifierPath(op: Operation, apiRootLength: number, actions = true): string {
   const segments = pathSegments(op.path);
-  if (inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
+  if (actions && inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
   if (inferSingleton(op.path, apiRootLength)) {
     const parent = itemParentIndex(segments, apiRootLength);
     return '/' + segments.filter((_, i) => i !== parent && i !== segments.length - 2).join('/');
