@@ -1528,7 +1528,7 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * a reference whatever else it carries; a type list naming another type
  * beside `array` is a union; and a schema that also composes — a `oneOf` /
  * `anyOf` with a typing variant, or an `allOf` with a `$ref` member, a
- * member with `properties` or a lone typing member — is that composition,
+ * member declaring properties inline or a lone typing member — is that composition,
  * `type: 'array'` or not, since it is read before `items` and the item
  * extractor must not claim a variant's name first. An `allOf` or `oneOf` of
  * bare limits (`[{ minItems: 1 }, { maxItems: 10 }]`) types nothing there and
@@ -1772,15 +1772,18 @@ const TYPING_KEYWORDS: readonly string[] = [
 /**
  * Whether an `allOf` is what types the schema, i.e. the cases its branch in
  * `schemaToTypeRef` acts on: a `$ref` member (a reference, or an augmentation
- * model), a member declaring `properties` (a merged model), or a lone member
- * that types on its own (unwrapped). An `allOf` whose members only conjoin
- * limits or documentation — `allOf: [{ minProperties: 1 }, { maxProperties:
- * 3 }]` beside the schema's own `properties` — does not: the schema is then
- * typed from its own keywords, and `extractConstraints` still conjoins the
+ * model), a member declaring properties inline (a merged model —
+ * `declaresInlineProperties`: its own `properties`, or those of a nested
+ * `allOf` member or of a `oneOf`/`anyOf` variant, which `mergeAllOfMembers`
+ * reads into the model), or a lone member that types on its own
+ * (unwrapped). An `allOf` whose members only conjoin limits or
+ * documentation — `allOf: [{ minProperties: 1 }, { maxProperties: 3 }]`
+ * beside the schema's own `properties` — does not: the schema is then typed
+ * from its own keywords, and `extractConstraints` still conjoins the
  * members' limits onto the field and the model it builds.
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
-  if (members.some((member) => member.$ref !== undefined || member.properties !== undefined)) return true;
+  if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
   const only = members.length === 1 ? members[0] : undefined;
   return only !== undefined && TYPING_KEYWORDS.some((key) => (only as Record<string, unknown>)[key] !== undefined);
 }
@@ -3102,29 +3105,15 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
+    // An `allOf` field is merged by `mergeAllOfMembers`, as everywhere else
+    // (`$ref` members resolved, nested `allOf` members and the inline object
+    // variants of a `oneOf`/`anyOf` member read in), and the merged shape is
+    // extracted under the field's nested name, every property typed under it.
     if (kind === 'allOf' && fieldSchema.allOf) {
-      const mergedProperties: Record<string, SchemaObject | undefined> = {};
-      const mergedRequired: string[] = [];
-      for (const sub of fieldSchema.allOf) {
-        if (sub.properties) Object.assign(mergedProperties, sub.properties);
-        if (sub.required) mergedRequired.push(...sub.required);
-      }
-      if (Object.keys(mergedProperties).length > 0) {
+      const merged = mergeAllOfMembers(fieldSchema, schemas);
+      if (merged.properties.length > 0) {
         nestedModels.push(
-          ...extractInlineModelDeep(
-            qualifyNestedInlineName(name, fieldName),
-            {
-              type: 'object',
-              properties: mergedProperties,
-              required: mergedRequired,
-              ...deprecatedEntry(fieldSchema),
-              ...extractConstraints(fieldSchema),
-              // The wrapper's own link, as for every `allOf` merge; a member's
-              // stays on that member.
-              ...externalDocsEntry(fieldSchema.externalDocs),
-            },
-            schemas,
-          ),
+          ...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), mergedObjectSchema(merged), schemas),
         );
       }
     }
@@ -3327,14 +3316,17 @@ export function schemaToTypeRef(
 
   // Handle allOf — merge properties from all sub-schemas.
   // This handles patterns like: allOf: [{ type: object, properties: {...} }, { oneOf: [...] }]
-  // which are valid OAS 3.1 but weren't handled for field-level schemas.
+  // which are valid OAS 3.1 but weren't handled for field-level schemas. The
+  // model named here is built by `mergeAllOfMembers`, which reads every
+  // member the two tests below count — a `oneOf`/`anyOf` member's inline
+  // object variants included — so the reference always has its fields.
   if (inlineKind === 'allOf' && schema.allOf) {
     // If allOf contains a $ref, prefer the ref (it's a named type)
     const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
     if (refItem) {
-      // If allOf has $ref AND siblings with properties, return a merged model ref
-      // to avoid losing the augmentation properties
-      const hasAugmentation = schema.allOf.some((s: SchemaObject) => !s.$ref && (s.properties || s.type === 'object'));
+      // If allOf has $ref AND an inline object member (`isInlineAllOfMember`),
+      // return a merged model ref to avoid losing the augmentation properties
+      const hasAugmentation = schema.allOf.some(isInlineAllOfMember);
       if (hasAugmentation) {
         const baseName = toPascalCase(contextName ?? 'UnknownModel');
         return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
@@ -3354,8 +3346,9 @@ export function schemaToTypeRef(
         reservedNames,
       );
     }
-    // If allOf items all have properties, treat as a merged model
-    const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
+    // If a member declares properties inline (`declaresInlineProperties`),
+    // treat as a merged model
+    const hasProperties = schema.allOf.some(declaresInlineProperties);
     if (hasProperties) {
       const baseName = toPascalCase(contextName ?? 'UnknownModel');
       return {
@@ -3695,12 +3688,16 @@ export function schemaToTypeRef(
 import {
   buildInlineModel,
   collectProperties,
+  declaresInlineProperties,
   elementContextName,
   extractInlineModelsFromProperties,
   firstFreeElementContext,
   isContestedTitle,
+  isInlineAllOfMember,
   mapValueSchema,
   markContestedTitles,
+  mergeAllOfMembers,
+  mergedObjectSchema,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
