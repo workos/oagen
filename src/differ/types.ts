@@ -281,11 +281,18 @@ export interface OperationModified {
    * The body stayed but its `requestBodyEncoding` differs: the wire format
    * the SDK serializes it as (`json`, `form-data`, `form-urlencoded`,
    * `binary` or `text`), read from the media type the body is declared
-   * under. Always breaking: an SDK built for the old spec keeps serializing
-   * and labelling the body as that spec said (`application/json` where the
-   * server now reads `application/x-www-form-urlencoded`). Compared only
-   * while both specs carry a body, as `requestBodyRequiredChanged` is; a
-   * body appearing or disappearing takes its encoding with it and is
+   * under. An SDK built for the old spec keeps serializing and labelling the
+   * body as that spec said, so the change is breaking when the new spec no
+   * longer accepts that representation — the media type the old body was
+   * read from is gone from `requestBodyContentTypes`, or its type changed
+   * (`application/json` where the server now reads only
+   * `application/x-www-form-urlencoded`) — and additive when it still does,
+   * as when a media type the parser prefers is added beside it
+   * (`application/json` added beside a kept
+   * `application/x-www-form-urlencoded`: existing callers keep sending the
+   * form body). A body without media-type lists reads as breaking. Compared
+   * only while both specs carry a body, as `requestBodyRequiredChanged` is;
+   * a body appearing or disappearing takes its encoding with it and is
    * `requestBodyChanged` alone. Reported beside
    * `requestBodyContentTypesChanged`, which lists the media types callers
    * may choose from: a body moving from `application/json` to
@@ -527,8 +534,12 @@ export interface WebhookModified {
   /**
    * Set exactly when the payload's encoding changed (`details` reads
    * `encoding json → form-urlencoded`): the encoding on each side, old →
-   * new, as an `operation-modified` change carries them. Breaking: the
-   * handler decodes a different wire format.
+   * new, as an `operation-modified` change carries them. Breaking when the
+   * representation the sender now uses — the media type the new payload is
+   * read from, with its type — is not one the old spec declared with that
+   * type, so the handler decodes a wire format it never saw; additive when
+   * the old spec already declared it. A payload without media-type lists
+   * reads as breaking.
    */
   oldRequestBodyEncoding?: RequestBodyEncoding;
   newRequestBodyEncoding?: RequestBodyEncoding;
@@ -613,20 +624,20 @@ export interface ParamChange {
  * requests somewhere else. Reported once per diff whatever moved it: a
  * changed `servers[0]` template (also a `server-removed` plus a
  * `server-added`), a changed variable default (also a `server-modified`), a
- * reordered list, or a `servers` list that appeared or disappeared. A
- * document that declares no server and one whose only server is `/` without
- * variables both have OpenAPI's default server and no default host, so
- * nothing is reported between them (#291).
+ * reordered list, or a `servers` list that appeared or disappeared. The
+ * comparison reads `''` and `/` as one address — OpenAPI's default, whether
+ * the document declares no server, writes `/` out, or resolves its first
+ * server to `/` — so nothing is reported between those (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** `''` when the old document declared no server; `/` when it wrote OpenAPI's default out, which means the same. */
+  /** `''` when the old document declared no server; `/` when its first server resolved to `/`, which means the same. */
   oldBaseUrl: string;
-  /** `''` when the new document declares no server; `/` when it writes OpenAPI's default out, which means the same. */
+  /** `''` when the new document declares no server; `/` when its first server resolves to `/`, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
-   * document declared no server, or only `/`: every existing caller had to
+   * document's default address was `''` or `/`: every existing caller had to
    * name a host themselves and still can.
    */
   classification: 'additive' | 'breaking';

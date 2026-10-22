@@ -156,9 +156,7 @@ export function diffRequestBodyContentTypes(
   side: RequestBodySide,
 ): RequestBodyContentTypesChange | undefined {
   if (!declaresBody(oldBody) || !declaresBody(newBody)) return undefined;
-  const bodies = (body: RequestBodyMediaTypes): MediaTypeBody[] =>
-    mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
-  const { pairs, added, removed } = pairMediaTypeBodies(bodies(oldBody), bodies(newBody));
+  const { pairs, added, removed } = pairMediaTypeBodies(requestBodyBodies(oldBody), requestBodyBodies(newBody));
   const retyped = retypedBodies(pairs, true);
   if (added.length === 0 && removed.length === 0 && retyped.length === 0) return undefined;
   const breaking = retyped.length > 0 || (side === 'caller' ? removed.length > 0 : added.length > 0);
@@ -173,4 +171,31 @@ export function diffRequestBodyContentTypes(
 /** Whether a body is declared at all: a type was read from it, or it lists media types none of which is read. */
 function declaresBody(body: RequestBodyMediaTypes): boolean {
   return body.requestBody !== undefined || body.requestBodyContentTypes !== undefined;
+}
+
+/** A request body's media types as the differ compares them, the one `requestBody` was read from marked `own`. */
+function requestBodyBodies(body: RequestBodyMediaTypes): MediaTypeBody[] {
+  return mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
+}
+
+/**
+ * Whether the representation `requestBody` is read from in `from` — the
+ * media type it was read from, with its type — is one `to` declares with an
+ * unchanged type: paired by essence as `diffRequestBodyContentTypes` pairs
+ * the two sides, the types compared as a retype is (`typeRefsEqual`). This
+ * decides whether an encoding shift (`requestBodyEncodingShift`) breaks a
+ * side of the wire: for an operation, whether the representation the old
+ * SDK sends (`from` the old spec) is still accepted by the new spec (`to`);
+ * for a webhook, whether the representation the sender now uses (`from`
+ * the new spec) is one the old handler (`to`) already decoded. `false` when
+ * `from` marks no own body — no media-type lists, or none read as
+ * `requestBody` — so a hand-built IR without lists keeps the breaking
+ * reading.
+ */
+export function ownRepresentationKept(from: RequestBodyMediaTypes, to: RequestBodyMediaTypes): boolean {
+  const fromBodies = requestBodyBodies(from);
+  const own = fromBodies.find((body) => body.own);
+  if (!own?.type) return false;
+  const counterpart = pairMediaTypeBodies(fromBodies, requestBodyBodies(to)).pairs.find(([body]) => body === own)?.[1];
+  return counterpart?.type !== undefined && typeRefsEqual(own.type, counterpart.type);
 }
