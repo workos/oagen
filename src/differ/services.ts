@@ -1,16 +1,19 @@
 import type { Service } from '../ir/types.js';
 import type { Change } from './types.js';
 import { diffOperations, type DocumentServers } from './operations.js';
+import type { DocumentSecurity } from './security.js';
 
 /**
  * `documentServers` — the two documents' `servers` — lets `diffOperations`
- * resolve what each operation is actually served from; `diffSpecs` passes it,
- * a direct caller may leave it out.
+ * resolve what each operation is actually served from, and
+ * `documentSecurity` — their `security` — what its requests must carry;
+ * `diffSpecs` passes both, a direct caller may leave either out.
  */
 export function diffServices(
   oldServices: Service[],
   newServices: Service[],
   documentServers?: DocumentServers,
+  documentSecurity?: DocumentSecurity,
 ): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldServices.map((s) => [s.name, s]));
@@ -32,7 +35,9 @@ export function diffServices(
     const oldService = oldByName.get(name);
     if (!oldService) continue;
 
-    changes.push(...diffOperations(name, oldService.operations, newService.operations, documentServers));
+    changes.push(
+      ...diffOperations(name, oldService.operations, newService.operations, documentServers, documentSecurity),
+    );
   }
 
   return changes;

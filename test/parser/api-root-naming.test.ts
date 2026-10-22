@@ -146,7 +146,7 @@ describe('2. a path-named operation that clashes with an operationId name is the
         '/api/{teamId}/notes/{noteId}': { get: withParam('teamId', { operationId: 'get' }) },
       }),
     ).toEqual({
-      'GET /api/notes/{noteId}': 'Notes.getNotes',
+      'GET /api/notes/{noteId}': 'Notes.getNote',
       'GET /api/{teamId}/notes/{noteId}': 'Notes.get',
     });
   });
@@ -398,7 +398,7 @@ describe('every service has unique, order-independent operation names across the
             "GET /api/v1/pets": "Pets.list",
           },
           "operationId and path-named clash with parameters": {
-            "GET /api/notes/{noteId}": "Notes.getNotes",
+            "GET /api/notes/{noteId}": "Notes.getNote",
             "GET /api/pets/{petId}": "Pets.get",
             "GET /api/{teamId}/notes/{noteId}": "Notes.get",
             "GET /api/{teamId}/pets/{petId}": "Pets.getByTeamId",

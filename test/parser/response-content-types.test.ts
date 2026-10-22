@@ -181,7 +181,7 @@ describe('response content types', () => {
       // Outside the fixed order the schema decides, and no schema is unknown.
       expect(typeOf(exports, '*/*')).toEqual({ kind: 'primitive', type: 'string', format: 'binary' });
       expect(typeOf(exports, 'application/*')).toEqual({ kind: 'primitive', type: 'unknown' });
-      const avatar = findOp(spec, 'listAvatar');
+      const avatar = findOp(spec, 'getPetAvatar');
       expect(typeOf(avatar, 'image/png')).toEqual({ kind: 'primitive', type: 'unknown' });
       expect(typeOf(avatar, 'image/webp')).toEqual({ kind: 'primitive', type: 'string', format: 'binary' });
       // A text type is a string whatever its schema says, exactly as when it is primary.
@@ -212,7 +212,7 @@ describe('response content types', () => {
       expect(fieldsOf(spec, 'RenderPetCardApplicationProblemJsonError')).toBeUndefined();
       expect(fieldsOf(spec, 'RenderPetCardApplicationYamlError')).toEqual(['message']);
       // Without an operationId the path names it, as it names the primary body.
-      expect(findOp(spec, 'listAvatar').responseContents?.[3].type).toEqual({
+      expect(findOp(spec, 'getPetAvatar').responseContents?.[3].type).toEqual({
         kind: 'model',
         name: 'PetsByPetIdAvatarGetApplicationVndPetJsonResponse',
       });
@@ -241,9 +241,9 @@ describe('response content types', () => {
           "renderPetCard text/html",
           "renderPetCard text/html",
           "renderPetCard application/yaml",
-          "listAvatar image/png",
-          "listAvatar image/webp",
-          "listAvatar application/vnd.pet+json",
+          "getPetAvatar image/png",
+          "getPetAvatar image/webp",
+          "getPetAvatar application/vnd.pet+json",
           "getReport application/vnd.api+json",
           "getReport application/json; charset=utf-8",
           "getReport text/plain",

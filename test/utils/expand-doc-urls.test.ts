@@ -355,6 +355,26 @@ describe('expandDocUrls – externalDocs (issue #217)', () => {
     expect('externalDocs' in result.enums[0]).toBe(false);
   });
 
+  it("expands a webhook's externalDocs description, keeps its url verbatim, and leaves the key absent otherwise (issue #270)", () => {
+    const spec = minimalSpec({
+      webhooks: [
+        {
+          name: 'petAdopted',
+          httpMethod: 'post',
+          externalDocs: link,
+          headerParams: [],
+          queryParams: [],
+          responses: [],
+        },
+        { name: 'petReturned', httpMethod: 'post', headerParams: [], queryParams: [], responses: [] },
+      ],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    expect(result.webhooks![0].externalDocs).toEqual(expanded);
+    expect('externalDocs' in result.webhooks![1]).toBe(false);
+  });
+
   it('expands a field or parameter link beside its description and leaves the key absent otherwise (issue #247)', () => {
     const type = { kind: 'primitive', type: 'string' } as const;
     const spec = minimalSpec({

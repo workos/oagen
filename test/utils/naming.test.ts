@@ -179,6 +179,37 @@ describe('singularizePathSegment', () => {
     expect(singularizePathSegment('hashes')).toBe('hash');
   });
 
+  it('drops the es of an -ias noun and turns -yses into -ysis (issue #268)', () => {
+    expect(singularizePathSegment('aliases')).toBe('alias');
+    expect(singularizePathSegment('biases')).toBe('bias');
+    expect(singularizePathSegment('email_aliases')).toBe('email_alias');
+    expect(singularizePathSegment('analyses')).toBe('analysis');
+    expect(singularizePathSegment('paralyses')).toBe('paralysis');
+    expect(singularizePathSegment('risk_analyses')).toBe('risk_analysis');
+    // -iases only slices, so the segment's own case is kept.
+    expect(singularizePathSegment('Aliases')).toBe('Alias');
+    expect(singularizePathSegment('ALIASES')).toBe('ALIAS');
+    // -yses → -ysis writes two letters; they take the case of the es they replace.
+    expect(singularizePathSegment('Analyses')).toBe('Analysis');
+    expect(singularizePathSegment('ANALYSES')).toBe('ANALYSIS');
+    // An `-is` singular is left alone, as before.
+    expect(singularizePathSegment('analysis')).toBe('analysis');
+  });
+
+  it('documents the plurals and singulars ending in s it deliberately does not handle', () => {
+    // `-ases` other than `-iases` reads as an `-ase` noun (`cases`, `releases`).
+    expect(singularizePathSegment('canvases')).toBe('canvase');
+    // `-es` of an `-is` noun other than `-ysis` reads as an `-e` noun
+    // (`premises`, `cheeses`).
+    expect(singularizePathSegment('crises')).toBe('crise');
+    expect(singularizePathSegment('theses')).toBe('these');
+    // A singular ending in `-as` or `-ns` looks like the plural of an `-a` or
+    // `-n` noun (`areas`, `tokens`), so its `s` is dropped, as before.
+    expect(singularizePathSegment('alias')).toBe('alia');
+    expect(singularizePathSegment('canvas')).toBe('canva');
+    expect(singularizePathSegment('lens')).toBe('len');
+  });
+
   it('drops only the s when the stem itself ends in e', () => {
     expect(singularizePathSegment('responses')).toBe('response');
     expect(singularizePathSegment('licenses')).toBe('license');
