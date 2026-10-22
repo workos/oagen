@@ -161,6 +161,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     servers,
     version,
     options?.operationHints,
+    enums,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
