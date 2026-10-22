@@ -116,6 +116,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### Parameter
 
+- `type` — Every `TypeRef` kind, a model reference included: an inline object parameter (`style: deepObject`), or an array, map or union holding one, references a model the parser created (`PetsFilter`), as a response header's does
 - `description` — Parameter description content
 - `externalDocs` — The parameter schema's link (falls back to its `$ref` target), for the param doc tag
 - `deprecated` — Deprecated marker on params (first truthy of the parameter object, its inline `schema`, then the `$ref`'d component schema)
