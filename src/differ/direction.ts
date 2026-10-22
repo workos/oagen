@@ -55,6 +55,9 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
           requestSeeds.push(param.type);
         }
         responseSeeds.push(op.response);
+        // The iterator yields its item type, which an explicit `dataPath` can
+        // point at a model `response` does not reach.
+        if (op.pagination) responseSeeds.push(op.pagination.itemType);
         for (const field of op.pagination?.envelopeFields ?? []) responseSeeds.push(field.type);
         for (const header of collectResponseHeaders(op)) responseSeeds.push(header.type);
         for (const { type } of collectResponseBodyTypes(op)) responseSeeds.push(type);

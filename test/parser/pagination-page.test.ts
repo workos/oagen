@@ -622,6 +622,28 @@ describe('resolvePaginationOverride + applyPaginationOverride', () => {
     expect(result?.pageStart).toBe(42);
   });
 
+  it("carries the response's stop field into an iterator the override creates from scratch (Greptile)", () => {
+    const total = { kind: 'totalCount', path: 'total' } as const;
+    const override = resolvePaginationOverride({ extension: { strategy: 'page', param: 'page' } }, 'x');
+    expect(applyPaginationOverride(undefined, override, params, pets, 'x', { endOfIteration: total })).toMatchObject({
+      strategy: 'page',
+      param: 'page',
+      endOfIteration: total,
+    });
+    // The override's own stop field wins over it; a detected iterator's does too.
+    const own = resolvePaginationOverride(
+      { extension: { strategy: 'page', param: 'page', endOfIteration: { kind: 'hasMore', path: 'more' } } },
+      'x',
+    );
+    expect(
+      applyPaginationOverride(undefined, own, params, pets, 'x', { endOfIteration: total })?.endOfIteration,
+    ).toEqual({ kind: 'hasMore', path: 'more' });
+    expect(
+      applyPaginationOverride(detected, override, params, pets, 'x', { endOfIteration: total })?.endOfIteration,
+    ).toBe(detected.endOfIteration);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('drops pageStart when the resulting strategy is not page', () => {
     expect(apply(detected, { extension: { strategy: 'offset', pageStart: 5 } })?.pageStart).toBeUndefined();
     expect(

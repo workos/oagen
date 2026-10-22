@@ -1738,6 +1738,9 @@ function buildOperation(
   }
   const pagination = applyPaginationOverride(detectedPagination, paginationOverride, queryParams, response, opLabel, {
     overrideItemType,
+    // Read from the response above, so an override that creates the iterator
+    // where detection found none still stops on it.
+    endOfIteration: responseEndOfIteration,
     pageStartOf,
   });
 

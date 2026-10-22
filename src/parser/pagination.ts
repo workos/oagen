@@ -447,7 +447,12 @@ export function resolvePaginationOverride(
  * names is driven by the parameter that fits it rather than by one detection
  * guessed (the envelope fallback's `after`). `extras.overrideItemType` is the element type an explicit
  * `dataPath` resolved to; without it the detected item type (or the response
- * itself) stands. `extras.pageStartOf` decides the first page for the page
+ * itself) stands. `extras.endOfIteration` is the stop field read from the
+ * response, which belongs to the iterator whether detection built one or the
+ * override creates it from scratch (no paging parameter recognized, a
+ * wrapper kept under an explicit `dataPath`): the override's own
+ * `endOfIteration` wins, then the detected iterator's, then it.
+ * `extras.pageStartOf` decides the first page for the page
  * parameter in use (default: `derivePageStart` on the IR parameter alone).
  *
  * Returns `detected` unchanged when there is no override or it is unusable —
@@ -461,7 +466,11 @@ export function applyPaginationOverride(
   queryParams: Parameter[],
   response: TypeRef,
   opLabel: string,
-  extras: { overrideItemType?: TypeRef; pageStartOf?: PageStartResolver } = {},
+  extras: {
+    overrideItemType?: TypeRef;
+    endOfIteration?: PaginationEndOfIteration;
+    pageStartOf?: PageStartResolver;
+  } = {},
 ): PaginationMeta | undefined {
   if (!override) return detected;
   const merged = override.hint;
@@ -480,7 +489,7 @@ export function applyPaginationOverride(
   // The data array's description belongs to the array detection unwrapped;
   // it survives an override that keeps that array.
   const dataDescription = dataPath === detected?.dataPath ? detected?.dataDescription : undefined;
-  const endOfIteration = merged.endOfIteration ?? detected?.endOfIteration;
+  const endOfIteration = merged.endOfIteration ?? detected?.endOfIteration ?? extras.endOfIteration;
   // The page base belongs to the page parameter actually in use, which the
   // override may have swapped, so it is derived from that parameter rather
   // than carried over from detection.

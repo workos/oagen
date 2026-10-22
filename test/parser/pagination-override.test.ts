@@ -83,6 +83,12 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     walkTypeRef(ref, { model: (m) => names.push(m.name) });
     return names;
   };
+  /** Every enum name a TypeRef references, through the same wrappers. */
+  const enumNamesIn = (ref: TypeRef): string[] => {
+    const names: string[] = [];
+    walkTypeRef(ref, { enum: (e) => names.push(e.name) });
+    return names;
+  };
 
   it('reports the issue repro as page pagination ending at pagination.totalPages (#221)', async () => {
     const op = onlyOperation(await parseJson(petsSpec({})));
@@ -737,7 +743,7 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
           properties: { owner: { type: 'object', properties: { name: { type: 'string' } } } },
         },
       };
-      const wrapperSpec = (items: unknown) =>
+      const wrapperSpec = (items: unknown, schemas: Record<string, unknown> = {}) =>
         petsSpec(
           {
             responses: jsonResponse({ $ref: '#/components/schemas/Wrapper' }),
@@ -750,6 +756,7 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
                 properties: { records: { $ref: '#/components/schemas/PetList' }, total: { type: 'integer' } },
               },
               PetList: { type: 'array', items },
+              ...schemas,
             },
           },
         );
@@ -788,6 +795,119 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         });
         expect(ir.models.find((m) => m.name === 'ListPetsRecord')?.fields.map((f) => f.name)).toEqual(['id']);
       });
+
+      // An item type the document alone types is a reference nothing else in
+      // the IR holds — `response` is the wrapper — so every pass that walks an
+      // operation's types has to reach `pagination.itemType` on its own: the
+      // enum lift, the Json-suffix fold's rename, reference validation
+      // (Greptile, after the merge with main).
+      const enumItems = { type: 'string', enum: ['cat', 'dog'] };
+      const enumShapes: Record<string, unknown> = {
+        'an inline enum': enumItems,
+        'a nullable inline enum': { oneOf: [enumItems, { type: 'null' }] },
+        'an array of an inline enum': { type: 'array', items: enumItems },
+        'a union holding an inline enum': { oneOf: [enumItems, { type: 'integer' }] },
+      };
+      it.each(Object.entries(enumShapes))(
+        'promotes the inline enum the iterator yields to spec.enums when the items are %s',
+        async (_shape, items) => {
+          const ir = await parseJson(wrapperSpec(items));
+          const referenced = enumNamesIn(onlyOperation(ir).pagination!.itemType);
+          expect(referenced.length).toBeGreaterThan(0);
+          for (const name of referenced) {
+            expect(ir.enums.find((e) => e.name === name)?.values.map((v) => v.value)).toEqual(['cat', 'dog']);
+          }
+          expect(warn).not.toHaveBeenCalled();
+        },
+      );
+
+      it('names the iterator enum from the path, stepping past a component enum with other members', async () => {
+        const ir = await parseJson(wrapperSpec(enumItems));
+        expect(onlyOperation(ir).pagination?.itemType).toMatchObject({ kind: 'enum', name: 'ListPetsRecord' });
+        expect(ir.enums.map((e) => e.name)).toEqual(['ListPetsRecord']);
+
+        // The name a component enum already owns with other members is not
+        // shared: the reference is renamed before it is promoted, like a
+        // header or error-body enum's.
+        const taken = await parseJson(wrapperSpec(enumItems, { ListPetsRecord: { type: 'string', enum: ['fish'] } }));
+        const itemType = onlyOperation(taken).pagination!.itemType;
+        expect(itemType).toMatchObject({ kind: 'enum', name: 'ListPetsRecord2' });
+        expect(taken.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+          ['ListPetsRecord', ['fish']],
+          ['ListPetsRecord2', ['cat', 'dog']],
+        ]);
+      });
+
+      it('follows the Json-suffix fold when the items are a `…Json` component (Greptile)', async () => {
+        const ir = await parseJson(
+          wrapperSpec(
+            { $ref: '#/components/schemas/ItemJson' },
+            {
+              Item: { type: 'object', properties: { id: { type: 'string' } } },
+              ItemJson: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+            },
+          ),
+        );
+        expect(onlyOperation(ir).pagination?.itemType).toEqual({ kind: 'model', name: 'Item' });
+        expect(ir.models.map((m) => m.name)).not.toContain('ItemJson');
+        expect(ir.models.find((m) => m.name === 'Item')?.fields.map((f) => f.name)).toEqual(['id', 'name']);
+        // The fold's own notice, and no unresolved reference.
+        expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+          '[oagen] Merged "ItemJson" into "Item" (2 fields, superset)',
+        ]);
+      });
+    });
+  });
+
+  describe('an override that creates the iterator where detection found none (Greptile)', () => {
+    // Only a custom query parameter, so no paging parameter is recognized,
+    // and the explicit `dataPath` keeps the body as a wrapper: the stop field
+    // read from the wrapper belongs to the iterator the override creates.
+    const custom = {
+      parameters: [query('p')],
+      responses: jsonResponse({
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          result: {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+            },
+          },
+          total: { type: 'integer' },
+        },
+      }),
+    };
+    const hint: PaginationHint = { strategy: 'page', param: 'p', dataPath: 'result.items' };
+
+    it("keeps the response's stop field", async () => {
+      const op = onlyOperation(await parseJson(petsSpec({ ...custom, 'x-pagination': hint })));
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(op.pagination).toEqual({
+        strategy: 'page',
+        param: 'p',
+        pageStart: 1,
+        dataPath: 'result.items',
+        itemType: { kind: 'model', name: 'ListPetsResponseResultItem' },
+        endOfIteration: { kind: 'totalCount', path: 'total' },
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps it through the config hint, and lets the override name its own', async () => {
+      const viaHint = onlyOperation(
+        await parseJson(petsSpec(custom), { operationHints: { 'GET /pets': { pagination: hint } } }),
+      );
+      expect(viaHint.pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+
+      const own = onlyOperation(
+        await parseJson(
+          petsSpec({ ...custom, 'x-pagination': { ...hint, endOfIteration: { kind: 'hasMore', path: 'more' } } }),
+        ),
+      );
+      expect(own.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'more' });
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 

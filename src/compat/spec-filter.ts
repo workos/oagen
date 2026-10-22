@@ -20,6 +20,9 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
       // Operation methods are matched by the class diff, not by name here
       collectTypeRefNames(op.response, names, hints, topLevelEnumNames);
       if (op.requestBody) collectTypeRefNames(op.requestBody, names, hints, topLevelEnumNames);
+      // The iterator's item type, which an explicit `dataPath` can point at a
+      // model `response` does not reach.
+      if (op.pagination) collectTypeRefNames(op.pagination.itemType, names, hints, topLevelEnumNames);
       for (const field of op.pagination?.envelopeFields ?? []) {
         collectTypeRefNames(field.type, names, hints, topLevelEnumNames);
       }
