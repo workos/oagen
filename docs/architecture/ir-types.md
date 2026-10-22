@@ -55,9 +55,11 @@ interface ExternalDocs {
 }
 ```
 
-An OpenAPI External Documentation Object — the document's way of linking to fuller documentation — carried on `ApiSpec` (the top-level `externalDocs`), `Service` (from the document tag, see below), `Operation`, `Model` and `Enum`, so an emitter can add it to a doc comment (a JSDoc `@see`, say). The key is present only when the document declares an entry with a non-blank `url`: a non-object, a missing or blank `url`, is dropped — silently, the way a malformed document tag is, since the parser ignored `externalDocs` entirely before and a malformed value must keep parsing. `url` is kept verbatim. OpenAPI allows it to be relative to the document's own location, which the parser does not know, so it is neither resolved nor rewritten, and `expandDocUrls` leaves it alone too; `expandDocUrls` does expand relative links inside `description`, which is CommonMark like every other description it walks. `description` is present only when it has non-whitespace content and is kept verbatim otherwise.
+An OpenAPI External Documentation Object — the document's way of linking to fuller documentation — carried on `ApiSpec` (the top-level `externalDocs`), `Service` (from the document tag, see below), `Operation`, `Model`, `Field`, `Parameter`, `ResponseHeader` and `Enum`, so an emitter can add it to a doc comment (a JSDoc `@see`, say). The key is present only when the document declares an entry with a non-blank `url`: a non-object, a missing or blank `url`, is dropped — silently, the way a malformed document tag is, since the parser ignored `externalDocs` entirely before and a malformed value must keep parsing. `url` is kept verbatim. OpenAPI allows it to be relative to the document's own location, which the parser does not know, so it is neither resolved nor rewritten, and `expandDocUrls` leaves it alone too; `expandDocUrls` does expand relative links inside `description`, which is CommonMark like every other description it walks. `description` is present only when it has non-whitespace content and is kept verbatim otherwise.
 
-A `Model` built from an inline schema — a request body, a response, a `oneOf` variant, an object nested in a component field, array items, an `allOf` merge, a discriminated `allOf` + `oneOf` variant — carries the `externalDocs` of the schema it was built from. A wrapper the parser collapses or merges — a nullable `oneOf`/`anyOf` or `type: [..., "null"]`, a single-member `allOf`, an `allOf` response, field or nested-field merge — is the schema the document wrote, so the model built from what it unwraps or merges to carries the wrapper's link; a member's own stays on that member (a `$ref` member's on its component model), and a collapsed branch or member keeps its own link only when the wrapper has none. Every later pass that keeps, renames or merges models preserves the link; when `collapseJsonSuffixModels` folds `PetJson` into `Pet`, `Pet` keeps its own link as it keeps its own description, and takes `PetJson`'s only when it has none. An `Enum` carries the component schema's; an enum lifted from an inline field schema carries none.
+A `Model` built from an inline schema — a request body, a response, a `oneOf` variant, an object nested in a component field, array items, an `allOf` merge, a discriminated `allOf` + `oneOf` variant — carries the `externalDocs` of the schema it was built from. A wrapper the parser collapses or merges — a nullable `oneOf`/`anyOf` or `type: [..., "null"]`, a single-member `allOf`, an `allOf` response, field or nested-field merge — is the schema the document wrote, so the model built from what it unwraps or merges to carries the wrapper's link; a member's own stays on that member (a `$ref` member's on its component model), and a collapsed branch or member keeps its own link only when the wrapper has none. Every later pass that keeps, renames or merges models preserves the link; when `collapseJsonSuffixModels` folds `PetJson` into `Pet`, `Pet` keeps its own link as it keeps its own description, and takes `PetJson`'s only when it has none.
+
+A Schema Object that does not become a model of its own keeps its link too. `Field.externalDocs` is the property schema's own, read like `description`: for a `$ref` with an `externalDocs` sibling (legal in OAS 3.1) the field carries the sibling's link while the referenced model keeps its own, and a bare `$ref` gives the field none — unlike `example`, a link is never taken from the referenced component. Every path that builds a field reads it: component properties, `allOf` merges, flattened `oneOf` variants, inline request bodies and responses, nested inline objects, list-envelope companions and header models. It is documentation, not shape: where two inline models are folded into one by structural agreement (`modelFingerprint`, the header-model registry, the same-named merge passes), two fields that differ only in their link are one shape, as two that differ only in `description` are. `Parameter.externalDocs` and `ResponseHeader.externalDocs` are read from the schema, as described under each. An `Enum` carries its schema's: a component enum's own, and — for an enum lifted into `spec.enums` from an inline schema on a property, parameter or response header, including array items, `oneOf` variants and a `oneOf` of string consts collapsed into one enum — that schema's. A nullable wrapper or single-member `allOf` the parser collapses carries its link onto the lifted enum by the rule above for models (the wrapper's wins; the branch's only when the wrapper has none). When several inline schemas lift to one enum name, the first lifted gives the link, as it gives the values. The link lives on the `Enum`, not on the field's or parameter's `EnumRef`.
 
 ### SdkBehavior
 
@@ -335,6 +337,7 @@ interface ResponseHeader {
   required: boolean;
   description?: string;
   deprecated?: boolean;
+  externalDocs?: ExternalDocs; // The header schema's (`schema`, or the single `content` entry's), when usable
 }
 
 interface Parameter {
@@ -343,6 +346,7 @@ interface Parameter {
   required: boolean;
   description?: string;
   deprecated?: boolean;
+  externalDocs?: ExternalDocs; // The schema's, else the `$ref` target's, when usable
   default?: unknown;
   example?: unknown; // The document's `example`, else `examples[0]`
   examples?: unknown[]; // Every example value, in document order; only when non-empty
@@ -352,7 +356,9 @@ interface Parameter {
 }
 ```
 
-`Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented. `deprecated` and `example` fall through the same three levels in the same order, each by its own rule: `deprecated` takes the first truthy level, `example` the first level that gives a value (an explicit `null` is kept; see Parameter Examples below). `default` does not: it is read from the inline `schema`, else the `$ref`'d component schema, with `??`, so a `false` or `0` default is kept, and the Parameter Object itself is never consulted since OpenAPI gives it no `default`.
+`Parameter.description` is the first non-empty `description` found on, in order, the parameter itself, its inline `schema`, and the `$ref`'d component schema. An empty string at any level counts as absent, and the field is `undefined` (never `""`) when nothing in the chain is documented. `deprecated` and `example` fall through the same three levels in the same order, each by its own rule: `deprecated` takes the first truthy level, `example` the first level that gives a value (an explicit `null` is kept; see Parameter Examples below). `default` does not: it is read from the inline `schema`, else the `$ref`'d component schema, with `??`, so a `false` or `0` default is kept, and the Parameter Object itself is never consulted since OpenAPI gives it no `default`. `Parameter.externalDocs` follows the same chain from the schema down — the parameter's `schema` (a sibling of a `$ref` included), then the component schema its `$ref` points at — an unusable entry at one level falling through to the next; a Parameter Object declares no `externalDocs` of its own.
+
+`ResponseHeader.externalDocs` is the header schema's `externalDocs` — the Header Object's `schema`, or the schema of its single `content` entry, after a `$ref` into `components/headers` is resolved — when it declares a usable one. A header reads only its own schema, as its `description` and `deprecated` read only the Header Object: a `$ref` sibling's link is the header's, and a bare `$ref` gives none (the referenced model carries its own).
 
 A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the fieldless alias model the target also becomes. The key is absent when neither declares any.
 
@@ -528,6 +534,7 @@ interface Field {
   type: TypeRef;
   required: boolean;
   description?: string;
+  externalDocs?: ExternalDocs; // The field schema's own, a $ref sibling included; a bare $ref yields none (see ExternalDocs)
   readOnly?: boolean;
   writeOnly?: boolean;
   deprecated?: boolean;
@@ -620,7 +627,7 @@ The differ compares the flag on every node that carries it — operation, parame
 interface Enum {
   name: string; // PascalCase
   values: EnumValue[];
-  externalDocs?: ExternalDocs; // The component enum schema's externalDocs, when usable; inline enums carry none
+  externalDocs?: ExternalDocs; // The enum schema's externalDocs, when usable — a component's, or the inline schema's the enum was lifted from
   deprecated?: boolean; // The component enum schema's own `deprecated: true`; absent otherwise
 }
 

@@ -53,7 +53,7 @@ import {
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
-import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
+import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 
 export interface PathItem {
   get?: OperationObject;
@@ -1743,6 +1743,11 @@ export function extractParams(
       const own = p.schema ? extractConstraints(p.schema) : undefined;
       const inherited = refTarget ? extractConstraints(refTarget) : undefined;
       const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
+      // The schema's link, else the `$ref` target's — the same fallback chain
+      // `description` and `deprecated` follow, with an unusable entry at one
+      // level falling through to the next as an empty description does. A
+      // Parameter Object declares no `externalDocs` of its own.
+      const externalDocs = readExternalDocs(p.schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
       return {
         name: p.name,
         type: p.schema
@@ -1751,6 +1756,7 @@ export function extractParams(
         required: p.required ?? false,
         description: firstDescription(p.description, p.schema?.description, refTarget?.description),
         deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
+        ...(externalDocs ? { externalDocs } : {}),
         default: p.schema?.default ?? refTarget?.default,
         example,
         ...(examples ? { examples } : {}),
@@ -2529,6 +2535,9 @@ function extractResponseHeaders(
       required: header.required ?? false,
       description: header.description,
       deprecated: header.deprecated || undefined,
+      // The header schema's own link — a Header Object has none — read from
+      // whichever of `schema` and `content` types the header, as the type is.
+      ...externalDocsEntry(schema?.externalDocs),
     };
     if (schema) {
       ctx.deferred.push({
