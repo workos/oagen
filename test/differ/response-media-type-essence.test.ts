@@ -210,6 +210,21 @@ describe('diffOperations — response media types are compared by essence (issue
     expect(diffOperations('Graphs', [quoted('https://example.com/a;b')], [quoted('https://example.com/a;b')])).toEqual(
       [],
     );
+    // One parameter whose value holds `; ` is not the two parameters it spells (Greptile round 5).
+    const titled = (spelling: string): Operation =>
+      card([[`text/plain; ${spelling}`, string]], { name: 'getNote', response: string });
+    expect(
+      diffOperations('Notes', [titled('title="report; version=2"')], [titled('title=report; version=2')])[0],
+    ).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [
+            { from: 'text/plain; title="report; version=2"', to: 'text/plain; title=report; version=2' },
+          ],
+          classification: 'additive',
+        },
+      ],
+    });
     expect(
       diffOperations(
         'Pets',

@@ -17,8 +17,8 @@ export interface MediaTypeBody {
   mediaType: string;
   /** `mediaTypeEssence(mediaType)`: what decides which key of the other document this one is. */
   essence: string;
-  /** `mediaTypeParameters(mediaType)`: the parameters that may select another representation, in one form. */
-  parameters: string;
+  /** `mediaTypeParameters(mediaType)`: the parameters that may select another representation, as sorted name/value pairs. */
+  parameters: Array<[string, string]>;
   /** The body's type, when the entry's contents carry one for this key. */
   type?: TypeRef;
   /**
@@ -67,33 +67,38 @@ export function mediaTypeBodies(
  * A media type's parameters other than `charset`, in one form whatever the
  * spelling: each parameter as `parseMediaType` reads it — name lower-cased,
  * quoted value decoded, so a `;` inside the quotes is part of the value and
- * `profile="print"` is `profile=print` — sorted and joined with `; `. So
- * `application/pdf; version=1.7` reads `version=1.7`, `text/html;
- * Charset=UTF-8` and `text/html` both read `` (empty), and `; a=1; b=2` is
- * `; b=2 ;a=1`. `charset` is left out because it never selects another
- * representation of a JSON or text body (RFC 8259 §8.1 has no charset for
- * JSON at all); any other parameter — `version`, `profile` — may, which is
- * what `reparameterized` reports.
+ * `profile="print"` is `profile=print` — as `[name, value]` pairs sorted by
+ * name, then value. So `application/pdf; version=1.7` reads
+ * `[['version', '1.7']]`, `text/html; Charset=UTF-8` and `text/html` both
+ * read `[]`, and `; a=1; b=2` is `; b=2 ;a=1`. The pairs stay structured
+ * (compared JSON-encoded, never joined into one string), so `title="report;
+ * version=2"` — one parameter — and `title=report; version=2` — two — are
+ * different parameters. `charset` is left out because it never selects
+ * another representation of a JSON or text body (RFC 8259 §8.1 has no
+ * charset for JSON at all); any other parameter — `version`, `profile` —
+ * may, which is what `reparameterized` reports.
  */
-export function mediaTypeParameters(contentType: string): string {
+export function mediaTypeParameters(contentType: string): Array<[string, string]> {
   return parseMediaType(contentType)
     .parameters.filter((parameter) => parameter.name !== 'charset')
-    .map((parameter) => (parameter.value.length > 0 ? `${parameter.name}=${parameter.value}` : parameter.name))
-    .sort()
-    .join('; ');
+    .map((parameter): [string, string] => [parameter.name, parameter.value])
+    .sort(([aName, aValue], [bName, bValue]) =>
+      aName < bName ? -1 : aName > bName ? 1 : aValue < bValue ? -1 : aValue > bValue ? 1 : 0,
+    );
 }
 
 /**
  * The pairs whose parameters other than `charset` differ
- * (`mediaTypeParameters`): the body is typed the same on both sides, but
- * the new spelling may select another representation (`application/pdf;
- * version=1.7` → `; version=2.0`), so it is reported — additive, since
- * callers can still ask for the essence and the shape did not change.
+ * (`mediaTypeParameters`, compared as structured pairs): the body is typed
+ * the same on both sides, but the new spelling may select another
+ * representation (`application/pdf; version=1.7` → `; version=2.0`), so it
+ * is reported — additive, since callers can still ask for the essence and
+ * the shape did not change.
  */
 export function reparameterizedBodies(
   pairs: Array<[MediaTypeBody, MediaTypeBody]>,
 ): Array<[MediaTypeBody, MediaTypeBody]> {
-  return pairs.filter(([before, after]) => before.parameters !== after.parameters);
+  return pairs.filter(([before, after]) => JSON.stringify(before.parameters) !== JSON.stringify(after.parameters));
 }
 
 /** A reparameterized pair as a change reports it: both spellings, as written in their specs. */
