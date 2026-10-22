@@ -10,7 +10,7 @@ import {
 } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
-import { diffRequestBodyContentTypes } from './media-types.js';
+import { diffRequestBodyContentTypes, ownRepresentationKept } from './media-types.js';
 
 /**
  * Report webhooks added, removed and modified between two specs. A webhook is
@@ -119,10 +119,15 @@ export function diffWebhooks(
  * Compare what the handler is handed as a body, from the receiver's side:
  *
  * - type changed, gained or lost: breaking — it is the handler's parameter type.
- * - encoding changed: breaking — the handler decodes a different wire format.
- *   Read through `requestBodyEncodingShift`, the function `diffOperations`
- *   reads an operation's body encoding with, and carried as `encoding`
- *   beside the `details` string so the change can report both sides.
+ * - encoding changed: breaking when the representation the sender now uses
+ *   — the media type the new payload is read from, with its type — is not
+ *   one the old spec declared with that type, so the handler decodes a wire
+ *   format it never saw; additive when the old spec already declared it (a
+ *   media type dropped beside a kept one). A payload without media-type
+ *   lists reads as breaking. Read through `requestBodyEncodingShift`, the
+ *   function `diffOperations` reads an operation's body encoding with, and
+ *   carried as `encoding` beside the `details` string so the change can
+ *   report both sides.
  * - required → optional: breaking — a handler that assumed a body may get none.
  * - optional → required: additive — the body is now always there.
  * - media types changed, both sides declaring a payload: one the sender can
@@ -154,7 +159,9 @@ function diffWebhookBody(
   const encoding = requestBodyEncodingShift(oldWebhook, newWebhook);
   if (encoding) {
     changes.push(requestBodyEncodingDetails(encoding));
-    breaking = true;
+    // From the receiver's side: what the sender now sends must be a
+    // representation the old handler already decoded.
+    if (!ownRepresentationKept(newWebhook, oldWebhook)) breaking = true;
   }
 
   const wasRequired = oldWebhook.requestBodyRequired === true;
