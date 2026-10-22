@@ -3,6 +3,7 @@ import type { BehaviorChange, Change, DiffReport, EnumValueChange } from './type
 import { buildDirectionIndex } from './direction.js';
 import { diffModels } from './models.js';
 import { diffServices } from './services.js';
+import { diffWebhooks } from './webhooks.js';
 
 export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
   // Both specs seed the index so a model that was request-facing in either one
@@ -15,6 +16,7 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
     // The documents' servers travel along so an operation is judged by where
     // it is actually served from, not by whether it carries an override.
     ...diffServices(oldSpec.services, newSpec.services, { old: oldSpec.servers, new: newSpec.servers }),
+    ...diffWebhooks(oldSpec.webhooks ?? [], newSpec.webhooks ?? []),
   ];
 
   const behaviorChanges = collectBehaviorChanges(changes);

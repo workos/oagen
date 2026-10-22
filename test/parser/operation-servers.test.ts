@@ -520,6 +520,8 @@ paths:
         undefined,
         undefined,
         undefined,
+        undefined, // componentResponses
+        undefined, // componentFieldModels
         [{ url: 'https://pets.example.com' }],
       );
       expect('servers' in services[0].operations[0]).toBe(false);
