@@ -140,6 +140,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
     fieldInlineModels,
     servers,
+    version,
   );
 
   // Webhooks are read while the schema-name transform is still active, like

@@ -331,14 +331,34 @@ export function extractOperations(
   componentResponses?: Record<string, Record<string, unknown>>,
   componentFieldModels?: Model[],
   documentServers?: ServerEntry[],
+  openapiVersion?: string,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
+  // OAS 3.0 ignores properties beside a `$ref`; 3.1 lets a sibling
+  // `description` override the referenced response's. Unknown is read as 3.1.
+  const refSiblingDescriptions = openapiVersion?.startsWith('3.0') ? 'ignore' : 'override';
+
   // Operations without an operationId name their inline models from the
-  // path, and two distinct paths — or a path and an operationId or component
-  // schema — can produce the same name, so the prefix for every such
-  // operation is decided up front (see resolvePathModelBaseNames).
-  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+  // path, and two distinct paths — or a path and an operationId, component
+  // schema or component response — can produce the same name, so the prefix
+  // for every such operation is decided up front (see resolvePathModelBaseNames).
+  // The model name each component response's inline body takes, decided once
+  // for every operation that returns it (see resolveComponentResponseModelNames).
+  const componentResponseNaming = resolveComponentResponseModelNames(
+    componentResponses,
+    [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+    componentSchemas,
+  );
+  const componentResponseModelNames = new Map(
+    [...componentResponseNaming].map(([componentName, naming]) => [componentName, naming.name]),
+  );
+  const pathModelBaseNames = resolvePathModelBaseNames(
+    paths,
+    componentModels,
+    componentRequestBodies,
+    componentResponseNaming,
+  );
   // An API root the untagged paths sit under (`/api`, `/v1`) tells the
   // services apart no better than nothing, so untagged operations skip it
   // when their service and fallback name are taken from the path (see
@@ -409,6 +429,8 @@ export function extractOperations(
         deferred,
         apiRootLength,
         servers,
+        refSiblingDescriptions,
+        componentResponseModelNames,
       );
       inlineModels.push(...opModels);
       for (const model of opModels) operationOf.set(model, operationQualifier);
@@ -1479,6 +1501,8 @@ function buildOperation(
   deferred: DeferredInlineType[] = [],
   apiRootLength = 0,
   servers?: ServerEntry[],
+  refSiblingDescriptions: 'override' | 'ignore' = 'override',
+  componentResponseModelNames?: ReadonlyMap<string, string>,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -1597,6 +1621,8 @@ function buildOperation(
     serviceName: opContext,
     operationQualifier,
     deferred,
+    refSiblingDescriptions,
+    componentResponseModelNames,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -2404,8 +2430,19 @@ interface ResponseTypingContext {
   componentHeaders?: Record<string, Record<string, unknown>>;
   /** Lets inline models resolve `$ref` siblings and augmentations the way fields do. */
   componentSchemas?: Record<string, SchemaObject>;
-  /** `components/responses`, for a fallback response written as a Reference Object. */
+  /** `components/responses`, for a response written as a Reference Object. */
   componentResponses?: Record<string, Record<string, unknown>>;
+  /**
+   * Whether a `description` written beside a response `$ref` overrides the
+   * component's (OAS 3.1) or is ignored (OAS 3.0); see `resolveResponseRef`.
+   */
+  refSiblingDescriptions?: 'override' | 'ignore';
+  /**
+   * The model name each component response's inline body is shared under
+   * (`resolveComponentResponseModelNames`). Absent, every component keeps
+   * `componentResponseModelName`.
+   */
+  componentResponseModelNames?: ReadonlyMap<string, string>;
   /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
   serviceName?: string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
@@ -2703,6 +2740,7 @@ function resolvePathModelBaseNames(
   paths: Record<string, PathItem>,
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentResponseNaming: ReadonlyMap<string, ComponentResponseNaming> = new Map(),
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -2711,6 +2749,23 @@ function resolvePathModelBaseNames(
 
   for (const model of componentModels ?? []) {
     reservedNames.add(model.name);
+  }
+  // A shared response names its inline body after the component, not the
+  // operation (see componentResponseModelName), so its stem is reserved like
+  // an operationId's — and so is every name that body mints, the model and
+  // everything nested under it (`OwnerCardResponseAddressGetResponse` for an
+  // `address_get_response` object in `OwnerCard`): a path stem that merely
+  // extends the component's (`GET /owner/card/response/address` →
+  // `OwnerCardResponseAddressGet`) starts with none of the stems above, yet
+  // its `…Response` is exactly such a nested name, and the later merge would
+  // keep one shape for both. The names are the ones
+  // `resolveComponentResponseModelNames` read with the extractor the
+  // operation will use, under the same context name, so they agree by
+  // construction.
+  for (const [componentName, naming] of componentResponseNaming) {
+    reservedNames.add(componentResponseModelBase(componentName));
+    reservedNames.add(naming.name);
+    for (const name of naming.minted) reservedNames.add(name);
   }
 
   for (const [path, pathItem] of Object.entries(paths)) {
@@ -2857,6 +2912,9 @@ function collectOperationConstPrefixes(
   for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
     const code = parseInt(statusCode, 10);
     if (code < 200 || code >= 300) continue;
+    // A `$ref` into `components/responses` has no `content` here and is not
+    // followed either: its inline body is named after the component, so the
+    // consts it pins never prefix a path-derived name.
     for (const media of Object.values(response.content ?? {})) {
       collectConstPrefixes(media?.schema, prefixes, 0);
     }
@@ -2904,6 +2962,144 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
     return operationIdModelName(op.operationId, 'Response');
   }
   return pathModelBaseName + 'Response';
+}
+
+/**
+ * The `components/responses` entry a response is written as a `$ref` to, or
+ * undefined for an inline response. Only the outermost ref counts: it is the
+ * name the operation uses, and the name a chain resolves through
+ * (`resolveResponseRef`) stays the component's own business. The pointer is
+ * matched whole and JSON Pointer escapes (RFC 6901 §4) undone, exactly as the
+ * resolver does, so the name agrees with what it resolved.
+ */
+function componentResponseNameOf(resp: ResponseObject | ReferenceObject): string | undefined {
+  if (!('$ref' in resp) || typeof resp.$ref !== 'string') return undefined;
+  const match = /^#\/components\/responses\/(.+)$/.exec(resp.$ref);
+  return match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
+/**
+ * `<Component>Response`: the inline body of a response declared once under
+ * `components/responses` and referenced from each operation that returns it.
+ * It is named after the component, not the operation, so every referrer
+ * shares one model (`PetFound` → `PetFoundResponse`) instead of minting a
+ * `<Op>Response` copy each; the suffix is not doubled when the component is
+ * already named `…Response`. Cleaned like an operationId-derived name, so
+ * the stem (`componentResponseModelBase`) prefixes everything derived from
+ * it — a list's `<Component>Item`, nested `<Component>Response…` models.
+ */
+function componentResponseModelName(componentName: string): string {
+  const base = toPascalCase(componentName);
+  return cleanSchemaName(base.endsWith('Response') ? base : base + 'Response');
+}
+
+/** What a component response's inline body is named, and every model name it mints under that name. */
+interface ComponentResponseNaming {
+  name: string;
+  /** The root model and everything nested under it, envelope companions included; empty for a body without a schema. */
+  minted: readonly string[];
+}
+
+/**
+ * The model name each component response's inline body is shared under,
+ * decided once for the document: `componentResponseModelName`, stepped to the
+ * first numbered form (`OwnerCardResponse2`, `…3`) under which neither it nor
+ * any model the body mints — a nested object (`OwnerCardResponse2Detail`),
+ * array items, union variants, envelope companions — is a name a component
+ * schema (or a model a component field mints) or an earlier component
+ * response already owns: `OwnerCard` beside a schema `OwnerCardResponse`, or
+ * beside a schema `OwnerCardResponse2Detail`, or beside a component response
+ * `OwnerCardResponse`. A shared name of another shape would otherwise be
+ * folded by the later merge, which compares field names, onto a model with
+ * other field types, silently; and naming such a body per operation instead
+ * would hand two shared bodies of one operation (`OwnerCard` at 200,
+ * `NewOwner` at 201) the same `<Op>Response`. The names are read with the
+ * extractor the operation will use, under the candidate name, so the whole
+ * body moves together and the reference and the models agree by
+ * construction; a chain of refs is followed to the body silently, since the
+ * operation declaring the ref reports a bad one when it reads it. A clash the
+ * stem does not reach — a titled variant, named the same under any stem —
+ * stops the stepping, and the merge passes settle it as for any operation
+ * body. A component already named like its derived name
+ * (`OwnerCardResponse` → `OwnerCardResponse`) keeps it ahead of one that
+ * only derives it; the rest are decided in document order, so the outcome
+ * never depends on which operation is read first. Every component ends up in
+ * the map, so every operation that returns it shares the one model.
+ */
+function resolveComponentResponseModelNames(
+  componentResponses: Record<string, Record<string, unknown>> | undefined,
+  takenModels: readonly Model[],
+  componentSchemas?: Record<string, SchemaObject>,
+): ReadonlyMap<string, ComponentResponseNaming> {
+  const taken = new Set(takenModels.map((model) => model.name));
+  const componentNames = Object.keys(componentResponses ?? {});
+  const exact = componentNames.filter((name) => componentResponseModelName(name) === name);
+  const ordered = [...exact, ...componentNames.filter((name) => !exact.includes(name))];
+  const names = new Map<string, ComponentResponseNaming>();
+  for (const componentName of ordered) {
+    const schema = componentResponseBodySchema(componentName, componentResponses ?? {});
+    const mintedUnder = (name: string): string[] => (schema ? bodyModelNames(schema, name, componentSchemas) : []);
+    const base = componentResponseModelName(componentName);
+    let name = base;
+    let minted = mintedUnder(name);
+    let previous: string[] | undefined;
+    // Unbounded on purpose: `taken` is finite and every step is a new
+    // numbered stem, so a free one is always reached; only a clash the stem
+    // does not reach (`stuck`) ends the search without one.
+    for (let n = 2; ; n++) {
+      const clashing = [name, ...minted].filter((candidate) => taken.has(candidate));
+      if (clashing.length === 0) break;
+      const stuck =
+        previous !== undefined && clashing.length === previous.length && clashing.every((c) => previous!.includes(c));
+      if (stuck) break;
+      previous = clashing;
+      name = `${base}${n}`;
+      minted = mintedUnder(name);
+    }
+    taken.add(name);
+    for (const minted_ of minted) taken.add(minted_);
+    names.set(componentName, { name, minted });
+  }
+  return names;
+}
+
+/** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */
+function componentResponseBodySchema(
+  componentName: string,
+  componentResponses: Record<string, Record<string, unknown>>,
+): SchemaObject | undefined {
+  const component = componentResponses[componentName];
+  if (!component) return undefined;
+  const resolved = resolveResponseRef<ResponseObject>(
+    component as ResponseObject | ReferenceObject,
+    componentResponses,
+    `components/responses/${componentName}`,
+    'override',
+    'silent',
+  );
+  return primaryBodySchema(resolved).schema;
+}
+
+/** Every model name a response body mints under `contextName`: the extractor's models and its envelope companions'. */
+function bodyModelNames(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): string[] {
+  const body = classifyAndExtractResponse(schema, contextName, componentSchemas);
+  return [
+    ...body.inlineModels.map((model) => model.name),
+    ...(body.envelopeCompanions ?? []).flatMap((companion) => companion.models.map((model) => model.name)),
+  ];
+}
+
+/**
+ * The stem every model derived from a component response starts with (see
+ * operationIdModelBase for the argument). Reserved by resolvePathModelBaseNames
+ * so no path-derived name takes it.
+ */
+function componentResponseModelBase(componentName: string): string {
+  return cleanSchemaName(toPascalCase(componentName).replace(/Response$/, ''));
 }
 
 /**
@@ -3080,6 +3276,7 @@ function readFallbackResponse(
       resp,
       sink.ctx.componentResponses,
       `${key} response of ${sink.opLabel}`,
+      sink.ctx.refSiblingDescriptions,
     );
     // The entry is filled in place: a deferred body's `type` lands on this
     // very object once every operation has been read.
@@ -3184,6 +3381,38 @@ function typeFallbackBody(
 }
 
 /**
+ * The fixed-order pick of a success response's body: the JSON schema when a
+ * JSON media type is declared (`application/json` by essence, then `+json`);
+ * else a binary (`application/octet-stream`, `application/pdf`) or text
+ * (`TEXT_RESPONSE_MEDIA_TYPES`) media type, typed as a string without reading
+ * its schema; else the first media type that declares a schema; else the
+ * first declared, which reads as `unknown`. Media types are compared by
+ * essence (`application/pdf; foo=bar` is as binary as `application/pdf`,
+ * `TEXT/PLAIN; charset=utf-8` as much a string as `text/plain`) and
+ * `contentType` is the key as written. `extractResponses` reads a 2xx body
+ * through this, and `resolvePathModelBaseNames` asks the same question of a
+ * component response, so the names it reserves are the ones the operation
+ * will mint, whatever media type the body is declared under.
+ */
+function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema?: SchemaObject; type?: TypeRef } {
+  const json = jsonResponseSchema(resp);
+  if (json) return { contentType: json.contentType, schema: json.schema };
+  const content = resp.content;
+  if (!content) return {};
+  const keyWithEssence = (essence: string): string | undefined =>
+    Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
+  const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
+  if (binaryKey) return { contentType: binaryKey, type: { kind: 'primitive', type: 'string', format: 'binary' } };
+  const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+  if (textKey) return { contentType: textKey, type: { kind: 'primitive', type: 'string' } };
+  // The first media type that declares a schema; when none does, the first
+  // declared is the primary and reads as unknown.
+  const entries = Object.entries(content);
+  const first = entries.find(([, media]) => media?.schema) ?? entries[0];
+  return first ? { contentType: first[0], schema: first[1]?.schema } : {};
+}
+
+/**
  * The schema of a response's JSON body, with the media type it was declared
  * under as written: `application/json` first, else a `+json` media type
  * (`application/problem+json` is the usual shape of a `default` error),
@@ -3254,11 +3483,34 @@ function extractResponses(
   const contentModelBase = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
   const fallback: FallbackResponseSink = { op, pathModelBaseName, opLabel, ctx, rangeResponses: [] };
 
-  for (const [statusCode, resp] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // `default` and `1XX`–`5XX` never parse as a status code (`parseInt('2XX')`
     // is 2), so they are routed to their own fields before the numeric branches.
-    if (readFallbackResponse(statusCode, resp, fallback)) continue;
+    if (readFallbackResponse(statusCode, rawResponse, fallback)) continue;
     const code = parseInt(statusCode, 10);
+    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+    // Reference Object has no `headers` or `content` of its own to read, so
+    // the ref is resolved before either is. Only a status code one of the
+    // branches below reads is resolved: `default`, a `2XX` range and an `x-`
+    // extension are left as written, as nothing here reads them.
+    const resp =
+      code >= 200
+        ? resolveResponseRef<ResponseObject>(
+            rawResponse,
+            ctx.componentResponses,
+            `${statusCode} response of ${opLabel}`,
+            ctx.refSiblingDescriptions,
+          )
+        : rawResponse;
+    // Set when the response came from a component: its inline body is then
+    // named after the component, shared by every operation that returns it.
+    const componentName = code >= 200 ? componentResponseNameOf(rawResponse) : undefined;
+    const componentModelName =
+      componentName === undefined
+        ? undefined
+        : ctx.componentResponseModelNames
+          ? ctx.componentResponseModelNames.get(componentName)
+          : componentResponseModelName(componentName);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
     // response, which no branch below keeps, declares none worth
@@ -3267,8 +3519,9 @@ function extractResponses(
     // The response's own `description`, success or error alike. Blank text
     // counts as absent, the way an operation's summary is read, and the key is
     // only added when there is something to keep. A `$ref` into
-    // `components/responses` is not resolved here, so for one only a sibling
-    // `description` written next to the `$ref` (OAS 3.1) is visible.
+    // `components/responses` was resolved above, so the component's own
+    // `description` is read; a sibling written next to the `$ref` wins in an
+    // OAS 3.1 document and is ignored in 3.0 (`ctx.refSiblingDescriptions`).
     const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
@@ -3279,41 +3532,15 @@ function extractResponses(
       // first other media type that declares one. Either way it goes through
       // `classifyAndExtractResponse`, so its inline models are created and
       // the response never references a model the parser did not emit.
-      const json = jsonResponseSchema(resp);
-      let bodySchema = json?.schema;
-      // The media type the fixed-order pick reads `extractedType` from, as
-      // written, so its `contents` entry can share that TypeRef instead of
-      // re-deriving it.
-      let primaryContentType = json?.contentType;
-      if (!bodySchema && resp.content) {
-        // Handle non-JSON response content types (text/plain, binary, XML, etc.)
-        // Media types are compared by essence: `application/pdf; foo=bar` is
-        // as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much
-        // a string as `text/plain`. The keys themselves stay as written.
-        const content = resp.content;
-        const keyWithEssence = (essence: string): string | undefined =>
-          Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
-        const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
-        const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
-        if (binaryKey) {
-          extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
-          primaryContentType = binaryKey;
-        } else if (textKey) {
-          extractedType = { kind: 'primitive', type: 'string' };
-          primaryContentType = textKey;
-        } else {
-          // Try the first media type that declares a schema; when none does,
-          // the first declared is the primary and reads as unknown.
-          const entries = Object.entries(content);
-          const first = entries.find(([, media]) => media?.schema) ?? entries[0];
-          if (first) {
-            primaryContentType = first[0];
-            bodySchema = first[1]?.schema;
-          }
-        }
-      }
+      // The fixed-order pick (`primaryBodySchema`): `primaryContentType` is
+      // the media type `extractedType` is read from, as written, so its
+      // `contents` entry can share that TypeRef instead of re-deriving it.
+      const pick = primaryBodySchema(resp);
+      const bodySchema = pick.schema;
+      const primaryContentType = pick.contentType;
+      if (pick.type) extractedType = pick.type;
       if (bodySchema) {
-        const contextName = deriveResponseName(op, pathModelBaseName);
+        const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
         extractedType = result.response;
         bodyResults.set(code, result);
@@ -3352,7 +3579,7 @@ function extractResponses(
       });
     } else if (code >= 400) {
       const json = jsonResponseSchema(resp);
-      const type = json ? schemaToTypeRef(json.schema, `Error${code}`) : undefined;
+      const type = json ? schemaToTypeRef(json.schema, componentModelName ?? `Error${code}`) : undefined;
       const contents = extractResponseContents(
         resp.content,
         json?.contentType,
