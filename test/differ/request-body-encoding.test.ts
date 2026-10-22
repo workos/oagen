@@ -595,6 +595,56 @@ describe('parseSpec to diffSpecs — the issue #290 repro', () => {
     expect(summary.breaking).toBe(1);
   });
 
+  it('keeps JSON dropped beside an unchanged inline form payload additive for the receiver although its model is renamed (Greptile round 2)', async () => {
+    // The form payload is `PetAdoptedApplicationXWwwFormUrlencodedPayload`
+    // while JSON is preferred and `PetAdoptedPayload` once it is the only
+    // one: the handler already decoded that shape, read through the old
+    // document for the old name and the new document for the new one.
+    const [oldSpec, newSpec] = await parseDocuments(
+      documentWith({ 'application/json': inlinePet, [form]: inlinePet }),
+      documentWith({ [form]: inlinePet }),
+    );
+    expect(oldSpec.webhooks?.[0].requestBodyEncoding).toBe('json');
+    expect(newSpec.webhooks?.[0].requestBodyEncoding).toBe('form-urlencoded');
+
+    const { changes, summary } = diffSpecs(oldSpec, newSpec);
+    expect(changes.find((c) => c.kind === 'webhook-modified')).toMatchObject({
+      requestBodyChanged: true,
+      oldRequestBodyEncoding: 'json',
+      newRequestBodyEncoding: 'form-urlencoded',
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: ['application/json'],
+        retyped: [],
+        classification: 'additive',
+      },
+      details: 'encoding json → form-urlencoded; payload media type application/json removed',
+      classification: 'additive',
+    });
+    // The mirror: the old SDK sent JSON, which the server no longer reads.
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      requestBodyEncodingChanged: true,
+      oldRequestBodyEncoding: 'json',
+      newRequestBodyEncoding: 'form-urlencoded',
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: ['application/json'],
+        retyped: [],
+        classification: 'breaking',
+      },
+      classification: 'breaking',
+    });
+    // What breaks: the operation, and the two secondary-media-type models
+    // the old spec minted and the new spec no longer has.
+    expect(
+      changes
+        .filter((c) => c.classification === 'breaking')
+        .map((c) => c.kind)
+        .sort(),
+    ).toEqual(['model-removed', 'model-removed', 'operation-modified']);
+    expect(summary.breaking).toBe(3);
+  });
+
   it('reports nothing when both documents declare the body the same way', async () => {
     const [oldSpec, newSpec] = await parseDocuments(document('application/json'), document('application/json'));
     expect(diffSpecs(oldSpec, newSpec).changes).toEqual([]);
