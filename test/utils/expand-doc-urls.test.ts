@@ -468,6 +468,40 @@ describe('expandDocUrls – every collection that holds a documented node', () =
     expectExpanded(op.cookieParams![0]);
   });
 
+  it('walks the webhooks: prose, header, query and cookie parameters, and response descriptions (Greptile)', () => {
+    const spec = minimalSpec({
+      webhooks: [
+        {
+          name: 'petAdopted',
+          httpMethod: 'post',
+          summary: text,
+          description: text,
+          headerParams: [param('x-signature')],
+          queryParams: [param('q')],
+          cookieParams: [param('session')],
+          responses: [{ statusCode: 200, description: text }],
+        },
+      ],
+    });
+    const [hook] = expandDocUrls(spec, base).webhooks!;
+    expect(hook.summary).toBe(expandedText);
+    expect(hook.description).toBe(expandedText);
+    expectExpanded(hook.headerParams[0]);
+    expectExpanded(hook.queryParams[0]);
+    expectExpanded(hook.cookieParams![0]);
+    expect(hook.responses[0].description).toBe(expandedText);
+    // The key stays absent on a document without webhooks, and a webhook's optional keys stay absent too.
+    expect('webhooks' in expandDocUrls(minimalSpec(), base)).toBe(false);
+    const bare = expandDocUrls(
+      minimalSpec({
+        webhooks: [{ name: 'bare', httpMethod: 'post', headerParams: [], queryParams: [], responses: [] }],
+      }),
+      base,
+    ).webhooks![0];
+    expect('summary' in bare).toBe(false);
+    expect('cookieParams' in bare).toBe(false);
+  });
+
   it('walks the primary response headers', () => {
     const op = run({ responseHeaders: [header('X-Rate-Limit')] });
     expectExpanded(op.responseHeaders![0]);

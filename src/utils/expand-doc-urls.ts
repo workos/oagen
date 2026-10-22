@@ -7,6 +7,7 @@ import type {
   Parameter,
   ParameterGroup,
   ResponseHeader,
+  Webhook,
 } from '../ir/types.js';
 
 /**
@@ -22,11 +23,13 @@ import type {
  * `externalDocs`, whose `url` is left exactly as written (OpenAPI allows it
  * to be relative to the document's own location, which is not the doc site).
  * The nodes are every one that carries them — the spec, its services,
- * operations, parameters, response headers, models, fields, enums and enum
- * values — reached through every collection that holds them: each parameter
- * list, the mutually exclusive parameter groups, the headers of the primary,
- * of each alternate success and of each error response, and the list
- * envelope's companion fields. A key a node does not have stays absent.
+ * operations, webhooks, parameters, response headers, models, fields, enums
+ * and enum values — reached through every collection that holds them: each
+ * parameter list (a webhook's header, query and cookie parameters included),
+ * the mutually exclusive parameter groups, the headers of the primary, of
+ * each alternate success and of each error response, the list envelope's
+ * companion fields and a webhook's response descriptions. A key a node does
+ * not have stays absent.
  *
  * The IR shares some nodes by identity: a grouped parameter is the same
  * object in `queryParams` and in its `parameterGroups` variant, and the
@@ -140,10 +143,25 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
     };
   }
 
+  // A webhook's prose and parameters follow the same rules as an operation's;
+  // its responses carry a description each. Every optional key stays absent.
+  function webhook(hook: Webhook): Webhook {
+    return {
+      ...hook,
+      ...expandText(hook, 'summary'),
+      ...expandText(hook, 'description'),
+      headerParams: parameters(hook.headerParams),
+      queryParams: parameters(hook.queryParams),
+      ...(hook.cookieParams ? { cookieParams: parameters(hook.cookieParams) } : {}),
+      responses: hook.responses.map((entry) => ({ ...entry, ...expandText(entry, 'description') })),
+    };
+  }
+
   return {
     ...spec,
     ...expandText(spec, 'description'),
     ...expandExternalDocs(spec),
+    ...(spec.webhooks ? { webhooks: spec.webhooks.map(webhook) } : {}),
     services: spec.services.map((service) => ({
       ...service,
       ...expandText(service, 'description'),
