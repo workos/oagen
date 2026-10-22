@@ -883,6 +883,53 @@ describe('a rename repoints references by identity, never by name (review round 
     }
   });
 
+  it('never lets an enum the collectors rename take a model name the merge minted', async () => {
+    const legacy = getOp('getLegacyWidget', {
+      type: 'object',
+      deprecated: true,
+      properties: { object: { type: 'string', const: 'widget' }, a: str },
+    });
+    const live = getOp('getWidget', {
+      type: 'object',
+      required: ['a'],
+      properties: { object: { type: 'string', const: 'widget' }, a: str },
+    });
+    // The same `widget` query enum, now beside a component enum that owns
+    // `GetLegacyWidgetWidget` with other members: the deprecated response is
+    // qualified past the component enum to `GetLegacyWidgetWidget2`, and the
+    // collectors — which rename the query enum off the component's values
+    // after every model is named — must step past that model too.
+    const search = {
+      get: {
+        operationId: 'searchWidgets',
+        tags: ['GetLegacyWidget'],
+        parameters: [{ name: 'widget', in: 'query', schema: { type: 'string', enum: ['round', 'square'] } }],
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: { type: 'string' } } } } },
+      },
+    };
+    const schemas = { GetLegacyWidgetWidget: { type: 'string', enum: ['big', 'small'] } };
+    for (const { order, spec } of await parseBothOrders('enum-name-taken', schemas, [
+      ['/legacy-widgets/{id}', legacy],
+      ['/widgets/{id}', live],
+      ['/search', search],
+    ])) {
+      expect(
+        spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+        order,
+      ).toEqual([
+        ['GetLegacyWidgetWidget', ['big', 'small']],
+        ['GetLegacyWidgetWidget3', ['round', 'square']],
+      ]);
+      expect(
+        opsOf(spec).searchWidgets?.queryParams.map((p) => p.type),
+        order,
+      ).toEqual([{ kind: 'enum', name: 'GetLegacyWidgetWidget3', values: ['round', 'square'] }]);
+      expect(opsOf(spec).getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget2' });
+      expect(opsOf(spec).getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expectSound(spec, [], ['getLegacyWidget.response → GetLegacyWidgetWidget2']);
+    }
+  });
+
   it('qualifies two deprecated copies under different operations each by its own', async () => {
     const widget = (extra: Record<string, unknown>, props: Record<string, unknown> = {}) => ({
       type: 'object',

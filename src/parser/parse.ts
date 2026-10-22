@@ -209,9 +209,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);
+  // Each collector steps a renamed enum around every model name as well as
+  // every enum's, so the merge passes above (which mint against every enum
+  // name an `EnumRef` carries) and the collectors never meet on one name.
   collectInlineEnumsFromModels(finalModels, enums);
   collectInlineEnumsFromOperations(services, enums, finalModels, componentNames);
-  collectInlineEnumsFromWebhooks(webhooks, enums);
+  collectInlineEnumsFromWebhooks(webhooks, enums, finalModels);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
