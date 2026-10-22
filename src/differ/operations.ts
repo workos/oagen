@@ -122,6 +122,15 @@ export function diffOperations(
     // typed accessors on a response wrapper (#296).
     const responseHeaderChanges = diffResponseHeaders(oldOp, newOp);
     const responseHeadersChanged = responseHeaderChanges.length > 0;
+    // The status code `response` is read from (`responseStatusCode`, present
+    // exactly when a 2xx or 3xx is declared), compared only while both sides
+    // carry one, as `requestBodyRequired` is while both carry a body: an
+    // operation gaining or losing its only 2xx/3xx is not a move.
+    const bothCarryStatus = oldOp.responseStatusCode !== undefined && newOp.responseStatusCode !== undefined;
+    const responseStatusCodeChanged = bothCarryStatus && oldOp.responseStatusCode !== newOp.responseStatusCode;
+    const status = responseStatusCodeChanged
+      ? { oldResponseStatusCode: oldOp.responseStatusCode, newResponseStatusCode: newOp.responseStatusCode }
+      : {};
     const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
     // Additive either way: the operation's signature is unchanged, but a
@@ -166,6 +175,7 @@ export function diffOperations(
       errorsChanged ||
       responseContentTypesChanged ||
       responseHeadersChanged ||
+      responseStatusCodeChanged ||
       fallbackResponsesChanged ||
       deprecatedChanged ||
       serversChanged ||
@@ -231,6 +241,10 @@ export function diffOperations(
         errorsBreaking ||
         responseContentTypesBreaking ||
         responseHeadersBreaking ||
+        // responseStatusCode: breaking — the status the operation succeeds
+        // with is what an SDK checks or documents (the IR carries it for
+        // that), and the server now answers with another one.
+        responseStatusCodeChanged ||
         fallbackBreaking ||
         serversChanged ||
         securityBreaking ||
@@ -260,6 +274,8 @@ export function diffOperations(
         responseContentTypeChanges,
         responseHeadersChanged,
         responseHeaderChanges,
+        responseStatusCodeChanged,
+        ...status,
         fallbackResponsesChanged,
         deprecatedChanged,
         ...deprecation,
@@ -409,27 +425,36 @@ function mediaTypeBodies(
  * up by status code: every 2xx/3xx entry as `success:<code>`, every error as
  * `error:<code>`, the `default` and each range response as
  * `fallback:<key>`. The primary success response (the one `response` is the
- * body of, read from the operation's own lists) is `success:<code>` too when
- * `successResponses` lists it — with several 2xx it is the lowest-coded entry
- * whose type is the operation's `response`, the parser's own pick — so a
- * primary that changes status still pairs with the entry of its code; a lone
- * 2xx carries no code in the IR and is keyed `primary` (see
- * `pairContentEntries` for what it pairs with).
+ * body of, read from the operation's own lists) is `success:<code>` too: the
+ * entry of `responseStatusCode` when `successResponses` lists it — the
+ * parser's own pick, so a primary that changes status still pairs with the
+ * entry of its code — and, for a lone 2xx that `successResponses` does not
+ * list, `responseStatusCode` itself, the code the parser read `response`
+ * from, so a lone `201` pairs with the other spec's `201` whether that spec
+ * declares it alone or beside a `200` it added. A hand-built IR whose lone
+ * 2xx carries no code is keyed `primary` (see `pairContentEntries` for what
+ * it pairs with).
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
   const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
-  const primaryEntry = successes.find(
-    (entry) =>
-      (op.responseContents !== undefined && entry.contents === op.responseContents) ||
-      typeRefsEqual(entry.type, op.response),
-  );
+  // The entry `response` was read from: the one of `responseStatusCode`
+  // when the IR carries it, else — a hand-built IR without the code — the
+  // one that shares `response`'s content list or type.
+  const primaryEntry =
+    successes.find((entry) => entry.statusCode === op.responseStatusCode) ??
+    successes.find(
+      (entry) =>
+        (op.responseContents !== undefined && entry.contents === op.responseContents) ||
+        typeRefsEqual(entry.type, op.response),
+    );
+  const primaryStatus = primaryEntry?.statusCode ?? op.responseStatusCode;
   // The primary's headers are `responseHeaders`, the same array as its
   // `successResponses` entry's when both exist (how the parser builds it);
   // a hand-built IR that sets only the entry's is read from the entry.
   entries.push({
-    key: primaryEntry ? `success:${primaryEntry.statusCode}` : 'primary',
-    ...(primaryEntry ? { statusCode: primaryEntry.statusCode } : {}),
+    key: primaryStatus !== undefined ? `success:${primaryStatus}` : 'primary',
+    ...(primaryStatus !== undefined ? { statusCode: primaryStatus } : {}),
     isPrimary: true,
     bodies: mediaTypeBodies(op.responseContentTypes ?? [], op.responseContents ?? [], op.response),
     headers: op.responseHeaders ?? primaryEntry?.headers ?? [],
@@ -578,8 +603,9 @@ function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeader
   const paired = new Set<ContentEntry>();
   const changes: ResponseHeaderChange[] = [];
   // Every change says which response entry it is about, in the position
-  // `ResponseContentTypesChange` reports an entry: a status code, or the
-  // fallback key, or neither for a lone 2xx.
+  // `ResponseContentTypesChange` reports an entry: a status code (a lone
+  // 2xx's `responseStatusCode` included), or the fallback key, or neither
+  // for a lone 2xx of a hand-built IR that carries no code.
   const at = (entry: ContentEntry, change: ResponseHeaderChange): ResponseHeaderChange => {
     const { kind, headerName, ...rest } = change;
     return {
@@ -654,9 +680,10 @@ function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseH
  * only when another comparison reports that very body: the entry's own body
  * on both sides, for two primaries (`responseChanged`) or two errors of one
  * code (`errorsChanged`) — never for a primary paired with an alternate 2xx.
- * Entries pair by status code (`pairContentEntries`); a primary whose code the IR does not
- * carry (a lone 2xx) pairs with the entry of the other spec that offers its
- * media types, else with that spec's primary. An error only one spec has is
+ * Entries pair by status code (`pairContentEntries`), a lone 2xx by its
+ * `responseStatusCode`; two lone primaries of different codes pair with each
+ * other, and only a lone 2xx that carries no code (a hand-built IR) pairs by
+ * the media types it offers, else with the other spec's primary. An error only one spec has is
  * not a media-type change — a code that came or went is the errors diff's
  * business — and neither is a 2xx the new spec adds, but a 2xx the old spec
  * declared and the new does not has no other diff to report it, so its
@@ -705,16 +732,19 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
 }
 
 /**
- * Which old entry each new entry is compared with. Entries pair by key: a
- * status code, or `primary` for a lone 2xx, which carries no code in the IR.
- * A lone 2xx on one side only has no counterpart by key, so it pairs with
- * the 2xx entry of the other side that offers the very same media types,
- * whatever that entry's code — the response it most plausibly still is, as
- * when a spec adds a `200` beside an unchanged lone `201` — and, when none
- * does, with the other side's primary. Pairing the two primaries blindly
- * would compare that unchanged `201` with the new `200` and report every
- * format the `200` does not offer as removed. A new entry nothing pairs with
- * is left out of the map.
+ * Which old entry each new entry is compared with. Entries pair by key — a
+ * status code, a lone 2xx's `responseStatusCode` included — so a lone `201`
+ * pairs with the other spec's `201` whether that spec declares it alone or
+ * beside a `200` it added, and the added `200` pairs with nothing. When
+ * neither primary has a counterpart by code and both carry one, the primary
+ * moved (a lone `201` became a lone `200`): the two primaries pair, and
+ * `responseStatusCodeChanged` reports the move once rather than every header
+ * and media type as removed under one code and added under the other. Only
+ * a lone 2xx that carries no code (a hand-built IR, keyed `primary`) falls
+ * back to shape: it pairs with the 2xx entry of the other side that offers
+ * the very same media types, whatever that entry's code — the response it
+ * most plausibly still is — and, when none does, with the other side's
+ * primary. A new entry nothing pairs with is left out of the map.
  */
 function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry[]): Map<ContentEntry, ContentEntry> {
   const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
@@ -726,9 +756,14 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
   const oldPrimary = oldEntries.find((entry) => entry.isPrimary);
   const newPrimary = newEntries.find((entry) => entry.isPrimary);
   if (!oldPrimary || !newPrimary || pairs.has(newPrimary)) return pairs;
-  if (newPrimary.key === 'primary') {
+  // The old primary is some new entry's by code (a lone `201` beside a new
+  // `200`): the new primary is a 2xx the new spec adds, paired with nothing.
+  if (new Set(pairs.values()).has(oldPrimary)) return pairs;
+  if (oldPrimary.statusCode !== undefined && newPrimary.statusCode !== undefined) {
+    pairs.set(newPrimary, oldPrimary);
+  } else if (newPrimary.statusCode === undefined) {
     pairs.set(newPrimary, survivingEntry(newPrimary, oldEntries) ?? oldPrimary);
-  } else if (oldPrimary.key === 'primary') {
+  } else {
     pairs.set(survivingEntry(oldPrimary, newEntries) ?? newPrimary, oldPrimary);
   }
   return pairs;
@@ -737,7 +772,9 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
 /**
  * The 2xx entry among `others` that offers exactly `lone`'s media types — by
  * essence, order aside, so `Text/HTML` + `application/pdf` still offers
- * `application/pdf` + `text/html` — the primary when it does, if any.
+ * `application/pdf` + `text/html` — the primary when it does, if any. The
+ * shape fallback `pairContentEntries` uses for a lone 2xx that carries no
+ * `responseStatusCode`.
  */
 function survivingEntry(lone: ContentEntry, others: ContentEntry[]): ContentEntry | undefined {
   const offered = essenceSignature(lone);
