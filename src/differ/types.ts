@@ -1,4 +1,5 @@
 import type { Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
+import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
   oldVersion: string;
@@ -542,7 +543,9 @@ export interface WebhookRemoved {
  * body that may now be absent breaks a handler that assumed one, and
  * parameter changes are classified the way a response's would be (see
  * `diffWebhookParams`). Every `ParamChange` carries its `paramLocation`,
- * since a header and a query parameter may share a name. A parameter's
+ * since a header and a query parameter may share a name; a header's name is
+ * matched case-insensitively, as on an operation, so a header whose name
+ * only changed case is a `param-name-changed` entry. A parameter's
  * `deprecated` flipping is a `param-deprecated-changed` entry there, as on
  * an operation. The security the request carries is read from the
  * receiver's side too: a credential the sender stops presenting, or an
@@ -606,14 +609,23 @@ export interface WebhookModified {
  * `cookieParams`); a webhook carries `header`, `query` and `cookie` ones.
  * `locatedParams` in `params.ts` tags every parameter a node carries with
  * its location, and `paramKey` there joins it to the name to identify one.
+ * The same four locations `ParameterLocation` in `ir/parameter-key.ts`
+ * names, since the parser merges parameters on the same identity.
  */
-export type ParamLocation = 'path' | 'query' | 'header' | 'cookie';
+export type ParamLocation = ParameterLocation;
 
 /**
  * A change to one parameter of an operation or a webhook, in any location it
- * carries one. Parameters are matched by location and name — OpenAPI allows
- * a path `id` beside a query `id` on one operation — so every entry carries
- * `paramLocation` to say which one it is.
+ * carries one. Parameters are matched by location and name (`paramKey` in
+ * `params.ts`, which is `parameterKey` in `ir/parameter-key.ts`) — OpenAPI
+ * allows a path `id` beside a query `id` on one operation — so every entry
+ * carries `paramLocation` to say which one it is. A header's name is
+ * compared case-insensitively (RFC 9110 §5.1): a header written
+ * `X-Pet-Token` on one side and `x-pet-token` on the other is one parameter,
+ * and the spelling change is a `param-name-changed` entry (additive, with
+ * `oldName`/`newName`) beside whatever else changed about it, not a
+ * `param-removed` beside a `param-added`. Path, query and cookie names are
+ * case-sensitive. `paramName` is the name as the new spec writes it.
  */
 export interface ParamChange {
   kind:
@@ -623,9 +635,14 @@ export interface ParamChange {
     | 'param-format-changed'
     | 'param-required-changed'
     | 'param-default-changed'
-    | 'param-deprecated-changed';
+    | 'param-deprecated-changed'
+    | 'param-name-changed';
   paramName: string;
   classification: 'additive' | 'breaking';
+  /** For `param-name-changed`: the name as the old spec wrote it. */
+  oldName?: string;
+  /** For `param-name-changed`: the name as the new spec writes it (also `paramName`). */
+  newName?: string;
   /** For `param-default-changed`: serialized old default value, or `null` if previously unset. */
   oldDefault?: string | null;
   /** For `param-default-changed`: serialized new default value, or `null` if now unset. */
@@ -640,7 +657,10 @@ export interface ParamChange {
    * parameters may share a name).
    */
   paramLocation?: ParamLocation;
-  /** For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
+  /**
+   * For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`.
+   * For `param-name-changed`: `name X-Pet-Token → x-pet-token`.
+   */
   details?: string;
 }
 

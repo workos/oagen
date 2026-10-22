@@ -139,7 +139,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `externalDocs?` — the operation's own link, when usable
   - `httpMethod` — `get` | `post` | `put` | `patch` | `delete` | `head` | `options` | `trace`
   - `path` — e.g. `/organizations/{id}`
-  - `pathParams`, `queryParams`, `headerParams` — `Parameter[]` per location; always present, possibly empty
+  - `pathParams`, `queryParams`, `headerParams` — `Parameter[]` per location; always present, possibly empty. Each `name` is as the spec wrote it; a parameter's identity is its location plus name, a header's name compared case-insensitively (`parameterKey` from `@workos/oagen`), so one list never holds two headers that differ in case alone
   - `bodyOwnedQueryParams?` — query declarations the request body also owns; never serialize these to the URL
   - `cookieParams?` — `Parameter[]`, present only when the operation declares cookie parameters
   - `requestBody?` — `TypeRef` of the request body, read from one `content` entry by media type essence (parameters and case aside): `application/json`, else a `+json` media type, else `multipart/form-data`, else `application/x-www-form-urlencoded` (each only with a schema), else `application/octet-stream`, else `text/plain`; absent, with a parser warning, when none of the declared media types is read

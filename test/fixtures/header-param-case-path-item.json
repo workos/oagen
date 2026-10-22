@@ -1,0 +1,17 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Pets", "version": "1" },
+  "paths": {
+    "/pets/{petId}": {
+      "parameters": [
+        { "name": "petId", "in": "path", "required": true, "schema": { "type": "string" } },
+        { "name": "X-Pet-Token", "in": "header", "required": true, "schema": { "type": "string" } }
+      ],
+      "get": {
+        "operationId": "getPet",
+        "parameters": [{ "name": "x-pet-token", "in": "header", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "string" } } } } }
+      }
+    }
+  }
+}

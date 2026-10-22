@@ -20,6 +20,7 @@ import type {
 } from '../ir/types.js';
 import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
 import { serverListsEqual, serversBeyondDefault } from '../ir/server-url.js';
+import { foldHeaderName, parameterKey } from '../ir/parameter-key.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -1978,17 +1979,20 @@ function buildOperation(
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
   // An operation-level parameter overrides a path-level one with the same
-  // (name, in) identity rather than adding a second entry. Operation params come
-  // last, so last-write-wins; Map.set keeps the original insertion position, so
-  // path-level parameter ordering is preserved.
+  // identity — `parameterKey`: location and name, a header's name
+  // case-folded, so a path-level `X-Pet-Token` and an operation-level
+  // `x-pet-token` are one header (#295) — rather than adding a second entry.
+  // Operation params come last, so last-write-wins; Map.set keeps the
+  // original insertion position, so path-level parameter ordering is
+  // preserved.
   const paramsByIdentity = new Map<string, ParameterObject>();
   for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
     const param = resolveParameterRef(raw, componentParameters, opLabel);
-    paramsByIdentity.set(`${param.in}:${param.name}`, param);
+    paramsByIdentity.set(parameterKey(param.in, param.name), param);
   }
   const allParams = [...paramsByIdentity.values()];
 
-  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
+  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key');
 
   // A parameter the spec declares both as `in: query` and as a request-body
   // property is one value with two wire locations. On a body-carrying method
@@ -2052,7 +2056,7 @@ function buildOperation(
   // The idempotency header is the SDK's to inject (`injectIdempotencyKey`), not a parameter to type.
   const headerParams = extract(
     'header',
-    wireParams.filter((p) => !(p.in === 'header' && p.name.toLowerCase() === 'idempotency-key')),
+    wireParams.filter((p) => !(p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key')),
   );
   const cookieParams = extract('cookie');
   // Keep the body-owned declarations on the operation so downstream passes
@@ -3494,6 +3498,13 @@ function deferParameterModels(
  * — otherwise the ref would dangle with nothing to emit. That naming waits
  * for every primary model (`resolveDeferredInlineTypes`), so a header with a
  * schema is deferred and its `type` filled in then.
+ *
+ * Header names are case-insensitive (RFC 9110 §5.1; OpenAPI says so of this
+ * map), so two keys that differ in case alone (`X-Request-Id` beside
+ * `x-request-id`) declare one header: the later declaration is kept, in the
+ * earlier one's position, with a warning — the way an operation-level
+ * parameter replaces a path-level one, except that the document gave these
+ * two no precedence (#295).
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
@@ -3504,11 +3515,23 @@ function extractResponseHeaders(
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
-  const result: ResponseHeader[] = [];
+  const declarations = new Map<string, { name: string; raw: RawHeaderObject }>();
   for (const [name, raw] of Object.entries(headers)) {
+    const folded = foldHeaderName(name);
+    const earlier = declarations.get(folded);
+    if (earlier) {
+      console.warn(
+        `[oagen] Warning: Response header "${name}" on ${operationLabel} ${statusCode} is also declared as "${earlier.name}"; header names are case-insensitive, so the later declaration is used.`,
+      );
+    }
+    declarations.set(folded, { name, raw });
+  }
+
+  const result: ResponseHeader[] = [];
+  for (const [folded, { name, raw }] of declarations) {
     // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
     // media type is already carried by the response's `content` map.
-    if (name.toLowerCase() === 'content-type') continue;
+    if (folded === 'content-type') continue;
 
     const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel);
     if (!header) continue;
