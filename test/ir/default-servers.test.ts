@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isDefaultServerList, serversBeyondDefault } from '../../src/ir/server-url.js';
+import { isDefaultServerList, isDefaultServerSet, serversBeyondDefault } from '../../src/ir/server-url.js';
 import type { ServerEntry } from '../../src/ir/types.js';
 
 /**
@@ -79,5 +79,36 @@ describe('serversBeyondDefault', () => {
 
     const rootBesideHost: ServerEntry[] = [{ url: '/' }, ...staging];
     expect(serversBeyondDefault(rootBesideHost)).toBe(rootBesideHost);
+  });
+});
+
+describe('isDefaultServerSet', () => {
+  const host = 'https://api.example.com';
+
+  it('is true for the shapes the parser gives a document at the default', () => {
+    expect(isDefaultServerSet({ baseUrl: '', servers: undefined })).toBe(true);
+    expect(isDefaultServerSet({ baseUrl: '', servers: [] })).toBe(true);
+    expect(isDefaultServerSet({ baseUrl: '/', servers: [{ url: '/' }] })).toBe(true);
+    expect(isDefaultServerSet({ baseUrl: '/', servers: [{ url: '/', description: 'Same origin' }] })).toBe(true);
+  });
+
+  it('is true for a hand-built pairing of the two default values', () => {
+    expect(isDefaultServerSet({ baseUrl: '/', servers: undefined })).toBe(true);
+    expect(isDefaultServerSet({ baseUrl: '', servers: [{ url: '/' }] })).toBe(true);
+  });
+
+  it('is false when baseUrl names a host, with or without servers beside it', () => {
+    expect(isDefaultServerSet({ baseUrl: host, servers: undefined })).toBe(false);
+    expect(isDefaultServerSet({ baseUrl: host, servers: [] })).toBe(false);
+    expect(isDefaultServerSet({ baseUrl: host, servers: [{ url: host }] })).toBe(false);
+    expect(isDefaultServerSet({ baseUrl: '/v1', servers: undefined })).toBe(false);
+  });
+
+  it('is false when the list is not the default, whatever baseUrl says', () => {
+    expect(isDefaultServerSet({ baseUrl: '/', servers: [{ url: '/' }, { url: host }] })).toBe(false);
+    expect(
+      isDefaultServerSet({ baseUrl: '/', servers: [{ url: '{root}', variables: { root: { default: '/' } } }] }),
+    ).toBe(false);
+    expect(isDefaultServerSet({ baseUrl: '', servers: [{ url: host }] })).toBe(false);
   });
 });

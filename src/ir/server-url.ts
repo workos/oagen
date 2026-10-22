@@ -1,4 +1,4 @@
-import type { ServerEntry, ServerVariable } from './types.js';
+import type { ApiSpec, ServerEntry, ServerVariable } from './types.js';
 
 /** Outcome of filling a server URL template with its variables' defaults. */
 export interface ResolvedServerUrl {
@@ -169,10 +169,11 @@ const DEFAULT_SERVER_URL = '/';
  * A template that merely resolves to `/` (a referenced variable whose default
  * is `/`) and `/` listed beside another server are not the default.
  *
- * The parser (`Operation.servers`) and the differ (`base-url-changed`,
- * `server-added`, `server-removed`, `serversChanged`) read lists through
- * `serversBeyondDefault`, so the three spellings of the default compare
- * equal everywhere server lists are compared (#291).
+ * The parser (`Operation.servers`) and the differ (`server-added`,
+ * `server-removed`, `serversChanged`) read lists through
+ * `serversBeyondDefault`, and `base-url-changed` reads `baseUrl` and
+ * `servers` together through `isDefaultServerSet`, so the three spellings of
+ * the default compare equal everywhere server lists are compared (#291).
  */
 export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
   if (!servers || servers.length === 0) return true;
@@ -189,4 +190,19 @@ export function isDefaultServerList(servers: readonly ServerEntry[] | undefined)
  */
 export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
   return servers && !isDefaultServerList(servers) ? servers : [];
+}
+
+/**
+ * Whether a document's `servers` and `baseUrl` together mean OpenAPI's
+ * default server: the list is the default by `isDefaultServerList` and
+ * `baseUrl` is what the parser sets for such a list — `''` when the
+ * document declares no server, `/` when it writes the default out. Both
+ * fields are read because `ApiSpec` does not tie them: an IR built by hand
+ * may name a host in `baseUrl` with no `servers` beside it, and that host is
+ * not the default — the differ compares it as written and reports it when
+ * it moves. The parser never produces that shape (`baseUrl` is always
+ * `servers[0]` resolved, or `''`).
+ */
+export function isDefaultServerSet(spec: Pick<ApiSpec, 'baseUrl' | 'servers'>): boolean {
+  return isDefaultServerList(spec.servers) && (spec.baseUrl === '' || spec.baseUrl === DEFAULT_SERVER_URL);
 }

@@ -676,6 +676,57 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
     ]);
   });
 
+  describe('a host set in `baseUrl` with no `servers` beside it (an IR built by hand; Greptile)', () => {
+    const byHand = (baseUrl: string): ApiSpec => ({ ...spec(), baseUrl });
+
+    it('is compared as written by diffServers, so a moved host is still breaking', () => {
+      expect(diffServers(byHand('https://old.example.com'), byHand('https://new.example.com'))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://old.example.com',
+          newBaseUrl: 'https://new.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('is compared as written by diffSpecs, the public call', () => {
+      const old = byHand('https://old.example.com');
+      expect(diffSpecs(old, { ...old, baseUrl: 'https://new.example.com' }).changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://old.example.com',
+          newBaseUrl: 'https://new.example.com',
+          classification: 'breaking',
+        },
+      ]);
+      expect(diffSpecs(old, old).changes).toEqual([]);
+    });
+
+    it('is a host that disappears (breaking) or appears (additive) against a document at the default', () => {
+      expect(diffSpecs(byHand('https://old.example.com'), spec()).changes).toEqual([
+        { kind: 'base-url-changed', oldBaseUrl: 'https://old.example.com', newBaseUrl: '', classification: 'breaking' },
+      ]);
+      expect(diffSpecs(byHand('https://old.example.com'), spec([server('/')])).changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://old.example.com',
+          newBaseUrl: '/',
+          classification: 'breaking',
+        },
+      ]);
+      expect(diffSpecs(spec(), byHand('https://new.example.com')).changes).toEqual([
+        { kind: 'base-url-changed', oldBaseUrl: '', newBaseUrl: 'https://new.example.com', classification: 'additive' },
+      ]);
+    });
+
+    it('is still the default when the hand-built baseUrl is `/`', () => {
+      expect(diffSpecs(byHand('/'), spec()).changes).toEqual([]);
+      expect(diffSpecs(spec(), byHand('/')).changes).toEqual([]);
+      expect(diffSpecs(byHand('/'), spec([server('/')])).changes).toEqual([]);
+    });
+  });
+
   it('still reports `/` moving to another path-only server as breaking', () => {
     expect(diffServers(spec([server('/v1')]), spec([server('/v2')]))).toEqual([
       { kind: 'base-url-changed', oldBaseUrl: '/v1', newBaseUrl: '/v2', classification: 'breaking' },

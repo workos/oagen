@@ -102,6 +102,7 @@ export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 export type { ResolvedServerUrl } from './ir/server-url.js';
 export {
   isDefaultServerList,
+  isDefaultServerSet,
   resolveServerUrl,
   serverListsEqual,
   serverUrlPlaceholders,
