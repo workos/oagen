@@ -2,7 +2,14 @@ import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } fr
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, singularize, stripListItemMarkers, splitWords } from '../utils/naming.js';
 import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
-import { enumValuesOf, inlineEnumExternalDocsOf, inlineEnumRef, toEnumValue, type EnumMember } from './enum-members.js';
+import {
+  enumShapeKey,
+  enumValuesOf,
+  inlineEnumExternalDocsOf,
+  inlineEnumRef,
+  toEnumValue,
+  type EnumMember,
+} from './enum-members.js';
 
 /**
  * Module-level transform set during extractSchemas(). Used by schemaToTypeRef()
@@ -93,15 +100,24 @@ interface ArrayComponentPlan {
   /**
    * The synthetic property the schema is typed and extracted as, under the
    * component's name: `item`, so the items mint `<Component>Item…`, or the
-   * context `memberContext` stepped to when a name they would mint is
-   * already a component's, or another named union's inline variant's, of a
-   * different shape (`item_item`, `item_array_item`, numbered).
+   * context the tree stepped to (`item_item`, `item_array_item`, numbered)
+   * when a name it would mint anywhere — the item model, an object nested
+   * under it, an inline enum, a union variant — is already a component's,
+   * another array component's tree's, or another named union's inline
+   * variant's, of a different shape (`planArrayComponent`).
    */
   context: string;
   /** `{ [context]: schema }`: the one-property object both sides read, as a named union's `memberProperties`. */
   properties: ReadonlyMap<string, SchemaObject>;
   /** Set once the self-reference warning has been printed, so it is printed once per component. */
   warnedSelfReference: boolean;
+}
+
+/** Every model and inline enum an array component's item tree mints under one context (`arrayComponentMints`). */
+interface ArrayComponentMints {
+  models: Model[];
+  /** Each inline enum the items are or hold, by name, with its members. */
+  enums: Map<string, EnumValue[]>;
 }
 
 /**
@@ -846,17 +862,28 @@ export function extractSchemas(
     }
   }
 
-  // The array components, planned once the sets above are complete: a plan
-  // reads every component's shape and every named union's variant names, and
-  // a `$ref` to an array component — from a component field, a named union's
-  // variant, an operation or a webhook — is typed from its plan. As for an
-  // enum, the first raw key resolving to a name decides for that name.
+  // The array components, planned once the sets above are complete, in two
+  // reads so the decision is symmetric: every item tree is first read in
+  // isolation under `item` (`arrayComponentMints`), then each is planned
+  // against every component, every other named union's variants and every
+  // other tree's isolated names (`planArrayComponent`). Nothing is registered
+  // until every plan is decided, so no rehearsal resolves a `$ref` to another
+  // array component. A `$ref` to an array component — from a component field,
+  // a named union's variant, an operation or a webhook — is then typed from
+  // its plan. As for an enum, the first raw key resolving to a name decides
+  // for that name.
   activeArrayComponentPlans = new Map();
+  const arrayComponents = new Map<string, SchemaObject>();
   for (const [name, schema] of Object.entries(schemas)) {
     const resolved = resolveSchemaName(name);
-    if (!isArrayComponentSchema(schema) || activeArrayComponentPlans.has(resolved)) continue;
-    activeArrayComponentPlans.set(resolved, planArrayComponent(resolved, schema, schemas));
+    if (isArrayComponentSchema(schema) && !arrayComponents.has(resolved)) arrayComponents.set(resolved, schema);
   }
+  const isolated = new Map(
+    [...arrayComponents].map(([name, schema]) => [name, arrayComponentMints(name, schema, schemas, 'item')] as const),
+  );
+  activeArrayComponentPlans = new Map(
+    [...arrayComponents].map(([name, schema]) => [name, planArrayComponent(name, schema, schemas, isolated)] as const),
+  );
 
   const modelsByCleanName = new Map<string, Model>();
   // Keep the model with more fields when names collide after cleaning
@@ -2787,20 +2814,156 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
  * The base is `item`, so inline object items are `<Component>Item`, an
  * inline enum `<Component>Item`, the objects of a nested array or map
  * `<Component>Item` as well, and whatever those hold `<Component>Item…`, by
- * the one rule a field's inline models follow. When a name the items would
- * mint is already a component's, or another named union's inline variant's,
- * of a different shape (`namedUnionClaimedShapes`), the context steps
- * exactly as a named union's `variant_<n>` does (`memberContext`): `item_item`
- * (`<Component>ItemItem`), then `item_array_item`, then numbered; a claimant
- * of the identical shape is shared instead, and the items then reference it.
+ * the one rule a field's inline models follow. Every name the whole tree
+ * mints under a context is read off a rehearsal of the extraction itself
+ * (`arrayComponentMints`), so an object nested under the item model
+ * (`PetsItemOwner`) or an enum a nested field holds counts exactly as the
+ * item model does. When any of them is already claimed for a different
+ * shape (`arrayComponentClaims`: a component model, enum or array component,
+ * another array component's tree, another named union's inline variant), the
+ * context steps exactly as a named union's `variant_<n>` does
+ * (`firstFreeElementContext`): `item_item` (`<Component>ItemItem…`), then
+ * `item_array_item`, then numbered, until no name under it is claimed, and
+ * every name nested under the tree moves with it. A claimant of the
+ * identical shape — the same fields and limits for a model, the same
+ * members for an enum — is shared instead, and the tree references it.
+ * `isolated` holds every tree's names under `item`, read before any plan
+ * exists, so the decision does not depend on declaration order.
  */
 function planArrayComponent(
   name: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject>,
+  isolated: ReadonlyMap<string, ArrayComponentMints>,
 ): ArrayComponentPlan {
-  const context = memberContext('item', schema, name, namedUnionClaimedShapes(name, schema, schemas));
+  const claims = arrayComponentClaims(name, schema, schemas, isolated);
+  const own = isolated.get(name) ?? arrayComponentMints(name, schema, schemas, 'item');
+  const contested = [...mintedShapes(own)].some(([minted, shape]) =>
+    (claims.get(minted) ?? []).some((rival) => rival() !== shape),
+  );
+  const names = (mints: ArrayComponentMints): string[] => [...mintedShapes(mints).keys()];
+  const context = contested
+    ? firstFreeElementContext(
+        'item',
+        'item',
+        new Set(claims.keys()),
+        (candidate) => names(arrayComponentMints(name, schema, schemas, candidate)),
+        names(own),
+      ).context
+    : 'item';
   return { schema, context, properties: new Map([[context, schema]]), warnedSelfReference: false };
+}
+
+/** The shape key of every name a tree mints: a model's fingerprint, an inline enum's members. */
+function mintedShapes(mints: ArrayComponentMints): Map<string, string> {
+  const shapes = new Map<string, string>();
+  for (const model of mints.models) shapes.set(model.name, modelShapeKey(model));
+  for (const [enumName, values] of mints.enums) shapes.set(enumName, enumShapeOf(values));
+  return shapes;
+}
+
+/** The shape a model stands for when a name is contested: its fingerprint, the key every clash check in the parser reads. */
+function modelShapeKey(model: Model): string {
+  return `model:${modelFingerprint(model)}`;
+}
+
+/** The shape an enum stands for when a name is contested: its members, each with its deprecation. */
+function enumShapeOf(values: readonly EnumValue[]): string {
+  return `enum:${enumShapeKey(values)}`;
+}
+
+/**
+ * Every model and inline enum an array component's items would mint under
+ * `context`: a rehearsal of both sides — the extractor
+ * (`extractInlineModelsFromProperties`) for the models, `schemaToTypeRef`
+ * for the inline enums the items are or hold, read off the TypeRef it builds
+ * and the fields of the models built — so the names are the ones the real
+ * extraction produces, with no second copy of the naming rules to keep in
+ * step. Run before any plan is registered, so a `$ref` to another array
+ * component stays a model reference and no other tree's names are read as
+ * this one's. The rehearsal is silent and leaves no trace (`rehearse`).
+ */
+function arrayComponentMints(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  context: string,
+): ArrayComponentMints {
+  return rehearse(() => {
+    const models: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { [context]: schema } }, models, name, schemas);
+    const enums = new Map<string, EnumValue[]>();
+    const typed = schemaToTypeRef(schema, context, name, new Map([[context, schema]]));
+    for (const ref of [typed, ...models.flatMap((model) => collectModelTypeRefs(model))]) {
+      walkTypeRef(ref, {
+        enum: (r) => {
+          if (r.values && !enums.has(r.name)) enums.set(r.name, enumValuesOf(r));
+        },
+      });
+    }
+    return { models, enums };
+  });
+}
+
+/**
+ * Run `fn` as a rehearsal whose output is discarded: `console.warn` is
+ * silenced, and the memory of which unions' fold warnings were already
+ * reported is set aside and restored, so every warning the schema deserves
+ * is printed once, by the extraction that keeps the models.
+ */
+function rehearse<T>(fn: () => T): T {
+  const warn = console.warn;
+  const reported = reportedUncarriedProperties;
+  console.warn = () => {};
+  reportedUncarriedProperties = new WeakSet();
+  try {
+    return fn();
+  } finally {
+    console.warn = warn;
+    reportedUncarriedProperties = reported;
+  }
+}
+
+/**
+ * Every name an array component's item tree must not take for a shape of
+ * its own, each with the shape(s) it stands for, computed only when that
+ * name is contested: every other component — a model's fingerprint
+ * (`extractModel`), an enum's members (`extractEnum`), or an array
+ * component's bare name, which no model or enum can share — every inline
+ * variant of every named union (`otherNamedUnionVariantEntries`, built as
+ * the model the union extracts for it), and every model and enum every
+ * other array component's tree mints in isolation (`isolated`). Each tree is
+ * read against the same claimants, so two trees contesting one name decide
+ * symmetrically: both keep it when the shapes agree and one model is
+ * emitted, both step when they differ, whichever the document declares
+ * first.
+ */
+function arrayComponentClaims(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  isolated: ReadonlyMap<string, ArrayComponentMints>,
+): Map<string, Array<() => string>> {
+  const claims = new Map<string, Array<() => string>>();
+  const claim = (claimant: string, shape: () => string): void => {
+    if (claimant === name) return;
+    claims.set(claimant, [...(claims.get(claimant) ?? []), shape]);
+  };
+  for (const [key, other] of Object.entries(schemas)) {
+    const resolved = resolveSchemaName(key);
+    if (isEnumComponentSchema(other)) claim(resolved, () => enumShapeOf(extractEnum(resolved, other).values));
+    else if (isArrayComponentSchema(other)) claim(resolved, () => 'array');
+    else claim(resolved, () => modelShapeKey(extractModel(resolved, other, schemas)));
+  }
+  for (const { variant, entry } of otherNamedUnionVariantEntries(name, schema, schemas, componentModelNames())) {
+    claim(entry.name, () => modelShapeKey(buildInlineModel(entry.name, variant, schemas)));
+  }
+  for (const [other, mints] of isolated) {
+    if (other === name) continue;
+    for (const model of mints.models) claim(model.name, () => modelShapeKey(model));
+    for (const [enumName, values] of mints.enums) claim(enumName, () => enumShapeOf(values));
+  }
+  return claims;
 }
 
 /**
@@ -4032,6 +4195,7 @@ import {
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
+  modelFingerprint,
   qualifyInlineModelName,
   reservedInlineNames,
   resetInheritedModelRefs,
