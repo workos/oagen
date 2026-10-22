@@ -1557,7 +1557,9 @@ function disambiguateOperationNames(
  * still held on the path by an operationId or by another verb — path-named
  * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
  * to drop — a numeric suffix free in the service is added, silently, as the
- * numeric pass adds one (`updatePet2`). Two operationId-named operations on
+ * numeric pass adds one and spelled as it spells it (numberedName:
+ * `updatePet2`, and `updateTop10No2` for a PATCH on `/store/top10/{id}`
+ * beside `operationId: updateTop10`). Two operationId-named operations on
  * one path with one name are the document reusing an operationId: the first
  * in HTTP_METHODS order keeps it and the rest are numbered with the warning
  * the numeric pass gives that case. Paths are visited in lexical order and
@@ -1583,8 +1585,8 @@ function demoteSamePathNames(
   const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
   const freeSuffixed = (base: string) => {
     let n = 2;
-    while (taken.has(`${base}${n}`)) n++;
-    return `${base}${n}`;
+    while (taken.has(numberedName(base, n))) n++;
+    return numberedName(base, n);
   };
 
   const byPath = new Map<string, Operation[]>();
@@ -1738,7 +1740,8 @@ function nounKey(name: string): string {
 
 /**
  * `name` with the numeric suffix `n`, the last resort of
- * disambiguateOperationNames: `list` + 2 is `list2`. A name that already
+ * disambiguateOperationNames across paths and of demoteSamePathNames on one
+ * path: `list` + 2 is `list2`. A name that already
  * ends in a digit takes the number behind `No`, so that it cannot be read
  * as part of the number the name ends with: `listV1` + 2 is `listV1No2`,
  * never `listV12`, which reads as version 12 of the API, and `listTop10` +
