@@ -6,6 +6,7 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { collectFallbackResponseTypes, collectModelRefs } from '../../src/ir/types.js';
 import type { ApiSpec, HttpMethod, Operation } from '../../src/ir/types.js';
 import {
+  captureRawExchange,
   coversStatus,
   formatExpectedStatuses,
   getExpectedStatusCodes,
@@ -316,5 +317,144 @@ describe('formatExpectedStatuses', () => {
       '200/404/5XX/4XX/default',
     );
     expect(formatExpectedStatuses({ codes: [201], ranges: [], hasDefault: false })).toBe('201');
+  });
+});
+
+/**
+ * The raw runner's capture, exercised with a stubbed `fetch`: redirects are
+ * never followed, so the exchange records the operation's own status (the
+ * first hop) and a declared `302` is not reported as its target's 200.
+ */
+describe('captureRawExchange', () => {
+  type Sent = { url: string; init: RequestInit };
+
+  /** A `fetch` stub that answers every call with `status` (and a JSON `body`), recording what it was sent. */
+  function stubFetch(status: number, body?: unknown, headers: Record<string, string> = {}) {
+    const sent: Sent[] = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      sent.push({ url: String(url), init: init ?? {} });
+      return new Response(body === undefined ? null : JSON.stringify(body), { status, headers });
+    }) as typeof fetch;
+    return { fetchImpl, sent };
+  }
+
+  const request = {
+    operationId: 'Pets.getPhoto',
+    service: 'Pets',
+    method: 'GET',
+    path: '/pets/p_1/photo',
+    url: 'https://api.example.test/pets/p_1/photo',
+    queryParams: {},
+    body: null,
+    headers: { Authorization: 'Bearer k' },
+  };
+
+  it('records a declared 302 as 302 without following it, and does not report it', async () => {
+    const op = await parseOnlyOperation('get', { '302': { description: 'See the photo' } });
+    const { fetchImpl, sent } = stubFetch(302, undefined, { location: 'https://cdn.example.test/p_1.png' });
+
+    const exchange = await captureRawExchange(op, request, { fetchImpl });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toBe(request.url);
+    expect(sent[0].init.redirect).toBe('manual');
+    expect(sent[0].init.method).toBe('GET');
+    expect(sent[0].init.headers).toEqual({ Authorization: 'Bearer k' });
+    expect(sent[0].init.body).toBeUndefined();
+    expect(exchange).toMatchObject({
+      operationId: 'Pets.getPhoto',
+      service: 'Pets',
+      operationName: op.name,
+      request: { method: 'GET', path: '/pets/p_1/photo', queryParams: {}, body: null },
+      response: { status: 302, body: null },
+      outcome: 'success',
+    });
+    expect(exchange.unexpectedStatus).toBeUndefined();
+    expect(exchange.expectedStatuses).toBeUndefined();
+    expect(exchange.error).toBeUndefined();
+  });
+
+  it('reports a 200 on an operation that declares only 302', async () => {
+    const op = await parseOnlyOperation('get', { '302': { description: 'See the photo' } });
+    const { fetchImpl } = stubFetch(200, { url: 'https://cdn.example.test/p_1.png' });
+
+    const exchange = await captureRawExchange(op, request, { fetchImpl });
+
+    expect(exchange.response).toEqual({ status: 200, body: { url: 'https://cdn.example.test/p_1.png' } });
+    expect(exchange.outcome).toBe('success');
+    expect(exchange.unexpectedStatus).toBe(true);
+    expect(exchange.expectedStatusCodes).toEqual([302]);
+    expect(exchange.expectedStatuses).toEqual({ codes: [302], ranges: [], hasDefault: false });
+  });
+
+  it('reports a redirect the document does not declare instead of hiding it behind its target', async () => {
+    const op = await parseOnlyOperation('get', { '200': jsonResponse('OK', 'id') });
+    const { fetchImpl, sent } = stubFetch(302, undefined, { location: 'https://api.example.test/v2/pets' });
+
+    const exchange = await captureRawExchange(op, request, { fetchImpl });
+
+    expect(sent).toHaveLength(1);
+    expect(exchange.response.status).toBe(302);
+    expect(exchange.unexpectedStatus).toBe(true);
+    expect(exchange.expectedStatuses).toEqual({ codes: [200], ranges: [], hasDefault: false });
+  });
+
+  it('records a declared error as an api-error exchange that is not unexpected', async () => {
+    const op = await parseOnlyOperation('get', {
+      '200': jsonResponse('OK', 'id'),
+      '404': jsonResponse('Gone', 'code'),
+    });
+    const { fetchImpl } = stubFetch(404, { code: 'not_found' });
+
+    const exchange = await captureRawExchange(op, request, { fetchImpl });
+
+    expect(exchange).toMatchObject({
+      response: { status: 404, body: { code: 'not_found' } },
+      outcome: 'api-error',
+      error: 'HTTP 404',
+    });
+    expect(exchange.unexpectedStatus).toBeUndefined();
+  });
+
+  it('records a fetch that throws as an api-error with status 0, which is never unexpected', async () => {
+    const op = await parseOnlyOperation('get', { '200': jsonResponse('OK', 'id') });
+    const fetchImpl = (async () => {
+      throw new Error('connect ECONNREFUSED');
+    }) as typeof fetch;
+
+    const exchange = await captureRawExchange(op, request, { fetchImpl });
+
+    expect(exchange).toMatchObject({
+      request: { method: 'GET', path: '/pets/p_1/photo', queryParams: {}, body: null },
+      response: { status: 0, body: null },
+      outcome: 'api-error',
+      error: 'connect ECONNREFUSED',
+    });
+    expect(exchange.unexpectedStatus).toBeUndefined();
+  });
+
+  it('sends the JSON body on POST and records it, but sends none on GET', async () => {
+    const post = await parseOnlyOperation('post', { '201': jsonResponse('Created', 'id') });
+    const posted = stubFetch(201, { id: 'p_2' });
+    const postExchange = await captureRawExchange(
+      post,
+      { ...request, method: 'POST', path: '/pets', url: 'https://api.example.test/pets', body: { name: 'Rex' } },
+      { fetchImpl: posted.fetchImpl },
+    );
+    expect(posted.sent[0].init.method).toBe('POST');
+    expect(posted.sent[0].init.body).toBe('{"name":"Rex"}');
+    expect(postExchange.request.body).toEqual({ name: 'Rex' });
+    expect(postExchange.response).toEqual({ status: 201, body: { id: 'p_2' } });
+    expect(postExchange.unexpectedStatus).toBeUndefined();
+
+    const get = await parseOnlyOperation('get', { '200': jsonResponse('OK', 'id') });
+    const got = stubFetch(200, { id: 'p_1' });
+    const getExchange = await captureRawExchange(
+      get,
+      { ...request, body: { ignored: true } },
+      { fetchImpl: got.fetchImpl },
+    );
+    expect(got.sent[0].init.body).toBeUndefined();
+    expect(getExchange.request.body).toEqual({ ignored: true });
   });
 });
