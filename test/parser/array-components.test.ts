@@ -647,24 +647,111 @@ describe('a name the items would mint that a component already owns', () => {
       ['Pets', petsTree(nameOwner)],
       ['PetsItemCat', catTree(idModel)],
     ]),
-  )('steps both trees that mint one nested name for different shapes, with %s', async (_order, entries) => {
-    const spec = await parse(twoTrees(entries));
+  )(
+    'steps the tree decided first past the other when two mint one nested name for different shapes, with %s',
+    async (_order, entries) => {
+      // Plans are decided by key order (`Pets` before `PetsItemCat`), never
+      // document order: `Pets` steps around `PetsItemCat`'s names under
+      // `item`, and `PetsItemCat`, decided against `Pets`'s settled names, is
+      // then free to keep `item`.
+      const spec = await parse(twoTrees(entries));
+      expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+      expect(fieldType(spec, 'PetsItemItem', 'cat_item_owner')).toEqual(model('PetsItemItemCatItemOwner'));
+      expect(fieldType(spec, 'Holder', 'cats')).toEqual(array(model('PetsItemCatItem')));
+      expect(fieldType(spec, 'PetsItemCatItem', 'owner')).toEqual(model('PetsItemCatItemOwner'));
+      expect(spec.models.find((m) => m.name === 'PetsItemItemCatItemOwner')?.fields.map((f) => f.name)).toEqual([
+        'name',
+      ]);
+      expect(spec.models.find((m) => m.name === 'PetsItemCatItemOwner')?.fields.map((f) => f.name)).toEqual(['id']);
+      expect(spec.models.map((m) => m.name).sort()).toEqual([
+        'Holder',
+        'PetsItemCatItem',
+        'PetsItemCatItemOwner',
+        'PetsItemItem',
+        'PetsItemItemCatItemOwner',
+      ]);
+      expect(warnings()).toEqual([]);
+      expectSound(spec, ['Holder'], ['Pets', 'PetsItemCat']);
+    },
+  );
+
+  // Greptile (#335, round 2): a plan read the other trees' names under
+  // `item` only, so two trees that both stepped could land on one name:
+  // here both nested owners became `PetsItemItemCatItemItemOwner`.
+  const greptile2 = (owners: [unknown, unknown]): Array<[string, unknown]> => [
+    ['Pets', { type: 'array', items: { type: 'object', properties: { cat_item_item_owner: owners[0] } } }],
+    ['PetsItemItemCat', { type: 'array', items: { type: 'object', properties: { owner: owners[1] } } }],
+    ['PetsItem', { type: 'object', properties: { q: { type: 'string' } } }],
+    ['PetsItemItemCatItem', { type: 'object', properties: { r: { type: 'string' } } }],
+  ];
+  const greptile2Doc = (entries: Array<[string, unknown]>) =>
+    specDoc({
+      Holder: { type: 'object', properties: { pets: ref('Pets'), cats: ref('PetsItemItemCat') } },
+      ...Object.fromEntries(entries),
+    });
+
+  it.each([
+    ['as written', greptile2([nameOwner, idModel])],
+    ['reversed', [...greptile2([nameOwner, idModel])].reverse()],
+  ])('never lets two stepped trees land on one nested name, with the document %s', async (_order, entries) => {
+    const spec = await parse(greptile2Doc(entries));
+    // `Pets`, decided first, steps once; `PetsItemItemCat` steps past the
+    // component and then past `Pets`'s settled `PetsItemItemCatItemItemOwner`.
     expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
-    expect(fieldType(spec, 'PetsItemItem', 'cat_item_owner')).toEqual(model('PetsItemItemCatItemOwner'));
-    expect(fieldType(spec, 'Holder', 'cats')).toEqual(array(model('PetsItemCatItemItem')));
-    expect(fieldType(spec, 'PetsItemCatItemItem', 'owner')).toEqual(model('PetsItemCatItemItemOwner'));
-    expect(spec.models.find((m) => m.name === 'PetsItemItemCatItemOwner')?.fields.map((f) => f.name)).toEqual(['name']);
-    expect(spec.models.find((m) => m.name === 'PetsItemCatItemItemOwner')?.fields.map((f) => f.name)).toEqual(['id']);
-    expect(spec.models.map((m) => m.name).sort()).toEqual([
-      'Holder',
-      'PetsItemCatItemItem',
-      'PetsItemCatItemItemOwner',
-      'PetsItemItem',
-      'PetsItemItemCatItemOwner',
+    expect(fieldType(spec, 'PetsItemItem', 'cat_item_item_owner')).toEqual(model('PetsItemItemCatItemItemOwner'));
+    expect(fieldType(spec, 'Holder', 'cats')).toEqual(array(model('PetsItemItemCatItemArrayItem')));
+    expect(fieldType(spec, 'PetsItemItemCatItemArrayItem', 'owner')).toEqual(
+      model('PetsItemItemCatItemArrayItemOwner'),
+    );
+    expect(spec.models.find((m) => m.name === 'PetsItemItemCatItemItemOwner')?.fields.map((f) => f.name)).toEqual([
+      'name',
     ]);
+    expect(spec.models.find((m) => m.name === 'PetsItemItemCatItemArrayItemOwner')?.fields.map((f) => f.name)).toEqual([
+      'id',
+    ]);
+    expect(spec.models.find((m) => m.name === 'PetsItem')?.fields.map((f) => f.name)).toEqual(['q']);
+    expect(spec.models.find((m) => m.name === 'PetsItemItemCatItem')?.fields.map((f) => f.name)).toEqual(['r']);
+    expect(spec.models).toHaveLength(7);
     expect(warnings()).toEqual([]);
-    expectSound(spec, ['Holder'], ['Pets', 'PetsItemCat']);
+    expectSound(spec, ['Holder', 'PetsItem', 'PetsItemItemCatItem'], ['Pets', 'PetsItemItemCat']);
   });
+
+  it.each([
+    ['as written', false],
+    ['reversed', true],
+  ])(
+    'decides a chain of three trees whose names nest into each other, with the document %s',
+    async (_order, reversed) => {
+      const owner = (field: string) => ({ type: 'object', properties: { [field]: { type: 'string' } } });
+      const tree = (field: string) => ({
+        type: 'array',
+        items: { type: 'object', properties: { owner: owner(field) } },
+      });
+      const entries: Array<[string, unknown]> = [
+        ['Pets', tree('a')],
+        ['PetsItem', tree('b')],
+        ['PetsItemItem', tree('c')],
+      ];
+      const spec = await parse(
+        specDoc({
+          Holder: { type: 'object', properties: { a: ref('Pets'), b: ref('PetsItem'), c: ref('PetsItemItem') } },
+          ...Object.fromEntries(reversed ? [...entries].reverse() : entries),
+        }),
+      );
+      // Each tree's `item` name is the next component's key, and its `item_item`
+      // names are the next tree's names under `item`, so the first two land on
+      // `item_array_item` and the last keeps `item`.
+      expect(fieldType(spec, 'Holder', 'a')).toEqual(array(model('PetsItemArrayItem')));
+      expect(fieldType(spec, 'Holder', 'b')).toEqual(array(model('PetsItemItemArrayItem')));
+      expect(fieldType(spec, 'Holder', 'c')).toEqual(array(model('PetsItemItemItem')));
+      expect(fieldType(spec, 'PetsItemArrayItemOwner', 'a')).toEqual(string);
+      expect(fieldType(spec, 'PetsItemItemArrayItemOwner', 'b')).toEqual(string);
+      expect(fieldType(spec, 'PetsItemItemItemOwner', 'c')).toEqual(string);
+      expect(spec.models).toHaveLength(7);
+      expect(warnings()).toEqual([]);
+      expectSound(spec, ['Holder'], ['Pets', 'PetsItem', 'PetsItemItem']);
+    },
+  );
 
   it.each(
     bothOrders([
@@ -880,12 +967,254 @@ describe('every reference site', () => {
       deprecated: true,
       constraints: { minItems: 2, maxItems: 10 },
     });
-    // A field reads its own schema only: the sibling text is its own, and a
+    // A field keeps its own text over the component's, takes the component's
+    // flag (there is no model to carry it; see the next describe), and a
     // bare `$ref` declares no limits, as before.
     const pets = spec.models.find((m) => m.name === 'Owner')?.fields[0];
-    expect(pets).toMatchObject({ type: array(string), description: 'Theirs' });
+    expect(pets).toMatchObject({ type: array(string), description: 'Theirs', deprecated: true });
     expect(pets).not.toHaveProperty('constraints');
-    expect(pets).not.toHaveProperty('deprecated', true);
+  });
+});
+
+describe('the component’s documentation and flag (MichaelDeBoey)', () => {
+  // No model carries an array component's `description`, `deprecated` and
+  // `externalDocs`, so a field that names it with a bare `$ref` takes them
+  // when it declares none of its own, as it takes the component's `example`.
+  const pets = {
+    type: 'array',
+    description: 'All pets',
+    deprecated: true,
+    externalDocs: { url: 'https://x/pets' },
+    items: { type: 'string' },
+  };
+
+  it('reaches a bare `$ref` field, every path that builds a field included', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: pets,
+        Owner: { type: 'object', properties: { pets: ref('Pets') } },
+        Base: { type: 'object', properties: { pets: ref('Pets') } },
+        Derived: { allOf: [ref('Base'), { type: 'object', properties: { more: { type: 'string' } } }] },
+      }),
+    );
+    for (const owner of ['Owner', 'Base', 'Derived']) {
+      expect(spec.models.find((m) => m.name === owner)?.fields.find((f) => f.name === 'pets')).toMatchObject({
+        type: array(string),
+        description: 'All pets',
+        deprecated: true,
+        externalDocs: { url: 'https://x/pets' },
+      });
+    }
+    expect(warnings()).toEqual([]);
+  });
+
+  it('yields to the field’s own text and link, and reads the flag from either side', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: pets,
+        Live: { type: 'array', items: { type: 'string' } },
+        Owner: {
+          type: 'object',
+          properties: {
+            own: { ...ref('Pets'), description: 'Mine', externalDocs: { url: 'https://x/own' } },
+            flagged: { ...ref('Live'), deprecated: true },
+          },
+        },
+      }),
+    );
+    const field = (name: string) => spec.models.find((m) => m.name === 'Owner')?.fields.find((f) => f.name === name);
+    expect(field('own')).toMatchObject({
+      description: 'Mine',
+      deprecated: true,
+      externalDocs: { url: 'https://x/own' },
+    });
+    expect(field('flagged')).toMatchObject({ deprecated: true });
+    expect(field('flagged')?.description).toBeUndefined();
+    expect(field('flagged')).not.toHaveProperty('externalDocs');
+  });
+
+  it('is not read through a wrapper, nor from a component that keeps a model or an enum', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: pets,
+        Widget: { type: 'object', description: 'W', deprecated: true, properties: { id: { type: 'string' } } },
+        Color: { type: 'string', description: 'C', deprecated: true, enum: ['red'] },
+        Owner: {
+          type: 'object',
+          properties: {
+            wrapped: { oneOf: [ref('Pets'), { type: 'null' }] },
+            merged: { allOf: [ref('Pets')] },
+            w: ref('Widget'),
+            c: ref('Color'),
+          },
+        },
+      }),
+    );
+    for (const name of ['wrapped', 'merged', 'w', 'c']) {
+      const field = spec.models.find((m) => m.name === 'Owner')?.fields.find((f) => f.name === name);
+      expect(field?.description).toBeUndefined();
+      expect(field?.deprecated).toBeUndefined();
+      expect(field).not.toHaveProperty('externalDocs');
+    }
+    expect(spec.models.find((m) => m.name === 'Widget')).toMatchObject({ description: 'W', deprecated: true });
+    expect(spec.enums.find((e) => e.name === 'Color')).toMatchObject({ description: 'C', deprecated: true });
+  });
+});
+
+describe('two keys that resolve to one name (MichaelDeBoey)', () => {
+  // `cleanSchemaName` singularizes the leading word, so `Note` and `Notes`
+  // are both `Note` in the IR. A plan is keyed by the key a `$ref` names,
+  // and the object keeps its model.
+  const note = { type: 'object', properties: { text: { type: 'string' } } };
+  const notes = { type: 'array', items: ref('Note') };
+  const paths = { '/notes': getOp('listNotes', ref('Notes')), '/notes/{id}': getOp('getNote', ref('Note')) };
+
+  it.each([
+    ['Note first', { Note: note, Notes: notes }],
+    ['Notes first', { Notes: notes, Note: note }],
+  ])('keeps the object a model and makes the array the list of it, with %s', async (_order, schemas) => {
+    const spec = await parse(specDoc(schemas, paths));
+    expect(opsOf(spec).getNote.response).toEqual(model('Note'));
+    expect(opsOf(spec).listNotes.response).toEqual(array(model('Note')));
+    expect(spec.models).toEqual([
+      { name: 'Note', description: undefined, fields: [expect.objectContaining({ name: 'text' })] },
+    ]);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Note'], ['Notes']);
+  });
+
+  it('types a `$ref` by its key when the other key is an enum', async () => {
+    const spec = await parse(
+      specDoc({
+        Notes: { type: 'array', items: { type: 'string' } },
+        Note: { type: 'string', enum: ['a'] },
+        Holder: { type: 'object', properties: { x: ref('Note'), y: ref('Notes') } },
+      }),
+    );
+    expect(fieldType(spec, 'Holder', 'x')).toEqual({ kind: 'enum', name: 'Note' });
+    expect(fieldType(spec, 'Holder', 'y')).toEqual(array(string));
+    expect(spec.enums.map((e) => e.name)).toEqual(['Note']);
+    expect(warnings()).toEqual([]);
+  });
+
+  it.each([
+    ['Note first', false],
+    ['Notes first', true],
+  ])('names the items of two array components resolving to one name apart, with %s', async (_order, reversed) => {
+    const entries: Array<[string, unknown]> = [
+      ['Note', { type: 'array', items: { type: 'object', properties: { a: { type: 'string' } } } }],
+      ['Notes', { type: 'array', items: { type: 'object', properties: { b: { type: 'string' } } } }],
+    ];
+    const spec = await parse(
+      specDoc({
+        Holder: { type: 'object', properties: { x: ref('Note'), y: ref('Notes') } },
+        ...Object.fromEntries(reversed ? [...entries].reverse() : entries),
+      }),
+    );
+    // Both trees mint `NoteItem`; `Note`, decided first by key order, steps.
+    expect(fieldType(spec, 'Holder', 'x')).toEqual(array(model('NoteItemItem')));
+    expect(fieldType(spec, 'Holder', 'y')).toEqual(array(model('NoteItem')));
+    expect(spec.models.find((m) => m.name === 'NoteItemItem')?.fields.map((f) => f.name)).toEqual(['a']);
+    expect(spec.models.find((m) => m.name === 'NoteItem')?.fields.map((f) => f.name)).toEqual(['b']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder'], ['Note', 'Notes']);
+  });
+});
+
+describe('an alias of an array component (MichaelDeBoey)', () => {
+  const items = { type: 'object', properties: { name: { type: 'string' } } };
+
+  it('resolves a bare `$ref` or an `allOf` of a `$ref` to the array, through aliases of aliases', async () => {
+    const spec = await parse(
+      specDoc(
+        {
+          Pets: { type: 'array', items },
+          PetsAlias: { allOf: [ref('Pets')] },
+          PetsLimited: { allOf: [ref('Pets'), { maxItems: 10 }] },
+          PetsRef: ref('Pets'),
+          Chain: ref('PetsRef'),
+          Holder: {
+            type: 'object',
+            properties: { a: ref('PetsAlias'), b: ref('PetsLimited'), c: ref('PetsRef'), d: ref('Chain') },
+          },
+        },
+        { '/pets': getOp('listPets', ref('Chain')) },
+      ),
+    );
+    for (const name of ['a', 'b', 'c', 'd']) expect(fieldType(spec, 'Holder', name)).toEqual(array(model('PetsItem')));
+    expect(opsOf(spec).listPets.response).toEqual(array(model('PetsItem')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'PetsItem']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder'], ['Pets', 'PetsAlias', 'PetsLimited', 'PetsRef', 'Chain']);
+  });
+
+  it('leaves an alias of an object component, and an `allOf` that adds properties, the models they were', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: { type: 'array', items },
+        Widget: { type: 'object', properties: { x: { type: 'string' } } },
+        WidgetAlias: { allOf: [ref('Widget')] },
+        Augmented: { allOf: [ref('Pets'), { type: 'object', properties: { extra: { type: 'string' } } }] },
+        Holder: { type: 'object', properties: { w: ref('WidgetAlias'), g: ref('Augmented') } },
+      }),
+    );
+    expect(fieldType(spec, 'Holder', 'w')).toEqual(model('WidgetAlias'));
+    expect(fieldType(spec, 'Holder', 'g')).toEqual(model('Augmented'));
+    expect(spec.models.find((m) => m.name === 'WidgetAlias')?.fields.map((f) => f.name)).toEqual(['x']);
+    expect(spec.models.find((m) => m.name === 'Augmented')?.fields.map((f) => f.name)).toEqual(['extra']);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('cuts a cycle that runs through an alias', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: { type: 'array', items: ref('PetsAlias') },
+        PetsAlias: { allOf: [ref('Pets')] },
+        Holder: { type: 'object', properties: { p: ref('Pets'), a: ref('PetsAlias') } },
+      }),
+    );
+    const unknown: TypeRef = { kind: 'primitive', type: 'unknown' };
+    expect(fieldType(spec, 'Holder', 'p')).toEqual(array(unknown));
+    expect(fieldType(spec, 'Holder', 'a')).toEqual(array(unknown));
+    // Each entry reaches itself through the other, so each warns once, under
+    // the key the document writes.
+    expect(warnings()).toEqual([
+      '[oagen] Warning: Array component "Pets" refers to itself through its items — the inner reference is typed as unknown',
+      '[oagen] Warning: Array component "PetsAlias" refers to itself through its items — the inner reference is typed as unknown',
+    ]);
+  });
+});
+
+describe('a name an operation mints too (MichaelDeBoey, #285)', () => {
+  // A component `ListPets` names its items `ListPetsItem`, exactly as
+  // `operationId: listPets` names an inline array response's items. Names
+  // derived from an explicit identifier — a component key, an operationId —
+  // are used verbatim on both sides, and the clash between an
+  // operation-minted name and a component-owned one is #285's: the
+  // component's definition wins, with the parser's existing warning.
+  const component = {
+    ListPets: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } } } },
+    Holder: { type: 'object', properties: { l: ref('ListPets') } },
+  };
+  const listPets = (items: unknown) => ({ '/pets': getOp('listPets', { type: 'array', items }) });
+
+  it('keeps the component’s items under the shared name and warns when the shapes differ', async () => {
+    const spec = await parse(specDoc(component, listPets({ type: 'object', properties: { id: { type: 'string' } } })));
+    expect(opsOf(spec).listPets.response).toEqual(array(model('ListPetsItem')));
+    expect(fieldType(spec, 'Holder', 'l')).toEqual(array(model('ListPetsItem')));
+    expect(spec.models.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name)).toEqual(['name']);
+    expect(warnings()).toEqual([
+      '[oagen] Warning: Inline model "ListPetsItem" has different fields than component schema — using component schema',
+    ]);
+  });
+
+  it('shares one model silently when the shapes agree', async () => {
+    const spec = await parse(
+      specDoc(component, listPets({ type: 'object', properties: { name: { type: 'string' } } })),
+    );
+    expect(opsOf(spec).listPets.response).toEqual(array(model('ListPetsItem')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'ListPetsItem']);
+    expect(warnings()).toEqual([]);
   });
 });
 

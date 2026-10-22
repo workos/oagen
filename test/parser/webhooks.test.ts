@@ -185,6 +185,19 @@ describe('webhooks', () => {
             "kind": "model",
             "name": "PetReturnedPayload",
           },
+          "requestBodyContentType": "application/json",
+          "requestBodyContentTypes": [
+            "application/json",
+          ],
+          "requestBodyContents": [
+            {
+              "contentType": "application/json",
+              "type": {
+                "kind": "model",
+                "name": "PetReturnedPayload",
+              },
+            },
+          ],
           "requestBodyEncoding": "json",
           "requestBodyRequired": true,
           "responses": [

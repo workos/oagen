@@ -1,5 +1,11 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectModelTypeRefs, collectResponseBodyTypes } from '../ir/types.js';
+import {
+  walkTypeRef,
+  collectResponseHeaders,
+  collectModelTypeRefs,
+  collectRequestBodyTypes,
+  collectResponseBodyTypes,
+} from '../ir/types.js';
 import type { ApiSurface, LanguageHints } from './types.js';
 
 /**
@@ -33,6 +39,9 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
         collectTypeRefNames(header.type, names, hints, topLevelEnumNames);
       }
       for (const { type } of collectResponseBodyTypes(op)) {
+        collectTypeRefNames(type, names, hints, topLevelEnumNames);
+      }
+      for (const { type } of collectRequestBodyTypes(op)) {
         collectTypeRefNames(type, names, hints, topLevelEnumNames);
       }
       for (const p of [
