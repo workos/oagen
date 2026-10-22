@@ -180,12 +180,15 @@ export function singularize(word: string): string {
  * `batch`, `responses` → `response`.
  *
  * Suffix rules only, no dictionary, so anything that does not look plural is
- * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`
- * or `is` (`status`, `analysis`), or is an invariant plural (`series`).
- * Case is preserved — the rules only slice, except `-ies` → `-y` and `-yses`
- * → `-ysis`, whose `y` and `is` take the case of the letters they replace
- * (`DIRECTORIES` → `DIRECTORY`, `ANALYSES` → `ANALYSIS`, so splitWords still
- * sees one word) — and only the trailing word of a compound segment matters.
+ * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`,
+ * `is` or `ias` (`status`, `analysis`, `alias`), or is an invariant plural
+ * (`series`). Case is preserved — the rules only slice, except `-ies` → `-y`
+ * and `-yses` → `-ysis`, whose `y` and `is` take the case of the letters they
+ * replace (`DIRECTORIES` → `DIRECTORY`, `ANALYSES` → `ANALYSIS`, so splitWords
+ * still sees one word) — and only the trailing word of a compound segment
+ * matters. Idempotent: every singular it produces is returned as it is when
+ * passed back in (`aliases` → `alias` → `alias`), so a comparison of two
+ * words by their singular forms (see appendQualifier) is sound.
  *
  * Deliberately not handled — a resource that stems wrong should carry an
  * `operationId`: irregular plurals (`people`, `children`, `data`), `-ies`
@@ -195,9 +198,10 @@ export function singularize(word: string): string {
  * other than `-ias` (`canvases` → `canvase`, where `cases` → `case` is the
  * common reading), `-es` plurals of `-is` nouns other than `-ysis` (`crises`
  * → `crise`, `theses` → `these`, where `premises` → `premise` and `cheeses`
- * → `cheese` are the common readings), singular nouns ending in `-as` or
- * `-ns` (`alias` → `alia`, `canvas` → `canva`, `lens` → `len`, where `areas`
- * → `area` and `tokens` → `token` are the common readings), plurals of
+ * → `cheese` are the common readings), singular nouns ending in `-as` other
+ * than `-ias`, or in `-ns` (`canvas` → `canva`, `lens` → `len`, where `areas`
+ * → `area` and `tokens` → `token` are the common readings), plurals of `-ia`
+ * nouns (`utopias` is kept as it is, so that `alias` is), plurals of
  * `-u`/`-i` nouns (`menus`, `apis` are kept as they are) and acronyms (`sms`
  * → `sm`).
  */
@@ -205,7 +209,9 @@ export function singularizePathSegment(segment: string): string {
   const lower = segment.toLowerCase();
   if (lower.length <= 2 || !lower.endsWith('s')) return segment;
   if (lower.endsWith('series') || lower.endsWith('species') || lower.endsWith('news')) return segment;
-  if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is')) return segment;
+  // `-ias` is kept for `alias` and `bias`, the singulars the `-iases` rule
+  // below produces, at the price of the rarer `-ia` plurals (`utopias`).
+  if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is') || lower.endsWith('ias')) return segment;
   // `directories` → `directory`; a short `-ies` word keeps its `ie` (`pies` → `pie`).
   if (lower.endsWith('ies') && lower.length > 4) {
     return segment.slice(0, -3) + (segment.endsWith('IES') ? 'Y' : 'y');
