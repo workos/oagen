@@ -886,6 +886,17 @@ export function extractSchemas(
     .filter(([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (arrayComponents.length > 0) {
+    // While the plans are decided, every array component is registered
+    // provisionally under `item`, so a `$ref` to one resolves to its array in
+    // every rehearsal — the typing the real pass uses, which tells
+    // `{ value: { $ref: Notes } }` from `{ value: { $ref: Note } }` as
+    // `array<Note>` and `Note` — and the shapes compared below are the real
+    // ones; the names a tree mints are read with none registered
+    // (`withoutArrayComponents`), so another component's items are never
+    // counted as its own.
+    activeArrayComponentPlans = new Map(
+      arrayComponents.map(([key, schema]) => [key, provisionalArrayComponentPlan(key, schema)] as const),
+    );
     // Every name every other entry will take, read off a rehearsal of the
     // passes that take them (`componentMints`), once for all the plans.
     const minted = new Map(Object.entries(schemas).map(([key, schema]) => [key, componentMints(key, schema, schemas)]));
@@ -911,9 +922,21 @@ export function extractSchemas(
   // Keep the model with more fields when names collide after cleaning
   // (two raw keys cleaning to one name), or when two inline models — a
   // discriminated-allOf variant's, a named union's, an array component's
-  // items' — take one name.
+  // items' — take one name. Two definitions of one name are one model only
+  // when their shapes agree (`modelFingerprint`: fields, types, limits);
+  // equal field counts say nothing, so a definition that differs is
+  // reported before it is dropped, as `keepLargestByName` reports one.
   const keepLarger = (model: Model): void => {
     const existing = modelsByCleanName.get(model.name);
+    if (existing && modelFingerprint(existing) !== modelFingerprint(model)) {
+      const kept =
+        model.fields.length > existing.fields.length
+          ? 'keeping the one with more fields'
+          : 'keeping the first definition';
+      console.warn(
+        `[oagen] Warning: Model "${model.name}" has more than one definition under components/schemas with different fields or field types (${existing.fields.length} vs ${model.fields.length}) — ${kept}`,
+      );
+    }
     if (!existing || model.fields.length > existing.fields.length) modelsByCleanName.set(model.name, model);
   };
 
@@ -2982,9 +3005,12 @@ function enumShapeOf(values: readonly EnumValue[]): string {
  * for the inline enums the items are or hold, read off the TypeRef it builds
  * and the fields of the models built — so the names are the ones the real
  * extraction produces, with no second copy of the naming rules to keep in
- * step. Run before any plan is registered, so a `$ref` to another array
- * component stays a model reference and no other tree's names are read as
- * this one's. The rehearsal is silent and leaves no trace (`rehearse`).
+ * step. The models are built with every array component provisionally
+ * registered (`extractSchemas`), so their fingerprints read a `$ref` to one
+ * as the array the real pass types; the enums are read with none registered
+ * (`withoutArrayComponents`), so an enum another component's items hold is
+ * never counted as this tree's own. The rehearsal is silent and leaves no
+ * trace (`rehearse`).
  */
 function arrayComponentMints(
   name: string,
@@ -2993,19 +3019,67 @@ function arrayComponentMints(
   context: string,
 ): ArrayComponentMints {
   return rehearse(() => {
-    const models: Model[] = [];
-    extractInlineModelsFromProperties({ properties: { [context]: schema } }, models, name, schemas);
-    const enums = new Map<string, EnumValue[]>();
-    const typed = schemaToTypeRef(schema, context, name, new Map([[context, schema]]));
-    for (const ref of [typed, ...models.flatMap((model) => collectModelTypeRefs(model))]) {
-      walkTypeRef(ref, {
-        enum: (r) => {
-          if (r.values && !enums.has(r.name)) enums.set(r.name, enumValuesOf(r));
-        },
-      });
-    }
+    const extract = (): Model[] => {
+      const models: Model[] = [];
+      extractInlineModelsFromProperties({ properties: { [context]: schema } }, models, name, schemas);
+      return models;
+    };
+    const models = extract();
+    const enums = withoutArrayComponents(() =>
+      liftedEnums([
+        schemaToTypeRef(schema, context, name, new Map([[context, schema]])),
+        ...extract().flatMap((model) => collectModelTypeRefs(model)),
+      ]),
+    );
     return { models, enums };
   });
+}
+
+/** Every inline enum `refs` hold — an `EnumRef` carrying `values` — by name, with its members; the first occurrence of a name decides, as the lift does. */
+function liftedEnums(refs: readonly TypeRef[]): Map<string, EnumValue[]> {
+  const enums = new Map<string, EnumValue[]>();
+  for (const ref of refs) {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (r.values && !enums.has(r.name)) enums.set(r.name, enumValuesOf(r));
+      },
+    });
+  }
+  return enums;
+}
+
+/**
+ * The plan an array component is given while the plans are decided: its
+ * tree under `item`. A `$ref` to it then resolves to its array in every
+ * rehearsal, as the real pass types it. The nested names that array carries
+ * are provisional — the tree may still step — but a shape is read the same
+ * way on both sides of every comparison, so the sharing decision is the one
+ * the real extraction would make.
+ */
+function provisionalArrayComponentPlan(key: string, schema: SchemaObject): ArrayComponentPlan {
+  return {
+    key,
+    name: resolveSchemaName(key),
+    schema,
+    context: 'item',
+    properties: new Map([['item', schema]]),
+    warnedSelfReference: false,
+  };
+}
+
+/**
+ * Run `fn` with no array component registered, so a `$ref` to one is a
+ * plain model reference that mints nothing: the way the names a tree mints
+ * are read, so another component's items are never counted among them.
+ */
+function withoutArrayComponents<T>(fn: () => T): T {
+  const plans = activeArrayComponentPlans;
+  activeArrayComponentPlans = new Map();
+  try {
+    return fn();
+  } finally {
+    activeArrayComponentPlans = plans;
+  }
 }
 
 /**
@@ -3041,9 +3115,13 @@ function rehearse<T>(fn: () => T): T {
  * models' fields hold — so an array component's plan steps around exactly
  * the names the real passes will take, and an `Event` whose variant pins
  * `type: 'pets_item'` keeps its `PetsItem` while `Pets`'s items step. A name
- * two passes mint for one entry carries both shapes. An array component's
- * items are not read here: their names come from its plan (`others`), under
- * the context it settles on.
+ * two passes mint for one entry carries both shapes. The models are built
+ * with every array component provisionally registered, so a field that is a
+ * `$ref` to one is fingerprinted as the array the real pass types; the
+ * enums are read with none registered (`withoutArrayComponents`), so an
+ * enum another component's items hold is never claimed for this entry. An
+ * array component's items are not read here: their names come from its plan
+ * (`others`), under the context it settles on.
  */
 function componentMints(
   key: string,
@@ -3064,22 +3142,15 @@ function componentMints(
       claim(name, 'array');
       return shapes;
     }
-    const models = [
+    const extract = (): Model[] => [
       extractModel(name, schema, schemas),
       ...extractDiscriminatedAllOfVariantModels(schema, name, schemas),
       ...extractNamedUnionVariantModels(schema, name, schemas),
       ...extractInlineModelsFromSchemas({ [key]: schema }),
     ];
-    for (const model of models) claim(model.name, modelShapeKey(model));
-    for (const model of models) {
-      for (const ref of collectModelTypeRefs(model)) {
-        walkTypeRef(ref, {
-          enum: (r) => {
-            if (r.values) claim(r.name, enumShapeOf(enumValuesOf(r)));
-          },
-        });
-      }
-    }
+    for (const model of extract()) claim(model.name, modelShapeKey(model));
+    const enums = withoutArrayComponents(() => liftedEnums(extract().flatMap((model) => collectModelTypeRefs(model))));
+    for (const [enumName, values] of enums) claim(enumName, enumShapeOf(values));
     return shapes;
   });
 }

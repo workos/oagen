@@ -1349,6 +1349,147 @@ describe('a name another component’s extraction mints (Greptile round 3)', () 
   });
 });
 
+describe('shapes compared as the real pass types them (Greptile round 4)', () => {
+  // `Note` and `Notes` both resolve to `Note`; a rehearsal that typed every
+  // `$ref` as a model reference read `{ value: { $ref: Notes } }` and
+  // `{ value: { $ref: Note } }` as one shape, shared the name, and the real
+  // extraction dropped one of two models with equal field counts.
+  const note = { type: 'object', properties: { text: { type: 'string' } } };
+  const notes = { type: 'array', items: ref('Note') };
+  const holder = { type: 'object', properties: { pets: ref('Pets'), item: ref('PetsItem') } };
+  const both = (entries: Array<[string, unknown]>): Array<[string, Array<[string, unknown]>]> => [
+    ['as written', entries],
+    ['reversed', [...entries].reverse()],
+  ];
+
+  it.each(
+    both([
+      ['Note', note],
+      ['Notes', notes],
+      ['Pets', { type: 'array', items: { type: 'object', properties: { value: ref('Note') } } }],
+      ['PetsItem', { type: 'object', properties: { value: ref('Notes') } }],
+    ]),
+  )(
+    "tells a `$ref` to an array component from one to the object it lists (Greptile's shape), with the document %s",
+    async (_order, entries) => {
+      const spec = await parse(specDoc({ Holder: holder, ...Object.fromEntries(entries) }));
+      expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+      expect(fieldType(spec, 'PetsItemItem', 'value')).toEqual(model('Note'));
+      expect(fieldType(spec, 'Holder', 'item')).toEqual(model('PetsItem'));
+      expect(fieldType(spec, 'PetsItem', 'value')).toEqual(array(model('Note')));
+      expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'Note', 'PetsItem', 'PetsItemItem']);
+      expect(warnings()).toEqual([]);
+      expectSound(spec, ['Holder', 'Note', 'PetsItem'], ['Notes', 'Pets']);
+    },
+  );
+
+  it.each(
+    both([
+      ['Note', note],
+      ['Notes', notes],
+      [
+        'Pets',
+        {
+          type: 'array',
+          items: { type: 'object', properties: { inner: { type: 'object', properties: { value: ref('Note') } } } },
+        },
+      ],
+      ['PetsItem', { type: 'object', properties: { inner: { type: 'object', properties: { value: ref('Notes') } } } }],
+    ]),
+  )('reads the difference two levels down, with the document %s', async (_order, entries) => {
+    // `PetsItem` itself reads alike on both sides (one `inner` field of one
+    // name); the nested `PetsItemInner` does not, and the whole tree steps.
+    const spec = await parse(specDoc({ Holder: holder, ...Object.fromEntries(entries) }));
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+    expect(fieldType(spec, 'PetsItemItem', 'inner')).toEqual(model('PetsItemItemInner'));
+    expect(fieldType(spec, 'PetsItemItemInner', 'value')).toEqual(model('Note'));
+    expect(fieldType(spec, 'PetsItem', 'inner')).toEqual(model('PetsItemInner'));
+    expect(fieldType(spec, 'PetsItemInner', 'value')).toEqual(array(model('Note')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual([
+      'Holder',
+      'Note',
+      'PetsItem',
+      'PetsItemInner',
+      'PetsItemItem',
+      'PetsItemItemInner',
+    ]);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Note', 'PetsItem'], ['Notes', 'Pets']);
+  });
+
+  it('shares a component whose field is the same `$ref` to an array component', async () => {
+    const spec = await parse(
+      specDoc({
+        Holder: holder,
+        Note: note,
+        Notes: notes,
+        Pets: { type: 'array', items: { type: 'object', properties: { value: ref('Notes') } } },
+        PetsItem: { type: 'object', properties: { value: ref('Notes') } },
+      }),
+    );
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItem')));
+    expect(fieldType(spec, 'PetsItem', 'value')).toEqual(array(model('Note')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'Note', 'PetsItem']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Note', 'PetsItem'], ['Notes', 'Pets']);
+  });
+
+  it('never counts the enum another component’s items hold as the tree’s own, so a contested tree steps once', async () => {
+    const spec = await parse(
+      specDoc({
+        Holder: { type: 'object', properties: { pets: ref('Pets'), o: ref('PetsItemOwner') } },
+        Colors: { type: 'array', items: { type: 'string', enum: ['red', 'green'] } },
+        Pets: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { colors: ref('Colors'), owner: { type: 'object', properties: { name: { type: 'string' } } } },
+          },
+        },
+        PetsItemOwner: { type: 'object', properties: { id: { type: 'integer' } } },
+      }),
+    );
+    // Were `ColorItem` read as `Pets`'s own, no candidate context could free
+    // it and the tree would run to the attempt cap instead of `item_item`.
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+    expect(fieldType(spec, 'PetsItemItem', 'colors')).toEqual(
+      array({ kind: 'enum', name: 'ColorItem', values: ['red', 'green'] }),
+    );
+    expect(fieldType(spec, 'PetsItemItem', 'owner')).toEqual(model('PetsItemItemOwner'));
+    expect(spec.enums.map((e) => e.name)).toEqual(['ColorItem']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'PetsItemOwner'], ['Colors', 'Pets']);
+  });
+});
+
+describe('two keys that resolve to one name with different shapes', () => {
+  it('keeps one definition and says so, rather than dropping the other silently', async () => {
+    const spec = await parse(
+      specDoc({
+        Note: { type: 'object', properties: { a: { type: 'string' } } },
+        note: { type: 'object', properties: { b: { type: 'integer' } } },
+        Holder: { type: 'object', properties: { n: ref('Note') } },
+      }),
+    );
+    expect(spec.models.find((m) => m.name === 'Note')?.fields.map((f) => f.name)).toEqual(['a']);
+    expect(warnings()).toEqual([
+      '[oagen] Warning: Model "Note" has more than one definition under components/schemas with different fields or field types (1 vs 1) — keeping the first definition',
+    ]);
+  });
+
+  it('stays silent when the two definitions agree', async () => {
+    const spec = await parse(
+      specDoc({
+        Note: { type: 'object', properties: { a: { type: 'string' } } },
+        note: { type: 'object', properties: { a: { type: 'string' } } },
+        Holder: { type: 'object', properties: { n: ref('Note') } },
+      }),
+    );
+    expect(spec.models.filter((m) => m.name === 'Note')).toHaveLength(1);
+    expect(warnings()).toEqual([]);
+  });
+});
+
 describe('a name an operation mints too (MichaelDeBoey)', () => {
   // A component `ListPets` names its items `ListPetsItem`, exactly as
   // `operationId: listPets` names an inline array response's items. The
