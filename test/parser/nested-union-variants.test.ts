@@ -598,11 +598,266 @@ describe("a discriminated allOf + oneOf variant's field", () => {
   });
 });
 
+describe('a title-mapped nested union (Greptile round 1)', () => {
+  // Every variant titled and pinning the same const: `nameInlineVariants`
+  // names them by their titles, which are context-free — the same under
+  // every context — so no step applies, but the models must still be built.
+  const titledA = obj({ kind: { const: 'a' }, a: str }, { title: 'A' });
+  const titledB = obj({ kind: { const: 'b' }, b: str }, { title: 'B' });
+  const titledUnion: SchemaObject = { oneOf: [titledA, titledB] };
+
+  it("the finding's shape: two titled objects beside `{ message }` — `A` and `B` are built and the nested mapping points at them", async () => {
+    const { spec, warnings } = await parse('titled', everySite({ oneOf: [message, titledUnion] }));
+    expect(siteTypes(spec)).toEqual({
+      body: '(CreateThingRequest | (A | B))',
+      response: '(CreateThingResponse | (A | B))',
+      error: '(CreateThingError400 | (A | B))',
+      field: '(HolderPayload | (A | B))',
+    });
+    expect(fieldsOf(spec, 'A')).toEqual(['kind', 'a']);
+    expect(fieldsOf(spec, 'B')).toEqual(['kind', 'b']);
+    expect(opsOf(spec)['createThing']!.errors[0]!.type).toMatchObject({
+      variants: [{}, { kind: 'union', discriminator: { property: 'kind', mapping: { a: 'A', b: 'B' } } }],
+    });
+    expect(warnings).toEqual([]);
+    expectSound(spec, everySiteComponents);
+  });
+
+  const cases: Array<{
+    label: string;
+    schema: SchemaObject;
+    type: (base: string) => string;
+    models: (base: string) => Record<string, string[]>;
+  }> = [
+    {
+      label: 'beside only a primitive',
+      schema: { oneOf: [str, titledUnion] },
+      type: () => '(string | (A | B))',
+      models: () => ({ A: ['kind', 'a'], B: ['kind', 'b'] }),
+    },
+    {
+      label:
+        'under an anyOf, which is never title-mapped: the titles name nothing, the const prefixes and the position do',
+      schema: { anyOf: [message, { anyOf: [titledA, titledB] }] },
+      type: (base) => `(${base} | (${base}Variant2 | B${base}Variant2))`,
+      models: (base) => ({
+        [base]: ['message'],
+        [`${base}Variant2`]: ['kind', 'a'],
+        [`B${base}Variant2`]: ['kind', 'b'],
+      }),
+    },
+    {
+      label: 'as the items of an array variant',
+      schema: { oneOf: [message, { type: 'array', items: titledUnion }] },
+      type: (base) => `(${base} | (A | B)[])`,
+      models: (base) => ({ [base]: ['message'], A: ['kind', 'a'], B: ['kind', 'b'] }),
+    },
+    {
+      label: 'two levels down, under a nested union that stepped',
+      schema: { oneOf: [message, { oneOf: [obj({ x: str }), titledUnion] }] },
+      type: (base) => `(${base} | (${base}Variant2 | (A | B)))`,
+      models: (base) => ({ [base]: ['message'], [`${base}Variant2`]: ['x'], A: ['kind', 'a'], B: ['kind', 'b'] }),
+    },
+    {
+      label: 'with one title already taken by an earlier variant: that variant falls back to a context-qualified name',
+      schema: { oneOf: [message, { oneOf: [titledA, obj({ kind: { const: 'a2' }, z: str }, { title: 'A' })] }] },
+      type: (base) => `(${base} | (A | A${base}))`,
+      models: (base) => ({ [base]: ['message'], A: ['kind', 'a'], [`A${base}`]: ['kind', 'z'] }),
+    },
+  ];
+
+  it.each(cases)('$label', async ({ label, schema, type, models }) => {
+    const { spec, warnings } = await parse(label.replace(/\W+/g, '-'), everySite(schema));
+    expect(siteTypes(spec)).toEqual(
+      Object.fromEntries(Object.entries(siteBases).map(([site, base]) => [site, type(base)])),
+    );
+    for (const base of Object.values(siteBases)) {
+      for (const [name, fields] of Object.entries(models(base))) expect(fieldsOf(spec, name)).toEqual(fields);
+    }
+    expect(warnings).toEqual([]);
+    expectSound(spec, everySiteComponents);
+  });
+
+  it('a title that names a component is treated exactly as a field-level union treats it: the component wins, with the same warning', async () => {
+    const titledComp = obj({ kind: { const: 'c' }, c: str }, { title: 'Comp' });
+    const comp = { Comp: obj({ id: str }) };
+    const nested = await parse(
+      'titled-component-nested',
+      specDoc({}, { ...comp, Thing: obj({ shape: { oneOf: [message, { oneOf: [titledComp, titledB] }] } }) }),
+    );
+    const flat = await parse(
+      'titled-component-flat',
+      specDoc({}, { ...comp, Thing: obj({ shape: { oneOf: [titledComp, titledB] } }) }),
+    );
+    expect(render(fieldType(nested.spec, 'Thing', 'shape')!)).toBe('(ThingShape | (Comp | B))');
+    expect(render(fieldType(flat.spec, 'Thing', 'shape')!)).toBe('(Comp | B)');
+    for (const { spec, warnings } of [nested, flat]) {
+      expect(fieldsOf(spec, 'Comp')).toEqual(['id']);
+      expect(fieldsOf(spec, 'B')).toEqual(['kind', 'b']);
+      expect(warnings).toEqual([
+        '[oagen] Warning: Inline model "Comp" has different fields than component schema — using component schema',
+      ]);
+      expectSound(spec, ['Comp', 'Thing']);
+    }
+  });
+});
+
+describe('a nested title that another model already holds (Greptile round 2)', () => {
+  const titled = (title: string, tag: string, field: string): SchemaObject =>
+    obj({ kind: { const: tag }, [field]: str }, { title });
+  const titledB = titled('B', 'b', 'b');
+  const thing = (name: string, properties: Record<string, SchemaObject>, extra: Record<string, SchemaObject> = {}) =>
+    specDoc({}, { ...extra, [name]: obj(properties) });
+
+  it("the finding's shape: a sibling field's model `HolderA` — the nested variant takes `HolderAHolderShape`, the name a field-level union gives it, never the sibling's fields", async () => {
+    const nested = await parse(
+      'sibling-model-nested',
+      thing('Holder', {
+        a: obj({ id: str }),
+        shape: { oneOf: [message, { oneOf: [titled('HolderA', 'a', 'a'), titledB] }] },
+      }),
+    );
+    expect(render(fieldType(nested.spec, 'Holder', 'shape')!)).toBe('(HolderShape | (HolderAHolderShape | B))');
+    expect(fieldsOf(nested.spec, 'HolderA')).toEqual(['id']);
+    expect(fieldsOf(nested.spec, 'HolderAHolderShape')).toEqual(['kind', 'a']);
+    expect(fieldType(nested.spec, 'Holder', 'shape')).toMatchObject({
+      variants: [{}, { discriminator: { property: 'kind', mapping: { a: 'HolderAHolderShape', b: 'B' } } }],
+    });
+    // The same title one level up, beside the same sibling, falls back the same way.
+    const flat = await parse(
+      'sibling-model-flat',
+      thing('Holder', { a: obj({ id: str }), shape: { oneOf: [titled('HolderA', 'a', 'a'), titledB] } }),
+    );
+    expect(render(fieldType(flat.spec, 'Holder', 'shape')!)).toBe('(HolderAHolderShape | B)');
+    expect(fieldsOf(flat.spec, 'HolderAHolderShape')).toEqual(['kind', 'a']);
+    for (const { spec, warnings } of [nested, flat]) {
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Holder']);
+    }
+  });
+
+  it("an earlier variant's model, minted by the parent union under `<field>_variant_<n>`", async () => {
+    const { spec, warnings } = await parse(
+      'earlier-variant-model',
+      thing('Holder', {
+        shape: {
+          oneOf: [
+            message,
+            { allOf: [obj({ x: str }), obj({ y: str })] },
+            { oneOf: [titled('HolderShapeVariant2', 'a', 'a'), titledB] },
+          ],
+        },
+      }),
+    );
+    expect(render(fieldType(spec, 'Holder', 'shape')!)).toBe(
+      '(HolderShape | HolderShapeVariant2 | (HolderShapeVariant2HolderShape | B))',
+    );
+    expect(fieldsOf(spec, 'HolderShapeVariant2')).toEqual(['x', 'y']);
+    expect(fieldsOf(spec, 'HolderShapeVariant2HolderShape')).toEqual(['kind', 'a']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Holder']);
+  });
+
+  it("the outer object variant's own name as a title: the base is never a variant's name", async () => {
+    const { spec, warnings } = await parse(
+      'outer-variant-name',
+      thing('Holder', { shape: { oneOf: [message, { oneOf: [titled('HolderShape', 'a', 'a'), titledB] }] } }),
+    );
+    expect(render(fieldType(spec, 'Holder', 'shape')!)).toBe('(HolderShape | (HolderShapeWithA | B))');
+    expect(fieldsOf(spec, 'HolderShape')).toEqual(['message']);
+    expect(fieldsOf(spec, 'HolderShapeWithA')).toEqual(['kind', 'a']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Holder']);
+  });
+
+  it("an earlier nested variant's title: reserved for a different shape, shared for the identical one", async () => {
+    const differ = await parse(
+      'earlier-title-differs',
+      thing('Holder', {
+        shape: {
+          oneOf: [
+            message,
+            { oneOf: [titled('A', 'a', 'a'), titledB] },
+            { oneOf: [titled('A', 'a', 'z'), titled('C', 'c', 'c')] },
+          ],
+        },
+      }),
+    );
+    expect(render(fieldType(differ.spec, 'Holder', 'shape')!)).toBe('(HolderShape | (A | B) | (AHolderShape | C))');
+    expect(fieldsOf(differ.spec, 'A')).toEqual(['kind', 'a']);
+    expect(fieldsOf(differ.spec, 'AHolderShape')).toEqual(['kind', 'z']);
+    const same = await parse(
+      'earlier-title-same',
+      thing('Holder', {
+        shape: {
+          oneOf: [
+            message,
+            { oneOf: [titled('A', 'a', 'a'), titledB] },
+            { oneOf: [titled('A', 'a', 'a'), titled('C', 'c', 'c')] },
+          ],
+        },
+      }),
+    );
+    expect(render(fieldType(same.spec, 'Holder', 'shape')!)).toBe('(HolderShape | (A | B) | (A | C))');
+    expect(fieldsOf(same.spec, 'A')).toEqual(['kind', 'a']);
+    for (const { spec, warnings } of [differ, same]) {
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Holder']);
+    }
+  });
+
+  it('a header model of the same operation: the deferred body reserves the clashing name and the nested variant steps off it', async () => {
+    const { spec, warnings } = await parse(
+      'header-model',
+      specDoc({
+        '/note/{id}': {
+          get: {
+            operationId: 'getNote',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+            responses: {
+              '200': {
+                description: 'OK',
+                headers: { 'X-Meta': { schema: obj({ id: str }) } },
+                ...json(obj({ id: str })),
+              },
+              '400': {
+                description: 'Bad',
+                ...json({ oneOf: [message, { oneOf: [titled('NoteXMeta', 'a', 'a'), titledB] }] }),
+              },
+            },
+          },
+        },
+      }),
+    );
+    const op = opsOf(spec)['getNote']!;
+    expect(render(collectResponseHeaders(op)[0]!.type)).toBe('NoteXMeta');
+    expect(fieldsOf(spec, 'NoteXMeta')).toEqual(['id']);
+    expect(render(op.errors[0]!.type!)).toBe('(GetNoteError400 | (NoteXMetaGetNoteError400 | B))');
+    expect(fieldsOf(spec, 'NoteXMetaGetNoteError400')).toEqual(['kind', 'a']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, []);
+  });
+});
+
 describe('nonObjectVariantContexts', () => {
   const nested: SchemaObject = { oneOf: [a, b] };
   const arr: SchemaObject = { type: 'array', items: b };
   const ref: SchemaObject = { $ref: '#/components/schemas/Base' };
   const nul: SchemaObject = { type: 'null' };
+  const titledA = obj({ kind: { const: 'a' }, a: str }, { title: 'A' });
+  const titledB = obj({ kind: { const: 'b' }, b: str }, { title: 'B' });
+  const titled: SchemaObject = { oneOf: [titledA, titledB] };
+  /** The entries' contexts, keyed by variant, in order. */
+  const contextsOf = (entries: Map<SchemaObject, { context: string }>): Array<[SchemaObject, string]> =>
+    [...entries].map(([variant, { context }]) => [variant, context]);
+
+  it('maps a nested title-mapped union under the field context: its names are context-free, so nothing could claim them away', () => {
+    expect(
+      contextsOf(
+        nonObjectVariantContexts('shape', [message, titled], undefined, 'Thing', new Map([[message, 'ThingShape']])),
+      ),
+    ).toEqual([[titled, 'shape']]);
+  });
 
   it('maps every variant that mints a name and is not an inline object; a `$ref`, a primitive and `null` get no entry', () => {
     const contexts = nonObjectVariantContexts(
@@ -612,19 +867,19 @@ describe('nonObjectVariantContexts', () => {
       'Thing',
       new Map([[message, 'ThingShape']]),
     );
-    expect([...contexts]).toEqual([
+    expect(contextsOf(contexts)).toEqual([
       [nested, 'shape_variant_2'],
       [arr, 'shape_item'],
     ]);
   });
 
   it('keeps the field context for a nested union whose names no object variant, sibling or earlier variant claims', () => {
-    expect([...nonObjectVariantContexts('shape', [str, nested], undefined, 'Thing', new Map())]).toEqual([
+    expect(contextsOf(nonObjectVariantContexts('shape', [str, nested], undefined, 'Thing', new Map()))).toEqual([
       [nested, 'shape'],
     ]);
     // An earlier nested union of the same union claims the field context.
     const other: SchemaObject = { oneOf: [obj({ c: str }), obj({ d: str })] };
-    expect([...nonObjectVariantContexts('shape', [str, nested, other], undefined, 'Thing', new Map())]).toEqual([
+    expect(contextsOf(nonObjectVariantContexts('shape', [str, nested, other], undefined, 'Thing', new Map()))).toEqual([
       [nested, 'shape'],
       [other, 'shape_variant_3'],
     ]);
@@ -632,9 +887,56 @@ describe('nonObjectVariantContexts', () => {
 
   it('reads the caller-reserved names as claims, like the object variants do', () => {
     const reserved = new Set(['ThingShape', 'ThingShapeVariant2']);
-    expect([...nonObjectVariantContexts('shape', [str, nested], undefined, 'Thing', new Map(), reserved)]).toEqual([
-      [nested, 'shape_variant_2_value'],
+    expect(
+      contextsOf(nonObjectVariantContexts('shape', [str, nested], undefined, 'Thing', new Map(), reserved)),
+    ).toEqual([[nested, 'shape_variant_2_value']]);
+  });
+
+  it("hands each variant the names claimed when it was decided: the caller's, the siblings', the object variants' and their children's, and every earlier variant's", () => {
+    const withItem = obj({ item: obj({ x: str }) });
+    const variants = [withItem, nested, titled];
+    const siblings = new Map<string, SchemaObject>([
+      ['a', obj({ id: str })],
+      ['shape', { oneOf: variants }],
     ]);
+    const entries = nonObjectVariantContexts(
+      'shape',
+      variants,
+      siblings,
+      'Thing',
+      new Map([[withItem, 'ThingShape']]),
+      new Set(['Reserved']),
+    );
+    expect([...entries.get(nested)!.reserved].sort()).toEqual(['Reserved', 'ThingA', 'ThingShape', 'ThingShapeItem']);
+    // The nested union at position 2 took `ThingShapeVariant2` and `BThingShapeVariant2`.
+    expect([...entries.get(titled)!.reserved].sort()).toEqual([
+      'BThingShapeVariant2',
+      'Reserved',
+      'ThingA',
+      'ThingShape',
+      'ThingShapeItem',
+      'ThingShapeVariant2',
+    ]);
+  });
+
+  it("reserves an earlier variant's kept title for a later variant of a different shape, and shares it for the identical shape", () => {
+    const otherShape: SchemaObject = {
+      oneOf: [
+        obj({ kind: { const: 'a' }, z: str }, { title: 'A' }),
+        obj({ kind: { const: 'c' }, c: str }, { title: 'C' }),
+      ],
+    };
+    const sameShape: SchemaObject = { oneOf: [titledA, obj({ kind: { const: 'c' }, c: str }, { title: 'C' })] };
+    const entries = nonObjectVariantContexts(
+      'shape',
+      [str, titled, otherShape, sameShape],
+      undefined,
+      'Thing',
+      new Map(),
+    );
+    expect(entries.get(otherShape)!.reserved.has('A')).toBe(true);
+    expect(entries.get(sameShape)!.reserved.has('A')).toBe(false);
+    expect(entries.get(sameShape)!.reserved.has('B')).toBe(true);
   });
 
   it('decides nothing without a context name', () => {

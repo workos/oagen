@@ -146,6 +146,20 @@ describe('expandDocUrls', () => {
     expect(result.enums[0].values[0].description).toBe('See [statuses](https://workos.com/docs/reference/statuses).');
   });
 
+  it('expands links in an enum description, and leaves the key absent where the parser left it absent (Greptile)', () => {
+    const spec = minimalSpec({
+      enums: [
+        { name: 'Status', description: 'See the [Status guide](/reference/status).', values: [] },
+        { name: 'Bare', values: [{ name: 'A', value: 'a' }] },
+      ],
+    });
+
+    const result = expandDocUrls(spec, 'https://workos.com/docs');
+    expect(result.enums[0].description).toBe('See the [Status guide](https://workos.com/docs/reference/status).');
+    expect('description' in result.enums[1]).toBe(false);
+    expect('description' in result.enums[1].values[0]).toBe(false);
+  });
+
   it('leaves descriptions without relative links unchanged', () => {
     const spec = minimalSpec({
       models: [
