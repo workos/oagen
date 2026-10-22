@@ -254,10 +254,11 @@ export interface Operation {
    * `responseHeaders` and `responseDescription` come from the same entry.
    * Never promoted from a `2XX` range or the `default` response: an
    * operation declaring no 2xx or 3xx response at all (only `default` or
-   * `2XX`, or only a `404`) keeps the parser's initial
-   * `{ kind: 'primitive', type: 'string' }` here, with no `responseHeaders`
-   * or `responseDescription`, and an emitter should take the success body
-   * from `rangeResponses` (`2XX`), then `defaultResponse` — the same order
+   * `2XX`, or only a `404`, or no `responses` at all) has
+   * `{ kind: 'primitive', type: 'unknown' }` here, as a lone 3xx does,
+   * with no `responseHeaders` or `responseDescription`, and an emitter
+   * should take the success body from `rangeResponses` (`2XX`), then
+   * `defaultResponse` — the same order
    * it resolves any status: the explicit entry, then the matching range,
    * then the default.
    */

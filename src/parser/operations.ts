@@ -3788,7 +3788,7 @@ function extractResponses(
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
-  let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let response: TypeRef = { kind: 'primitive', type: 'unknown' };
   let responseHeaders: ResponseHeader[] | undefined;
   let responseContentTypes: string[] | undefined;
   let responseContents: ResponseContent[] | undefined;

@@ -153,7 +153,7 @@ describe('the default response (issue #214)', () => {
       ),
     );
 
-    expect(op.response).toEqual(str);
+    expect(op.response).toEqual({ kind: 'primitive', type: 'unknown' });
     expect(op.successResponses).toBeUndefined();
     expect(op.errors).toEqual([]);
     expect(op.defaultResponse).toEqual({ type: model('Error'), ...jsonBody(model('Error')), description: 'err' });
@@ -357,7 +357,7 @@ describe('range responses (1XX–5XX)', () => {
   it('does not promote a 2XX range to the primary response', async () => {
     const op = only(await parseWithoutWarnings(petsSpec({ '2XX': ok })));
 
-    expect(op.response).toEqual(str);
+    expect(op.response).toEqual({ kind: 'primitive', type: 'unknown' });
     expect(op.rangeResponses).toEqual([
       { range: '2XX', type: model('Pet'), ...jsonBody(model('Pet')), description: 'ok' },
     ]);
@@ -1502,5 +1502,40 @@ describe('a fallback written as a $ref into components/responses', () => {
       ),
     );
     warn.mockRestore();
+  });
+});
+
+describe('an operation declaring no 2xx or 3xx response (issue #264)', () => {
+  const unknown: TypeRef = { kind: 'primitive', type: 'unknown' };
+  const errorBody = (description: string) => ({ description, content: json({ $ref: '#/components/schemas/Error' }) });
+  const expectNoPrimary = (op: Operation) => {
+    expect(op.response).toEqual(unknown);
+    expect(op.responseDescription).toBeUndefined();
+    expect(op.responseHeaders).toBeUndefined();
+  };
+
+  it.each([
+    ['default only', { default: errorBody('err') }],
+    ['404 only', { '404': errorBody('Not found') }],
+    ['ranges only', { '2XX': ok, '4XX': errorBody('bad') }],
+  ])('types the response as unknown: %s', async (_, responses) => {
+    expectNoPrimary(only(await parseWithoutWarnings(petsSpec(responses))));
+  });
+
+  it('types the response as unknown when the operation has no responses key', async () => {
+    const spec = petsSpec({}) as { paths: Record<string, { get: Record<string, unknown> }> };
+    delete spec.paths['/pets'].get.responses;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expectNoPrimary(only(await parseTempSpec(spec)));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still types a lone 3xx as unknown', async () => {
+    const op = only(await parseWithoutWarnings(petsSpec({ '302': { description: 'Moved' } })));
+    expect(op.response).toEqual(unknown);
+    expect(op.responseDescription).toBe('Moved');
   });
 });
