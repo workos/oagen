@@ -234,21 +234,29 @@ export interface Operation {
    */
   requestBodyRequired?: boolean;
   /**
-   * The primary success body: the lowest explicit 2xx with a body schema,
-   * else the first explicit 2xx. Never promoted from a `2XX` range or the
-   * `default` response, so when an operation declares no explicit 2xx this is
-   * `{ kind: 'primitive', type: 'string' }` and an emitter should take the
-   * success body from `rangeResponses` (`2XX`), then `defaultResponse` —
-   * the same order it resolves any status: the explicit entry, then the
-   * matching range, then the default.
+   * The primary success response's body type: the lowest declared status code
+   * from 200 to 399 whose type is not `unknown` — the lowest 2xx with a typed
+   * body, so a `200` left `unknown` by the media-type rules (a schema-less
+   * `text/csv`) yields to a `201` typed from a schema, and a 3xx entry (always
+   * `unknown`) never wins over a typed 2xx — falling back to the lowest
+   * declared code (an untyped 2xx, or a 3xx when no 2xx is declared).
+   * `responseHeaders` and `responseDescription` come from the same entry.
+   * Never promoted from a `2XX` range or the `default` response: an
+   * operation declaring no 2xx or 3xx response at all (only `default` or
+   * `2XX`, or only a `404`) keeps the parser's initial
+   * `{ kind: 'primitive', type: 'string' }` here, with no `responseHeaders`
+   * or `responseDescription`, and an emitter should take the success body
+   * from `rangeResponses` (`2XX`), then `defaultResponse` — the same order
+   * it resolves any status: the explicit entry, then the matching range,
+   * then the default.
    */
   response: TypeRef;
   /**
    * Headers the primary success response declares (the one `response` is the
    * body of). Present only when the spec declares at least one. Each entry of
-   * `successResponses` carries its own `headers`, but that list only exists
-   * when an operation has more than one 2xx, so the primary response's headers
-   * need a home of their own.
+   * `successResponses` carries its own `headers`, but that list is only set
+   * when an operation declares more than one 2xx or 3xx response (counted
+   * together), so the primary response's headers need a home of their own.
    */
   responseHeaders?: ResponseHeader[];
   /**
@@ -257,7 +265,7 @@ export interface Operation {
    * `application/vnd.api+json`, a wildcard such as `application/*`). Present
    * only when it declares at least one. Like `responseHeaders`, this lifts
    * the primary entry's `contentTypes`, because `successResponses` only
-   * exists when an operation has more than one 2xx.
+   * exists when an operation declares more than one 2xx or 3xx response.
    */
   responseContentTypes?: string[];
   /**
@@ -273,11 +281,30 @@ export interface Operation {
    * statement of what an operation gives back, so an emitter can print it as
    * a `@returns` tag. Present only when that response declares one with
    * non-whitespace content; the text is kept verbatim. Each entry of
-   * `successResponses` carries its own `description`, but that list only
-   * exists when an operation has more than one 2xx, so the primary response's
-   * description needs a home of its own.
+   * `successResponses` carries its own `description`, but that list is only
+   * set when an operation declares more than one 2xx or 3xx response (counted
+   * together), so the primary response's description needs a home of its own.
    */
   responseDescription?: string;
+  /**
+   * Every declared 2xx and 3xx response, one `SuccessResponse` per status
+   * code, each with its own `type`, `headers` and `description`. A 2xx entry's
+   * `type` is its body, read by media type compared by essence, parameters
+   * and case aside (the JSON schema — `application/json`, else a `+json`
+   * media type; else binary string for `application/octet-stream` /
+   * `application/pdf`; else `string` for `text/plain`, `text/html`,
+   * `text/xml`, `application/xml`; else the schema of the first media type
+   * that declares one) and `unknown` when none applies, a schema-less
+   * `text/csv` included; a 3xx entry's `type` is always
+   * `unknown`, and the entry is kept so an emitter can
+   * recognize a redirect endpoint. Set only when more than one such response
+   * is declared, counting 2xx and 3xx together: `200` + `201`, `200` + `302`
+   * and `301` + `302` all set it, while a lone `200` (or a lone `302`) leaves
+   * it `undefined` and `response` / `responseHeaders` / `responseDescription`
+   * describe that single response alone. 4xx and 5xx responses go to
+   * `errors`; `default` and the ranges `1XX`–`5XX` to `defaultResponse` and
+   * `rangeResponses`; an explicit 1xx code is not carried.
+   */
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   /**
@@ -1112,7 +1139,10 @@ export interface ErrorResponse {
   description?: string;
 }
 
-/** A successful response entry from a 2xx status code */
+/**
+ * One entry of `Operation.successResponses`: a declared 2xx or 3xx response.
+ * A 3xx entry's `type` is always `unknown`.
+ */
 export interface SuccessResponse {
   statusCode: number;
   type: TypeRef;

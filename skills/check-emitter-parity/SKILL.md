@@ -101,9 +101,9 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `description` — Method-level description
 - `externalDocs` — The operation's link, for the method doc comment
-- `deprecated` — Deprecation marker on methods
+- `deprecated` — Deprecation marker on methods (the Operation Object's own keyword)
 - `async` — Async operation marker
-- `successResponses` — Multiple 2xx response types
+- `successResponses` — Every declared 2xx and 3xx response, set when there is more than one; a 3xx entry's `type` is `unknown`
 - `responseHeaders` — Headers declared on the primary response (`Content-Disposition`, `Location`, `ETag`, rate limits); each carries `description`, `deprecated` and `externalDocs`
 - `responseDescription` — The primary response's description, for a `@returns`-style doc tag
 - `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
@@ -116,7 +116,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `description` — Parameter description content
 - `externalDocs` — The parameter schema's link (falls back to its `$ref` target), for the param doc tag
-- `deprecated` — Deprecated marker on params
+- `deprecated` — Deprecated marker on params (first truthy of the parameter object, its inline `schema`, then the `$ref`'d component schema)
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or argument checks
@@ -126,6 +126,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `description` — Model-level doc comment
 - `externalDocs` — The schema's link, for the model doc comment (an `Enum` carries one the same way, component or lifted inline)
+- `deprecated` — Deprecation marker on models (the schema's own top-level keyword, normalized to a literal `true`; never an `allOf` member's)
 - `typeParams` — Generic type parameters
 - `constraints` — Object-level limits (`minProperties`, `maxProperties`, `dependentRequired`)
 
@@ -135,16 +136,22 @@ A missing kind means an entire category of types won't generate correctly.
 - `externalDocs` — The field schema's own link (a `$ref` sibling's included), for the field doc comment
 - `readOnly` — Read-only annotation (language-appropriate: `readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, etc.)
 - `writeOnly` — Write-only annotation
-- `deprecated` — Deprecation marker on fields
+- `deprecated` — Deprecation marker on fields (the property schema's own keyword, a `$ref` sibling included; the referenced model keeps its own)
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `examples` — Every example value (the list `example` is drawn from)
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or value checks
 
+#### Enum
+
+- `default` — The schema's `default:` value, for a default-value annotation
+- `externalDocs` — Link to external documentation, for a `@see`-style tag
+- `deprecated` — Deprecation marker on enums (the component enum schema's own keyword, normalized to a literal `true`)
+
 #### EnumValue
 
 - `description` — Enum value doc comment
-- `deprecated` — Deprecation marker on enum values
+- `deprecated` — Deprecation marker on enum values (declared in the IR; the parser does not set it today, so it only arrives from an overlay or plugin)
 
 ## Step 3: Read Emitter Generators
 
@@ -248,13 +255,16 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `ApiSpec.servers`            | Server URL constants or configuration                                                                                                           |
 | `ApiSpec.webhooks`           | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                      |
 | `Operation.async`            | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                         |
-| `Operation.successResponses` | Document additional return types for each 2xx response                                                                                          |
+| `Operation.successResponses` | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                        |
 | `Operation.responseHeaders`  | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                              |
 | `Operation.responseContents` | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                      |
 | `Operation.cookieParams`     | Document cookie parameters                                                                                                                      |
 | `Parameter.description`      | Document query/header/cookie params in method doc comments                                                                                      |
 | `Parameter.externalDocs`     | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Service` and `ApiSpec` carry the same |
 | `Parameter.deprecated`       | Mark parameter as deprecated in docs                                                                                                            |
+| `Model.deprecated`           | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                     |
+| `Enum.deprecated`            | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                        |
+| `Enum.default`               | Document the enum's default value                                                                                                               |
 | `Parameter.default`          | Document default value                                                                                                                          |
 | `Parameter.example`          | Document example value                                                                                                                          |
 | `Parameter.examples`         | Document every example value (e.g. one `@example` tag each)                                                                                     |
