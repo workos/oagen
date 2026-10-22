@@ -64,17 +64,19 @@ import {
 } from './pagination.js';
 import {
   classifyAndExtractResponse,
+  composedWithoutFields,
   classifyResponseKey,
   resolveDataPathFromSchema,
   STATUS_RANGE_LABELS,
   warnUnrecognizedResponseKey,
 } from './responses.js';
 import type { ResponseKey } from './responses.js';
-import type { ResponseExtractionResult } from './responses.js';
+import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
+  registerInlineModels,
   type InlineModelRegistry,
   type InlineModelOwner,
   type SiblingSites,
@@ -428,15 +430,27 @@ export function extractOperations(
   // Only these may be renamed when names collide within a service (see
   // disambiguateOperationNames); a name taken from an operationId is kept as is.
   const pathNamed = new Set<Operation>();
-  // Header, secondary-body, fallback-body and error-body schemas are typed
-  // only after this loop, once every primary model is known
+  // Header, secondary-body, fallback-body, error-body and parameter schemas
+  // are typed only after this loop, once every primary model is known
   // (`resolveDeferredInlineTypes`): their names must not collide with a
   // differently shaped component, request body or primary response of any
-  // operation, or the later merge would overwrite the first. `operationOf`
-  // remembers which operation minted each primary model, so a clash within
-  // one operation can be told from one across two.
+  // operation, or the later merge would overwrite the first. The registry
+  // records which operation minted each model, so a clash within one
+  // operation can be told from one across two.
   const deferred: DeferredInlineType[] = [];
-  const operationOf = new Map<Model, string>();
+  // The spec-wide registry of model shapes (`InlineModelRegistry`), seeded
+  // with every name decided before the operations — the component models
+  // and enums, the components' field models (a nested object, a map's
+  // values; not among `componentModels`, see parseSpec) and the enums their
+  // fields mint — and filled as the operations are read: each operation's
+  // models once it is built, its array items as they are typed
+  // (`typeInlineItems` settles them against it), the envelope companions
+  // once named, and every enum the operations mint. The deferred schemas are
+  // named against all of it last.
+  const registry: ModelShapeRegistry = new Map();
+  const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
+  registerInlineModels(registry, registeredModels);
+  registerEnumNames(registry, mintedEnumNames(componentEnums ?? [], registeredModels, []));
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -488,9 +502,13 @@ export function extractOperations(
         // Same "METHOD /path" key the operation resolver uses for the rest of the hint.
         operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
         componentModels,
+        registry,
       );
       inlineModels.push(...opModels);
-      for (const model of opModels) operationOf.set(model, operationQualifier);
+      // The operation's models join the registry under its qualifier, so a
+      // later operation's items and every deferred schema step around them;
+      // its settled item models are already there (`typeInlineItems`).
+      registerInlineModels(registry, opModels, operationQualifier);
       inlineModelBundles.push(...opBundles);
       if (opCompanions) {
         envelopeCompanions.push(...opCompanions);
@@ -525,23 +543,17 @@ export function extractOperations(
   );
 
   // Headers, secondary bodies, fallback bodies, error bodies and parameters
-  // are named last, in document order, against every name above — the
-  // component models, the inline models the components' own fields mint (a
-  // nested object, a map's values; not among `componentModels`, see
-  // parseSpec), every request body, primary response and companion model —
-  // and against every enum name: the component enums', and the name every
-  // inline enum a model field, a parameter or a body mints will be lifted
-  // under (`mintedEnumNames`). So none of them takes a name one of those
-  // owns, whichever comes first in the document, and no deferred model
-  // shares a name with an enum.
-  const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
-  const deferredTypes = resolveDeferredInlineTypes(
-    deferred,
-    registeredModels,
-    inlineModels,
-    operationOf,
-    mintedEnumNames(componentEnums ?? [], [...registeredModels, ...inlineModels], [...serviceMap.values()].flat()),
-  );
+  // are named last, in document order, against every name in the registry —
+  // the component models and enums, the components' field models, every
+  // request body, primary response, item and companion model — and against
+  // every enum name the operations minted: the name every inline enum a
+  // model field, a parameter or a body mints will be lifted under
+  // (`mintedEnumNames`). So none of them takes a name one of those owns,
+  // whichever comes first in the document, and no deferred model shares a
+  // name with an enum.
+  registerInlineModels(registry, companionModels);
+  registerEnumNames(registry, mintedEnumNames(componentEnums ?? [], inlineModels, [...serviceMap.values()].flat()));
+  const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
   // models it minted), and a reference it wrote by sharing another site's
@@ -1937,6 +1949,7 @@ function buildOperation(
   componentResponseModelNames?: ReadonlyMap<string, string>,
   paginationHint?: unknown,
   componentModels?: Model[],
+  registry?: ModelShapeRegistry,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -2007,6 +2020,7 @@ function buildOperation(
     deferred,
     refSiblingDescriptions,
     componentResponseModelNames,
+    registry,
   };
   // One location's parameters, typed by `extractParams`. A parameter whose
   // inline schema mints a model is deferred once the responses have been
@@ -2946,8 +2960,11 @@ function typePickedRequestBody(
     if (merged) schema = merged;
   }
 
-  // If the request body is an inline object with properties, extract it as a model
-  if (schema.properties && (schema.type === 'object' || !schema.type)) {
+  // If the request body is an inline object with properties, extract it as a
+  // model. An empty `properties: {}` beside a composition that types the
+  // body is not its object (`composedWithoutFields`): the `oneOf` branch or
+  // the fall-through reads the composition, as for a response body.
+  if (schema.properties && !composedWithoutFields(schema) && (schema.type === 'object' || !schema.type)) {
     const requiredSet = new Set(schema.required ?? []);
     const siblings = collectProperties(schema);
     const fields: Field[] = [];
@@ -3361,16 +3378,25 @@ interface ResponseTypingContext {
   operationQualifier: string;
   /** Collects every schema whose models are named after the operations loop. */
   deferred: DeferredInlineType[];
+  /**
+   * The spec-wide registry of model shapes the operations fill as they are
+   * read (see `extractOperations`); with it, the primary body's array items
+   * are settled against every name it holds (`typeInlineItems`). Absent for
+   * a dry run that only reads the names a body would mint.
+   */
+  registry?: ModelShapeRegistry;
 }
 
 /**
  * Name and materialize every deferred header, secondary request-body,
- * secondary response-body, fallback-body and error-body schema, now that
- * every primary model is known. The registry holds the component models
- * first (with the inline models their fields mint), then every inline model
- * the operations minted — request bodies, primary response bodies with their
- * nested objects and union variants, envelope companions — so no deferred
- * schema can take one of their names for a different shape, whichever
+ * secondary response-body, fallback-body, error-body and parameter schema,
+ * now that every primary model is known. The registry comes filled from
+ * `extractOperations`: the component models and enums first (with the models
+ * and enums their fields mint), then every inline model the operations minted
+ * — request bodies, primary response bodies with their nested objects, union
+ * variants and settled array items, envelope companions — and every enum
+ * name they mint, so no deferred schema can take one of their names for a
+ * different shape, or an enum's name at all, whichever
  * operation minted it; each resolved schema's own models join it in turn, in
  * document order (path order, then an operation's secondary request bodies
  * in content order, then the response keys as written; a response's headers
@@ -3385,22 +3411,8 @@ interface ResponseTypingContext {
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
-  componentModels: readonly Model[],
-  inlineModels: readonly Model[],
-  operationOf: ReadonlyMap<Model, string>,
-  enumNames: ReadonlySet<string> = new Set(),
+  registry: ModelShapeRegistry,
 ): { models: Model[]; bundles: InlineModelBundle[] } {
-  const registry: ModelShapeRegistry = new Map();
-  for (const model of componentModels) {
-    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
-  }
-  for (const model of inlineModels) {
-    if (registry.has(model.name)) continue;
-    registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
-  }
-  // Every enum name, so no deferred model of any kind takes one; a name a
-  // model above already owns stays that model's.
-  registerEnumNames(registry, enumNames);
   const models: Model[] = [];
   const bundles: InlineModelBundle[] = [];
   const siblingsByBareName = new Map<string, SiblingSites>();
@@ -4096,6 +4108,7 @@ function resolveOverrideItemType(
   dataPath: string,
   componentModels: Model[],
   componentSchemas?: Record<string, SchemaObject>,
+  settle?: ItemSettlement,
 ): { itemType: TypeRef; inlineModels: Model[] } | undefined {
   if (dataPath === result.dataPath && result.itemType) return { itemType: result.itemType, inlineModels: [] };
 
@@ -4116,7 +4129,7 @@ function resolveOverrideItemType(
   }
   if (fromIr) return { itemType: fromIr, inlineModels: [] };
 
-  return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas);
+  return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas, settle);
 }
 
 /** What the explicit pagination override asks of response extraction. */
@@ -4778,9 +4791,13 @@ function extractResponses(
           !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
             ? undefined
             : pagination.dataPath;
+        // The primary body's array items are settled against the registry
+        // (`typeInlineItems`); the dry run that reads a component response's
+        // names (`bodyModelNames`) passes none and mints nothing into it.
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
           paginationDisabled: pagination.disabled,
           dataPathOverride,
+          ...(ctx.registry && { settle: { registry: ctx.registry, operation: ctx.operationQualifier } }),
         });
         extractedType = result.response;
         bodyResults.set(code, result);
@@ -4957,6 +4974,7 @@ function extractResponses(
       pagination.dataPath,
       pagination.componentModels ?? [],
       componentSchemas,
+      ctx.registry && { registry: ctx.registry, operation: ctx.operationQualifier },
     );
     if (resolved) {
       overrideItemType = resolved.itemType;

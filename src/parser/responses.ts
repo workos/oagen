@@ -11,6 +11,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
   buildFieldFromSchema,
+  classifyInlineSchema,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
@@ -25,6 +26,18 @@ import {
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
 import { externalDocsEntry } from './external-docs.js';
+import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
+
+/**
+ * What settles an array body's or list envelope's item models against the
+ * names already decided (see `typeInlineItems`): the spec-wide registry of
+ * model shapes the operations fill as they are read, and the operation to
+ * record this body's models under.
+ */
+export interface ItemSettlement {
+  registry: InlineModelRegistry;
+  operation: string;
+}
 
 export interface ResponseExtractionResult {
   /** The TypeRef to use as the operation's response type */
@@ -81,6 +94,14 @@ export interface ResponseClassificationOptions {
    * read, with the override's root property as the data property.
    */
   dataPathOverride?: string;
+  /**
+   * With it, the items of an array body or a list envelope are typed under
+   * the first `<Op>Item` candidate the registry does not give another shape,
+   * and an identical shape shares the model it finds (`typeInlineItems`).
+   * Absent — a dry run that only reads names, a direct call — the items take
+   * `<Op>Item` as written.
+   */
+  settle?: ItemSettlement;
 }
 
 /**
@@ -164,7 +185,7 @@ export function classifyAndExtractResponse(
     if (envelope.isEnvelope) {
       const override = options.dataPathOverride;
       if (override === undefined || override === envelope.dataPath) {
-        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas);
+        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
       }
       // The full path is excluded, not its root: a stop field beside the
       // nested array (`pagination.has_more` next to `pagination.items`) stays
@@ -172,7 +193,7 @@ export function classifyAndExtractResponse(
       const { properties } = collectEnvelopeProperties(schema, componentSchemas);
       const endOfIteration = detectEndOfIteration(properties, override, componentSchemas);
       return {
-        ...extractDirectResource(schema, contextName, componentSchemas),
+        ...extractDirectResource(schema, contextName, componentSchemas, options.settle),
         ...(endOfIteration && { endOfIteration }),
       };
     }
@@ -184,7 +205,7 @@ export function classifyAndExtractResponse(
   }
 
   // 4. Direct resource or plain inline object
-  return extractDirectResource(schema, contextName, componentSchemas);
+  return extractDirectResource(schema, contextName, componentSchemas, options.settle);
 }
 
 interface ListEnvelopeResult {
@@ -263,6 +284,7 @@ function extractListResponse(
   contextName: string,
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
+  settle?: ItemSettlement,
 ): ResponseExtractionResult {
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
@@ -278,7 +300,12 @@ function extractListResponse(
   // materialized as `<Operation>Item` (`typeInlineItems`).
   const dataArray = dataProp ? arraySchemaOf(dataProp) : undefined;
   if (dataArray?.items) {
-    const typed = typeInlineItems(dataArray.items, contextName.replace(/Response$/, '') + 'Item', componentSchemas);
+    const typed = typeInlineItems(
+      dataArray.items,
+      contextName.replace(/Response$/, '') + 'Item',
+      componentSchemas,
+      settle,
+    );
     itemTypeRef = typed.itemType;
     inlineModels.push(...typed.inlineModels);
   }
@@ -348,12 +375,13 @@ export function resolveDataPathFromSchema(
   dataPath: string,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
+  settle?: ItemSettlement,
 ): { itemType: TypeRef; inlineModels: Model[] } | undefined {
   const target = resolveSchemaPath(schema, dataPath, componentSchemas);
   if (!target) return undefined;
   const array = resolveBareSchema(target, componentSchemas);
   if (!isArraySchema(array) || !array.items) return undefined;
-  return typeInlineItems(array.items, inlineItemNameForPath(contextName, dataPath), componentSchemas);
+  return typeInlineItems(array.items, inlineItemNameForPath(contextName, dataPath), componentSchemas, settle);
 }
 
 /**
@@ -391,13 +419,37 @@ function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * composition carrying the properties (`foldSiblingProperties`); the
  * objects of a nested array or map, and whatever any of these reference in
  * turn, are materialized under the name the reference uses.
+ *
+ * With `settle`, the names are settled against the spec-wide registry
+ * through `materializeInlineSchema`, the one retry loop every deferred
+ * schema goes through: the items are tried as `<Op>Item`, and when a name
+ * they mint — the root, a union variant, a nested object — belongs to
+ * another shape (a component model or enum, a component's field model, an
+ * earlier operation's model), as `<Op>ResponseItem`, then `<Op>Item2`,
+ * `<Op>Item3`, …, the first candidate that clashes with nothing; a shape
+ * identical to a name's owner shares it and mints nothing, so items matching
+ * a component `ListPetsItem` reference the component. The models minted are
+ * recorded under the operation. Without `settle` — a dry run that only
+ * reads names, a direct call — the items take `<Op>Item` as written.
  */
 function typeInlineItems(
   items: SchemaObject,
   itemName: string,
   componentSchemas?: Record<string, SchemaObject>,
+  settle?: ItemSettlement,
 ): { itemType: TypeRef; inlineModels: Model[] } {
   const inlineModels: Model[] = [];
+  if (settle) {
+    const itemType = materializeInlineSchema(items, {
+      stem: (index) =>
+        index === 0 ? itemName : index === 1 ? itemName.replace(/Item$/, 'ResponseItem') : `${itemName}${index}`,
+      componentSchemas,
+      registry: settle.registry,
+      operation: settle.operation,
+      models: inlineModels,
+    });
+    return { itemType, inlineModels };
+  }
   extractInlineModelsFromProperties({ properties: { [itemName]: items } }, inlineModels, undefined, componentSchemas);
   return { itemType: schemaToTypeRef(items, itemName), inlineModels };
 }
@@ -684,11 +736,17 @@ function extractDirectResource(
   schema: SchemaObject,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
+  settle?: ItemSettlement,
 ): ResponseExtractionResult {
   const inlineModels: Model[] = [];
 
-  // Direct object with properties (with or without explicit type: 'object')
-  if (schema.properties && (schema.type === 'object' || !schema.type)) {
+  // Direct object with properties (with or without explicit type: 'object').
+  // An empty `properties: {}` beside a composition that types the schema is
+  // not the body's object — the fold leaves it as written
+  // (`hasFoldableProperties`) and the `allOf` or `oneOf` branch below reads
+  // it, as `{ allOf: [Pet] }` alone is read — so a body declaring no field of
+  // its own never becomes an empty model that drops the composition.
+  if (schema.properties && !composedWithoutFields(schema) && (schema.type === 'object' || !schema.type)) {
     const modelName = deriveModelName(schema, contextName);
     inlineModels.push(...extractInlineModel(modelName, schema, componentSchemas));
     return {
@@ -730,7 +788,7 @@ function extractDirectResource(
         // first, so an own `kind` enum beside a member's plain `kind` stays
         // the enum here as it does in a field or an array's items.
         for (const [property, propertySchema] of Object.entries(resolved.properties ?? {})) {
-          if (!(property in mergedProperties)) mergedProperties[property] = propertySchema;
+          if (!Object.hasOwn(mergedProperties, property)) mergedProperties[property] = propertySchema;
         }
         if (resolved.required) mergedRequired.push(...resolved.required);
       }
@@ -790,7 +848,7 @@ function extractDirectResource(
   // under the response's own name.
   const array = arraySchemaOf(schema);
   if (array?.items) {
-    const typed = typeInlineItems(array.items, contextName.replace(/Response$/, '') + 'Item', componentSchemas);
+    const typed = typeInlineItems(array.items, contextName.replace(/Response$/, '') + 'Item', componentSchemas, settle);
     return {
       response: nullableIf(schema, { kind: 'array', items: typed.itemType }),
       inlineModels: [...inlineModels, ...typed.inlineModels],
@@ -838,6 +896,20 @@ function extractDirectResource(
     inlineModels,
     isPaginated: false,
   };
+}
+
+/**
+ * Whether `schema` writes an empty `properties: {}` beside an `allOf`,
+ * `oneOf` or `anyOf` that types it (`classifyInlineSchema`). Such a schema
+ * declares no field of its own, so the object branch of a body path must
+ * not claim it: the composition is read instead, as it is when the
+ * `properties` keyword is absent. Shared by the response and request-body
+ * paths.
+ */
+export function composedWithoutFields(schema: SchemaObject): boolean {
+  if (!schema.properties || Object.keys(schema.properties).length > 0) return false;
+  const kind = classifyInlineSchema(schema);
+  return kind === 'allOf' || kind === 'union';
 }
 
 /**
