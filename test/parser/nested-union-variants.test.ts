@@ -683,7 +683,7 @@ describe('a title-mapped nested union (Greptile round 1)', () => {
     expectSound(spec, everySiteComponents);
   });
 
-  it('a title that names a component is treated exactly as a field-level union treats it: the component wins, with the same warning', async () => {
+  it('a title that names a component of another shape is renamed under its holder, exactly as a field-level union’s is, and the component stands (issue #285)', async () => {
     const titledComp = obj({ kind: { const: 'c' }, c: str }, { title: 'Comp' });
     const comp = { Comp: obj({ id: str }) };
     const nested = await parse(
@@ -694,13 +694,14 @@ describe('a title-mapped nested union (Greptile round 1)', () => {
       'titled-component-flat',
       specDoc({}, { ...comp, Thing: obj({ shape: { oneOf: [titledComp, titledB] } }) }),
     );
-    expect(render(fieldType(nested.spec, 'Thing', 'shape')!)).toBe('(ThingShape | (Comp | B))');
-    expect(render(fieldType(flat.spec, 'Thing', 'shape')!)).toBe('(Comp | B)');
+    expect(render(fieldType(nested.spec, 'Thing', 'shape')!)).toBe('(ThingShape | (ThingComp | B))');
+    expect(render(fieldType(flat.spec, 'Thing', 'shape')!)).toBe('(ThingComp | B)');
     for (const { spec, warnings } of [nested, flat]) {
       expect(fieldsOf(spec, 'Comp')).toEqual(['id']);
+      expect(fieldsOf(spec, 'ThingComp')).toEqual(['kind', 'c']);
       expect(fieldsOf(spec, 'B')).toEqual(['kind', 'b']);
       expect(warnings).toEqual([
-        '[oagen] Warning: Inline model "Comp" has different fields than component schema — using component schema',
+        '[oagen] Renamed inline model "Comp" → "ThingComp": its shape differs from component schema "Comp"',
       ]);
       expectSound(spec, ['Comp', 'Thing']);
     }

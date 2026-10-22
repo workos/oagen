@@ -3109,10 +3109,12 @@ interface ResponseTypingContext {
  * Name and materialize every deferred header, secondary-body, fallback-body
  * and error-body schema, now that every primary model is known. The registry
  * holds the component models first (with the inline models their fields
- * mint), then every inline model the operations minted — request bodies,
- * primary response bodies with their nested objects and union variants,
- * envelope companions — so no deferred schema can take one of their names
- * for a different shape, whichever operation minted it; each resolved
+ * mint), each seeded with the model itself so it shares its name with every
+ * shape it admits (`ownerShares`), then every inline model the operations
+ * minted — request bodies, primary response bodies with their nested objects
+ * and union variants, envelope companions — shared on an identical shape
+ * only, so no deferred schema can take one of their names for a shape the
+ * owner does not share, whichever operation minted it; each resolved
  * schema's own models join it in turn, in document order (path order, then
  * the response keys as written; a response's headers before its error body
  * and its secondary bodies, a fallback's body before its headers), so the
@@ -3131,7 +3133,7 @@ function resolveDeferredInlineTypes(
 ): { models: Model[]; bundles: InlineModelBundle[] } {
   const registry: ModelShapeRegistry = new Map();
   for (const model of componentModels) {
-    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
   }
   for (const model of inlineModels) {
     if (registry.has(model.name)) continue;
@@ -3161,7 +3163,7 @@ function resolveDeferredInlineTypes(
  * body's model, a companion's, an earlier deferred model — takes the name and
  * mints nothing, so its reference is not among the owner's roots, and a merge
  * pass that renames the owner (a deprecated copy named like a live one,
- * `separateDeprecatedCopies`) would leave the `default` response or header on
+ * `settleSharedNames`) would leave the `default` response or header on
  * the old name, which the live copy then takes. The first site to mint a
  * name owns it, as the registry decided; the references the deferred site's
  * roots and its own models' fields make to that name are added to the
@@ -3241,9 +3243,10 @@ function attachSharedDeferredRefs(
  * within an operation each has a bare name of its own and no sibling to try.
  *
  * Both the type and the models come from the same property name, so nested
- * models (`DocumentsXMeta429Origin`) line up by construction. A shape
- * identical to the name's current owner shares it and materializes nothing
- * new, which is also how a header reuses a matching component model. A
+ * models (`DocumentsXMeta429Origin`) line up by construction. A shape the
+ * name's current owner shares — identical to an operation's model, or one a
+ * component admits (`ownerShares`) — takes the name and materializes nothing
+ * new, which is how a header reuses a component model. A
  * title-mapped union variant (`Circle`) is named from its title whatever the
  * property name, so `materializeInlineSchema` reserves every taken name and
  * such a variant falls back to its context-qualified name
@@ -4240,9 +4243,10 @@ function typeFallbackBody(
  * `schemaToTypeRef` references it by, by construction, and checked against
  * the spec-wide registry: a name a component schema, a model nested in one
  * (`GetPet.error404` owns `GetPetError404`), a header or another operation's
- * body already owns with a different shape moves the whole body to the next
- * free name (`GetPetError404Body`, `…Body2`), nested models and ref together;
- * an identical shape shares it. A titled variant that clashes (`Circle`) is
+ * body already owns with a shape it does not share moves the whole body to
+ * the next free name (`GetPetError404Body`, `…Body2`), nested models and ref
+ * together; a shape the owner shares (`ownerShares`) takes the name. A
+ * titled variant that clashes (`Circle`) is
  * reserved and qualified (`CircleGetPetError400`), as under any deferred
  * kind. A body that is itself an inline enum, or an array of one, mints no
  * model and is promoted to `spec.enums` by `collectInlineEnumsFromOperations`.

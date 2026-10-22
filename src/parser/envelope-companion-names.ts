@@ -26,9 +26,11 @@ export interface EnvelopeCompanion {
  * The same envelope recurs on every list endpoint of an API, so naming each
  * copy after its operation would mint one identical `ListMetadata` per
  * endpoint. But naming by property alone is only safe while the copies agree:
- * `mergeInlineResponseModels` keeps the largest model of a name, so a
- * `pagination` with three fields would silently replace an unrelated
- * `Pagination` component, or absorb another endpoint's two-field `pagination`.
+ * among inline models `mergeInlineResponseModels` keeps the largest model of
+ * a name, so a `pagination` with three fields would absorb another endpoint's
+ * two-field `pagination`, and one named like a `Pagination` component that
+ * does not admit it would be moved to an operation-qualified name by the
+ * merge rather than by this pass.
  *
  * So a companion takes its bare name only when that cannot change any other
  * type's shape:

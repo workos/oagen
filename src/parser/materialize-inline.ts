@@ -15,7 +15,12 @@ import { walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
-import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
+import {
+  extractInlineModelsFromProperties,
+  modelAdmits,
+  modelFingerprint,
+  qualifyInlineModelName,
+} from './inline-models.js';
 
 // The model-shape fingerprint lives beside the schema-shape key in
 // inline-models.ts, where the extractor compares models too; re-exported here
@@ -24,18 +29,37 @@ export { modelFingerprint };
 
 /**
  * Spec-wide record of every model name an inline model must not silently
- * reuse: the component models (seeded up front), each operation's primary
- * response and request body models, and each header and fallback model
- * materialized so far. The value carries the model's shape fingerprint, so a
- * model whose shape matches can share the name, and — for operation-owned
- * models — which operation produced it, so a collision inside one operation
- * can be told apart from one across operations.
+ * reuse: the component models and the models their fields mint (seeded up
+ * front, each with the model itself), each operation's primary response and
+ * request body models, and each header and fallback model materialized so
+ * far. The value carries the model's shape fingerprint, so a model whose
+ * shape the owner shares can take the name (`ownerShares`), and — for
+ * operation-owned models — which operation produced it, so a collision
+ * inside one operation can be told apart from one across operations.
  */
 export type InlineModelRegistry = Map<string, InlineModelOwner>;
 
 export interface InlineModelOwner {
   fingerprint: string;
   operation?: string;
+  /**
+   * The owner itself, for a model the document declares — a component schema
+   * or a model a component's field minted — which shares its name with every
+   * shape it admits (`modelAdmits`). Absent for an operation's model, which
+   * shares its name on an identical fingerprint only.
+   */
+  model?: Model;
+}
+
+/**
+ * Whether the owner of a name shares it with `model`, whose fingerprint is
+ * `fingerprint`: a declared model (`owner.model`) when it admits the shape —
+ * the same fields and types, the owner no stricter on requiredness or
+ * nullability, everything else identical — and an operation's model when the
+ * fingerprints agree. The one question every clash check below asks.
+ */
+export function ownerShares(owner: InlineModelOwner, model: Model, fingerprint: string): boolean {
+  return owner.model ? modelAdmits(owner.model, model) : owner.fingerprint === fingerprint;
 }
 
 /** Record every model of `models` the registry does not know yet as owned by `operation`; the first owner keeps a name. */
@@ -106,10 +130,11 @@ const MAX_RENAME_ROUNDS = 64;
  * under names the registry does not already give another shape.
  *
  * A trial extracts the schema under the current stem and compares every model
- * it minted with the registry: a name whose owner has the same shape is
- * shared (so a header or body matching a component simply references it); a
- * name whose owner has another shape clashes. On a clash the loop makes the
- * cheapest move that can still change something:
+ * it minted with the registry: a name whose owner shares it (`ownerShares`:
+ * a component or a component field's model admits the shape, an operation's
+ * model has the identical one) is shared, so a header or body a component
+ * admits simply references it; any other owned name clashes. On a clash the
+ * loop makes the cheapest move that can still change something:
  *
  *   1. reserve the clashing names — a `oneOf`/`anyOf` variant named from its
  *      own `title` or const (`Circle`) is minted from the schema, not the
@@ -243,7 +268,7 @@ function runTrial(
   const clashing = models
     .filter((model) => {
       const owner = options.registry.get(model.name);
-      return owner !== undefined && owner.fingerprint !== fingerprints.get(model);
+      return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!);
     })
     .map((model) => model.name)
     .sort();
@@ -256,8 +281,8 @@ function sameNames(a: string[], b: string[]): boolean {
 
 /**
  * Register and emit the trial's new models. A name the registry already owns
- * is shared only when the owner has the same shape — decided on the trial's
- * final fingerprints, after every rename — so a model whose references were
+ * is shared only when the owner shares it (`ownerShares`) — decided on the
+ * trial's final models, after every rename — so a model whose references were
  * rewritten is never dropped as "already defined" in favour of an owner that
  * no longer matches it. The trial has no such clash left when it gets here
  * (`runTrial` found none, or `renameClashing` cleared them all), so the
@@ -269,7 +294,7 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
   for (const model of trial.models) {
     const fingerprint = trial.fingerprints.get(model)!;
     const owner = options.registry.get(model.name);
-    if (owner?.fingerprint === fingerprint) continue;
+    if (owner && ownerShares(owner, model, fingerprint)) continue;
     if (owner !== undefined) {
       throw new Error(
         `Inline model "${model.name}" would overwrite a model of another shape; this is a bug in materializeInlineSchema.`,
@@ -302,9 +327,9 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
  *     (`ListPetsDefaultResponse2`; a header's qualified candidates), and with
  *     it every model named under it (`ListPetsDefaultResponse2Circle`), as a
  *     stem advance would have named them — except one whose name an
- *     identical definition already owns, which stays shared under that name
- *     with the moved parent still referencing it, exactly as it is shared
- *     when nothing moves.
+ *     owner that shares it already holds (`ownerShares`), which stays shared
+ *     under that name with the moved parent still referencing it, exactly as
+ *     it is shared when nothing moves.
  *
  * Every new name is one nothing owns and nothing in the trial uses, so a
  * renamed model can never clash again, a shared model never changes and so
@@ -380,15 +405,17 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, stemAt:
       if (movedRoot === undefined) movedRoot = claim((n) => `${oldRoot}${n + 1}`);
       taken.add(movedRoot);
       // Decided per model, by shape: a model named under the root whose name
-      // an identical definition already owns (a component, an earlier
-      // operation's model) stays shared under that name, exactly as it would
-      // had the root not moved, and the moved parent keeps referencing it.
-      // The root itself, and every other model named under it, moves.
+      // an owner that shares it already holds (a component that admits it,
+      // an earlier operation's identical model) stays shared under that
+      // name, exactly as it would had the root not moved, and the moved
+      // parent keeps referencing it. The root itself, and every other model
+      // named under it, moves.
       const moving = trial.models
         .filter((model) => {
           if (model.name === oldRoot) return true;
           if (!model.name.startsWith(oldRoot)) return false;
-          return registry.get(model.name)?.fingerprint !== fingerprints.get(model);
+          const owner = registry.get(model.name);
+          return owner === undefined || !ownerShares(owner, model, fingerprints.get(model)!);
         })
         .map((model) => model.name);
       for (const name of moving) {
@@ -410,7 +437,7 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, stemAt:
     clashing = trial.models
       .filter((model) => {
         const owner = registry.get(model.name);
-        return owner !== undefined && owner.fingerprint !== fingerprints.get(model);
+        return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!);
       })
       .map((model) => model.name)
       .sort();

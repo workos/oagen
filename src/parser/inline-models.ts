@@ -328,15 +328,71 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description',
  */
 export function modelFingerprint(model: Model): string {
   const fields = model.fields
-    .map(
-      (field) =>
-        `${field.name}:${stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) })}`,
-    )
+    .map((field) => `${field.name}:${fieldShapeKey(field)}`)
     .sort()
     .join('|');
+  return `${fields}#${modelShapeKey(model)}`;
+}
+
+/** A field's shape as `modelFingerprint` reads it: everything but its documentation, the type through `shapeWithEnumFlags`. */
+function fieldShapeKey(field: Field): string {
+  return stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) });
+}
+
+/** A model's shape beside its fields: its limits, type parameters, `deprecated`, variants (through `shapeWithEnumFlags`) and dispatch rules. */
+function modelShapeKey(model: Model): string {
   const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
   if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
-  return `${fields}#${stableStringify(rest)}`;
+  return stableStringify(rest);
+}
+
+/** Field properties `modelAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
+const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required']);
+
+/**
+ * Whether `owner` admits `candidate`: every value `candidate` describes is
+ * one `owner` describes too, so a reference typed as `owner` in place of
+ * `candidate` loses strictness and nothing else. The two have the same field
+ * names, and each field agrees with its namesake in everything
+ * `modelFingerprint` reads — type, limits, default, access flags, its own
+ * `deprecated` — except that `owner` may be looser where `candidate` is
+ * strict, never the other way round: a field `candidate` requires may be
+ * optional on `owner`, and a field type `candidate` leaves non-null may be
+ * `nullable<…>` on `owner`. Only the field type's own nullable wrapper is
+ * read that way; a wrapper deeper down (an array's items) must agree. The
+ * models' own limits, type parameters, variants, dispatch rules and
+ * `deprecated` must agree, and a model reference is compared by name: a
+ * nested inline model keeps its name, so a parent whose child was renamed is
+ * not admitted by one whose child was not. An identical shape is admitted.
+ *
+ * The one rule by which an inline model folds onto a model the document
+ * declares — a component schema, or a model a component's field minted — in
+ * the merge passes (`settleSharedNames`) and in the shape registry of
+ * `materializeInlineSchema` (`ownerShares`); two inline models share a name
+ * on an identical fingerprint only. The list-envelope pass compares its
+ * companions by a structural rule of its own, since a companion's nested
+ * models are named per operation.
+ */
+export function modelAdmits(owner: Model, candidate: Model): boolean {
+  if (owner.fields.length !== candidate.fields.length) return false;
+  const ownerFields = new Map(owner.fields.map((field) => [field.name, field]));
+  for (const field of candidate.fields) {
+    const own = ownerFields.get(field.name);
+    if (!own) return false;
+    if (own.required && !field.required) return false;
+    if (!fieldTypeAdmits(own.type, field.type)) return false;
+    if (stableStringify(omitKeys(own, FIELD_ADMIT_KEYS)) !== stableStringify(omitKeys(field, FIELD_ADMIT_KEYS))) {
+      return false;
+    }
+  }
+  return modelShapeKey(owner) === modelShapeKey(candidate);
+}
+
+/** Whether `owner` admits every value of `candidate`'s type: the same type under the field's own nullable wrapper, which `owner` may carry where `candidate` does not. */
+function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef): boolean {
+  if (candidate.kind === 'nullable' && owner.kind !== 'nullable') return false;
+  const inner = (ref: TypeRef): TypeRef => (ref.kind === 'nullable' ? ref.inner : ref);
+  return stableStringify(shapeWithEnumFlags(inner(owner))) === stableStringify(shapeWithEnumFlags(inner(candidate)));
 }
 
 /** The entries of `value` whose key is not in `keys` and whose value is set. */
@@ -875,9 +931,10 @@ function* inlineProperties(schema: SchemaObject): Generator<[string, SchemaObjec
 
 /**
  * Where a group of inline models came from, so a copy that must give up a
- * name it shares with a differently flagged model can be renamed and exactly
- * its own references repointed (see `separateDeprecatedCopies` in the merge
- * passes). `qualifier` is prefixed to the new name — the PascalCase operation
+ * name it shares with a differently flagged or differently shaped model can
+ * be renamed and exactly its own references repointed (see
+ * `settleSharedNames` in the merge passes). `qualifier` is prefixed to the
+ * new name — the PascalCase operation
  * name for an operation's models, as a list-envelope companion or header
  * model is qualified, the component name for a component field's; `roots`
  * are the type references the site owns — an operation's response, its
