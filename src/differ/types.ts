@@ -1,4 +1,4 @@
-import type { SecurityRequirementSet } from '../ir/types.js';
+import type { Operation, SecurityRequirementSet } from '../ir/types.js';
 
 export interface DiffReport {
   oldVersion: string;
@@ -257,6 +257,9 @@ export interface OperationRemoved {
   classification: 'breaking';
 }
 
+/** The wire encodings a request body or webhook payload is serialized as: `Operation.requestBodyEncoding`'s values. */
+export type RequestBodyEncoding = NonNullable<Operation['requestBodyEncoding']>;
+
 export interface OperationModified {
   kind: 'operation-modified';
   serviceName: string;
@@ -274,6 +277,26 @@ export interface OperationModified {
    * is breaking (callers must now send a body); required → optional is additive.
    */
   requestBodyRequiredChanged: boolean;
+  /**
+   * The body stayed but its `requestBodyEncoding` differs: the wire format
+   * the SDK serializes it as (`json`, `form-data`, `form-urlencoded`,
+   * `binary` or `text`), read from the media type the body is declared
+   * under. Always breaking: an SDK built for the old spec keeps serializing
+   * and labelling the body as that spec said (`application/json` where the
+   * server now reads `application/x-www-form-urlencoded`). Compared only
+   * while both specs carry a body, as `requestBodyRequiredChanged` is; a
+   * body appearing or disappearing takes its encoding with it and is
+   * `requestBodyChanged` alone.
+   */
+  requestBodyEncodingChanged: boolean;
+  /**
+   * Set exactly when `requestBodyEncodingChanged`: the encoding on each
+   * side, old → new. A side is `undefined` when that spec's body carries no
+   * encoding, which the parser never produces (it sets one beside every
+   * body) but a hand-built IR may.
+   */
+  oldRequestBodyEncoding?: RequestBodyEncoding;
+  newRequestBodyEncoding?: RequestBodyEncoding;
   httpMethodChanged: boolean;
   pathChanged: boolean;
   paginatedChanged: boolean;
@@ -441,6 +464,14 @@ export interface WebhookModified {
   paramChanges: ParamChange[];
   /** True when the payload's type, encoding, or `requestBodyRequired` changed; `details` says which. */
   requestBodyChanged: boolean;
+  /**
+   * Set exactly when the payload's encoding changed (`details` reads
+   * `encoding json → form-urlencoded`): the encoding on each side, old →
+   * new, as an `operation-modified` change carries them. Breaking: the
+   * handler decodes a different wire format.
+   */
+  oldRequestBodyEncoding?: RequestBodyEncoding;
+  newRequestBodyEncoding?: RequestBodyEncoding;
   /** True when the set of status codes the sender accepts changed; `details` says which (a code removed is breaking). */
   responsesChanged: boolean;
   /**
