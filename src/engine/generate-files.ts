@@ -3,6 +3,7 @@ import {
   walkTypeRef,
   collectResponseHeaders,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
 } from '../ir/types.js';
@@ -153,6 +154,7 @@ export function collectReferencedNames(
         collectFromTypeRef(p.type);
       }
       if (op.requestBody) collectFromTypeRef(op.requestBody);
+      for (const { type } of collectRequestBodyTypes(op)) collectFromTypeRef(type);
       collectFromTypeRef(op.response);
       if (op.pagination) {
         collectFromTypeRef(op.pagination.itemType);
