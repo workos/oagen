@@ -72,7 +72,15 @@ export type DeprecatedNode =
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
   | { node: 'enum'; enumName: string }
-  | { node: 'enum-value'; enumName: string; valueName: string };
+  | { node: 'enum-value'; enumName: string; valueName: string }
+  | { node: 'webhook'; name: string; httpMethod: string }
+  | {
+      node: 'webhook-parameter';
+      name: string;
+      httpMethod: string;
+      paramName: string;
+      paramLocation: 'path' | 'query' | 'header' | 'cookie';
+    };
 
 export type Change =
   | ModelAdded
@@ -295,7 +303,9 @@ export interface WebhookRemoved {
  * body that may now be absent breaks a handler that assumed one, and
  * parameter changes are classified the way a response's would be (see
  * `diffWebhookParams`). Every `ParamChange` carries its `paramLocation`,
- * since a header and a query parameter may share a name.
+ * since a header and a query parameter may share a name. A parameter's
+ * `deprecated` flipping is a `param-deprecated-changed` entry there, as on
+ * an operation.
  */
 export interface WebhookModified {
   kind: 'webhook-modified';
@@ -306,6 +316,15 @@ export interface WebhookModified {
   requestBodyChanged: boolean;
   /** True when the set of status codes the sender accepts changed; `details` says which (a code removed is breaking). */
   responsesChanged: boolean;
+  /**
+   * The webhook's own `deprecated` flipped. Additive either way: the handler's
+   * signature is unchanged. A webhook whose only change is this flag is still
+   * reported, with an empty `paramChanges`.
+   */
+  deprecatedChanged: boolean;
+  /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
   /** What changed about the body or the accepted responses, e.g. `payload type changed; accepted response 200 removed`. */
   details?: string;
   classification: 'additive' | 'breaking';
@@ -336,7 +355,7 @@ export interface ParamChange {
   newDeprecated?: boolean;
   /**
    * Where the parameter lives. Set on every entry `diffOperations` produces
-   * and on every change of a webhook parameter (whose header, query and
+   * and on every entry `diffWebhooks` produces (a webhook's header, query and
    * cookie parameters may share a name).
    */
   paramLocation?: 'path' | 'query' | 'header' | 'cookie';

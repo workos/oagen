@@ -1,10 +1,11 @@
 /**
  * Issue #256: `diffSpecs` reports every IR node whose `deprecated` flag flips.
  *
- * Operation, parameter, model, field, enum and enum value each carry the flag.
- * A flip is reported on the owning `-modified` change (a flat `deprecatedChanged`
- * on the operation, model or enum; a `*-deprecated-changed` entry for a
- * parameter, field or enum value), carries `oldDeprecated`/`newDeprecated`
+ * Operation, parameter, model, field, enum, enum value, webhook and webhook
+ * parameter each carry the flag. A flip is reported on the owning `-modified`
+ * change (a flat `deprecatedChanged` on the operation, model, enum or webhook;
+ * a `*-deprecated-changed` entry for a parameter, field or enum value), carries
+ * `oldDeprecated`/`newDeprecated`
  * beside it, is additive in either direction, is still reported when it is the
  * only change, and is mirrored into `behaviorChanges`. Only `true` is
  * deprecated: `false` and an absent key are the same thing.
@@ -16,9 +17,10 @@ import * as path from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffModels } from '../../src/differ/models.js';
 import { diffOperations } from '../../src/differ/operations.js';
+import { diffWebhooks } from '../../src/differ/webhooks.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
-import type { ApiSpec, Enum, Model, Operation, Parameter } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Model, Operation, Parameter, Webhook } from '../../src/ir/types.js';
 
 const fixtures = path.resolve(import.meta.dirname, '../fixtures');
 
@@ -79,6 +81,30 @@ function withSoldFlag(deprecated: boolean | undefined): Enum {
 }
 
 const deprecatedOp: Operation = { ...getPet, deprecated: true };
+
+/** A webhook with a parameter in each location it can carry one, delivering `Pet`. */
+const petAdopted: Webhook = {
+  name: 'petAdopted',
+  httpMethod: 'post',
+  headerParams: [{ name: 'X-Signature', type: { kind: 'primitive', type: 'string' }, required: true }],
+  queryParams: [{ name: 'attempt', type: { kind: 'primitive', type: 'integer' }, required: false }],
+  cookieParams: [{ name: 'session', type: { kind: 'primitive', type: 'string' }, required: false }],
+  requestBody: { kind: 'model', name: 'Pet' },
+  responses: [{ statusCode: 200 }],
+};
+
+const deprecatedHook: Webhook = { ...petAdopted, deprecated: true };
+
+/** `petAdopted` with the named parameter carrying `deprecated` as given, wherever it is declared. */
+function withWebhookParamFlag(name: string, deprecated: boolean | undefined): Webhook {
+  const flag = (params: Parameter[]) => params.map((p) => (p.name === name ? { ...p, deprecated } : p));
+  return {
+    ...petAdopted,
+    headerParams: flag(petAdopted.headerParams),
+    queryParams: flag(petAdopted.queryParams),
+    cookieParams: flag(petAdopted.cookieParams ?? []),
+  };
+}
 
 /** The two sides of a flip, as every change that reports one carries them. */
 const became = { oldDeprecated: false, newDeprecated: true };
@@ -567,6 +593,283 @@ describe('diffSpecs – deprecated behaviorChanges and summary (issue #256)', ()
   });
 });
 
+describe('diffWebhooks – deprecated (Greptile round 2)', () => {
+  it('reports a webhook becoming deprecated as its only change, additive, with both sides of the flip', () => {
+    expect(diffWebhooks([petAdopted], [deprecatedHook])).toEqual([
+      {
+        kind: 'webhook-modified',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramChanges: [],
+        requestBodyChanged: false,
+        responsesChanged: false,
+        deprecatedChanged: true,
+        ...became,
+        classification: 'additive',
+      },
+    ]);
+  });
+
+  it('reports a webhook no longer being deprecated, additive', () => {
+    expect(diffWebhooks([deprecatedHook], [petAdopted])).toMatchObject([
+      { kind: 'webhook-modified', deprecatedChanged: true, ...ceased, classification: 'additive' },
+    ]);
+  });
+
+  it('carries no oldDeprecated/newDeprecated on a webhook change whose flag did not flip', () => {
+    const widened: Webhook = { ...petAdopted, responses: [{ statusCode: 200 }, { statusCode: 202 }] };
+    const changes = diffWebhooks([petAdopted], [widened]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'webhook-modified', responsesChanged: true, deprecatedChanged: false });
+    expect(changes[0]).not.toHaveProperty('oldDeprecated');
+    expect(changes[0]).not.toHaveProperty('newDeprecated');
+  });
+
+  it('treats an explicit false on a webhook as not deprecated', () => {
+    expect(diffWebhooks([{ ...petAdopted, deprecated: false }], [deprecatedHook])).toMatchObject([
+      { deprecatedChanged: true, ...became },
+    ]);
+    expect(diffWebhooks([petAdopted], [{ ...petAdopted, deprecated: false }])).toHaveLength(0);
+    expect(diffWebhooks([{ ...petAdopted, deprecated: false }], [petAdopted])).toHaveLength(0);
+    expect(diffWebhooks([deprecatedHook], [deprecatedHook])).toHaveLength(0);
+  });
+
+  it('reports a header parameter becoming deprecated as a param-deprecated-changed entry with its location', () => {
+    expect(diffWebhooks([petAdopted], [withWebhookParamFlag('X-Signature', true)])).toEqual([
+      {
+        kind: 'webhook-modified',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramChanges: [
+          {
+            kind: 'param-deprecated-changed',
+            paramName: 'X-Signature',
+            classification: 'additive',
+            paramLocation: 'header',
+            ...became,
+            details: 'live → deprecated',
+          },
+        ],
+        requestBodyChanged: false,
+        responsesChanged: false,
+        deprecatedChanged: false,
+        classification: 'additive',
+      },
+    ]);
+  });
+
+  it('reports query and cookie parameters with their own locations', () => {
+    const modified: Webhook = {
+      ...petAdopted,
+      queryParams: petAdopted.queryParams.map((p) => ({ ...p, deprecated: true })),
+      cookieParams: (petAdopted.cookieParams ?? []).map((p) => ({ ...p, deprecated: true })),
+    };
+    const changes = diffWebhooks([petAdopted], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'webhook-modified',
+      deprecatedChanged: false,
+      classification: 'additive',
+    });
+    if (changes[0].kind === 'webhook-modified') {
+      expect(changes[0].paramChanges).toEqual([
+        {
+          kind: 'param-deprecated-changed',
+          paramName: 'attempt',
+          classification: 'additive',
+          paramLocation: 'query',
+          ...became,
+          details: 'live → deprecated',
+        },
+        {
+          kind: 'param-deprecated-changed',
+          paramName: 'session',
+          classification: 'additive',
+          paramLocation: 'cookie',
+          ...became,
+          details: 'live → deprecated',
+        },
+      ]);
+    }
+  });
+
+  it('reports a parameter no longer being deprecated with the direction in details', () => {
+    expect(diffWebhooks([withWebhookParamFlag('X-Signature', true)], [petAdopted])).toMatchObject([
+      {
+        deprecatedChanged: false,
+        paramChanges: [
+          {
+            kind: 'param-deprecated-changed',
+            paramName: 'X-Signature',
+            paramLocation: 'header',
+            ...ceased,
+            details: 'deprecated → live',
+          },
+        ],
+        classification: 'additive',
+      },
+    ]);
+  });
+
+  it('treats a parameter flag of false as not deprecated', () => {
+    const off = withWebhookParamFlag('attempt', false);
+    const on = withWebhookParamFlag('attempt', true);
+    expect(diffWebhooks([off], [on])).toMatchObject([
+      { paramChanges: [{ kind: 'param-deprecated-changed', paramName: 'attempt', paramLocation: 'query' }] },
+    ]);
+    expect(diffWebhooks([petAdopted], [off])).toHaveLength(0);
+    expect(diffWebhooks([off], [petAdopted])).toHaveLength(0);
+  });
+
+  it('keeps the change breaking when the payload type changes alongside the flag', () => {
+    const retyped: Webhook = { ...deprecatedHook, requestBody: { kind: 'model', name: 'Adoption' } };
+    expect(diffWebhooks([petAdopted], [retyped])).toMatchObject([
+      {
+        kind: 'webhook-modified',
+        requestBodyChanged: true,
+        details: 'payload type changed',
+        deprecatedChanged: true,
+        ...became,
+        classification: 'breaking',
+      },
+    ]);
+  });
+
+  it('keeps the change breaking when a parameter is removed alongside a parameter flag', () => {
+    const modified: Webhook = { ...withWebhookParamFlag('attempt', true), headerParams: [] };
+    const changes = diffWebhooks([petAdopted], [modified]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ classification: 'breaking', deprecatedChanged: false });
+    if (changes[0].kind === 'webhook-modified') {
+      expect(changes[0].paramChanges).toMatchObject([
+        { kind: 'param-removed', paramName: 'X-Signature', paramLocation: 'header', classification: 'breaking' },
+        { kind: 'param-deprecated-changed', paramName: 'attempt', paramLocation: 'query', classification: 'additive' },
+      ]);
+    }
+  });
+});
+
+describe('diffSpecs – webhook deprecated behaviorChanges and summary (Greptile round 2)', () => {
+  const webhooksOnly = (webhooks: Webhook[]): ApiSpec => ({ ...v1, enums: [], services: [], webhooks });
+  /** The webhook and its header flipped at once. */
+  const bothDeprecated: Webhook = { ...withWebhookParamFlag('X-Signature', true), deprecated: true };
+
+  it('mirrors a webhook flip and a parameter flip as webhook and webhook-parameter nodes', () => {
+    const diff = diffSpecs(webhooksOnly([petAdopted]), webhooksOnly([bothDeprecated]));
+    expect(diff.changes).toMatchObject([
+      { kind: 'webhook-modified', deprecatedChanged: true, ...became, classification: 'additive' },
+    ]);
+    expect(diff.behaviorChanges).toEqual([
+      {
+        kind: 'deprecated-changed',
+        node: 'webhook',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        ...became,
+        classification: 'additive',
+      },
+      {
+        kind: 'deprecated-changed',
+        node: 'webhook-parameter',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramName: 'X-Signature',
+        paramLocation: 'header',
+        ...became,
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 2 });
+  });
+
+  it('reports the reverse direction with oldDeprecated true', () => {
+    const diff = diffSpecs(webhooksOnly([bothDeprecated]), webhooksOnly([petAdopted]));
+    expect(diff.changes.map((c) => c.classification)).toEqual(['additive']);
+    expect(diff.behaviorChanges.map((b) => (b.kind === 'deprecated-changed' ? b.node : b.kind))).toEqual([
+      'webhook',
+      'webhook-parameter',
+    ]);
+    for (const b of diff.behaviorChanges) {
+      expect(b).toMatchObject({ kind: 'deprecated-changed', ...ceased, classification: 'additive' });
+    }
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 2 });
+  });
+
+  it('counts a flag flip beside a breaking webhook change once, as one breaking modified change', () => {
+    const narrowed: Webhook = { ...deprecatedHook, responses: [{ statusCode: 202 }] };
+    const diff = diffSpecs(webhooksOnly([petAdopted]), webhooksOnly([narrowed]));
+    expect(diff.changes).toMatchObject([
+      { kind: 'webhook-modified', responsesChanged: true, deprecatedChanged: true, classification: 'breaking' },
+    ]);
+    expect(diff.behaviorChanges).toMatchObject([{ kind: 'deprecated-changed', node: 'webhook', newDeprecated: true }]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 1, additive: 0, behaviorChanges: 1 });
+  });
+
+  it('mirrors a webhook parameter flip but still not its default change, which is not an SDK-method concern', () => {
+    const [attempt] = petAdopted.queryParams;
+    const diff = diffSpecs(
+      webhooksOnly([{ ...petAdopted, queryParams: [{ ...attempt, default: 1 }] }]),
+      webhooksOnly([{ ...petAdopted, queryParams: [{ ...attempt, default: 2, deprecated: true }] }]),
+    );
+    expect(diff.changes).toMatchObject([
+      {
+        kind: 'webhook-modified',
+        paramChanges: [{ kind: 'param-default-changed' }, { kind: 'param-deprecated-changed' }],
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.behaviorChanges).toEqual([
+      {
+        kind: 'deprecated-changed',
+        node: 'webhook-parameter',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramName: 'attempt',
+        paramLocation: 'query',
+        ...became,
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.summary.behaviorChanges).toBe(1);
+  });
+
+  it('lists webhook nodes after every other kind when all flip at once', () => {
+    const before: ApiSpec = { ...v1, webhooks: [petAdopted] };
+    const after: ApiSpec = {
+      ...v1,
+      models: [{ ...withStatusFlag(true), deprecated: true }],
+      enums: [{ ...withSoldFlag(true), deprecated: true }],
+      services: [{ name: 'Pets', operations: [{ ...deprecatedOp, queryParams: [{ ...verbose, deprecated: true }] }] }],
+      webhooks: [bothDeprecated],
+    };
+    const diff = diffSpecs(before, after);
+    expect(diff.changes.map((c) => c.kind)).toEqual([
+      'model-modified',
+      'enum-modified',
+      'operation-modified',
+      'webhook-modified',
+    ]);
+    expect(diff.behaviorChanges.map((b) => (b.kind === 'deprecated-changed' ? b.node : b.kind))).toEqual([
+      'model',
+      'field',
+      'enum',
+      'enum-value',
+      'operation',
+      'parameter',
+      'webhook',
+      'webhook-parameter',
+    ]);
+    expect(diff.behaviorChanges.every((b) => b.classification === 'additive')).toBe(true);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 4, breaking: 0, additive: 4, behaviorChanges: 8 });
+  });
+
+  it('reports nothing for a webhook spec diffed against itself', () => {
+    const diff = diffSpecs(webhooksOnly([bothDeprecated]), webhooksOnly([bothDeprecated]));
+    expect(diff.changes).toEqual([]);
+    expect(diff.behaviorChanges).toEqual([]);
+  });
+});
+
 describe('diffSpecs – end to end (issue #256 repro)', () => {
   const dirs: string[] = [];
   afterAll(async () => {
@@ -702,5 +1005,101 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
       },
     ]);
     expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+  });
+
+  it('reports a webhook and its header the document deprecates, as webhook and webhook-parameter nodes', async () => {
+    const before = {
+      openapi: '3.1.0',
+      info: { title: 'Webhooks', version: '1' },
+      paths: {},
+      webhooks: {
+        petAdopted: {
+          post: {
+            operationId: 'petAdopted',
+            parameters: [
+              { name: 'X-Signature', in: 'header', required: true, schema: { type: 'string' } },
+              { name: 'attempt', in: 'query', schema: { type: 'integer' } },
+            ],
+            requestBody: {
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/AdoptionEvent' } } },
+            },
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+      components: { schemas: { AdoptionEvent: { type: 'object', properties: { petId: { type: 'string' } } } } },
+    };
+    const after = structuredClone(before) as typeof before & {
+      webhooks: { petAdopted: { post: { deprecated?: boolean; parameters: Array<{ deprecated?: boolean }> } } };
+    };
+    after.webhooks.petAdopted.post.deprecated = true;
+    after.webhooks.petAdopted.post.parameters[0].deprecated = true;
+    const beforeFile = await writeSpec('webhook-before.json', before);
+    const afterFile = await writeSpec('webhook-after.json', after);
+
+    const diff = diffSpecs(await parseSpec(beforeFile), await parseSpec(afterFile));
+    expect(diff.changes).toEqual([
+      {
+        kind: 'webhook-modified',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramChanges: [
+          {
+            kind: 'param-deprecated-changed',
+            paramName: 'X-Signature',
+            classification: 'additive',
+            paramLocation: 'header',
+            ...became,
+            details: 'live → deprecated',
+          },
+        ],
+        requestBodyChanged: false,
+        responsesChanged: false,
+        deprecatedChanged: true,
+        ...became,
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.behaviorChanges).toEqual([
+      {
+        kind: 'deprecated-changed',
+        node: 'webhook',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        ...became,
+        classification: 'additive',
+      },
+      {
+        kind: 'deprecated-changed',
+        node: 'webhook-parameter',
+        name: 'petAdopted',
+        httpMethod: 'post',
+        paramName: 'X-Signature',
+        paramLocation: 'header',
+        ...became,
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 2 });
+
+    const swapped = diffSpecs(await parseSpec(afterFile), await parseSpec(beforeFile));
+    expect(swapped.changes).toMatchObject([
+      {
+        kind: 'webhook-modified',
+        deprecatedChanged: true,
+        ...ceased,
+        paramChanges: [{ kind: 'param-deprecated-changed', ...ceased, details: 'deprecated → live' }],
+        classification: 'additive',
+      },
+    ]);
+    expect(swapped.behaviorChanges.map((b) => (b.kind === 'deprecated-changed' ? b.node : b.kind))).toEqual([
+      'webhook',
+      'webhook-parameter',
+    ]);
+    expect(swapped.summary.breaking).toBe(0);
+
+    const same = diffSpecs(await parseSpec(afterFile), await parseSpec(afterFile));
+    expect(same.changes).toEqual([]);
+    expect(same.behaviorChanges).toEqual([]);
   });
 });

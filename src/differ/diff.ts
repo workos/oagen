@@ -74,6 +74,28 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
       continue;
     }
 
+    if (c.kind === 'webhook-modified') {
+      // Only the flag is mirrored: a webhook parameter's default is the
+      // sender's concern, not an SDK-method behavior (see `diffWebhookParams`).
+      if (c.deprecatedChanged) out.push(flipped({ node: 'webhook', name: c.name, httpMethod: c.httpMethod }, c));
+      for (const pc of c.paramChanges) {
+        if (pc.kind !== 'param-deprecated-changed') continue;
+        out.push(
+          flipped(
+            {
+              node: 'webhook-parameter',
+              name: c.name,
+              httpMethod: c.httpMethod,
+              paramName: pc.paramName,
+              paramLocation: pc.paramLocation ?? 'header',
+            },
+            pc,
+          ),
+        );
+      }
+      continue;
+    }
+
     if (c.kind !== 'operation-modified') continue;
     if (c.deprecatedChanged) {
       out.push(flipped({ node: 'operation', serviceName: c.serviceName, operationName: c.operationName }, c));
