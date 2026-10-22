@@ -29,6 +29,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
+import { mediaTypeEssence } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -1700,7 +1701,10 @@ function extractBodyParameterGroups(
   // Collect the body schema's oneOf variant fields so we can resolve types.
   // The body schema has been structurally rewritten to allOf: [base, { oneOf: [...] }]
   // by the spec generator; the variant properties live inside oneOf branches.
-  const bodySchema = requestBody?.content?.['application/json']?.schema;
+  // Read from the same pick `requestBody` is typed from, so a body under
+  // `application/json; charset=utf-8` or a `+json` media type resolves its
+  // members like one under plain `application/json`.
+  const bodySchema = selectRequestBodyContent(requestBody)?.schema;
   const variantFieldSchemas = collectVariantFieldSchemas(bodySchema, componentSchemas);
 
   const groups: ParameterGroup[] = [];
@@ -1838,7 +1842,7 @@ function buildOperation(
   const groupedQueryNames = collectParameterGroupMemberNames(op);
   const bodyOwnedNames = new Set<string>();
   if (BODY_CARRYING_METHODS.has(method)) {
-    const bodySchema = selectRequestBodyContent(requestBodyObject).schema;
+    const bodySchema = selectRequestBodyContent(requestBodyObject)?.schema;
     for (const name of collectBodyPropertyNames(bodySchema, componentSchemas)) {
       if (!groupedQueryNames.has(name)) bodyOwnedNames.add(name);
     }
@@ -1882,6 +1886,7 @@ function buildOperation(
     pathModelBaseName,
     reqBodyModels,
     componentSchemas,
+    opLabel,
   );
   // Read off the resolved body so a `components/requestBodies` ref's flag
   // counts. Only `true` makes the body required: OpenAPI defaults the flag
@@ -2418,32 +2423,99 @@ export type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'bi
 const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['post', 'put', 'patch']);
 
 /**
- * Pick the request body's schema and wire encoding from its content map, in
- * priority order. JSON wins over form encodings; binary and text bodies may
- * legitimately carry no schema at all.
+ * The media types a request body is read from, in the order the pick tries
+ * them (`selectRequestBodyContent`). Each is matched by essence — `type/subtype`
+ * with parameters stripped and case folded (`mediaTypeEssence`), so
+ * `application/json; charset=utf-8`, `APPLICATION/JSON` and
+ * `multipart/form-data; boundary=x` read as their bare types — and a `+json`
+ * media type (`application/vnd.api+json`, `application/merge-patch+json`) is
+ * JSON. A JSON or form body is read only when it declares a schema, so an
+ * `application/json` entry without one yields to a later media type that has
+ * one; a binary or text body may legitimately declare none.
  */
-export function selectRequestBodyContent(body: RequestBodyObject | undefined): {
+const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
+  matches: (essence: string) => boolean;
   encoding: RequestBodyEncoding;
+  schemaRequired: boolean;
+}> = [
+  { matches: (essence) => essence === 'application/json', encoding: 'json', schemaRequired: true },
+  { matches: (essence) => essence.endsWith('+json'), encoding: 'json', schemaRequired: true },
+  { matches: (essence) => essence === 'multipart/form-data', encoding: 'form-data', schemaRequired: true },
+  {
+    matches: (essence) => essence === 'application/x-www-form-urlencoded',
+    encoding: 'form-urlencoded',
+    schemaRequired: true,
+  },
+  { matches: (essence) => essence === 'application/octet-stream', encoding: 'binary', schemaRequired: false },
+  { matches: (essence) => essence === 'text/plain', encoding: 'text', schemaRequired: false },
+];
+
+/** The content entry a request body is read from: the key as written, its wire encoding and its schema. */
+export interface SelectedRequestBodyContent {
+  /** The `content` key the body was read from, exactly as written (`application/json; charset=utf-8`). */
+  contentType: string;
+  encoding: RequestBodyEncoding;
+  /** Absent only for a binary or text body that declares none. */
   schema?: SchemaObject;
-} {
+}
+
+/**
+ * Pick the content entry a request body is read from, by media type essence
+ * in the fixed order of `REQUEST_BODY_MEDIA_TYPES`: `application/json`, then
+ * a `+json` media type, then `multipart/form-data`, then
+ * `application/x-www-form-urlencoded` — each only with a schema — then
+ * `application/octet-stream`, then `text/plain`. Within one tier the first
+ * matching key in document order wins. `undefined` when the body declares no
+ * content, or none of its media types is read; `warnDroppedRequestBody`
+ * reports the latter. Every pass that asks what the body is — the body
+ * extractor, the body-owned query names, the const prefixes, the body
+ * parameter groups, a webhook payload — reads it through this one pick.
+ */
+export function selectRequestBodyContent(body: RequestBodyObject | undefined): SelectedRequestBodyContent | undefined {
   const content = body?.content;
-  if (!content) return { encoding: 'json' };
-  if (content['application/json']?.schema) {
-    return { encoding: 'json', schema: content['application/json'].schema };
+  if (!content) return undefined;
+  const entries = Object.entries(content);
+  for (const { matches, encoding, schemaRequired } of REQUEST_BODY_MEDIA_TYPES) {
+    const match = entries.find(
+      ([contentType, media]) => matches(mediaTypeEssence(contentType)) && (!schemaRequired || media?.schema),
+    );
+    if (match) return { contentType: match[0], encoding, schema: match[1]?.schema };
   }
-  if (content['multipart/form-data']?.schema) {
-    return { encoding: 'form-data', schema: content['multipart/form-data'].schema };
-  }
-  if (content['application/x-www-form-urlencoded']?.schema) {
-    return { encoding: 'form-urlencoded', schema: content['application/x-www-form-urlencoded'].schema };
-  }
-  if (content['application/octet-stream']) {
-    return { encoding: 'binary', schema: content['application/octet-stream'].schema };
-  }
-  if (content['text/plain']) {
-    return { encoding: 'text', schema: content['text/plain'].schema };
-  }
-  return { encoding: 'json' };
+  return undefined;
+}
+
+/**
+ * Warn that a request body is dropped: it declares at least one media type
+ * and `selectRequestBodyContent` reads none, so no `requestBody` is set.
+ * Called once per operation (`extractRequestBody`) and once per webhook
+ * (where its entry is built: a webhook is minted twice, so the mint itself
+ * must not report), while the passes that re-read the pick for an operation
+ * (the body-owned query names, the const prefixes, the body parameter
+ * groups) stay silent — so a dropped body is reported once, and never
+ * silently. A body with no `content`, or an empty map, declares nothing and
+ * is not reported.
+ */
+export function warnDroppedRequestBody(body: RequestBodyObject | undefined, label: string): void {
+  const declared = Object.keys(body?.content ?? {});
+  if (declared.length === 0 || selectRequestBodyContent(body)) return;
+  console.warn(
+    `[oagen] Warning: Request body of ${label} is dropped: none of its media types (${declared.join(', ')}) ` +
+      `is read. A body is read from application/json or a +json media type, multipart/form-data or ` +
+      `application/x-www-form-urlencoded when it declares a schema, and from application/octet-stream or ` +
+      `text/plain with or without one, parameters and case aside.`,
+  );
+}
+
+/**
+ * The type of a picked request body that declares no schema: a binary body is
+ * a binary string, a text body a string. A JSON or form body is picked only
+ * with a schema (`REQUEST_BODY_MEDIA_TYPES`), so for those encodings this is
+ * never reached and returns `undefined`.
+ */
+export function schemalessRequestBodyType(encoding: RequestBodyEncoding): TypeRef | undefined {
+  if (encoding === 'binary') return { kind: 'primitive', type: 'string', format: 'binary' };
+  if (encoding === 'text') return { kind: 'primitive', type: 'string' };
+  return undefined;
 }
 
 /** Parameter names referenced by any `x-mutually-exclusive-parameter-groups` variant. */
@@ -2512,23 +2584,22 @@ function extractRequestBody(
   op: OperationObject | undefined,
   pathModelBaseName: string,
   inlineModels: Model[],
-  componentSchemas?: Record<string, SchemaObject>,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  opLabel: string,
 ): { body?: TypeRef; encoding?: RequestBodyEncoding } {
-  if (!body?.content) return {};
-
   const selected = selectRequestBodyContent(body);
-  const encoding = selected.encoding;
+  if (!selected) {
+    // No content, or no media type the parser reads: no body, reported once.
+    warnDroppedRequestBody(body, opLabel);
+    return {};
+  }
+  const { encoding } = selected;
   let schema = selected.schema;
 
   if (!schema) {
-    // For binary/text, a schema is optional — produce a primitive TypeRef
-    if (encoding === 'binary') {
-      return { body: { kind: 'primitive', type: 'string', format: 'binary' }, encoding };
-    }
-    if (encoding === 'text') {
-      return { body: { kind: 'primitive', type: 'string' }, encoding };
-    }
-    return {};
+    // Only a binary or text pick comes without a schema; it is a primitive.
+    const primitive = schemalessRequestBodyType(encoding);
+    return primitive ? { body: primitive, encoding } : {};
   }
 
   // Without an operationId, name the body from the operation's path-derived
@@ -3489,7 +3560,7 @@ function collectOperationConstPrefixes(
   } catch {
     body = undefined;
   }
-  collectConstPrefixes(selectRequestBodyContent(body).schema, prefixes, 0);
+  collectConstPrefixes(selectRequestBodyContent(body)?.schema, prefixes, 0);
   for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
     // Only a key `extractResponses` reads as a 2xx status code: a range, a
     // fallback or a key OpenAPI does not define reserves nothing.
@@ -3833,15 +3904,6 @@ function typeSecondaryContent(
 function mediaTypeToken(contentType: string): string {
   const token = toPascalCase(contentType.split('*').join('Any'));
   return token.length > 0 ? token : 'Content';
-}
-
-/**
- * A media type's essence — `type/subtype` without parameters, trimmed and
- * lower-cased — which is what decides how its body is typed (RFC 9110
- * §8.3.1). The content keys themselves stay as written.
- */
-function mediaTypeEssence(contentType: string): string {
-  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
 }
 
 /**

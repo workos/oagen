@@ -107,7 +107,7 @@ Emitters should handle these additional variants introduced for open-source read
 
 - **Auth:** `'cookie'` in the `apiKey` auth scheme `in` field
 - **Pagination:** `'page'` strategy for page-number pagination — send `pageStart` first and advance `param` by one per request — next to `'link-header'` for RFC 5988 Link header pagination; optional `endOfIteration` (`{ kind: 'hasMore' | 'totalPages' | 'totalCount', path }`) naming the response field that ends the iteration (`hasMore === false`; `page - pageStart + 1 >= totalPages`; items received `>= totalCount`), in addition to the empty-page stop every strategy has; `dataPath` may be `undefined` (meaning the response IS the data)
-- **Encoding:** `'form-urlencoded'` for `application/x-www-form-urlencoded` request bodies
+- **Encoding:** `'form-urlencoded'` for `application/x-www-form-urlencoded` request bodies; every request body media type is matched by essence (parameters and case aside), and a `+json` media type is `'json'`
 - **HTTP methods:** `head`, `options`, `trace` — HEAD returns no body, OPTIONS/TRACE are informational
 - **Cookie params:** Optional `cookieParams` array on operations that use cookie parameters
 - **Servers:** Optional `servers: ServerEntry[]` on `ApiSpec` alongside `baseUrl`. Each entry keeps its URL template and, when declared, its `variables` (`default`, `enum`, `description`); `baseUrl` already has the defaults filled in, and `resolveServerUrl` from `@workos/oagen` does the same for any other entry

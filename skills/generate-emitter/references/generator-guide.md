@@ -142,8 +142,8 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `pathParams`, `queryParams`, `headerParams` — `Parameter[]` per location; always present, possibly empty
   - `bodyOwnedQueryParams?` — query declarations the request body also owns; never serialize these to the URL
   - `cookieParams?` — `Parameter[]`, present only when the operation declares cookie parameters
-  - `requestBody?` — `TypeRef` of the request body
-  - `requestBodyEncoding?` — `json` | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization
+  - `requestBody?` — `TypeRef` of the request body, read from one `content` entry by media type essence (parameters and case aside): `application/json`, else a `+json` media type, else `multipart/form-data`, else `application/x-www-form-urlencoded` (each only with a schema), else `application/octet-stream`, else `text/plain`; absent, with a parser warning, when none of the declared media types is read
+  - `requestBodyEncoding?` — `json` (`application/json` and any `+json` media type) | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization; set exactly when `requestBody` is
   - `requestBodyRequired?` — whether the caller must send the body; present exactly when `requestBody` is
   - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`unknown` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
