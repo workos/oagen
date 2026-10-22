@@ -1,5 +1,5 @@
 import type { ModelDirection } from './direction.js';
-import type { FieldChange, ParamChange } from './types.js';
+import type { FieldChange, ParamChange, RequestBodyEncoding } from './types.js';
 
 /**
  * Whether an IR node is deprecated. The parser only ever writes `true` and
@@ -55,6 +55,44 @@ export function tagsShift(oldNode: { tags?: string[] }, newNode: { tags?: string
   const newTags = newNode.tags ?? [];
   const same = oldTags.length === newTags.length && oldTags.every((tag, i) => tag === newTags[i]);
   return same ? undefined : { oldTags, newTags };
+}
+
+/** The two sides of a `requestBodyEncoding` change, carried on the change that reports it. */
+export interface RequestBodyEncodingShift {
+  /** The node's `requestBodyEncoding` in the old spec; `undefined` when its body carried none. */
+  oldRequestBodyEncoding: RequestBodyEncoding | undefined;
+  /** The node's `requestBodyEncoding` in the new spec; `undefined` when its body carries none. */
+  newRequestBodyEncoding: RequestBodyEncoding | undefined;
+}
+
+/**
+ * `{ oldRequestBodyEncoding, newRequestBodyEncoding }` when a node's
+ * `requestBodyEncoding` differs between the two specs, `undefined` when it
+ * does not. The encoding is the wire format the body is serialized as
+ * (`json`, `form-data`, `form-urlencoded`, `binary`, `text`), read from the
+ * media type the body is declared under, so a change breaks either side of
+ * the wire: an SDK built for the old spec keeps sending the old format, and
+ * a handler built for it keeps decoding it. An absent encoding is compared
+ * as a value of its own, so a body that gained or lost one is a change too;
+ * whether to compare at all when one side carries no body is the caller's
+ * rule. `diffOperations` and `diffWebhooks` both read the encoding through
+ * this function, so an operation's body and a webhook's payload are judged
+ * alike.
+ */
+export function requestBodyEncodingShift(
+  oldNode: { requestBodyEncoding?: RequestBodyEncoding },
+  newNode: { requestBodyEncoding?: RequestBodyEncoding },
+): RequestBodyEncodingShift | undefined {
+  const oldRequestBodyEncoding = oldNode.requestBodyEncoding;
+  const newRequestBodyEncoding = newNode.requestBodyEncoding;
+  return oldRequestBodyEncoding === newRequestBodyEncoding
+    ? undefined
+    : { oldRequestBodyEncoding, newRequestBodyEncoding };
+}
+
+/** The `details` a webhook change reports an encoding shift with: `encoding json → form-urlencoded`, `<none>` for no encoding. */
+export function requestBodyEncodingDetails(shift: RequestBodyEncodingShift): string {
+  return `encoding ${shift.oldRequestBodyEncoding ?? '<none>'} → ${shift.newRequestBodyEncoding ?? '<none>'}`;
 }
 
 export function classifyFieldChange(
