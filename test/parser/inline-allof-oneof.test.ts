@@ -87,7 +87,11 @@ function allRefs(spec: ApiSpec): Array<[string, TypeRef]> {
   return refs;
 }
 
-/** The invariants every case holds: every model reference resolves, and every model other than a component is referenced. */
+/**
+ * The invariants every case holds: every model reference resolves, and every
+ * model other than a component is referenced — through a type, or as the
+ * target of a dispatcher's `discriminator.mapping`.
+ */
 function expectSound(spec: ApiSpec, componentNames: string[]): void {
   const names = new Set(spec.models.map((m) => m.name));
   const referenced = new Set<string>();
@@ -98,16 +102,26 @@ function expectSound(spec: ApiSpec, componentNames: string[]): void {
       if (!names.has(name)) unresolved.push(`${owner} → ${name}`);
     }
   }
+  for (const m of spec.models) {
+    for (const name of Object.values(m.discriminator?.mapping ?? {})) {
+      referenced.add(name);
+      if (!names.has(name)) unresolved.push(`${m.name}.discriminator → ${name}`);
+    }
+  }
   expect(unresolved).toEqual([]);
   expect([...names].filter((name) => !componentNames.includes(name) && !referenced.has(name)).sort()).toEqual([]);
 }
 
-async function parseTempSpec(spec: Record<string, unknown>): Promise<ApiSpec> {
+/** Parse `spec` from a temp JSON file; `transformSpec` edits the loaded document first, as a consumer's hook would. */
+async function parseTempSpec(
+  spec: Record<string, unknown>,
+  transformSpec?: (doc: Record<string, unknown>) => Record<string, unknown>,
+): Promise<ApiSpec> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-inline-allof-oneof-'));
   const file = path.join(dir, 'spec.json');
   try {
     await fs.writeFile(file, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(file);
+    return await parseSpec(file, transformSpec ? { transformSpec } : undefined);
   } finally {
     await fs.rm(dir, { recursive: true });
   }
@@ -200,6 +214,7 @@ describe('an inline allOf with a oneOf member (workos/oagen#283)', () => {
           post: {
             operationId: 'createPet',
             tags: ['Pets'],
+            parameters: [{ name: 'filter', in: 'query', style: 'deepObject', schema: basePlusVariants }],
             requestBody: jsonBody({
               type: 'object',
               properties: {
@@ -268,6 +283,8 @@ describe('an inline allOf with a oneOf member (workos/oagen#283)', () => {
     expect(fieldsOf(models['CreatePetDefaultResponse'])).toEqual(expected);
     expect(ir.webhooks?.map((w) => w.requestBody)).toEqual([model('PetAdoptedPayload')]);
     expect(fieldsOf(models['PetAdoptedPayload'])).toEqual(expected);
+    expect(op.queryParams.map((p) => [p.name, p.type])).toEqual([['filter', model('PetsFilter')]]);
+    expect(fieldsOf(models['PetsFilter'])).toEqual(expected);
     expectSound(ir, ['Base', 'Holder']);
   });
 
@@ -358,7 +375,7 @@ describe('an inline allOf with a oneOf member (workos/oagen#283)', () => {
     expectSound(ir, []);
   });
 
-  it('takes the first declaration of a property several variants declare, and leaves a $ref variant to its component', async () => {
+  it('types a property variants pin to different consts as an enum of them, and leaves a $ref variant to its component', async () => {
     const ir = await parseWithoutWarnings({
       openapi: '3.1.0',
       info,
@@ -404,10 +421,17 @@ describe('an inline allOf with a oneOf member (workos/oagen#283)', () => {
     const models = modelsByName(ir);
     const request = models['CreatePetRequest']!;
     expect(request.fields.map((f) => f.name)).toEqual(['name', 'kind', 'ownerId', 'shelterId']);
+    // Not `kind?: 'owned'`, the first variant's value alone: a `dog` body
+    // would not type-check. The distinct declarations are read as the
+    // `oneOf` of string consts they are, so the field is an inline enum.
     expect(request.fields.find((f) => f.name === 'kind')).toMatchObject({
       required: false,
-      type: { kind: 'literal', value: 'owned' },
+      type: { kind: 'enum', name: 'CreatePetRequestKind' },
     });
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestKind')?.values.map((v) => v.value)).toEqual([
+      'owned',
+      'sheltered',
+    ]);
     // The `$ref` variants are not flattened: their components keep their fields.
     expect(fieldsOf(models['CreatePetResponse'])).toEqual(['name: string']);
     expectSound(ir, ['Owner', 'Shelter']);
@@ -583,5 +607,319 @@ describe('the one reading of an inline allOf', () => {
       'ownerId?: string',
       'shelterId?: string',
     ]);
+  });
+});
+
+describe('round 1: recursive components, shared schemas, conflicting variant declarations', () => {
+  const ownerOrShelter: SchemaObject = {
+    oneOf: [
+      { type: 'object', properties: { ownerId: { type: 'string' } } },
+      { type: 'object', properties: { shelterId: { type: 'string' } } },
+    ],
+  };
+  /** A discriminated component whose `node.created` variant carries `data`. */
+  const eventWithData = (data: SchemaObject): SchemaObject => ({
+    allOf: [
+      { type: 'object', properties: { id: { type: 'string' }, event: { type: 'string' } }, required: ['id', 'event'] },
+      {
+        oneOf: [
+          {
+            type: 'object',
+            properties: { event: { type: 'string', const: 'node.created' }, data },
+            required: ['event', 'data'],
+          },
+          {
+            type: 'object',
+            properties: {
+              event: { type: 'string', const: 'node.deleted' },
+              data: { type: 'object', properties: { id: { type: 'string' } } },
+            },
+            required: ['event', 'data'],
+          },
+        ],
+      },
+    ],
+  });
+  const withEvent = (schemas: Record<string, SchemaObject>, data: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/events': {
+        get: { operationId: 'getEvent', responses: { '200': jsonResponse({ $ref: '#/components/schemas/Event' }) } },
+      },
+    },
+    components: { schemas: { ...schemas, Event: eventWithData(data) } },
+  });
+
+  it('terminates on a component that extends itself through a field, typing the inherited field as the model that exists', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent(
+        {
+          Node: {
+            type: 'object',
+            properties: {
+              depth: { type: 'integer' },
+              child: { allOf: [{ $ref: '#/components/schemas/Node' }, { properties: { note: { type: 'string' } } }] },
+            },
+          },
+        },
+        { allOf: [{ $ref: '#/components/schemas/Node' }, ownerOrShelter] },
+      ),
+    );
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual([
+      'depth?: integer',
+      'child?: NodeChild',
+      'ownerId?: string',
+      'shelterId?: string',
+    ]);
+    expect(fieldsOf(models['NodeChild'])).toEqual(['depth?: integer', 'child?: NodeChild', 'note?: string']);
+    expect(models['NodeCreatedDataChild']).toBeUndefined();
+    expectSound(ir, ['Event', 'Node']);
+  });
+
+  it('terminates on two components that extend each other, and reads a $ref chain three deep', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent(
+        {
+          A: {
+            type: 'object',
+            properties: {
+              b: { allOf: [{ $ref: '#/components/schemas/B' }, { properties: { x: { type: 'string' } } }] },
+            },
+          },
+          B: {
+            type: 'object',
+            properties: {
+              a: { allOf: [{ $ref: '#/components/schemas/A' }, { properties: { y: { type: 'string' } } }] },
+            },
+          },
+          C1: { type: 'object', properties: { c1: { type: 'string' } }, required: ['c1'] },
+          C2: { allOf: [{ $ref: '#/components/schemas/C1' }, { properties: { c2: { type: 'string' } } }] },
+          C3: {
+            allOf: [{ $ref: '#/components/schemas/C2' }, { properties: { c3: { type: 'string' } } }],
+            required: ['c3'],
+          },
+        },
+        { allOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/C3' }, ownerOrShelter] },
+      ),
+    );
+    const models = modelsByName(ir);
+    // Members are read in order: `C3`'s `$ref` to `C2` — `C1`'s `c1`, then
+    // `C2`'s own `c2` — before `C3`'s inline `c3` member; `required` is read
+    // at every level (`c1` from `C1`, `c3` from `C3`'s own list).
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual([
+      'b?: AB',
+      'c1: string',
+      'c2?: string',
+      'c3: string',
+      'ownerId?: string',
+      'shelterId?: string',
+    ]);
+    expect(fieldsOf(models['AB'])).toEqual(['a?: BA', 'x?: string']);
+    expect(fieldsOf(models['BA'])).toEqual(['b?: AB', 'y?: string']);
+    expectSound(ir, ['A', 'B', 'C1', 'C2', 'C3', 'Event']);
+  });
+
+  it('keeps an inherited nested object typed as its component types it under a discriminated variant', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent(
+        { Base: { type: 'object', properties: { meta: { type: 'object', properties: { tag: { type: 'string' } } } } } },
+        { allOf: [{ $ref: '#/components/schemas/Base' }, ownerOrShelter] },
+      ),
+    );
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual(['meta?: BaseMeta', 'ownerId?: string', 'shelterId?: string']);
+    expect(fieldsOf(models['BaseMeta'])).toEqual(['tag?: string']);
+    expect(models['NodeCreatedDataMeta']).toBeUndefined();
+    expectSound(ir, ['Base', 'Event']);
+  });
+
+  /** The base object reused, as a variant and as a member, in either order. */
+  const sharedBody = (order: 'variant first' | 'member first'): SchemaObject => {
+    const shared: SchemaObject = { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] };
+    const union: SchemaObject = { oneOf: [shared, { type: 'object', properties: { other: { type: 'string' } } }] };
+    return { allOf: order === 'variant first' ? [union, shared] : [shared, union] };
+  };
+
+  it.each(['variant first', 'member first'] as const)(
+    'reads a schema object shared between a variant and a member once in each capacity (%s)',
+    async (order) => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        // JSON cannot share an object, so `transformSpec` puts the shared one in.
+        const ir = await parseTempSpec(
+          {
+            openapi: '3.1.0',
+            info,
+            paths: {
+              '/pets': {
+                post: {
+                  operationId: 'createPet',
+                  requestBody: jsonBody({ type: 'object' }),
+                  responses: { '204': { description: 'done' } },
+                },
+              },
+            },
+          },
+          (doc) => {
+            const paths = doc['paths'] as Record<string, Record<string, Record<string, unknown>>>;
+            paths['/pets']!['post']!['requestBody'] = jsonBody(sharedBody(order));
+            return doc;
+          },
+        );
+        expect(warnSpy.mock.calls).toEqual([]);
+        // `id` is required: the member's reading is not skipped because the
+        // same object was already read as a variant, or the other way round.
+        expect(fieldsOf(modelsByName(ir)['CreatePetRequest'])).toEqual(['id: string', 'other?: string']);
+        expectSound(ir, []);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    },
+  );
+
+  it('reads a YAML anchor shared between a variant and a member once in each capacity', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-inline-allof-oneof-yaml-'));
+    const file = path.join(dir, 'spec.yaml');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await fs.writeFile(
+        file,
+        [
+          'openapi: 3.1.0',
+          'info: { title: anchors, version: "1" }',
+          'paths:',
+          '  /pets:',
+          '    post:',
+          '      operationId: createPet',
+          '      requestBody:',
+          '        required: true',
+          '        content:',
+          '          application/json:',
+          '            schema:',
+          '              allOf:',
+          '                - oneOf:',
+          '                    - &note',
+          '                      type: object',
+          '                      properties: { id: { type: string } }',
+          '                      required: [id]',
+          '                    - type: object',
+          '                      properties: { other: { type: string } }',
+          '                - *note',
+          '      responses:',
+          '        "204": { description: done }',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+      const ir = await parseSpec(file);
+      expect(warnSpy.mock.calls).toEqual([]);
+      expect(fieldsOf(modelsByName(ir)['CreatePetRequest'])).toEqual(['id: string', 'other?: string']);
+      expectSound(ir, []);
+    } finally {
+      warnSpy.mockRestore();
+      await fs.rm(dir, { recursive: true });
+    }
+  });
+
+  it('follows a $ref written under a variant when the same object is reached again as a member', () => {
+    const ref: SchemaObject = { $ref: '#/components/schemas/Base' };
+    const components: Record<string, SchemaObject> = {
+      Base: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    };
+    const union: SchemaObject = { oneOf: [ref, { properties: { other: { type: 'string' } } }] };
+    for (const members of [
+      [union, ref],
+      [ref, union],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, components);
+      expect(merged.properties.map((p) => `${p.name}${p.origin ? ` (${p.origin.name})` : ''}`).sort()).toEqual([
+        'id (Base)',
+        'other',
+      ]);
+      expect(merged.required).toEqual(['id']);
+      expect(merged.resolvedRefs).toEqual(['#/components/schemas/Base']);
+    }
+  });
+
+  it("keeps an always-applying member's declaration over a variant's, whichever comes first", () => {
+    const base: SchemaObject = { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] };
+    const union: SchemaObject = {
+      oneOf: [{ properties: { name: { type: 'string', const: 'x' } } }, { properties: { size: { type: 'integer' } } }],
+    };
+    for (const members of [
+      [base, union],
+      [union, base],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, undefined);
+      expect(merged.properties.map((p) => [p.name, p.schema])).toEqual([
+        ['name', { type: 'string' }],
+        ['size', { type: 'integer' }],
+      ]);
+      expect(merged.required).toEqual(['name']);
+    }
+  });
+
+  it('types a property variants declare the same way from one declaration, and differently as the union of them', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({
+              allOf: [
+                { type: 'object', properties: { name: { type: 'string' } } },
+                {
+                  oneOf: [
+                    {
+                      properties: {
+                        same: { type: 'string', description: 'first' },
+                        flag: { type: 'boolean', const: true },
+                        shape: { type: 'object', properties: { radius: { type: 'number' } } },
+                      },
+                    },
+                    {
+                      properties: {
+                        same: { type: 'string', description: 'second' },
+                        flag: { type: 'boolean', const: false },
+                        shape: { type: 'object', properties: { side: { type: 'number' } } },
+                      },
+                    },
+                  ],
+                },
+              ],
+            }),
+            responses: { '204': { description: 'done' } },
+          },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    const request = models['CreatePetRequest']!;
+    const typeOf = (field: string): TypeRef | undefined => request.fields.find((f) => f.name === field)?.type;
+    // Documentation does not make a second shape: the first declaration stands.
+    expect(request.fields.find((f) => f.name === 'same')).toMatchObject({ type: str, description: 'first' });
+    // Two literals: a union of them, never the first alone.
+    expect(typeOf('flag')).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [
+        { kind: 'literal', value: true },
+        { kind: 'literal', value: false },
+      ],
+    });
+    // Two inline objects: a union of two variant models, named as any union
+    // under a field is and materialized under those names.
+    expect(typeOf('shape')).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [model('CreatePetRequestShape'), model('CreatePetRequestShapeWithSide')],
+    });
+    expect(fieldsOf(models['CreatePetRequestShape'])).toEqual(['radius?: number']);
+    expect(fieldsOf(models['CreatePetRequestShapeWithSide'])).toEqual(['side?: number']);
+    expectSound(ir, []);
   });
 });

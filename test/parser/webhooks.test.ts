@@ -494,10 +494,14 @@ describe('webhooks', () => {
 
   describe('extractWebhooks', () => {
     it('returns nothing for an absent map, and warns about one that is not an object', () => {
-      expect(extractWebhooks(undefined)).toEqual({ webhooks: [], inlineModels: [] });
+      expect(extractWebhooks(undefined)).toEqual({ webhooks: [], inlineModels: [], inlineModelBundles: [] });
       expect(warn).not.toHaveBeenCalled();
 
-      expect(extractWebhooks([postWith(petSchema)])).toEqual({ webhooks: [], inlineModels: [] });
+      expect(extractWebhooks([postWith(petSchema)])).toEqual({
+        webhooks: [],
+        inlineModels: [],
+        inlineModelBundles: [],
+      });
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toContain('`webhooks` is not an object');
     });
