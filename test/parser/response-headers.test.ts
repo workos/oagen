@@ -1032,6 +1032,64 @@ describe('inline header models', () => {
       expect(fieldsOf(inlineModels, 'DocumentsXMeta429')).toEqual(['taken']);
       expectHeaderModelsMaterialized(op, inlineModels);
     });
+
+    describe('when a model of this operation owns the bare name (issue #280)', () => {
+      // A title-mapped variant of the 200 body is named from its title, so
+      // one titled `DocumentXMeta` owns the name the `X-Meta` header of the
+      // `Document` service derives, inside this operation: the 200's header
+      // steps to `DocumentXMeta200`, and the 429's tries that stem before its
+      // own `DocumentXMeta429`.
+      const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+        title,
+        type: 'object',
+        properties: { kind: { const: kind }, ...properties },
+      });
+      const body = {
+        oneOf: [
+          titled('DocumentXMeta', 'meta', { taken: { type: 'boolean' } }),
+          titled('DocumentXOther', 'other', { label: { type: 'string' } }),
+        ],
+      };
+      const getDocument = (headerOn429: Record<string, unknown>) => {
+        const { services, inlineModels } = extractOperations({
+          '/document': {
+            get: {
+              operationId: 'getDocument',
+              responses: {
+                '200': {
+                  description: 'ok',
+                  headers: { 'X-Meta': object({ etag: { type: 'string' } }) },
+                  content: { 'application/json': { schema: body } },
+                },
+                '429': { description: 'throttled', headers: { 'X-Meta': object(headerOn429) } },
+              },
+            },
+          },
+        } as never);
+        return { op: services[0].operations[0], inlineModels };
+      };
+
+      it('shares one model under the name the 200 header settled on when the 429 header has its shape', () => {
+        const { op, inlineModels } = getDocument({ etag: { type: 'string' } });
+
+        expect(fieldsOf(inlineModels, 'DocumentXMeta')).toEqual(['kind', 'taken']);
+        expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentXMeta200' });
+        expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentXMeta200' });
+        expect(fieldsOf(inlineModels, 'DocumentXMeta200')).toEqual(['etag']);
+        expect(inlineModels.map((m) => m.name)).not.toContain('DocumentXMeta429');
+        expectHeaderModelsMaterialized(op, inlineModels);
+      });
+
+      it('still gives the 429 header its own name when its shape differs', () => {
+        const { op, inlineModels } = getDocument({ reset_at: { type: 'integer' } });
+
+        expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentXMeta200' });
+        expect(op.errors[0].headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentXMeta429' });
+        expect(fieldsOf(inlineModels, 'DocumentXMeta200')).toEqual(['etag']);
+        expect(fieldsOf(inlineModels, 'DocumentXMeta429')).toEqual(['reset_at']);
+        expectHeaderModelsMaterialized(op, inlineModels);
+      });
+    });
   });
 });
 

@@ -46,6 +46,19 @@ export function registerInlineModels(registry: InlineModelRegistry, models: Mode
   }
 }
 
+/**
+ * The stems the sites that derive from one bare name — the same header on
+ * several status codes or operations, one media type's inline body on
+ * several status codes — have settled on so far, in the order the sites were
+ * resolved, each once. `materializeInlineSchema` tries them right after the
+ * bare name, so a shape identical to an earlier site's shares that site's
+ * model under whichever stem it took (`…Response200`, not a fresh
+ * `…Response201`), and a different shape steps past them to the site's own
+ * candidates; the stem each site settles on is appended for the sites after
+ * it.
+ */
+export type SiblingStems = string[];
+
 export interface MaterializeInlineOptions {
   /**
    * The property name to extract the schema under for the `index`-th stem:
@@ -55,6 +68,13 @@ export interface MaterializeInlineOptions {
    * where the clash came from; empty while nothing has clashed.
    */
   stem: (index: number, firstClashOwners: InlineModelOwner[]) => string;
+  /**
+   * The stems earlier sites of the same bare name settled on, tried between
+   * the bare name and the caller's other candidates, and appended to with the
+   * stem this site settles on (see `SiblingStems`). Absent, only the caller's
+   * candidates are tried and nothing is recorded.
+   */
+  siblings?: SiblingStems;
   /** The parent the schema is a property of; none for a body. */
   parentName?: string;
   componentSchemas?: Record<string, SchemaObject>;
@@ -114,17 +134,28 @@ const MAX_RENAME_ROUNDS = 64;
  * reference from a `$ref` to a component of the same name, so a schema that
  * both inlines a clashing `Circle` and references component `Circle` fails
  * loudly instead.
+ *
+ * The stems are tried in the order `candidateStem` gives: the caller's bare
+ * name, then the stems earlier sites of the same bare name settled on
+ * (`options.siblings`), then the caller's own qualified candidates. So the
+ * `application/vnd.pet+json` body of a 201 whose bare name a component owns
+ * tries the `…Response200` its 200 settled on before its own `…Response201`,
+ * and shares the 200's model when the shapes are identical — a name-only
+ * comparison would mint a second model of the same shape. The stem the site
+ * settles on — the trial's, or the one its root moved to — is appended to
+ * `options.siblings` for the sites after it.
  */
 export function materializeInlineSchema(schema: SchemaObject, options: MaterializeInlineOptions): TypeRef {
   const { registry } = options;
   const reserved = new Set<string>();
   let stemIndex = 0;
   let firstClashOwners: InlineModelOwner[] = [];
+  const stemAt = (index: number): string => candidateStem(index, options, firstClashOwners);
   // The last clashing trial and the move made after it.
   let previous: { trial: Trial; move: 'reserve' | 'stem' } | undefined;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const trial = runTrial(schema, options.stem(stemIndex, firstClashOwners), reserved, options);
+    const trial = runTrial(schema, stemAt(stemIndex), reserved, options);
     if (trial.clashing.length === 0) return commit(trial, options);
 
     if (firstClashOwners.length === 0) {
@@ -139,13 +170,39 @@ export function materializeInlineSchema(schema: SchemaObject, options: Materiali
     if (previous?.move === 'stem' && sameNames(previous.trial.clashing, trial.clashing)) {
       // The stem advance changed nothing: the fixed point. The earlier of the
       // two identical trials carries the lower stem, so it is the one kept.
-      return commit(renameClashing(previous.trial, options, firstClashOwners), options);
+      return commit(renameClashing(previous.trial, options, stemAt), options);
     }
     stemIndex++;
     previous = { trial, move: 'stem' };
   }
 
-  return commit(renameClashing(previous!.trial, options, firstClashOwners), options);
+  return commit(renameClashing(previous!.trial, options, stemAt), options);
+}
+
+/**
+ * The `index`-th stem to try: the caller's bare name (its first candidate),
+ * then each stem an earlier site of the same bare name settled on
+ * (`options.siblings`, the bare name left out since it was just tried), then
+ * the caller's other candidates in the caller's order, leaving out any a
+ * sibling settled on — the same stem tried twice in a row would read to the
+ * fixed-point test as an advance that changed nothing. The caller's
+ * candidates end in an unbounded numbered run, so at most as many of them as
+ * there are siblings are left out and the search is bounded; past the bound
+ * the caller's own `index`-th candidate is the fallback.
+ */
+function candidateStem(index: number, options: MaterializeInlineOptions, firstClashOwners: InlineModelOwner[]): string {
+  const own = (i: number): string => options.stem(i, firstClashOwners);
+  const bare = own(0);
+  if (index === 0) return bare;
+  const siblings = (options.siblings ?? []).filter((stem) => stem !== bare);
+  if (index <= siblings.length) return siblings[index - 1];
+  let remaining = index - siblings.length;
+  for (let i = 1; i <= index + siblings.length; i++) {
+    const candidate = own(i);
+    if (siblings.includes(candidate)) continue;
+    if (--remaining === 0) return candidate;
+  }
+  return own(index);
 }
 
 interface Trial {
@@ -158,6 +215,12 @@ interface Trial {
   clashing: string[];
   /** Set once the trial's references have been rewritten and the type must not be rebuilt. */
   type?: TypeRef;
+  /**
+   * The stem the root is settled under — the trial's own, or the one the root
+   * moved to in `renameClashing`; unset when the root was numbered in place
+   * and no stem names it. Recorded for the site's siblings at commit.
+   */
+  settledStem: string | undefined;
 }
 
 function runTrial(
@@ -184,7 +247,7 @@ function runTrial(
     })
     .map((model) => model.name)
     .sort();
-  return { schema, propertyName, reserved, models, fingerprints, clashing };
+  return { schema, propertyName, reserved, models, fingerprints, clashing, settledStem: propertyName };
 }
 
 function sameNames(a: string[], b: string[]): boolean {
@@ -199,6 +262,8 @@ function sameNames(a: string[], b: string[]): boolean {
  * no longer matches it. The trial has no such clash left when it gets here
  * (`runTrial` found none, or `renameClashing` cleared them all), so the
  * remaining branch is a guard against a regression, not an expected path.
+ * The stem the site settled on is recorded for its siblings, whether it
+ * minted models or shared every one of them.
  */
 function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
   for (const model of trial.models) {
@@ -212,6 +277,10 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
     }
     options.registry.set(model.name, { fingerprint, operation: options.operation });
     options.models.push(model);
+  }
+  const { siblings } = options;
+  if (siblings && trial.settledStem !== undefined && !siblings.includes(trial.settledStem)) {
+    siblings.push(trial.settledStem);
   }
   return trial.type ?? schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
 }
@@ -242,12 +311,18 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
  * never starts a round, and the rounds end within the trial's size. A name
  * the schema also `$ref`s cannot be rewritten safely (see
  * `materializeInlineSchema`) and fails loudly.
+ *
+ * `stemAt` gives the stems in the order the loop tried them (`candidateStem`),
+ * so a moved root takes the next free one of those; the stem it moved to is
+ * the one recorded for the site's siblings, and a root numbered in place when
+ * none is free records none.
  */
-function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstClashOwners: InlineModelOwner[]): Trial {
+function renameClashing(trial: Trial, options: MaterializeInlineOptions, stemAt: (index: number) => string): Trial {
   const { registry } = options;
   const rootOf = (propertyName: string): string =>
     qualifyInlineModelName(toPascalCase(propertyName), options.parentName);
   let rootName = rootOf(trial.propertyName);
+  let settledStem = trial.settledStem;
   const referenced = componentRefTargets(trial.schema);
   const type = schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
   const taken = new Set([...registry.keys(), ...trial.models.map((m) => m.name)]);
@@ -293,9 +368,14 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
     if (clashing.includes(rootName)) {
       const oldRoot = rootName;
       let movedRoot: string | undefined;
+      settledStem = undefined;
       for (let index = 1; index <= MAX_RENAME_ROUNDS && movedRoot === undefined; index++) {
-        const candidate = rootOf(options.stem(index, firstClashOwners));
-        if (!taken.has(candidate)) movedRoot = candidate;
+        const stem = stemAt(index);
+        const candidate = rootOf(stem);
+        if (!taken.has(candidate)) {
+          movedRoot = candidate;
+          settledStem = stem;
+        }
       }
       if (movedRoot === undefined) movedRoot = claim((n) => `${oldRoot}${n + 1}`);
       taken.add(movedRoot);
@@ -336,7 +416,7 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
       .sort();
   }
 
-  return { ...trial, fingerprints, clashing: [], type };
+  return { ...trial, fingerprints, clashing: [], type, settledStem };
 }
 
 /** Rename, in place, every inline enum under `ref` whose name was built from `oldPrefix` so it is built from `newPrefix`. */
