@@ -923,3 +923,145 @@ describe('round 1: recursive components, shared schemas, conflicting variant dec
     expectSound(ir, []);
   });
 });
+
+describe('round 2: keywords the declarations of a combined property agree on', () => {
+  const createPet = (variants: SchemaObject[]) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: jsonBody({
+            allOf: [
+              { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+              { oneOf: variants },
+            ],
+          }),
+          responses: { '204': { description: 'done' } },
+        },
+      },
+    },
+  });
+
+  it('lifts the flags, documentation and limits every declaration shares onto the combined field', async () => {
+    const shared = { readOnly: true, description: 'The kind', deprecated: true, default: 'cat', maxLength: 3 };
+    const ir = await parseWithoutWarnings(
+      createPet([
+        {
+          properties: {
+            kind: { type: 'string', const: 'cat', ...shared },
+            secret: { type: 'string', const: 'a', writeOnly: true, example: 'a' },
+          },
+        },
+        {
+          properties: {
+            kind: { type: 'string', const: 'dog', ...shared },
+            secret: { type: 'integer', const: 1, writeOnly: true, example: 'a' },
+          },
+        },
+      ]),
+    );
+    const request = modelsByName(ir)['CreatePetRequest']!;
+    const kind = request.fields.find((f) => f.name === 'kind');
+    // An enum of both consts — and read-only, deprecated, documented, defaulted
+    // and limited as both declarations say, not a bare union of them.
+    expect(kind).toMatchObject({
+      type: { kind: 'enum', name: 'CreatePetRequestKind' },
+      required: false,
+      readOnly: true,
+      deprecated: true,
+      description: 'The kind',
+      default: 'cat',
+      constraints: { maxLength: 3 },
+    });
+    expect(kind?.writeOnly).toBeUndefined();
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestKind')?.values.map((v) => v.value)).toEqual(['cat', 'dog']);
+    expect(request.fields.find((f) => f.name === 'secret')).toMatchObject({
+      type: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'literal', value: 'a' },
+          { kind: 'literal', value: 1 },
+        ],
+      },
+      writeOnly: true,
+      example: 'a',
+    });
+    expectSound(ir, []);
+  });
+
+  it('leaves off a keyword the declarations disagree on, or only some declare', async () => {
+    const ir = await parseWithoutWarnings(
+      createPet([
+        {
+          properties: {
+            mode: { type: 'string', const: 'x', readOnly: true },
+            note: { type: 'string', const: 'p', description: 'first' },
+            level: { type: 'integer', const: 1, deprecated: true, minimum: 1 },
+            hidden: { type: 'string', const: 'h1', writeOnly: true },
+          },
+        },
+        {
+          properties: {
+            mode: { type: 'string', const: 'y' },
+            note: { type: 'string', const: 'q', description: 'second' },
+            level: { type: 'integer', const: 2, deprecated: false, minimum: 2 },
+            hidden: { type: 'string', const: 'h2', writeOnly: false },
+          },
+        },
+      ]),
+    );
+    const request = modelsByName(ir)['CreatePetRequest']!;
+    const field = (name: string) => request.fields.find((f) => f.name === name)!;
+    expect(field('mode')).toMatchObject({ type: { kind: 'enum', name: 'CreatePetRequestMode' } });
+    expect(field('mode').readOnly).toBeUndefined();
+    expect(field('note').description).toBeUndefined();
+    expect(field('level').deprecated).toBeUndefined();
+    expect(field('level').constraints).toBeUndefined();
+    expect(field('hidden').writeOnly).toBeUndefined();
+    expectSound(ir, []);
+  });
+
+  it('moves a null admission any declaration makes, in either spelling, onto the combined field', async () => {
+    const ir = await parseWithoutWarnings(
+      createPet([
+        {
+          properties: {
+            tag: { type: ['string', 'null'], const: 'a' },
+            half: { type: ['string', 'null'], const: 'a' },
+          },
+        },
+        {
+          properties: {
+            tag: { type: 'string', nullable: true, const: 'b' },
+            half: { type: 'string', const: 'b' },
+          },
+        },
+      ]),
+    );
+    const request = modelsByName(ir)['CreatePetRequest']!;
+    const typeOf = (name: string) => request.fields.find((f) => f.name === name)?.type;
+    // Both admit null: a nullable enum of both consts.
+    expect(typeOf('tag')).toMatchObject({ kind: 'nullable', inner: { kind: 'enum', name: 'CreatePetRequestTag' } });
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestTag')?.values.map((v) => v.value)).toEqual(['a', 'b']);
+    // One admits null: the union admits it too — the enum the consts collapse
+    // to would otherwise lose the `null` that branch allows.
+    expect(typeOf('half')).toMatchObject({ kind: 'nullable', inner: { kind: 'enum', name: 'CreatePetRequestHalf' } });
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestHalf')?.values.map((v) => v.value)).toEqual(['a', 'b']);
+    expectSound(ir, []);
+  });
+
+  it('keeps every declaration as written inside the combined schema', () => {
+    const cat: SchemaObject = { type: 'string', const: 'cat', readOnly: true, description: 'Kind' };
+    const dog: SchemaObject = { type: 'string', const: 'dog', readOnly: true, description: 'Kind' };
+    const merged = mergeAllOfMembers(
+      { allOf: [{ oneOf: [{ properties: { kind: cat } }, { properties: { kind: dog } }] }] },
+      undefined,
+    );
+    expect(merged.properties).toEqual([
+      { name: 'kind', origin: null, schema: { readOnly: true, description: 'Kind', oneOf: [cat, dog] } },
+    ]);
+  });
+});

@@ -1503,10 +1503,58 @@ export function mergeAllOfMembers(
 }
 
 /**
+ * The keywords a field reads from its own schema — the flags and
+ * documentation `buildFieldFromSchema` reads and the validation keywords
+ * `extractConstraints` reads — which `unionOfDeclarations` lifts onto a
+ * combined declaration when every declaration agrees on them.
+ */
+const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
+  'readOnly',
+  'writeOnly',
+  'deprecated',
+  'description',
+  'default',
+  'example',
+  'examples',
+  'externalDocs',
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'multipleOf',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'minContains',
+  'maxContains',
+  'minProperties',
+  'maxProperties',
+  'pattern',
+  'uniqueItems',
+  'dependentRequired',
+];
+
+/**
  * The one schema that types a property several variants declare: the first
  * declaration when every declaration has the same shape (`schemaShapeKey`,
  * documentation ignored), else a `oneOf` of the distinct shapes, each the
  * first declaration of its shape, in order. See `mergeAllOfMembers`.
+ *
+ * A field reads its flags, documentation and limits from its own schema
+ * (`buildFieldFromSchema`, `extractConstraints`), never from a union's
+ * variants, so a combined declaration carries every keyword of
+ * `LIFTED_DECLARATION_KEYWORDS` the declarations agree on, value for value:
+ * two `kind` declarations both `readOnly: true` with different consts make a
+ * read-only enum field; a keyword the declarations disagree on, or one only
+ * some declare, is not the field's. The declarations themselves are kept as
+ * written inside the `oneOf`, so an enum member or a variant model still
+ * carries its own description and limits. A `null` any declaration admits
+ * (`nullable: true`, or a `type` list naming `null`) is a value the property
+ * takes on that branch, so the union admits it: the admission moves to a
+ * `{ type: 'null' }` variant of the `oneOf` — the one place the type builder
+ * reads a union's nullability from, and one a union of string consts would
+ * otherwise lose when it collapses to an enum — and off the declarations.
  */
 function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   const distinct = new Map<string, SchemaObject>();
@@ -1515,7 +1563,32 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
     if (!distinct.has(key)) distinct.set(key, declaration);
   }
   const shapes = [...distinct.values()];
-  return shapes.length === 1 ? shapes[0]! : { oneOf: shapes };
+  if (shapes.length === 1) return shapes[0]!;
+  const agreed: Record<string, unknown> = {};
+  for (const keyword of LIFTED_DECLARATION_KEYWORDS) {
+    const values = shapes.map((shape) => (shape as Record<string, unknown>)[keyword]);
+    if (values[0] === undefined) continue;
+    const first = stableStringify(values[0]);
+    if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[keyword] = values[0];
+  }
+  const anyAdmitsNull = shapes.some(admitsNull);
+  const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
+  return { ...agreed, oneOf: variants };
+}
+
+/** Whether a declaration admits `null` on its own: OAS 3.0 `nullable: true`, or a `type` list naming `null`. */
+function admitsNull(schema: SchemaObject): boolean {
+  return schema.nullable === true || (Array.isArray(schema.type) && schema.type.includes('null'));
+}
+
+/** `schema` with its own `null` admission removed (see `admitsNull`); the type list collapses to its one remaining entry. */
+function withoutNull(schema: SchemaObject): SchemaObject {
+  const { nullable: _nullable, ...rest } = schema;
+  if (Array.isArray(rest.type)) {
+    const types = rest.type.filter((t) => t !== 'null');
+    rest.type = types.length === 1 ? types[0] : types;
+  }
+  return rest;
 }
 
 /**
