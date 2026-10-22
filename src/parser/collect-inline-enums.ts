@@ -191,9 +191,10 @@ export function collectInlineEnumsFromWebhooks(
  * Header lists to walk, each with the status-code qualifier that keeps a
  * colliding enum name apart. When `successResponses` exists the primary list
  * is the same array as its entry there, so the entries are walked with their
- * own codes instead of `responseHeaders`; a lone 2xx or 3xx response carries
- * no status code in the IR (`successResponses` is set only for more than one),
- * so its headers get no qualifier.
+ * own codes instead of `responseHeaders`; a lone 2xx or 3xx response is not
+ * listed in `successResponses` (set only for more than one), so its headers
+ * get no qualifier — its `responseStatusCode` is deliberately not used here,
+ * as qualifying by it would rename every enum such a header declares.
  */
 function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[]; qualifier?: string }> {
   const groups: Array<{ headers: ResponseHeader[]; qualifier?: string }> = [];
