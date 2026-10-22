@@ -393,10 +393,12 @@ export interface OperationModified {
  * `reparameterized`, additive. Each media type is reported as written in
  * the spec that declares it (`retyped` lists the new spec's spelling). Two keys of one
  * essence declared side by side (`application/json` beside
- * `application/json; charset=utf-8`) stay two media types: each pairs with
- * the key spelled the same way on the other side, else with the other
- * side's next unpaired key of its essence, and one left over is `added` or
- * `removed`.
+ * `application/json; charset=utf-8`) stay two media types: each pairs, in
+ * this order of preference, with the key spelled the same way on the other
+ * side, else one of its essence with the same parameters other than
+ * `charset`, else one of its essence whose body is the same shape, else the
+ * other side's next unpaired key of its essence; one left over is `added`
+ * or `removed`.
  */
 export interface ResponseContentTypesChange {
   statusCode?: number;

@@ -210,6 +210,21 @@ describe('diffOperations — response media types are compared by essence (issue
     expect(diffOperations('Graphs', [quoted('https://example.com/a;b')], [quoted('https://example.com/a;b')])).toEqual(
       [],
     );
+    // One parameter whose value holds `; ` is not the two parameters it spells (Greptile round 5).
+    const titled = (spelling: string): Operation =>
+      card([[`text/plain; ${spelling}`, string]], { name: 'getNote', response: string });
+    expect(
+      diffOperations('Notes', [titled('title="report; version=2"')], [titled('title=report; version=2')])[0],
+    ).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [
+            { from: 'text/plain; title="report; version=2"', to: 'text/plain; title=report; version=2' },
+          ],
+          classification: 'additive',
+        },
+      ],
+    });
     expect(
       diffOperations(
         'Pets',
@@ -567,6 +582,68 @@ describe('parser to differ — a secondary inline body under a respelled key (Gr
         },
       ],
       classification: 'breaking',
+    });
+  });
+
+  /** Two YAML keys beside the JSON primary, in the given order, each with its own shape. */
+  const yamlKeys = (keys: Array<[string, Record<string, unknown>]>) => {
+    const doc = report('application/yaml', title);
+    doc.paths['/report'].get.responses['200'].content = {
+      'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      ...Object.fromEntries(keys.map(([key, properties]) => [key, { schema: { type: 'object', properties } }])),
+    } as never;
+    return doc;
+  };
+  const summary = { summary: { type: 'string' } };
+
+  it('pairs keys of one essence by their parameters before document order, so respelling and reversing them is no change (Greptile round 6)', async () => {
+    const { changes } = await diffDocuments(
+      yamlKeys([
+        ['application/yaml; version=1', title],
+        ['application/yaml; version=2', summary],
+      ]),
+      yamlKeys([
+        ['Application/YAML; version=2', summary],
+        ['Application/YAML; version=1', title],
+      ]),
+    );
+    expect(changes).toEqual([]);
+  });
+
+  it('pairs keys of one essence by their shape before document order, so two parameter edits each find their body', async () => {
+    // `version=1` (title) becomes `version=4` and `version=2` (summary) becomes
+    // `version=3`, swapped in order: neither the spelling nor the parameters
+    // match, but each new key has exactly one old body of its shape.
+    const { changes } = await diffDocuments(
+      yamlKeys([
+        ['application/yaml; version=1', title],
+        ['application/yaml; version=2', summary],
+      ]),
+      yamlKeys([
+        ['application/yaml; version=3', summary],
+        ['application/yaml; version=4', title],
+      ]),
+    );
+    expect(
+      changes
+        .filter((c) => c.kind === 'model-removed')
+        .map((c) => (c as { name: string }).name)
+        .sort(),
+    ).toEqual(['GetReportApplicationYamlVersion1Response', 'GetReportApplicationYamlVersion2Response']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          added: [],
+          removed: [],
+          retyped: [],
+          reparameterized: [
+            { from: 'application/yaml; version=2', to: 'application/yaml; version=3' },
+            { from: 'application/yaml; version=1', to: 'application/yaml; version=4' },
+          ],
+          classification: 'additive',
+        },
+      ],
+      classification: 'additive',
     });
   });
 });
