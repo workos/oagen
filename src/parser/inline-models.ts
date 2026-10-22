@@ -1,5 +1,5 @@
 import type { Constraints, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { collectModelRefs, collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -484,13 +484,19 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * TypeRef and every extractor read the same decision. `undefined` clears
  * the previous document's marks.
  *
- * Each root is read with a visited set of its own, so a schema object two
+ * Each root is read with visited sets of its own, so a schema object two
  * roots share — one a `transformSpec` assigned in both places, a bundled
  * external schema inlined twice as one object — is read under each root and
  * compared with each root's other variants, and a mark from either root
  * stands: the shared variant's title is then qualified wherever it appears.
- * The descent over the document keeps a separate guard that never holds a
- * schema. Both guards end the walk on a document that refers back to itself.
+ * Within a root the same holds per claim group: a union object reached
+ * under two groups — nested in `shape`, where an earlier union of the group
+ * already claimed its title, and again as `wrapper.marker`, where it keeps
+ * the title — is read under each, so the two shapes of the title are
+ * compared and contested (`markContestedTitlesUnderRoot`). A schema that
+ * refers back to itself is stopped by the ancestors on the path to it. The
+ * descent over the document keeps a separate guard that never holds a
+ * schema. The guards end the walk on a document that refers back to itself.
  */
 export function markContestedTitles(document: unknown): void {
   contestedTitledVariants = new WeakSet();
@@ -625,15 +631,19 @@ function schemaRootsOf(
 /**
  * Mark every title-mapped variant under `roots` (read as one root) whose
  * title another variant under the same roots gives a different shape; see
- * `markContestedTitles` for the walk. The visited set is this root's own:
+ * `markContestedTitles` for the walk. The visited sets are this root's own:
  * a schema object another root also holds is read here as well, against
- * this root's variants, and a schema reached twice within this root — the
- * same object under two properties, or one that refers back to itself — is
- * read once, which ends the walk.
+ * this root's variants. Within the root a schema is read once per claim
+ * group it is reached from — a union object one group already read (its
+ * title skipped as claimed) is read again under a property that starts a
+ * group of its own, where the same title is a claim — and a schema that
+ * refers back to itself is stopped by the ancestors on the path to it, which
+ * ends the walk.
  */
 function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
-  const visited = new WeakSet<SchemaObject>();
+  const visitedByGroup = new WeakMap<Set<string>, WeakSet<SchemaObject>>();
+  const ancestors = new Set<SchemaObject>();
   // `claims` is the group's claim set (see `markContestedTitles`): the titles
   // already read for the union this schema is reached from without entering
   // an object. Only the first variant of a group to carry a title can keep
@@ -642,8 +652,14 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
   // titles `nonObjectVariantContexts` reserves across a union's non-object
   // variants) whatever else is in the document — so a later one competes
   // for nothing and is not read here. A schema reached any other way starts
-  // a group of its own.
+  // a group of its own, under which a title the first group skipped is a
+  // claim of its own, so the schema is read again there (a union object a
+  // `transformSpec` reused under another property: its title keeps the bare
+  // name there, and contests the first group's).
   const walk = (schema: SchemaObject, claims: Set<string> = new Set()): void => {
+    if (ancestors.has(schema)) return;
+    let visited = visitedByGroup.get(claims);
+    if (!visited) visitedByGroup.set(claims, (visited = new WeakSet()));
     if (visited.has(schema)) return;
     visited.add(schema);
     if (schema.$ref) return;
@@ -663,6 +679,7 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
     // union: its variants, an array's items, a map's values (whether under
     // `additionalProperties` or `patternProperties`), and the one member of a
     // lone `allOf`. `properties` and every other keyword begin a new group.
+    ancestors.add(schema);
     for (const [keyword, value] of Object.entries(schema)) {
       if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(value)) {
         const inherited = keyword === 'patternProperties' ? claims : undefined;
@@ -677,6 +694,7 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
         for (const sub of value) if (isSchemaRecord(sub)) walk(sub, inherited);
       }
     }
+    ancestors.delete(schema);
   };
   for (const root of roots) walk(root);
   for (const { shapes, variants } of byTitle.values()) {
@@ -1212,7 +1230,7 @@ export function extractInlineModelsFromProperties(
             // roots read into one list), and the union's reference will
             // resolve to the model that keeps the name, so say so rather
             // than drop the variant silently.
-            warnOnVariantNameClash(existing, variant, variantName, parentName, componentSchemas);
+            warnOnVariantNameClash(existing, variant, variantName, parentName, componentSchemas, results);
             continue;
           }
           const model = buildInlineModel(variantName, variant, componentSchemas);
@@ -1271,10 +1289,14 @@ export function extractInlineModelsFromProperties(
  * variant is not extracted, and the union's reference resolves to the model
  * that keeps the name. The comparison is between the models themselves —
  * the one in the list, however it was built (an ordinary object, an `allOf`
- * merge, a variant), and the one the variant would have produced — by
- * `modelFingerprint`, the shape every clash check in the parser reads, so an
- * ordinary object of exactly the variant's shape shares the name silently,
- * as a sibling variant of the identical shape does. Once per variant, since
+ * merge, a variant), and the one the variant would have produced, with the
+ * nested models each would build — by `deepModelFingerprint`, so a `detail`
+ * that is `{ radius }` under the first and `{ diameter }` under the variant
+ * counts as a different shape although both parents reference one
+ * `DrawingCircleDetail`, and an ordinary object of exactly the variant's
+ * shape, nested models included, shares the name silently, as a sibling
+ * variant of the identical shape does. The warning names the nested models
+ * that differ when the parents' own fields agree. Once per variant, since
  * each is visited once.
  */
 function warnOnVariantNameClash(
@@ -1283,16 +1305,69 @@ function warnOnVariantNameClash(
   variantName: string,
   parentName: string | undefined,
   componentSchemas: Record<string, SchemaObject> | undefined,
+  results: readonly Model[],
 ): void {
   const candidate = buildInlineModel(variantName, variant, componentSchemas);
-  if (modelFingerprint(existing) === modelFingerprint(candidate)) return;
+  const built: Model[] = [candidate];
+  extractInlineModelsFromProperties(variant, built, variantName, componentSchemas);
+  if (deepModelFingerprint(existing, results) === deepModelFingerprint(candidate, built)) return;
   const fieldList = (model: Model): string => model.fields.map((f) => f.name).join(', ') || '(no fields)';
   const site = parentName ? ` under ${parentName}` : '';
+  const differing =
+    modelFingerprint(existing) === modelFingerprint(candidate)
+      ? `; nested models differ: ${differingNestedModels(existing, results, candidate, built).join(', ')}`
+      : '';
   console.warn(
     `[oagen] Warning: Inline model "${variantName}" is minted twice with different shapes${site} ` +
-      `(fields: ${fieldList(existing)} | ${fieldList(candidate)}) ` +
+      `(fields: ${fieldList(existing)} | ${fieldList(candidate)}${differing}) ` +
       `— keeping the first; the second union's reference resolves to it`,
   );
+}
+
+/**
+ * `modelFingerprint` of `model` extended with the deep fingerprint of every
+ * inline model its fields and variants reference, read from `models`, the
+ * list it was built into — so two models of the same fields whose nested
+ * models differ compare as different shapes. A referenced name no model in
+ * the list defines is a component's and stays a name, the same on both
+ * sides; a model that reaches itself is read once per path. Sorted by name,
+ * so field order plays no part here either.
+ */
+export function deepModelFingerprint(model: Model, models: readonly Model[]): string {
+  const byName = new Map(models.map((m) => [m.name, m]));
+  const visiting = new Set<string>();
+  const deep = (m: Model): string => {
+    visiting.add(m.name);
+    const nested = [...new Set(collectModelTypeRefs(m).flatMap((ref) => collectModelRefs(ref)))].sort().map((name) => {
+      const referenced = byName.get(name);
+      return referenced && !visiting.has(name) ? `${name}=${deep(referenced)}` : name;
+    });
+    visiting.delete(m.name);
+    return `${modelFingerprint(m)}@{${nested.join(',')}}`;
+  };
+  return deep(model);
+}
+
+/** The names of the inline models `a` and `b` reference, directly or below, whose deep fingerprints differ or that only one side defines; sorted. */
+function differingNestedModels(a: Model, aModels: readonly Model[], b: Model, bModels: readonly Model[]): string[] {
+  const reachable = (model: Model, models: readonly Model[]): Map<string, string> => {
+    const byName = new Map(models.map((m) => [m.name, m]));
+    const found = new Map<string, string>();
+    const visit = (m: Model): void => {
+      for (const name of collectModelTypeRefs(m).flatMap((ref) => collectModelRefs(ref))) {
+        const referenced = byName.get(name);
+        if (!referenced || found.has(name)) continue;
+        found.set(name, deepModelFingerprint(referenced, models));
+        visit(referenced);
+      }
+    };
+    visit(model);
+    return found;
+  };
+  const left = reachable(a, aModels);
+  const right = reachable(b, bModels);
+  const names = new Set([...left.keys(), ...right.keys()]);
+  return [...names].filter((name) => left.get(name) !== right.get(name)).sort();
 }
 
 /** One property of a merged inline `allOf` and the component it is inherited from (null: an inline member's own). */
@@ -1485,10 +1560,58 @@ export function mergeAllOfMembers(
 }
 
 /**
+ * The keywords a field reads from its own schema — the flags and
+ * documentation `buildFieldFromSchema` reads and the validation keywords
+ * `extractConstraints` reads — which `unionOfDeclarations` lifts onto a
+ * combined declaration when every declaration agrees on them.
+ */
+const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
+  'readOnly',
+  'writeOnly',
+  'deprecated',
+  'description',
+  'default',
+  'example',
+  'examples',
+  'externalDocs',
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'multipleOf',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'minContains',
+  'maxContains',
+  'minProperties',
+  'maxProperties',
+  'pattern',
+  'uniqueItems',
+  'dependentRequired',
+];
+
+/**
  * The one schema that types a property several variants declare: the first
  * declaration when every declaration has the same shape (`schemaShapeKey`,
  * documentation ignored), else a `oneOf` of the distinct shapes, each the
  * first declaration of its shape, in order. See `mergeAllOfMembers`.
+ *
+ * A field reads its flags, documentation and limits from its own schema
+ * (`buildFieldFromSchema`, `extractConstraints`), never from a union's
+ * variants, so a combined declaration carries every keyword of
+ * `LIFTED_DECLARATION_KEYWORDS` the declarations agree on, value for value:
+ * two `kind` declarations both `readOnly: true` with different consts make a
+ * read-only enum field; a keyword the declarations disagree on, or one only
+ * some declare, is not the field's. The declarations themselves are kept as
+ * written inside the `oneOf`, so an enum member or a variant model still
+ * carries its own description and limits. A `null` any declaration admits
+ * (`nullable: true`, or a `type` list naming `null`) is a value the property
+ * takes on that branch, so the union admits it: the admission moves to a
+ * `{ type: 'null' }` variant of the `oneOf` — the one place the type builder
+ * reads a union's nullability from, and one a union of string consts would
+ * otherwise lose when it collapses to an enum — and off the declarations.
  */
 function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   const distinct = new Map<string, SchemaObject>();
@@ -1497,7 +1620,32 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
     if (!distinct.has(key)) distinct.set(key, declaration);
   }
   const shapes = [...distinct.values()];
-  return shapes.length === 1 ? shapes[0]! : { oneOf: shapes };
+  if (shapes.length === 1) return shapes[0]!;
+  const agreed: Record<string, unknown> = {};
+  for (const keyword of LIFTED_DECLARATION_KEYWORDS) {
+    const values = shapes.map((shape) => (shape as Record<string, unknown>)[keyword]);
+    if (values[0] === undefined) continue;
+    const first = stableStringify(values[0]);
+    if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[keyword] = values[0];
+  }
+  const anyAdmitsNull = shapes.some(admitsNull);
+  const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
+  return { ...agreed, oneOf: variants };
+}
+
+/** Whether a declaration admits `null` on its own: OAS 3.0 `nullable: true`, or a `type` list naming `null`. */
+function admitsNull(schema: SchemaObject): boolean {
+  return schema.nullable === true || (Array.isArray(schema.type) && schema.type.includes('null'));
+}
+
+/** `schema` with its own `null` admission removed (see `admitsNull`); the type list collapses to its one remaining entry. */
+function withoutNull(schema: SchemaObject): SchemaObject {
+  const { nullable: _nullable, ...rest } = schema;
+  if (Array.isArray(rest.type)) {
+    const types = rest.type.filter((t) => t !== 'null');
+    rest.type = types.length === 1 ? types[0] : types;
+  }
+  return rest;
 }
 
 /**
