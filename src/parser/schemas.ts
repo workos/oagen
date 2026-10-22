@@ -88,13 +88,24 @@ function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
  * True when an enum schema admits `null` by any OAS 3.0 / 3.1 spelling: the
  * `nullable: true` flag, a `type` list naming `'null'`, a `null` member in
  * `enum:`, or — for an enum declared as a `oneOf`/`anyOf` of `const`
- * schemas — a `type: 'null'` variant.
+ * schemas — a `type: 'null'` variant that an `enum:` list beside the union
+ * does not forbid (`enumListAdmitsNull`).
  */
 function isNullableEnumSchema(schema: SchemaObject): boolean {
   if (schema.nullable === true) return true;
   if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
   if (Array.isArray(schema.enum) && schema.enum.includes(null)) return true;
-  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullVariantSchema);
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullVariantSchema) && enumListAdmitsNull(schema);
+}
+
+/**
+ * Whether an `enum:` list written beside a `oneOf`/`anyOf` of consts lets a
+ * `type: 'null'` variant admit `null`. The keywords apply together, so a
+ * list that leaves `null` out forbids it whatever the variant says; a schema
+ * with no list admits it.
+ */
+function enumListAdmitsNull(schema: SchemaObject): boolean {
+  return !Array.isArray(schema.enum) || schema.enum.includes(null);
 }
 
 /**
@@ -131,8 +142,9 @@ function descriptionEntry(...candidates: unknown[]): { description?: string } {
  * The members of an enum schema in document order, each with the
  * documentation the document attaches to that one value, from whichever
  * spelling declares them: a `oneOf`/`anyOf` of string `const` schemas
- * (`constUnionEnumMembers`) first, else an `enum:` list
- * (`enumListMembers`). Null when the schema is neither.
+ * (`constUnionEnumMembers`, an `enum:` list beside it restricting the
+ * members) first, else an `enum:` list alone (`enumListMembers`). Null when
+ * the schema is neither.
  */
 export function enumMembersOf(schema: SchemaObject): EnumMember[] | null {
   return constUnionEnumMembers(schema) ?? enumListMembers(schema);
@@ -167,18 +179,25 @@ function enumListMembers(schema: SchemaObject): EnumMember[] | null {
  * whose own `description` has no content takes the schema's
  * `x-enum-descriptions` / `x-enumDescriptions` entry for it
  * (`enumValueDescriptions`), the list form read at the variant's position as
- * written. Null when the schema has no
- * `oneOf`/`anyOf`, when every variant is `type: 'null'`, or when any
- * variant is anything but a string const — a `$ref`, an object, a number
- * const — since such a union is not an enum.
+ * written. An `enum:` list written beside the union applies together with
+ * it, as JSON Schema keywords do: a member whose value the list leaves out
+ * is dropped (so the list may leave no member at all), and the list decides
+ * whether a `type: 'null'` variant admits `null` (`enumListAdmitsNull`).
+ * Null when the schema has no `oneOf`/`anyOf`, when every variant is
+ * `type: 'null'`, or when any variant is anything but a string const — a
+ * `$ref`, an object, a number const — since such a union is not an enum.
  */
 function constUnionEnumMembers(schema: SchemaObject): EnumMember[] | null {
-  const variants = schema.oneOf ?? schema.anyOf;
-  if (!variants) return null;
+  const variants = (schema.oneOf ?? schema.anyOf)
+    ?.map((variant, index) => ({ variant, index }))
+    .filter(({ variant }) => !isNullVariantSchema(variant));
+  if (!variants || variants.length === 0) return null;
+  const allowed = schema.enum
+    ? new Set(nonNullEnumValues(schema.enum).map((v) => (typeof v === 'number' ? v : String(v))))
+    : undefined;
   const describe = enumValueDescriptions(schema);
   const members: EnumMember[] = [];
-  for (const [index, variant] of variants.entries()) {
-    if (isNullVariantSchema(variant)) continue;
+  for (const { variant, index } of variants) {
     const value =
       typeof variant.const === 'string'
         ? variant.const
@@ -186,13 +205,14 @@ function constUnionEnumMembers(schema: SchemaObject): EnumMember[] | null {
           ? variant.enum[0]
           : undefined;
     if (value === undefined) return null;
+    if (allowed && !allowed.has(value)) continue;
     members.push({
       value,
       ...descriptionEntry(variant.description, describe(value, index)),
       ...deprecatedEntry(variant),
     });
   }
-  return members.length > 0 ? members : null;
+  return members;
 }
 
 /**
@@ -2052,7 +2072,17 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
       ? (rawDefault as string | number)
       : undefined;
 
-  return { name, values, default: def, ...externalDocsEntry(schema.externalDocs), ...deprecatedEntry(schema) };
+  // The component's own `description` is the enum's, as a model's is its
+  // model's; a lifted inline enum gets none, since its schema's text is the
+  // field's or parameter's. Present only when it has content.
+  return {
+    name,
+    ...descriptionEntry(schema.description),
+    values,
+    default: def,
+    ...externalDocsEntry(schema.externalDocs),
+    ...deprecatedEntry(schema),
+  };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   if (schema.allOf) {
@@ -3332,7 +3362,9 @@ export function schemaToTypeRef(
     const constMembers = constUnionEnumMembers(schema);
     if (constMembers !== null && constMembers.length >= 2) {
       const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
-      return nullVariant ? { kind: 'nullable', inner: enumRef } : enumRef;
+      // An `enum:` list beside the union that leaves `null` out forbids it,
+      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
+      return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
     // The inline object variants' model names, decided once for this TypeRef
