@@ -43,6 +43,8 @@ import {
   constraintsEntry,
   deprecatedEntry,
   collapsedNullableBranch,
+  nonObjectVariantContexts,
+  unwrapNullableField,
 } from './schemas.js';
 import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
@@ -908,7 +910,8 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
  * collection, a path with no resource, a segment that does not look plural —
  * so a non-null result always differs from the singular name.
  * disambiguateOperationNames falls back to it before a numeric suffix when
- * the singular name is an operationId's.
+ * the singular name is an operationId's, or another path-named operation's
+ * whose path differs only by that plural.
  */
 function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
   if (method === 'post' && inferPostAction(path, apiRootLength)) return null;
@@ -947,10 +950,28 @@ function inferVerb(method: HttpMethod, path: string): string {
 }
 
 /**
+ * The noun a literal path segment contributes to an operation name. A
+ * segment a path parameter follows addresses one item of its collection, so
+ * it is singular (`singularizePathSegment`): `pets` in `/store/pets/{id}` is
+ * `pet`. Any other segment is kept as the path spells it: `pets` in
+ * `/store/pets`, `legacy` in `/users/{id}/legacy/factors`. The one rule for
+ * the resource (inferResourceFromPath), the segments between the service and
+ * the resource (inferDeeperContext) and the service noun a name restores
+ * (inferServiceNoun), so `/store/cats/{id}/toys/{toyId}` and
+ * `/api/notes/{noteId}` read `Cat` and `Note`, as `/store/pets/{id}` reads
+ * `Pet`. An action's parent (inferPostAction) is singular by that function's
+ * own rule, which does not look at the segment after it.
+ */
+function pathSegmentNoun(segments: readonly string[], index: number): string {
+  const segment = segments[index];
+  return segments[index + 1]?.startsWith('{') ? singularizePathSegment(segment) : segment;
+}
+
+/**
  * Extract a resource noun from the path for operation naming.
  * Uses the last non-param segment (the resource being operated on). An item
  * operation — the last literal segment is followed by a path parameter —
- * addresses one entity, so its noun is singularised (`singularizePathSegment`).
+ * addresses one entity, so its noun is singularised (pathSegmentNoun).
  *
  * Examples:
  *   /accounts/users → "Users"
@@ -971,22 +992,21 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
 
   // Find the last meaningful (non-param) segment past the API root, so a
   // root word is never the resource: /api/v1/{id} is Api.delete, not deleteV1.
-  let resourceSegment: string | null = null;
-  let isItem = false;
+  let resourceIndex = -1;
   for (let i = segments.length - 1; i >= apiRootLength; i--) {
     if (!segments[i].startsWith('{')) {
-      resourceSegment = segments[i];
-      isItem = i < segments.length - 1;
+      resourceIndex = i;
       break;
     }
   }
 
-  if (!resourceSegment) return null;
+  if (resourceIndex < 0) return null;
+  const resourceSegment = segments[resourceIndex];
   // Skip the service name (the segment the service was named from) — it
   // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
   if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
 
-  return toPascalCase(isItem && singularItem ? singularizePathSegment(resourceSegment) : resourceSegment);
+  return toPascalCase(singularItem ? pathSegmentNoun(segments, resourceIndex) : resourceSegment);
 }
 
 /**
@@ -1062,8 +1082,11 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *
  *   1. the resource noun (inferResourceFromPath);
  *   2. the path segments between the service and the resource
- *      (inferDeeperContext): `GET /users/{id}/sso/factors` next to
- *      `GET /users/{id}/factors` → `listFactorsSso`;
+ *      (inferDeeperContext), each singular when a path parameter follows it
+ *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
+ *      `GET /users/{id}/factors` → `listFactorsLegacy`, and
+ *      `GET /store/cats/{id}/toys/{toyId}` next to
+ *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`;
  *   3. `By<Param>` for each path parameter the colliding paths do not all
  *      share, in path order, when those are what tell the paths apart:
  *      `GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes
@@ -1083,15 +1106,21 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      parameters above cannot touch: `GET /api/notes` beside
  *      `operationId: list` on `GET /api/{teamId}/notes` is `listNotes`;
  *   6. for a path-named item operation whose singular name none of those
- *      could tell from an operationId — `GET /store/pets/{id}` is `getPet`,
- *      and so is `operationId: getPet` on `/store/featured/{id}` — the plural
- *      name it had before item resources were singularised, `getPets`
- *      (pluralFallbackName), when no operation in the service has it. The
- *      plural still says which collection is read, and it is the name every
- *      SDK generated from such a document already exposes, where a number
- *      says nothing. Two path-named operations never need it: their paths
- *      differ, so a qualifier above tells them apart. A name a qualifier has
- *      already extended, and an action, go straight to the suffix;
+ *      could tell apart — `GET /store/pets/{id}` is `getPet`, and so is
+ *      `operationId: getPet` on `/store/featured/{id}`, or path-named
+ *      `GET /store/pet/{id}`, whose path differs only by the plural the
+ *      singular erased — the plural name it had before item resources were
+ *      singularised, `getPets` (pluralFallbackName), when no operation in
+ *      the service has it. The plural still says which collection is read,
+ *      and it is the name every SDK generated from such a document already
+ *      exposes, where a number says nothing. Like the qualifiers above it
+ *      runs only when it tells the group apart: an operationId-named
+ *      operation, an action and a name a qualifier has already extended
+ *      have no plural, so any member that has one differs from them, while
+ *      a group whose members would all take the same plural
+ *      (`/store/Pets/{id}` beside `/store/pets/{id}`) goes straight to the
+ *      suffix, since `getPets` beside `getPet` would say nothing about
+ *      which is which;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
  *      operation keeps the plain name over a path-named one; then the path
@@ -1192,20 +1221,29 @@ function disambiguateOperationNames(
   // per service. Groups come in name order and members are sorted by path,
   // so the names are allocated in an order that depends only on the data.
   const inUse = new Set(operations.map((op) => op.name));
+  // The plural a member could take back: none for an operationId-named
+  // operation, and for a path-named one only while its name is still the one
+  // it was built with — no qualifier above has extended it.
+  const pluralOf = (op: Operation): string | null => {
+    if (!pathNamed.has(op)) return null;
+    const root = apiRootLengthOf(op);
+    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root)) return null;
+    return pluralFallbackName(op.httpMethod, op.path, root);
+  };
   for (const group of collidingGroups(operations)) {
-    // Only next to an operationId: two path-named operations have different
-    // paths, and the qualifiers above are what tell those apart.
-    if (group.every((op) => pathNamed.has(op))) continue;
+    // Like every qualifier, only when it tells the group apart: beside an
+    // operationId, which has no plural, or beside a path that spells the
+    // resource singular (`/store/pet/{id}`). Members that would all take the
+    // same plural are left to the numeric suffix.
+    const plurals = new Map(group.map((op) => [op, pluralOf(op)]));
+    if (new Set(plurals.values()).size <= 1) continue;
     const pluralByPath = new Map<string, string>();
     for (const op of group.filter((member) => pathNamed.has(member)).sort(byPath)) {
       let plural = pluralByPath.get(op.path);
       if (plural === undefined) {
-        const root = apiRootLengthOf(op);
-        const candidate = pluralFallbackName(op.httpMethod, op.path, root);
-        // The name must still be the one the operation was built with — no
-        // qualifier above has extended it — and the plural must be free.
-        const untouched = op.name === fallbackOperationName(op.httpMethod, op.path, root);
-        if (candidate === null || !untouched || inUse.has(candidate)) continue;
+        const candidate = plurals.get(op);
+        // The plural must be free.
+        if (candidate == null || inUse.has(candidate)) continue;
         plural = candidate;
         inUse.add(plural);
         pluralByPath.set(op.path, plural);
@@ -1288,14 +1326,18 @@ function collidingGroups(operations: Operation[]): Operation[][] {
  * remain are then joined where they overlap the end of the name: `listNotes`
  * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
  * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
- * case-insensitively on the camelCase boundary, so `listNotes` + `Note` does
- * not overlap and is appended whole. The name's own words are never touched.
+ * on the camelCase boundary, case-insensitively and by their singular form
+ * (singularizePathSegment), so a noun the name ends with is not repeated in
+ * the other number either: `listNotes` + `Note`, the deeper context of
+ * `/orgs/notes/{id}/notes`, stays `listNotes`. The name's own words are
+ * never touched.
  */
 function appendQualifier(name: string, qualifier: string | null): string {
   if (!qualifier) return name;
-  const have = splitWords(name).map((w) => w.toLowerCase());
-  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || w.toLowerCase() !== all[i - 1].toLowerCase());
-  const want = words.map((w) => w.toLowerCase());
+  const word = (w: string) => singularizePathSegment(w.toLowerCase());
+  const have = splitWords(name).map(word);
+  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || word(w) !== word(all[i - 1]));
+  const want = words.map(word);
   // The longest run of words that both ends the name and starts the qualifier.
   let overlap = Math.min(have.length, want.length);
   while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
@@ -1349,26 +1391,34 @@ function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string 
 
 /**
  * The resource noun inferResourceFromPath leaves off because it is the
- * segment the service was named from: `Notes` for `/api/notes`,
- * `/api/notes/{id}` and `/api/{teamId}/notes` under an `/api` root, and for a
- * root-less `/notes`. Null when the last literal segment past the API root is
- * a different word (`/api/notes/{id}/tags`, whose `Tags` the plain name
- * already carries) or when nothing literal follows the root (`/api/v1/{id}`).
+ * segment the service was named from, spelled as that function would have
+ * spelled it (pathSegmentNoun): `Notes` for `/api/notes` and
+ * `/api/{teamId}/notes` under an `/api` root and for a root-less `/notes`,
+ * `Note` for the item `/api/notes/{id}`. Null when the last literal segment
+ * past the API root is a different word (`/api/notes/{id}/tags`, whose `Tags`
+ * the plain name already carries) or when nothing literal follows the root
+ * (`/api/v1/{id}`).
  */
 function inferServiceNoun(path: string, apiRootLength: number): string | null {
   const segments = pathSegments(path);
   let last = segments.length - 1;
   while (last >= apiRootLength && segments[last].startsWith('{')) last--;
   if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
-  return toPascalCase(segments[last]);
+  return toPascalCase(pathSegmentNoun(segments, last));
 }
 
 /**
- * Extract a deeper disambiguation context from the path when the last
- * segment isn't unique enough. Uses the second-to-last non-param segment.
+ * Extract a deeper disambiguation context from the path when the resource
+ * noun isn't unique enough: the literal segments between the service segment
+ * and the resource, joined in path order, each spelled as pathSegmentNoun
+ * spells it — singular when a path parameter follows it, since the segment
+ * then addresses one item, and as written otherwise.
  *
- * /users/{id}/auth_factors → already captured as "AuthFactors"
- * /users/external_id/{external_id} → "ExternalId" (special path, not a sub-resource)
+ * /users/{id}/legacy/factors → "Legacy"
+ * /store/cats/{id}/toys/{toyId} → "Cat" (one cat's toys), so `getToyCat`
+ * /store/cats/toys/{toyId} → "Cats" (no one cat), so `getToyCats`
+ * /org/analytics/analytics/teams → "AnalyticsAnalytics" (appendQualifier collapses the repeat)
+ * /users/{id}/auth_factors → null: nothing lies between the service and the resource
  *
  * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
  * left out along with the service segment that follows it, so
@@ -1376,10 +1426,13 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
  */
 function inferDeeperContext(path: string, apiRootLength = 0): string | null {
   const segments = pathSegments(path);
-  const nonParams = segments.slice(apiRootLength).filter((s) => !s.startsWith('{'));
+  const nouns: string[] = [];
+  for (let i = apiRootLength; i < segments.length; i++) {
+    if (!segments[i].startsWith('{')) nouns.push(pathSegmentNoun(segments, i));
+  }
   // Skip first (service) and last (already used) — use the middle ones
-  if (nonParams.length >= 3) {
-    return toPascalCase(nonParams.slice(1, -1).join('_'));
+  if (nouns.length >= 3) {
+    return toPascalCase(nouns.slice(1, -1).join('_'));
   }
   return null;
 }
@@ -2320,45 +2373,77 @@ function extractRequestBody(
     // nullable or not, is not collapsed: every variant is built as written.
     const branch = collapsedNullableBranch(schema);
 
+    // The inline object variants are named and built first, in order, so the
+    // other variants' contexts can step around their names and their
+    // children's (`nonObjectVariantContexts`).
+    const objectVariantNames = new Map<SchemaObject, string>();
+    for (const variant of inlineObjectVariants) {
+      const named = deriveOneOfVariantName(
+        variant,
+        contextName,
+        inlineModels,
+        inlineObjectVariants,
+        contentNamed,
+        Boolean(op?.operationId),
+      );
+      const variantName = named.name;
+      if (named.fromContent) contentNamed.push(variantName);
+      objectVariantNames.set(variant, variantName);
+      const source = branch ?? variant;
+      const requiredSet = new Set(source.required ?? []);
+      const siblings = collectProperties(source);
+      const fields: Field[] = [];
+      for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
+        if (!fieldSchema) continue;
+        fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings));
+      }
+      inlineModels.push({
+        name: variantName,
+        description: source.description,
+        ...externalDocsEntry(source.externalDocs),
+        fields,
+        ...deprecatedEntry(source),
+        ...constraintsEntry(source),
+      });
+      extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
+    }
+    // Every other variant that mints a name — an array or map, a nested
+    // union, a nullable wrapper around an object, an `allOf`, an inline enum
+    // — is typed under the context `nonObjectVariantContexts` gives it, apart
+    // from the object variants' names, and materialized by the field
+    // extractor under that context, so the body never references a model the
+    // parser did not create: the variants of a union nested under the body's
+    // second variant are `CreateThingRequestVariant2`,
+    // `BCreateThingRequestVariant2`, never `CreateThingRequest` again.
+    const variantContexts = nonObjectVariantContexts(
+      contextName,
+      schema.oneOf,
+      undefined,
+      undefined,
+      objectVariantNames,
+    );
+    for (const [variant, context] of variantContexts) {
+      extractInlineModelsFromProperties(
+        { properties: { [context]: unwrapNullableField(variant) } },
+        inlineModels,
+        undefined,
+        componentSchemas,
+      );
+    }
+
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
         const ref = schemaToTypeRef(variant, contextName);
         variants.push(ref);
       } else if (variant.type === 'null') {
         // skip null variant in union, handle separately
-      } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const named = deriveOneOfVariantName(
-          variant,
-          contextName,
-          inlineModels,
-          inlineObjectVariants,
-          contentNamed,
-          Boolean(op?.operationId),
-        );
-        const variantName = named.name;
-        if (named.fromContent) contentNamed.push(variantName);
-        const source = branch ?? variant;
-        const requiredSet = new Set(source.required ?? []);
-        const siblings = collectProperties(source);
-        const fields: Field[] = [];
-        for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
-          if (!fieldSchema) continue;
-          fields.push(
-            buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
-          );
-        }
-        inlineModels.push({
-          name: variantName,
-          description: source.description,
-          ...externalDocsEntry(source.externalDocs),
-          fields,
-          ...deprecatedEntry(source),
-          ...constraintsEntry(source),
-        });
-        extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
-        variants.push({ kind: 'model', name: variantName });
       } else {
-        variants.push(schemaToTypeRef(variant, contextName));
+        const variantName = objectVariantNames.get(variant);
+        variants.push(
+          variantName !== undefined
+            ? { kind: 'model', name: variantName }
+            : schemaToTypeRef(variant, variantContexts.get(variant) ?? contextName),
+        );
       }
     }
 
@@ -2378,6 +2463,20 @@ function extractRequestBody(
     return { body, encoding };
   }
 
+  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
+  // array, a map, a nullable object, …). Such a TypeRef can still reach
+  // inline models — the inline object variants of an `anyOf`, an array's
+  // inline items or the variants of an `items.oneOf`, a map's inline values,
+  // and whatever is nested under any of them, a union under a variant
+  // included — so materialize them the way an inline response does: as a
+  // property of this name under no parent, which names every nested model
+  // exactly as the TypeRef references it.
+  extractInlineModelsFromProperties(
+    { properties: { [contextName]: schema } },
+    inlineModels,
+    undefined,
+    componentSchemas,
+  );
   return { body: schemaToTypeRef(schema, contextName), encoding };
 }
 
@@ -3769,6 +3868,19 @@ function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema
   return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 
+/**
+ * The type of a body the document does not describe:
+ * `{ kind: 'primitive', type: 'unknown' }`. A 3xx entry's `type` is always
+ * this; a 2xx entry's is this until a media-type rule types it; and an
+ * operation's `response` is this when the operation declares no 2xx or 3xx
+ * response at all — only `default`, ranges or errors, an empty `responses`
+ * map, or no `responses` key — so an emitter never types a return value the
+ * document does not describe. Each call returns a new object.
+ */
+function undescribedBodyType(): TypeRef {
+  return { kind: 'primitive', type: 'unknown' };
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -3802,7 +3914,7 @@ function extractResponses(
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
-  let response: TypeRef = { kind: 'primitive', type: 'string' };
+  let response: TypeRef = undescribedBodyType();
   let responseHeaders: ResponseHeader[] | undefined;
   let responseContentTypes: string[] | undefined;
   let responseContents: ResponseContent[] | undefined;
@@ -3817,6 +3929,9 @@ function extractResponses(
   let overrideItemType: TypeRef | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
 
+  // An operation without a `responses` object declares no success response,
+  // so `response` is `unknown` here as it is for one that declares only
+  // `default`, ranges or errors.
   if (!responses) return { response, errors, inlineModels, isPaginated };
 
   const allSuccessResponses: SuccessResponse[] = [];
@@ -3876,7 +3991,7 @@ function extractResponses(
     const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
-      let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
+      let extractedType: TypeRef = undescribedBodyType();
       // The body schema to classify: the JSON one when a JSON media type is
       // declared (`application/json` by essence, then `+json`), else — past
       // the binary and text media types typed below without a schema — the
@@ -3936,7 +4051,7 @@ function extractResponses(
       );
       allSuccessResponses.push({
         statusCode: code,
-        type: { kind: 'primitive', type: 'unknown' },
+        type: undescribedBodyType(),
         ...(headers && { headers }),
         ...(description && { description }),
         ...contents,
@@ -3993,8 +4108,9 @@ function extractResponses(
   // Primary response = lowest status code whose type is not `unknown` (the
   // lowest 2xx with a typed body; a 3xx entry is always `unknown`), falling
   // back to the lowest declared code (an untyped 2xx, or a 3xx when there is
-  // no 2xx). With no 2xx or 3xx at all, `response` keeps its initial `string`;
-  // a `2XX` range or `default` body is never promoted into it.
+  // no 2xx). With no 2xx or 3xx at all, `response` stays `unknown` — the type
+  // of a body the document does not describe — with no headers, description
+  // or media types; a `2XX` range or `default` body is never promoted into it.
   let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);

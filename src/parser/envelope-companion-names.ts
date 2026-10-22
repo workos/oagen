@@ -1,6 +1,7 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, renameModelRefs, walkTypeRef } from '../ir/types.js';
 import type { InlineModelBundle } from './inline-models.js';
+import { enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { unionRulesKey, unionShapeKey } from './union-shape.js';
 
 /**
@@ -267,8 +268,10 @@ function admits(
 /**
  * Whether `target` admits every value of `copy`'s type. A nullable target
  * admits a nullable or a non-null copy; a non-null target admits only a
- * non-null copy. An enum with known values admits a copy whose values are a
- * subset of its own. Everything else must match exactly, by fingerprint.
+ * non-null copy. An enum with known values admits a copy whose members are a
+ * subset of its own — a member being a value with its deprecation
+ * (`enumValueShapeKey`), so a copy deprecating a value the target does not
+ * is not admitted. Everything else must match exactly, by fingerprint.
  */
 function typeAdmits(
   target: TypeRef,
@@ -294,8 +297,8 @@ function typeAdmits(
     case 'enum': {
       const c = copy as typeof target;
       if (target.values && c.values) {
-        const allowed = new Set(target.values.map((v) => `${typeof v}:${String(v)}`));
-        return c.values.every((v) => allowed.has(`${typeof v}:${String(v)}`));
+        const allowed = new Set(enumValuesOf(target).map(enumValueShapeKey));
+        return enumValuesOf(c).every((v) => allowed.has(enumValueShapeKey(v)));
       }
       return target.name === c.name;
     }
@@ -308,8 +311,10 @@ function typeAdmits(
  * Structural fingerprint of a companion model: whether it is deprecated, its
  * field names, requiredness, and each field's shape, with models nested
  * inside the companion compared by shape rather than by (operation-qualified)
- * name, and inline enums compared by their values. Models outside the
- * companion are compared by name.
+ * name, and inline enums compared by their members — each value with its
+ * deprecation (`enumValueShapeKey`), so a copy deprecating a value the others
+ * do not keeps its own name, as a deprecated copy of a model does. Models
+ * outside the companion are compared by name.
  */
 function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set<string>): string {
   if (visiting.has(model.name)) return `rec:${model.name}`;
@@ -342,12 +347,7 @@ function fingerprintType(ref: TypeRef, local: Map<string, Model>, visiting: Set<
         .sort()
         .join(',')}>`;
     case 'enum':
-      return ref.values
-        ? `e<${[...ref.values]
-            .map((v) => `${typeof v}:${String(v)}`)
-            .sort()
-            .join('|')}>`
-        : `e:${ref.name}`;
+      return ref.values ? `e<${enumValuesOf(ref).map(enumValueShapeKey).sort().join('|')}>` : `e:${ref.name}`;
     case 'model': {
       const nested = local.get(ref.name);
       return nested ? fingerprintModel(nested, local, visiting) : `ref:${ref.name}`;
