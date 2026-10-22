@@ -287,10 +287,6 @@ describe('request bodies keep every media type (issue #278)', () => {
 
   describe('naming through the shape registry', () => {
     it('tells two spellings of one media type apart by their parameters; a case-only third shape steps to the next free name', async () => {
-      // Issue #279: beside another key of its essence, a parameterized key carries
-      // its parameters in its name, so the names do not depend on key order; a
-      // case-only spelling has none and goes through the registry.
-
       const spec = await parseDocument(
         document(
           replaceWidget({
