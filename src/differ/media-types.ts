@@ -1,7 +1,7 @@
 import type { RequestBodyContent, ResponseContent, TypeRef } from '../ir/types.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 import type { RequestBodyContentTypesChange } from './types.js';
-import { typeRefsEqual } from './models.js';
+import { sameShape, type DocumentShapes } from './shapes.js';
 
 /**
  * One media type a request body or a response entry declares, as the differ
@@ -107,16 +107,21 @@ export function pairMediaTypeBodies(oldBodies: MediaTypeBody[], newBodies: Media
 }
 
 /**
- * The pairs whose body types differ, except the own body on both sides when
- * `ownCoveredElsewhere`: another comparison (`responseChanged`,
- * `errorsChanged`, `requestBodyChanged`) reports that very retype.
+ * The pairs whose body types are not one shape (`sameShape`, so a model that
+ * was only renamed — as the parser does when a parameter edit on a key
+ * declared beside another spelling of its essence renames the model it mints
+ * — is no retype; by name alone without `shapes`), except the own body on
+ * both sides when `ownCoveredElsewhere`: another comparison
+ * (`responseChanged`, `errorsChanged`, `requestBodyChanged`) reports that
+ * very retype.
  */
 export function retypedBodies(
   pairs: Array<[MediaTypeBody, MediaTypeBody]>,
   ownCoveredElsewhere: boolean,
+  shapes?: DocumentShapes,
 ): Array<[MediaTypeBody, MediaTypeBody]> {
   return pairs.filter(([before, after]) => {
-    if (!before.type || !after.type || typeRefsEqual(before.type, after.type)) return false;
+    if (!before.type || !after.type || sameShape(before.type, after.type, shapes)) return false;
     return !(before.own && after.own && ownCoveredElsewhere);
   });
 }
@@ -147,19 +152,22 @@ export type RequestBodySide = 'caller' | 'receiver';
  * type it could send that is gone or whose body changed type is breaking and
  * one it can newly send is additive; for the receiver, one the sender can
  * newly use or whose body changed type is breaking (the handler must decode
- * it) and one the sender can no longer use is additive. `undefined` when
+ * it) and one the sender can no longer use is additive. A retype is a body
+ * whose shape changed (`sameShape` through `shapes`, the two documents'
+ * named types), not one whose model was only renamed. `undefined` when
  * nothing changed.
  */
 export function diffRequestBodyContentTypes(
   oldBody: RequestBodyMediaTypes,
   newBody: RequestBodyMediaTypes,
   side: RequestBodySide,
+  shapes?: DocumentShapes,
 ): RequestBodyContentTypesChange | undefined {
   if (!declaresBody(oldBody) || !declaresBody(newBody)) return undefined;
   const bodies = (body: RequestBodyMediaTypes): MediaTypeBody[] =>
     mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
   const { pairs, added, removed } = pairMediaTypeBodies(bodies(oldBody), bodies(newBody));
-  const retyped = retypedBodies(pairs, true);
+  const retyped = retypedBodies(pairs, true, shapes);
   if (added.length === 0 && removed.length === 0 && retyped.length === 0) return undefined;
   const breaking = retyped.length > 0 || (side === 'caller' ? removed.length > 0 : added.length > 0);
   return {

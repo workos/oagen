@@ -161,6 +161,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     servers,
     version,
     options?.operationHints,
+    // The component enums, so no header, fallback, error or secondary-body
+    // model the operations pass names last takes one of their names.
+    enums,
   );
 
   // Webhooks are read while the schema-name transform is still active, like

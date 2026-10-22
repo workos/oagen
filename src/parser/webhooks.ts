@@ -15,7 +15,7 @@ import { toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef } from './schemas.js';
-import { extractInlineModelsFromProperties } from './inline-models.js';
+import { extractInlineModelsFromProperties, modelFingerprint } from './inline-models.js';
 import {
   HTTP_METHODS,
   extractParams,
@@ -642,21 +642,61 @@ function mintPayload(
   }
   for (const contentType of contentTypes) {
     const schema = content[contentType]?.schema;
-    // A secondary entry's property is named from the media type's essence
-    // among the body's content keys (`mediaTypeNameFragment`), so a key keeps
-    // its name however it is spelled and two spellings of one essence side
-    // by side are told apart by their parameters, whatever their order.
     const type =
       selected && contentType === selected.contentType && minted.ref
         ? minted.ref
         : schema
-          ? absorb(
-              mintSchema(schema, `${mediaTypeNameFragment(contentType, contentTypes)}Payload`, stem, componentSchemas),
-            )
+          ? absorb(mintSecondaryPayload(schema, contentType, contentTypes, stem, minted, componentSchemas))
           : schemalessRequestContentType(contentType);
     minted.contents.push({ contentType, type });
   }
   return minted;
+}
+
+/**
+ * A secondary payload entry typed and materialized under the first
+ * `<Fragment>Payload` property whose minted names are free of everything the
+ * payload has minted so far — `<Fragment>Payload`, then `<Fragment>Payload2`,
+ * `…Payload3`, … — the fragment coming from the media type's essence and,
+ * when another key of the same essence sits beside it, its parameters
+ * (`mediaTypeNameFragment`), so `application/xml` and `APPLICATION/XML;
+ * charset=utf-8` take `…ApplicationXmlPayload` and
+ * `…ApplicationXmlCharsetUtf8Payload` before any candidate is tried. A
+ * candidate whose names are all taken by models of the very shape this entry
+ * mints shares them and mints nothing, as the operation registry shares an
+ * identical shape; a name taken by a different shape (`application/xml` and
+ * `APPLICATION/XML` with other fields) steps on, so no two entries of one
+ * payload ever point at a model with the other's fields. When a candidate
+ * changes none of the minted names (a title-mapped variant), the last is
+ * kept and the clash left to the model merge, as `mintParameter` does.
+ */
+function mintSecondaryPayload(
+  schema: SchemaObject,
+  contentType: string,
+  siblings: readonly string[],
+  stem: string,
+  minted: MintedPayload,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): MintedSchema {
+  const fragment = mediaTypeNameFragment(contentType, siblings);
+  const own = new Map(minted.models.map((model) => [model.name, model]));
+  let previous: MintedSchema | undefined;
+  for (let attempt = 0; ; attempt++) {
+    const property = attempt === 0 ? `${fragment}Payload` : `${fragment}Payload${attempt + 1}`;
+    const trial = mintSchema(schema, property, stem, componentSchemas);
+    const taken = [...trial.names].filter((name) => minted.names.has(name));
+    if (taken.length === 0) return trial;
+    const sharesShape =
+      taken.length === trial.names.size &&
+      trial.models.every((model) => {
+        const owner = own.get(model.name);
+        return owner !== undefined && modelFingerprint(owner) === modelFingerprint(model);
+      });
+    if (sharesShape) return { ref: trial.ref, models: [], names: new Set() };
+    const stuck = previous !== undefined && sameNames(previous.names, trial.names);
+    if (stuck || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return trial;
+    previous = trial;
+  }
 }
 
 /**

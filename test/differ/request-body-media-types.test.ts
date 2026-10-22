@@ -320,4 +320,88 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
       classification: 'breaking',
     });
   });
+
+  /** The JSON body beside two CSV keys, `version=<v>` with the given schema and `version=2`. */
+  const versioned = (v: number, properties: Record<string, unknown>) =>
+    document({
+      'application/json': name,
+      [`text/csv; version=${v}`]: { schema: { type: 'object', properties } },
+      'text/csv; version=2': { schema: { type: 'object', properties: { cell: { type: 'string' } } } },
+    });
+  const row = { row: { type: 'string' } };
+
+  it('reports only the renamed model when a parameter edit on a sibling-distinguished key leaves the schema as it was (Greptile round 3)', async () => {
+    const { changes } = await diffDocuments(versioned(1, row), versioned(3, row));
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed']);
+    expect(changes).toContainEqual({
+      kind: 'model-removed',
+      name: 'CreatePetTextCsvVersion1Request',
+      classification: 'breaking',
+    });
+  });
+
+  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped, breaking', async () => {
+    const { changes } = await diffDocuments(versioned(1, row), versioned(3, { ...row, cells: { type: 'integer' } }));
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      requestBodyChanged: false,
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: [],
+        retyped: ['text/csv; version=3'],
+        classification: 'breaking',
+      },
+      classification: 'breaking',
+    });
+  });
+});
+
+describe('diffSpecs — a webhook payload model that was only renamed is no media-type change', () => {
+  const event: TypeRef = { kind: 'model', name: 'AdoptionEvent' };
+  const note = (modelName: string): Model => ({
+    name: modelName,
+    fields: [{ name: 'text', type: string, required: true }],
+  });
+  const adoptionEvent: Model = {
+    name: 'AdoptionEvent',
+    fields: [{ name: 'pet_id', type: string, required: true }],
+  };
+  const hook = (noteModel: string): Webhook => ({
+    name: 'petAdopted',
+    httpMethod: 'post',
+    headerParams: [],
+    queryParams: [],
+    requestBody: event,
+    requestBodyContentTypes: ['application/json', 'text/plain'],
+    requestBodyContents: contents([
+      ['application/json', event],
+      ['text/plain', { kind: 'model', name: noteModel }],
+    ]),
+    responses: [{ statusCode: 200 }],
+  });
+  const spec = (noteModel: string, noteShape: Model): ApiSpec => ({
+    name: 'Test',
+    version: '1',
+    baseUrl: '',
+    services: [],
+    webhooks: [hook(noteModel)],
+    models: [adoptionEvent, noteShape],
+    enums: [],
+    sdk: defaultSdkBehavior(),
+  });
+
+  it('reports the rename through the models diff only', () => {
+    const { changes } = diffSpecs(spec('OldNote', note('OldNote')), spec('NewNote', note('NewNote')));
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed']);
+  });
+
+  it('reports a payload whose shape changed as retyped, breaking', () => {
+    const changed: Model = { ...note('NewNote'), fields: [{ name: 'text', type: string, required: false }] };
+    const { changes } = diffSpecs(spec('OldNote', note('OldNote')), spec('NewNote', changed));
+    expect(changes.find((c) => c.kind === 'webhook-modified')).toMatchObject({
+      requestBodyChanged: true,
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
+      details: 'payload media type text/plain retyped',
+      classification: 'breaking',
+    });
+  });
 });

@@ -387,6 +387,51 @@ describe('parser to differ — a secondary inline body under a respelled key (Gr
     );
     expect(changes).toEqual([]);
   });
+
+  /** Two YAML keys beside the JSON primary, `version=1` and `version=2`, with the given shapes under `version=<v>`. */
+  const versioned = (v: number, properties: Record<string, unknown>) => {
+    const doc = report('application/yaml', title);
+    doc.paths['/report'].get.responses['200'].content = {
+      'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      [`application/yaml; version=${v}`]: { schema: { type: 'object', properties } },
+      'application/yaml; version=2': { schema: { type: 'object', properties: { summary: { type: 'string' } } } },
+    } as never;
+    return doc;
+  };
+
+  it('reports only the renamed model, not a retype, when a parameter edit on a sibling-distinguished key leaves the schema as it was (Greptile round 3)', async () => {
+    const { changes, summary } = await diffDocuments(versioned(1, title), versioned(3, title));
+    // The model the parser mints for the key is renamed with it; the differ reads
+    // both through to the same fields, so the body is not retyped and the rename
+    // is the models diff's business.
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed']);
+    expect(changes).toContainEqual({
+      kind: 'model-removed',
+      name: 'GetReportApplicationYamlVersion1Response',
+      classification: 'breaking',
+    });
+    expect(changes).toContainEqual({
+      kind: 'model-added',
+      name: 'GetReportApplicationYamlVersion3Response',
+      classification: 'additive',
+    });
+    expect(summary.breaking).toBe(1);
+  });
+
+  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped, breaking', async () => {
+    const { changes } = await diffDocuments(
+      versioned(1, title),
+      versioned(3, { ...title, pages: { type: 'integer' } }),
+    );
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed', 'operation-modified']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/yaml; version=3'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
 });
 
 describe('pairing a lone 2xx: the entry spelled as it is wins over one that only matches by essence (Greptile round 2)', () => {

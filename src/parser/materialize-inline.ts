@@ -23,13 +23,17 @@ import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModel
 export { modelFingerprint };
 
 /**
- * Spec-wide record of every model name an inline model must not silently
- * reuse: the component models (seeded up front), each operation's primary
- * response and request body models, and each header and fallback model
- * materialized so far. The value carries the model's shape fingerprint, so a
- * model whose shape matches can share the name, and — for operation-owned
- * models — which operation produced it, so a collision inside one operation
- * can be told apart from one across operations.
+ * Spec-wide record of every name an inline model must not silently reuse:
+ * the component models (seeded up front), each operation's primary response
+ * and request body models, each header and fallback model materialized so
+ * far — and every enum name, component or minted (`reserveEnumNames`), since
+ * a model and an enum under one name reach an emitter as one public symbol.
+ * A model's entry carries its shape fingerprint, so a model whose shape
+ * matches can share the name, and — for operation-owned models — which
+ * operation produced it, so a collision inside one operation can be told
+ * apart from one across operations. An enum's entry carries
+ * `ENUM_NAME_FINGERPRINT`, which no model's fingerprint equals, so a model
+ * minted under an enum's name always clashes and moves on.
  */
 export type InlineModelRegistry = Map<string, InlineModelOwner>;
 
@@ -38,11 +42,30 @@ export interface InlineModelOwner {
   operation?: string;
 }
 
+/**
+ * The fingerprint an enum name is registered under. Every model fingerprint
+ * (`modelFingerprint`) carries a `#` between its fields and the rest, so no
+ * model can match this and share an enum's name.
+ */
+export const ENUM_NAME_FINGERPRINT = 'enum';
+
 /** Record every model of `models` the registry does not know yet as owned by `operation`; the first owner keeps a name. */
 export function registerInlineModels(registry: InlineModelRegistry, models: Model[], operation?: string): void {
   for (const model of models) {
     if (registry.has(model.name)) continue;
     registry.set(model.name, { fingerprint: modelFingerprint(model), operation });
+  }
+}
+
+/**
+ * Record every name of `names` the registry does not know yet as an enum's,
+ * so no inline model is materialized under it (`ENUM_NAME_FINGERPRINT`). A
+ * name a model already owns keeps the model's entry: that is the document's
+ * own clash, not one the registry can move.
+ */
+export function reserveEnumNames(registry: InlineModelRegistry, names: Iterable<string>): void {
+  for (const name of names) {
+    if (!registry.has(name)) registry.set(name, { fingerprint: ENUM_NAME_FINGERPRINT });
   }
 }
 

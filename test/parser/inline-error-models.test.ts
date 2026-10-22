@@ -966,9 +966,18 @@ describe('round 1: the reserved set covers every name the component and header p
 
   it('two operations whose operationIds share a stem: enum bodies with other members get distinct enums', async () => {
     const ir = await parseWithoutWarnings(sameStem(notFound(en(['absent', 'unknown']))));
-    // The first operation's 404 is `reason`-shaped (a model), so only its stem is shared here.
+    // The first operation's 404 is `reason`-shaped (a model named
+    // `GetPetError404`), so the second's enum body derives the very name a
+    // model owns and is promoted under the next distinct one instead
+    // (`collectDistinctEnums`): the IR never declares a model and an enum
+    // under one name.
     const second = operationsOf(ir)[1];
-    expect(second.errors[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['absent', 'unknown'] });
+    expect(second.errors[0].type).toEqual({
+      kind: 'enum',
+      name: 'GetPetError404Body',
+      values: ['absent', 'unknown'],
+    });
+    expect(ir.models.map((m) => m.name)).toContain('GetPetError404');
 
     const both = await parseWithoutWarnings(
       doc({
