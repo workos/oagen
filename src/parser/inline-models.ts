@@ -302,7 +302,10 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * title different shapes (`schemaShapeKey`), neither can keep it, and both
  * take their context-qualified names instead (`nameInlineVariantEntries`).
  * Identical shapes under one title share one model, as between siblings
- * (`reservedInlineNames`), and a title used once is kept.
+ * (`reservedInlineNames`), and a title used once is kept. Within one union
+ * only the first variant to carry a title is read: a later one with the
+ * same title never keeps it, whatever the document holds (`emitted` in
+ * `nameInlineVariantEntries`), so it is no claim on the title.
  *
  * A root is a schema whose inline models are collected together: every
  * `components.schemas` entry is read as one root, because one pass collects
@@ -401,7 +404,15 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
     if (visited.has(schema)) return;
     visited.add(schema);
     if (schema.$ref) return;
+    // Only the first variant of a union to carry a title can keep it: a
+    // later variant of the same union with the same title falls back to a
+    // context-qualified name whatever else is in the document
+    // (`nameInlineVariantEntries`, `emitted`), so it competes for nothing
+    // and is not read here.
+    const titlesOfUnion = new Set<string>();
     for (const [variant, title] of titleMappedVariantNames(schema)) {
+      if (titlesOfUnion.has(title)) continue;
+      titlesOfUnion.add(title);
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
       entry.shapes.add(schemaShapeKey(variant));
       entry.variants.push(variant);

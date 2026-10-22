@@ -4209,6 +4209,24 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(alike).map(isContestedTitle)).toEqual([false, false]);
     });
 
+    it('reads only the first variant of a union to carry a title: a later one never keeps it anyway', () => {
+      // One union giving `Circle` two shapes: the second falls back through
+      // `emitted` whatever the document holds, so it claims nothing and the
+      // first keeps `Circle` — the rule `nameInlineVariantEntries` has always
+      // applied within a union.
+      const twice: SchemaObject = { oneOf: [circle({ radius: n }), circle({ diameter: n })] };
+      markContestedTitles({ components: { schemas: { Drawing: obj({ shape: twice }) } } });
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([false, false]);
+      // A second union whose `Circle` has the later variant's shape contests
+      // the first variant's, not the later one's.
+      const other = byDiameter();
+      markContestedTitles({
+        components: { schemas: { Drawing: obj({ shape: twice, marker: obj({ shape: other }) }) } },
+      });
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([true, false]);
+      expect(variantsOf(other).map(isContestedTitle)).toEqual([true, false]);
+    });
+
     it('ends on a schema that refers back to itself, within a root and across the document', () => {
       // A root whose property is the root itself, with a conflict further
       // down; a component that contains itself; and a document that refers
