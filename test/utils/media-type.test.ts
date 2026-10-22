@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mediaTypeEssence } from '../../src/utils/media-type.js';
+import { mediaTypeEssence, mediaTypeNameFragment } from '../../src/utils/media-type.js';
 
 describe('mediaTypeEssence', () => {
   it('strips parameters', () => {
@@ -27,5 +27,32 @@ describe('mediaTypeEssence', () => {
   it('reads an empty or parameter-only key as an empty essence', () => {
     expect(mediaTypeEssence('')).toBe('');
     expect(mediaTypeEssence('; charset=utf-8')).toBe('');
+  });
+});
+
+describe('mediaTypeNameFragment', () => {
+  it('PascalCases the essence', () => {
+    expect(mediaTypeNameFragment('text/html')).toBe('TextHtml');
+    expect(mediaTypeNameFragment('text/csv')).toBe('TextCsv');
+    expect(mediaTypeNameFragment('application/vnd.api+json')).toBe('ApplicationVndApiJson');
+  });
+
+  it('names every spelling of one media type the same', () => {
+    for (const spelling of [
+      'application/json',
+      'application/json; charset=utf-8',
+      'APPLICATION/JSON',
+      ' application/json ',
+    ]) {
+      expect(mediaTypeNameFragment(spelling), spelling).toBe('ApplicationJson');
+    }
+    expect(mediaTypeNameFragment('multipart/form-data; boundary=x')).toBe('MultipartFormData');
+  });
+
+  it('reads a wildcard segment as Any and an empty essence as Content', () => {
+    expect(mediaTypeNameFragment('application/*')).toBe('ApplicationAny');
+    expect(mediaTypeNameFragment('*/*')).toBe('AnyAny');
+    expect(mediaTypeNameFragment('')).toBe('Content');
+    expect(mediaTypeNameFragment('; charset=utf-8')).toBe('Content');
   });
 });

@@ -111,6 +111,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
 
 - Input: `Enum[]`. Each `Enum` has:
   - `name` — PascalCase enum name
+  - `description?` — the component enum schema's own description, when it has content; a lifted inline enum carries none (its schema's text is the field's or parameter's)
   - `values` — `EnumValue[]`
   - `default?` — the schema's `default:` value (`string | number`)
   - `externalDocs?` — the enum schema's link, when usable: a component enum's own, or the inline schema's an enum was lifted from
@@ -144,6 +145,8 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `requestBody?` — `TypeRef` of the request body, read from one `content` entry by media type essence (parameters and case aside): `application/json`, else a `+json` media type, else `multipart/form-data`, else `application/x-www-form-urlencoded` (each only with a schema), else `application/octet-stream`, else `text/plain`; absent, with a parser warning, when none of the declared media types is read
   - `requestBodyEncoding?` — `json` (`application/json` and any `+json` media type) | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization; set exactly when `requestBody` is
   - `requestBodyRequired?` — whether the caller must send the body; present exactly when `requestBody` is
+  - `requestBodyContentType?` — the essence of the media type `requestBody` was read from (`application/merge-patch+json`; `application/json` for `application/json; charset=utf-8`); send it as the `Content-Type`, producing parameters such as a multipart boundary yourself; set exactly when `requestBody` is
+  - `requestBodyContentTypes?`, `requestBodyContents?` — every media type the request body declares, as written and in document order, with a `TypeRef` per media type (the entry `requestBody` was read from shares its `TypeRef`); present only when the body declares at least one, so a body argument or serializer per media type can be offered
   - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`unknown` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
   - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag

@@ -351,7 +351,13 @@ export interface OperationModified {
   /**
    * The operation's `tags` differ, compared in document order (an absent key
    * is an empty list). Always additive: tags group and document a method and
-   * change nothing a caller compiles against.
+   * change nothing a caller compiles against. Operations are matched by
+   * name within a service, so this flag only ever carries an edit that
+   * leaves the operation in a service of the same name; a first-tag change
+   * that the parser's grouping files under another service leaves nothing
+   * to match, and the diff reports the move instead — removed from the old
+   * service and added to the new one, or `service-removed` and
+   * `service-added` when a service goes or comes with it.
    */
   tagsChanged: boolean;
   /** Present exactly when `tagsChanged`: the lists on each side, old → new, `[]` for none. */
