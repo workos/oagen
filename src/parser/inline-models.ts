@@ -1084,14 +1084,8 @@ export function extractInlineModelsFromProperties(
     if (kind === 'allOf' && fieldSchema.allOf) {
       const members = fieldSchema.allOf;
       const emitMerged = (): void => {
-        const merged = mergeAllOfMembers(fieldSchema, componentSchemas);
-        if (merged.properties.length === 0) return;
         const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
-        results.push(buildMergedModel(modelName, merged, componentSchemas));
-        const own: Record<string, SchemaObject> = {};
-        for (const p of merged.properties) if (p.origin === null) own[p.name] = p.schema;
-        const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
-        extractInlineModelsFromProperties({ properties: own }, results, modelName, componentSchemas, mergedSiblings);
+        materializeMergedAllOf(modelName, fieldSchema, results, componentSchemas);
       };
       const only = members.length === 1 ? members[0] : undefined;
       if (members.some((m) => m.$ref)) {
@@ -1337,29 +1331,57 @@ export function isInlineAllOfMember(member: SchemaObject): boolean {
  * applies; a variant's `required` is not read, since its properties are
  * present only on that branch, so they are optional on the merged model,
  * exactly as `extractAllOfModel` flattens a component's variants. Two
- * boundaries are not crossed: a `$ref` variant is not followed (its
- * component keeps its own fields), and a union a `$ref` member's component
- * carries is not read (the component's own model dispatches or flattens
- * it). The first declaration of a name wins, earlier members and earlier
- * variants before later ones. The walk reads property lists only — it never
- * descends into a property — so it is finite for any component graph (the
- * `seen` set only short-circuits a schema reached twice within one merge).
+ * boundaries are not crossed: a `$ref` under a variant — the variant itself,
+ * or a member of the variant's own `allOf` — is not followed (its component
+ * keeps its own fields), and a union a `$ref` member's component carries is
+ * not read (the component's own model dispatches or flattens it).
+ *
+ * A property keeps the first declaration an always-applying member gives
+ * it, whatever a variant says: a variant can only narrow what every instance
+ * carries. A property only variants declare is typed as the union of its
+ * distinct declarations (`unionOfDeclarations`): one declaration, or several
+ * of one shape, is that declaration; several shapes become a `oneOf` of
+ * them, which the type builder reads as it reads any inline union — string
+ * consts pinned differently per variant (`kind: cat` | `kind: dog`) collapse
+ * to an inline enum, other literals and types to a union — so the field is
+ * never typed from one variant's value alone. Properties keep the order they
+ * were first declared in.
+ *
+ * A schema reached twice is read once in each capacity: a reading under a
+ * variant does not stand in for an always-applying one, so a schema shared
+ * between a variant and a member — a YAML anchor, an object a `transformSpec`
+ * reuses, a `$ref` written twice — still contributes its `required` and is
+ * still followed when the member is reached (`done`). The walk reads
+ * property lists only — it never descends into a property — so it is finite
+ * for any component graph: a schema already read in the same capacity is not
+ * read again, which is what stops a component that extends itself.
  */
 export function mergeAllOfMembers(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): MergedAllOf {
-  const properties: MergedProperty[] = [];
-  const seenNames = new Set<string>();
+  /** Every declaration of one property name, in the order first declared. */
+  interface Declarations {
+    name: string;
+    /** The first always-applying member's declaration, with the component it is inherited from. */
+    unconditional?: { schema: SchemaObject; origin: MergedProperty['origin'] };
+    /** Each variant's declaration, in order. */
+    conditional: SchemaObject[];
+  }
+  const declared = new Map<string, Declarations>();
   const required: string[] = [];
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
-  const seen = new Set<SchemaObject>();
+  // The schemas read so far, by capacity. An always-applying reading is
+  // complete; a reading under a variant is not, so the same schema reached
+  // again as a member is read once more for its `required` and its `$ref`s.
+  const done = { unconditional: new Set<SchemaObject>(), conditional: new Set<SchemaObject>() };
   // `onBranch`: inside a `oneOf`/`anyOf` variant, whose properties are
   // optional and whose `$ref`s are not followed.
   const visit = (s: SchemaObject, origin: MergedProperty['origin'], onBranch: boolean): void => {
-    if (seen.has(s)) return;
-    seen.add(s);
+    const mode = onBranch ? 'conditional' : 'unconditional';
+    if (done.unconditional.has(s) || done[mode].has(s)) return;
+    done[mode].add(s);
     if (s.$ref) {
       if (onBranch) return;
       const rawName = s.$ref.split('/').pop() ?? '';
@@ -1373,9 +1395,11 @@ export function mergeAllOfMembers(
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (!value || seenNames.has(key)) continue;
-      seenNames.add(key);
-      properties.push({ name: key, schema: value, origin });
+      if (!value) continue;
+      let entry = declared.get(key);
+      if (!entry) declared.set(key, (entry = { name: key, conditional: [] }));
+      if (onBranch) entry.conditional.push(value);
+      else entry.unconditional ??= { schema: value, origin };
     }
     if (s.required && !onBranch) required.push(...s.required);
     for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);
@@ -1384,6 +1408,11 @@ export function mergeAllOfMembers(
     if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
   };
   visit(schema, null, false);
+  const properties: MergedProperty[] = [...declared.values()].map(({ name, unconditional, conditional }) =>
+    unconditional
+      ? { name, schema: unconditional.schema, origin: unconditional.origin }
+      : { name, schema: unionOfDeclarations(conditional), origin: null },
+  );
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
   return {
@@ -1396,6 +1425,53 @@ export function mergeAllOfMembers(
     constraints: extractConstraints(schema),
     deprecated: schema.deprecated === true || undefined,
   };
+}
+
+/**
+ * The one schema that types a property several variants declare: the first
+ * declaration when every declaration has the same shape (`schemaShapeKey`,
+ * documentation ignored), else a `oneOf` of the distinct shapes, each the
+ * first declaration of its shape, in order. See `mergeAllOfMembers`.
+ */
+function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
+  const distinct = new Map<string, SchemaObject>();
+  for (const declaration of declarations) {
+    const key = schemaShapeKey(declaration);
+    if (!distinct.has(key)) distinct.set(key, declaration);
+  }
+  const shapes = [...distinct.values()];
+  return shapes.length === 1 ? shapes[0]! : { oneOf: shapes };
+}
+
+/**
+ * Build the model for an inline `allOf` under `name` and materialize what its
+ * own properties reference, into `results`; `false`, with nothing built, when
+ * the merge declares no properties. The model is `buildMergedModel`'s, so an
+ * inherited property is typed as its component's model types it (`Base.meta`
+ * stays `BaseMeta`) and is not read into again — the component pass
+ * materialized whatever it references, and a component that extends itself
+ * through a field (`Node.child: allOf: [{ $ref: Node }, …]`) is typed as the
+ * `NodeChild` that exists instead of being re-extracted without end. Only
+ * the merged model's own properties — the inline members' and the variants'
+ * — are re-entered, under `name`, with the full merged property set as
+ * siblings. Shared by the field extractor and `extractInlineModelDeep`, so a
+ * field nested under a discriminated component variant is built exactly as
+ * the same field anywhere else.
+ */
+export function materializeMergedAllOf(
+  name: string,
+  schema: SchemaObject,
+  results: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): boolean {
+  const merged = mergeAllOfMembers(schema, componentSchemas);
+  if (merged.properties.length === 0) return false;
+  results.push(buildMergedModel(name, merged, componentSchemas));
+  const own: Record<string, SchemaObject> = {};
+  for (const p of merged.properties) if (p.origin === null) own[p.name] = p.schema;
+  const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
+  extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
+  return true;
 }
 
 /**
