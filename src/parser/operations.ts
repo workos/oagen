@@ -8,16 +8,24 @@ import type {
   ErrorResponse,
   SuccessResponse,
   ResponseHeader,
+  ResponseContent,
+  DefaultResponse,
+  RangeResponse,
+  StatusRange,
   Model,
   Field,
   PaginationMeta,
-  Enum,
-  EnumRef,
   ExternalDocs,
 } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
 import { createHash } from 'node:crypto';
-import { toPascalCase, toCamelCase, splitWords, cleanSchemaName, stripListItemMarkers } from '../utils/naming.js';
+import {
+  toPascalCase,
+  toCamelCase,
+  splitWords,
+  cleanSchemaName,
+  stripListItemMarkers,
+  singularizePathSegment,
+} from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -32,18 +40,22 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
 } from './schemas.js';
+import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import { detectPagination, paginatedItemType } from './pagination.js';
+import { classifyAndExtractResponse, STATUS_RANGE_LABELS } from './responses.js';
+import type { ResponseExtractionResult } from './responses.js';
+import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
-  collectProperties,
-  extractInlineModelsFromProperties,
-  extractInlineModelsFromSchemas,
-} from './inline-models.js';
-import { detectPagination } from './pagination.js';
-import { classifyAndExtractResponse } from './responses.js';
+  materializeInlineSchema,
+  modelFingerprint,
+  type InlineModelRegistry,
+  type InlineModelOwner,
+} from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
 
-interface PathItem {
+export interface PathItem {
   get?: OperationObject;
   post?: OperationObject;
   put?: OperationObject;
@@ -62,7 +74,7 @@ interface ParameterGroupExtension {
   optionalFields?: Record<string, string[]>;
 }
 
-interface OperationObject {
+export interface OperationObject {
   operationId?: string;
   summary?: string;
   description?: string;
@@ -92,7 +104,7 @@ interface ExampleObject {
   $ref?: string;
 }
 
-interface ParameterObject {
+export interface ParameterObject {
   name: string;
   in: 'path' | 'query' | 'header' | 'cookie';
   required?: boolean;
@@ -114,7 +126,7 @@ interface ParameterObject {
  * `components/parameters` are never inlined — they arrive here exactly as
  * written in the spec and must be resolved before use.
  */
-type RawParameterObject = ParameterObject | { $ref: string };
+export type RawParameterObject = ParameterObject | { $ref: string };
 
 /**
  * Resolve a raw parameter entry to a concrete Parameter Object, following
@@ -127,7 +139,7 @@ type RawParameterObject = ParameterObject | { $ref: string };
  * which used to drop any entry with no `in` field — every `$ref` object has
  * none).
  */
-function resolveParameterRef(
+export function resolveParameterRef(
   raw: RawParameterObject,
   componentParameters: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
@@ -158,7 +170,7 @@ function resolveParameterRef(
   return current;
 }
 
-interface RequestBodyObject {
+export interface RequestBodyObject {
   required?: boolean;
   content?: Record<string, { schema?: SchemaObject }>;
 }
@@ -168,7 +180,7 @@ interface RequestBodyObject {
  * Reference Object into `components/requestBodies`. The bundler never inlines
  * those refs (`dereference: false`), so they must be resolved before use.
  */
-type RawRequestBodyObject = RequestBodyObject | { $ref: string };
+export type RawRequestBodyObject = RequestBodyObject | { $ref: string };
 
 /**
  * Resolve a raw request body to a concrete Request Body Object, following
@@ -177,7 +189,7 @@ type RawRequestBodyObject = RequestBodyObject | { $ref: string };
  * silently losing the body — and with it the body-ownership rule that keeps
  * duplicated secrets out of the query string.
  */
-function resolveRequestBodyRef(
+export function resolveRequestBodyRef(
   raw: RawRequestBodyObject | undefined,
   componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
@@ -279,13 +291,13 @@ function resolveHeaderRef(
   return description === undefined ? current : { ...current, description };
 }
 
-interface ResponseObject {
+export interface ResponseObject {
   description?: string;
   headers?: Record<string, RawHeaderObject>;
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
-const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
+export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 export interface OperationExtractionResult {
   services: Service[];
@@ -309,15 +321,26 @@ export function extractOperations(
   documentTags?: TagObject[],
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
-  componentEnums?: Enum[],
+  componentResponses?: Record<string, Record<string, unknown>>,
+  componentFieldModels?: Model[],
+  openapiVersion?: string,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [] };
 
+  // OAS 3.0 ignores properties beside a `$ref`; 3.1 lets a sibling
+  // `description` override the referenced response's. Unknown is read as 3.1.
+  const refSiblingDescriptions = openapiVersion?.startsWith('3.0') ? 'ignore' : 'override';
+
   // Operations without an operationId name their inline models from the
-  // path, and two distinct paths — or a path and an operationId or component
-  // schema — can produce the same name, so the prefix for every such
-  // operation is decided up front (see resolvePathModelBaseNames).
-  const pathModelBaseNames = resolvePathModelBaseNames(paths, componentModels, componentRequestBodies);
+  // path, and two distinct paths — or a path and an operationId, component
+  // schema or component response — can produce the same name, so the prefix
+  // for every such operation is decided up front (see resolvePathModelBaseNames).
+  const pathModelBaseNames = resolvePathModelBaseNames(
+    paths,
+    componentModels,
+    componentRequestBodies,
+    componentResponses,
+  );
   // An API root the untagged paths sit under (`/api`, `/v1`) tells the
   // services apart no better than nothing, so untagged operations skip it
   // when their service and fallback name are taken from the path (see
@@ -335,42 +358,15 @@ export function extractOperations(
   // Only these may be renamed when names collide within a service (see
   // disambiguateOperationNames); a name taken from an operationId is kept as is.
   const pathNamed = new Set<Operation>();
-  // One registry for the whole spec, seeded with the component models and the
-  // inline models nested in them (`extractInlineModelsFromSchemas` mints the
-  // same names the component pass will, so this is the full set of names that
-  // pass owns): a header or error body model's name must not collide with a
-  // differently shaped component or component child (a request body may
-  // already use `DocumentsXMeta`; `GetPet.error404` already owns
-  // `GetPetError404`) or with another operation's header or error model, or
-  // the later merge would overwrite the first. A top-level component keeps
-  // its name over a child of the same name, as the merge keeps it too.
-  const headerModelRegistry: HeaderModelRegistry = new Map();
-  // Likewise every enum name the component pass owns, with its members: the
-  // component enums and the inline enums of every component field (`GetPet.
-  // error422_severity` owns `GetPetError422Severity`), so an enum nested in
-  // an error body steps around one of other members (`typeErrorSchema`).
-  const enumRegistry: EnumRegistry = new Map(
-    (componentEnums ?? []).map((e) => [e.name, enumMembersKey(e.values.map((v) => v.value))]),
-  );
-  // And what every operation's request body and 2xx body will mint, read up
-  // front from the same extractors under the same context names
-  // `buildOperation` and `extractResponses` use: a title-mapped `oneOf` on a
-  // success response, or under a request body's field, names its variants by
-  // bare title (`Circle`), so an error body — of any operation, declared
-  // before or after — that gives the same title another shape must step
-  // around it, or the later merge would hand the body the error's fields.
-  const reserve = (model: Model): void => {
-    if (!headerModelRegistry.has(model.name)) {
-      headerModelRegistry.set(model.name, { fingerprint: modelFingerprint(model) });
-    }
-    for (const ref of nestedEnumRefs(model)) {
-      if (!enumRegistry.has(ref.name)) enumRegistry.set(ref.name, enumMembersKey(ref.values));
-    }
-  };
-  for (const model of [...(componentModels ?? []), ...extractInlineModelsFromSchemas(componentSchemas)]) reserve(model);
-  for (const model of operationBodyModels(paths, pathModelBaseNames, componentSchemas, componentRequestBodies)) {
-    reserve(model);
-  }
+  // Header, secondary-body, fallback-body and error-body schemas are typed
+  // only after this loop, once every primary model is known
+  // (`resolveDeferredInlineTypes`): their names must not collide with a
+  // differently shaped component, request body or primary response of any
+  // operation, or the later merge would overwrite the first. `operationOf`
+  // remembers which operation minted each primary model, so a clash within
+  // one operation can be told from one across two.
+  const deferred: DeferredInlineType[] = [];
+  const operationOf = new Map<Model, string>();
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -388,6 +384,7 @@ export function extractOperations(
         operation,
         inlineModels: opModels,
         envelopeCompanions: opCompanions,
+        operationQualifier,
       } = buildOperation(
         method,
         path,
@@ -401,11 +398,13 @@ export function extractOperations(
         componentRequestBodies,
         componentExamples,
         componentHeaders,
-        headerModelRegistry,
-        enumRegistry,
+        componentResponses,
+        deferred,
         apiRootLength,
+        refSiblingDescriptions,
       );
       inlineModels.push(...opModels);
+      for (const model of opModels) operationOf.set(model, operationQualifier);
       if (opCompanions) envelopeCompanions.push(...opCompanions);
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
@@ -418,8 +417,27 @@ export function extractOperations(
   }
 
   // Companion models of list envelopes are named once every list operation is
-  // known, so copies of one envelope shape can share a model.
+  // known, so copies of one envelope shape can share a model. They take their
+  // final names before any deferred schema is named, so a fallback variant
+  // titled `ListMetadata` steps around the companion a primary response's
+  // `list_metadata` becomes, instead of the later merge keeping whichever has
+  // more fields under one name.
   inlineModels.push(...resolveEnvelopeCompanionNames(envelopeCompanions, componentModels));
+
+  // Headers, secondary bodies, fallback bodies and error bodies are named
+  // last, in document order, against every name above — the component models,
+  // the inline models the components' own fields mint (a nested object, a
+  // map's values; not among `componentModels`, see parseSpec), every request
+  // body, primary response and companion model — so none of them takes a name
+  // one of those owns, whichever comes first in the document.
+  inlineModels.push(
+    ...resolveDeferredInlineTypes(
+      deferred,
+      [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+      inlineModels,
+      operationOf,
+    ),
+  );
 
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"
@@ -708,10 +726,10 @@ function normalizeOperationIdForNaming(operationId: string): string {
 /**
  * The inline request body, response or error body model name of an operation
  * that has an `operationId`. The single source of that name: extractRequestBody,
- * deriveResponseName and deriveErrorModelName use it to name,
- * resolvePathModelBaseNames to reserve.
+ * deriveResponseName, deriveFallbackResponseName and deriveErrorModelName use
+ * it to name, resolvePathModelBaseNames to reserve.
  */
-function operationIdModelName(operationId: string, suffix: 'Request' | 'Response' | `Error${number}`): string {
+function operationIdModelName(operationId: string, suffix: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
 }
 
@@ -719,11 +737,11 @@ function operationIdModelName(operationId: string, suffix: 'Request' | 'Response
  * The stem every model derived from an `operationId` starts with: its
  * `Request`, `Response` and `Error<code>` models, a list's `Item`, nested
  * inline models under those (`…ResponseOwner`) and envelope companions
- * (`…ListMetadata`). Every
- * step of cleanSchemaName is a global replace or acts on the leading word, so
- * this is a true prefix of each of those names. Used to reserve them all.
+ * (`…ListMetadata`). Every step of cleanSchemaName is a global replace or acts
+ * on the leading word, so this is a true prefix of each of those names. Used
+ * to reserve them all.
  */
-function operationIdModelBase(operationId: string): string {
+export function operationIdModelBase(operationId: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)));
 }
 
@@ -743,14 +761,48 @@ function inferOperationName(
   }
 
   // Fallback when no operationId is available — use method + path to build
-  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor"
+  // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor",
+  // or "adoptPet" for a POST action on one item.
+  return fallbackOperationName(method, path, apiRootLength);
+}
+
+/**
+ * The `<verb><Resource>` name of an operation without an `operationId`: the
+ * CRUD verb (inferVerb) plus the resource noun (inferResourceFromPath),
+ * singular for an item operation — `GET /store/pets/{id}` is `getPet` — or,
+ * for a POST action on one item (inferPostAction), the action verb plus the
+ * singular parent: `POST /store/pets/{id}/adopt` is `adoptPet`. The verb
+ * alone when the path names no resource past the service segment:
+ * `GET /pets/{id}` in `Pets` is `get`.
+ */
+function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number): string {
+  const action = method === 'post' ? inferPostAction(path, apiRootLength) : null;
+  if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
   const verb = inferVerb(method, path);
   const resource = inferResourceFromPath(path, apiRootLength);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
 }
 
 /**
- * Infer the CRUD verb from HTTP method and path shape.
+ * The name fallbackOperationName gave an item operation before its resource
+ * was singularised: the resource as the path spells it, `getPets` for
+ * `GET /store/pets/{id}`. `null` for a POST action, whose name is a verb with
+ * no plural, and for an operation whose resource is not singularised — a
+ * collection, a path with no resource, a segment that does not look plural —
+ * so a non-null result always differs from the singular name.
+ * disambiguateOperationNames falls back to it before a numeric suffix when
+ * the singular name is an operationId's.
+ */
+function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
+  if (method === 'post' && inferPostAction(path, apiRootLength)) return null;
+  const resource = inferResourceFromPath(path, apiRootLength, false);
+  if (resource === null || resource === inferResourceFromPath(path, apiRootLength)) return null;
+  return toCamelCase(`${inferVerb(method, path)}_${resource}`);
+}
+
+/**
+ * Infer the CRUD verb from HTTP method and path shape. A POST is `create`
+ * unless `inferPostAction` recognised it as an action first.
  */
 function inferVerb(method: HttpMethod, path: string): string {
   const segments = path.split('/').filter(Boolean);
@@ -779,28 +831,35 @@ function inferVerb(method: HttpMethod, path: string): string {
 
 /**
  * Extract a resource noun from the path for operation naming.
- * Uses the last non-param segment (the resource being operated on).
+ * Uses the last non-param segment (the resource being operated on). An item
+ * operation — the last literal segment is followed by a path parameter —
+ * addresses one entity, so its noun is singularised (`singularizePathSegment`).
  *
  * Examples:
  *   /accounts/users → "Users"
  *   /accounts/users/{id} → "User" (singular for item operations)
  *   /accounts/users/{id}/auth_factors → "AuthFactors"
+ *   /accounts/users/{id}/auth_factors/{factor_id} → "AuthFactor"
  *   /organizations/{id}/api_keys → "ApiKeys"
  *   /auth/authorize → "Authorize" (action endpoint)
  *
  * `apiRootLength` is the document's API root the path sits under (see
  * documentApiRoot); the service segment is the first literal one after it.
+ * `singularItem` false keeps an item's noun as the path spells it (`Users`
+ * for `/accounts/users/{id}`), for pluralFallbackName.
  */
-function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
+function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = true): string | null {
   const segments = path.split('/').filter(Boolean);
   if (segments.length <= 1) return null;
 
   // Find the last meaningful (non-param) segment past the API root, so a
   // root word is never the resource: /api/v1/{id} is Api.delete, not deleteV1.
   let resourceSegment: string | null = null;
+  let isItem = false;
   for (let i = segments.length - 1; i >= apiRootLength; i--) {
     if (!segments[i].startsWith('{')) {
       resourceSegment = segments[i];
+      isItem = i < segments.length - 1;
       break;
     }
   }
@@ -810,7 +869,46 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
   // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
   if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
 
-  return toPascalCase(resourceSegment);
+  return toPascalCase(isItem && singularItem ? singularizePathSegment(resourceSegment) : resourceSegment);
+}
+
+/**
+ * Recognise a POST action on one item: `/pets/{petId}/adopt`,
+ * `/owners/{o}/pets/{p}/vaccinate`. The last segment is a literal that follows
+ * a path parameter, so it names something done to that item rather than a
+ * collection to create into. The verb is the segment itself and the resource
+ * is the singular parent (`adopt` + `Pet`): the nearest literal before the
+ * parameter that is past the document's API root (`apiRootLength`, see
+ * documentApiRoot) and is not an API marker (isApiMarkerSegment) — the marker
+ * check also covers a tagged operation, which has no root — so
+ * `/api/v1/{companyId}/sendDocument` has no parent and is the bare verb
+ * `sendDocument` rather than `sendDocumentV1`. The parent is kept even when it
+ * is the service segment so that `/pets/{id}/archive` and `/users/{id}/archive`
+ * under one tag do not both become `archive`; the caller leaves it off when
+ * the verb already ends with it (`restart-id-verification` under
+ * `verification` is `restartIdVerification`, see appendQualifier).
+ *
+ * Not an action, so still a `create`: a literal ending in `s` after the
+ * parameter, which is read as a nested collection (`/orgs/{id}/api_keys`,
+ * and conservatively `/orders/{id}/status`), and a literal with no parameter
+ * before it, which is indistinguishable from a nested collection
+ * (`/pets/search` looks like `/accounts/users/auth_factors`). A singleton
+ * noun after the parameter (`/users/{id}/avatar`) is misread as a verb; give
+ * it an `operationId`.
+ */
+function inferPostAction(path: string, apiRootLength = 0): { verb: string; resource: string | null } | null {
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 2) return null;
+  const last = segments[segments.length - 1];
+  if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
+  if (last.toLowerCase().endsWith('s')) return null;
+
+  for (let i = segments.length - 3; i >= apiRootLength; i--) {
+    if (!segments[i].startsWith('{') && !isApiMarkerSegment(segments[i])) {
+      return { verb: last, resource: toPascalCase(singularizePathSegment(segments[i])) };
+    }
+  }
+  return { verb: last, resource: null };
 }
 
 /**
@@ -827,7 +925,10 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
  * root or the service segment into a name: `DELETE /api/v1/notes/all` in
- * `Notes` is `deleteAll`, never `deleteAllV1Notes`.
+ * `Notes` is `deleteAll`, never `deleteAllV1Notes`. A POST action's resource
+ * and deeper context are read from its path without the action segment (see
+ * qualifierPath), so a second `adoptPet` is qualified by what sets its path
+ * apart and never by repeating `Adopt`.
  *
  * Qualifiers are tried in order, each on every group still colliding after
  * the one before. A qualifier never puts the same word twice in a row into a
@@ -845,7 +946,17 @@ function inferResourceFromPath(path: string, apiRootLength = 0): string | null {
  *      while `GET /v1/{teamId}/notes` becomes `listByTeamId`, and with no
  *      root `GET /users/teams` keeps `listTeams` while `GET /users/{id}/teams`
  *      becomes `listTeamsById`;
- *   4. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
+ *   4. for a path-named item operation whose singular name none of those
+ *      could tell from an operationId — `GET /store/pets/{id}` is `getPet`,
+ *      and so is `operationId: getPet` on `/store/featured/{id}` — the plural
+ *      name it had before item resources were singularised, `getPets`
+ *      (pluralFallbackName), when no operation in the service has it. The
+ *      plural still says which collection is read, and it is the name every
+ *      SDK generated from such a document already exposes, where a number
+ *      says nothing. Two path-named operations never need it: their paths
+ *      differ, so a qualifier above tells them apart. A name a qualifier has
+ *      already extended, and an action, go straight to the suffix;
+ *   5. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
  *      operation keeps the plain name over a path-named one; otherwise the
  *      lexically first path keeps it, whatever the document order. The suffix
@@ -862,18 +973,21 @@ function disambiguateOperationNames(
   const rename = (op: Operation, name: string) => {
     (op as { name: string }).name = name;
   };
+  const byPath = (a: Operation, b: Operation) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
       for (const op of group) {
         if (!pathNamed.has(op)) continue;
-        rename(op, appendQualifier(op.name, inferResourceFromPath(op.path, apiRootLengthOf(op))));
+        const root = apiRootLengthOf(op);
+        rename(op, appendQualifier(op.name, inferResourceFromPath(qualifierPath(op, root), root)));
       }
     },
     (group) => {
       for (const op of group) {
         if (!pathNamed.has(op)) continue;
-        rename(op, appendQualifier(op.name, inferDeeperContext(op.path, apiRootLengthOf(op))));
+        const root = apiRootLengthOf(op);
+        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root), root)));
       }
     },
     (group) => {
@@ -894,8 +1008,32 @@ function disambiguateOperationNames(
     for (const group of collidingGroups(operations)) qualify(group);
   }
 
-  // Groups come in name order and members are sorted below, so suffixes are
-  // allocated from the shared pool in an order that depends only on the data.
+  // The plural pass and the numeric pass below both draw names from one pool
+  // per service. Groups come in name order and members are sorted by path,
+  // so the names are allocated in an order that depends only on the data.
+  const inUse = new Set(operations.map((op) => op.name));
+  for (const group of collidingGroups(operations)) {
+    // Only next to an operationId: two path-named operations have different
+    // paths, and the qualifiers above are what tell those apart.
+    if (group.every((op) => pathNamed.has(op))) continue;
+    const pluralByPath = new Map<string, string>();
+    for (const op of group.filter((member) => pathNamed.has(member)).sort(byPath)) {
+      let plural = pluralByPath.get(op.path);
+      if (plural === undefined) {
+        const root = apiRootLengthOf(op);
+        const candidate = pluralFallbackName(op.httpMethod, op.path, root);
+        // The name must still be the one the operation was built with — no
+        // qualifier above has extended it — and the plural must be free.
+        const untouched = op.name === fallbackOperationName(op.httpMethod, op.path, root);
+        if (candidate === null || !untouched || inUse.has(candidate)) continue;
+        plural = candidate;
+        inUse.add(plural);
+        pluralByPath.set(op.path, plural);
+      }
+      rename(op, plural);
+    }
+  }
+
   const taken = new Set(operations.map((op) => op.name));
   for (const group of collidingGroups(operations)) {
     const name = group[0].name;
@@ -975,6 +1113,18 @@ function appendQualifier(name: string, qualifier: string | null): string {
   while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
   const rest = words.slice(overlap);
   return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
+}
+
+/**
+ * The path a colliding operation's resource and deeper context are read
+ * from. For a POST action it is the path without the action segment: the
+ * name already ends with the parent (`adoptPet`), so the qualifiers see that
+ * parent, which appendQualifier leaves alone, rather than the verb, which
+ * would come back as `adoptPetAdopt`. Every other operation is read whole.
+ */
+function qualifierPath(op: Operation, apiRootLength: number): string {
+  if (op.httpMethod !== 'post' || !inferPostAction(op.path, apiRootLength)) return op.path;
+  return '/' + op.path.split('/').filter(Boolean).slice(0, -1).join('/');
 }
 
 /**
@@ -1188,10 +1338,17 @@ function buildOperation(
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentExamples?: Record<string, Record<string, unknown>>,
   componentHeaders?: Record<string, Record<string, unknown>>,
-  headerModelRegistry: HeaderModelRegistry = new Map(),
-  enumRegistry: EnumRegistry = new Map(),
+  componentResponses?: Record<string, Record<string, unknown>>,
+  deferred: DeferredInlineType[] = [],
   apiRootLength = 0,
-): { operation: Operation; inlineModels: Model[]; envelopeCompanions?: EnvelopeCompanion[] } {
+  refSiblingDescriptions: 'override' | 'ignore' = 'override',
+): {
+  operation: Operation;
+  inlineModels: Model[];
+  envelopeCompanions?: EnvelopeCompanion[];
+  /** What the shape registry records as the owner of this operation's models (see `headerOperationQualifier`). */
+  operationQualifier: string;
+} {
   const opLabel = operationLabel(op, path, method);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
@@ -1276,12 +1433,19 @@ function buildOperation(
   // to `false`, and a non-boolean value is not a declaration of requiredness.
   // Set exactly when a body is, so the two fields can be read together.
   const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
+  // Names this operation's models in the shape registry, and qualifies a
+  // deferred model's name when one of them is taken across operations.
+  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
   const {
     response,
     responseHeaders,
+    responseContentTypes,
+    responseContents,
     responseDescription,
     successResponses,
     errors,
+    defaultResponse,
+    rangeResponses,
     inlineModels,
     isPaginated,
     dataPath: responseDataPath,
@@ -1292,10 +1456,11 @@ function buildOperation(
   } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, {
     componentHeaders,
     componentSchemas,
+    componentResponses,
     serviceName: opContext,
-    operationQualifier: toPascalCase(operationName),
-    registry: headerModelRegistry,
-    enums: enumRegistry,
+    operationQualifier,
+    deferred,
+    refSiblingDescriptions,
   });
   inlineModels.push(...reqBodyModels);
 
@@ -1303,7 +1468,7 @@ function buildOperation(
   const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
   let pagination: PaginationMeta | undefined;
   if (isPaginated) {
-    const itemType = responseItemType ?? (response.kind === 'array' ? response.items : response);
+    const itemType = responseItemType ?? paginatedItemType(response);
     pagination = {
       strategy: paginationFromParams?.strategy ?? 'cursor',
       param: paginationFromParams?.param ?? 'after',
@@ -1360,10 +1525,15 @@ function buildOperation(
       response,
       // Added only when present so operations without headers keep their shape.
       ...(responseHeaders && { responseHeaders }),
+      ...(responseContentTypes && { responseContentTypes, responseContents }),
       // Likewise only when the primary response declares a description.
       ...(responseDescription && { responseDescription }),
       successResponses,
       errors,
+      // Added only when the document declares them so operations without
+      // fallback responses keep their shape.
+      ...(defaultResponse && { defaultResponse }),
+      ...(rangeResponses && { rangeResponses }),
       pagination,
       injectIdempotencyKey: hasIdempotencyHeader,
       deprecated: op.deprecated || undefined,
@@ -1373,7 +1543,32 @@ function buildOperation(
     },
     inlineModels,
     envelopeCompanions,
+    operationQualifier,
   };
+}
+
+/**
+ * The qualifier that tells one operation's header models from another's
+ * (`materializeDeferredType`'s `byOperation` candidate), and that the shape
+ * registry records as the owner of its models. An `operationId` names the
+ * operation. A path-named operation uses the path-derived stem its request
+ * and response models are built from, so the model name depends only on the
+ * method and path and never on the derived operation name — a verb or
+ * singular change in inferOperationName must not rename a generated type.
+ * The stem's leading service word is dropped when it ends on a word boundary,
+ * since the model name already starts with the service:
+ * `Notes` + `ByIdPinPost` + `XMeta`, beside `NotesByIdPinPostResponse`.
+ */
+function headerOperationQualifier(
+  op: OperationObject,
+  operationName: string,
+  pathModelBaseName: string,
+  serviceName: string | undefined,
+): string {
+  if (op.operationId) return toPascalCase(operationName);
+  const parent = serviceName ? toPascalCase(serviceName) : '';
+  const rest = pathModelBaseName.slice(parent.length);
+  return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
 }
 
 /**
@@ -1382,7 +1577,7 @@ function buildOperation(
  * with `description: ""` yields `"List pets"` rather than `""`. Text that has
  * content is kept verbatim, surrounding whitespace included.
  */
-function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
+export function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
   const presentSummary = presentText(summary);
   const presentDescription = presentText(description);
   if (presentSummary && presentDescription && presentSummary !== presentDescription) {
@@ -1392,11 +1587,11 @@ function buildDescription(summary: string | undefined, description: string | und
 }
 
 /** The text itself when it has non-whitespace content, otherwise `undefined`. */
-function presentText(text: string | undefined): string | undefined {
+export function presentText(text: string | undefined): string | undefined {
   return typeof text === 'string' && text.trim() !== '' ? text : undefined;
 }
 
-function extractParams(
+export function extractParams(
   params: ParameterObject[],
   location: 'path' | 'query' | 'header' | 'cookie',
   operationContext?: string,
@@ -1596,7 +1791,7 @@ function resolveSchemaRefObject(
   return componentSchemas[match[1]];
 }
 
-type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+export type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
 
 /** HTTP methods whose request body is the primary parameter carrier. */
 const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['post', 'put', 'patch']);
@@ -1606,7 +1801,7 @@ const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['pos
  * priority order. JSON wins over form encodings; binary and text bodies may
  * legitimately carry no schema at all.
  */
-function selectRequestBodyContent(body: RequestBodyObject | undefined): {
+export function selectRequestBodyContent(body: RequestBodyObject | undefined): {
   encoding: RequestBodyEncoding;
   schema?: SchemaObject;
 } {
@@ -1995,407 +2190,200 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
 }
 
 /**
- * Spec-wide record of every model name a header or error body model must not
- * silently reuse: the component models (seeded up front) and each inline
- * header or error model materialized so far. The value carries the model's
- * shape fingerprint, so a header or error body whose shape matches can share
- * the name, and — for the inline models — which operation produced it, so a
- * collision inside one operation can be told apart from one across
- * operations.
+ * The spec-wide registry of inline model shapes (see `InlineModelRegistry`):
+ * the component models and the inline models their fields mint, every inline
+ * model the operations mint for request bodies and primary responses, the
+ * envelope companions, and each deferred model materialized so far. The value
+ * carries the model's shape fingerprint, so a schema whose shape matches can
+ * share the name, and the operation that minted it (none for a component or
+ * a shared envelope companion), so a collision inside one operation can be
+ * told apart from one across operations.
  */
-type HeaderModelRegistry = Map<string, { fingerprint: string; operation?: string }>;
+type ModelShapeRegistry = InlineModelRegistry;
 
-/** What response-header extraction needs from the operation and the spec. */
-interface HeaderExtractionContext {
-  componentHeaders?: Record<string, Record<string, unknown>>;
-  /** Lets header models resolve `$ref` siblings and augmentations the way fields do. */
+/**
+ * A header, secondary-body, fallback-body or error-body schema whose inline
+ * models are named only once every primary model of every operation is known
+ * (`resolveDeferredInlineTypes`), which then fills in `target.type`. Until
+ * then the target carries a placeholder.
+ */
+interface DeferredInlineType {
+  kind: 'header' | 'content' | 'fallback' | 'error';
+  schema: SchemaObject;
+  /**
+   * The bare name the models derive from: the header name, the response stem
+   * + media type + role, a fallback body's `<Op><Label>Response` or an error
+   * body's `<Op>Error<code>`.
+   */
+  name: string;
+  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
+  statusCode: number | string;
+  /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
+  operationQualifier: string;
+  /** Qualifies a header's names (`Documents` + `X-Meta` → `DocumentsXMeta`); a body has none. */
+  parentName?: string;
   componentSchemas?: Record<string, SchemaObject>;
+  /**
+   * Everything the resolved type is written to: the header or content entry,
+   * and for a fallback or error body both the response entry and the content
+   * entry of the media type it was read from, which share one TypeRef as a
+   * success entry's do.
+   */
+  targets: Array<{ type?: TypeRef }>;
+}
+
+/** What response header and body typing needs from the operation and the spec. */
+interface ResponseTypingContext {
+  componentHeaders?: Record<string, Record<string, unknown>>;
+  /** Lets inline models resolve `$ref` siblings and augmentations the way fields do. */
+  componentSchemas?: Record<string, SchemaObject>;
+  /** `components/responses`, for a response written as a Reference Object. */
+  componentResponses?: Record<string, Record<string, unknown>>;
+  /**
+   * Whether a `description` written beside a response `$ref` overrides the
+   * component's (OAS 3.1) or is ignored (OAS 3.0); see `resolveResponseRef`.
+   */
+  refSiblingDescriptions?: 'override' | 'ignore';
   /** Qualifies header model and enum names: `Documents` + `X-Meta` → `DocumentsXMeta`. */
   serviceName?: string;
-  /** PascalCase operation name, e.g. `CreateDocument`; qualifies a name taken across operations. */
+  /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
-  registry: HeaderModelRegistry;
-  /**
-   * Every enum name the spec already owns with its members (`enumMembersKey`):
-   * the component enums and the inline enums of component fields, seeded up
-   * front, plus the enums nested in each error body model minted so far. Read
-   * only when typing error bodies (`typeErrorSchema`).
-   */
-  enums?: EnumRegistry;
+  /** Collects every schema whose models are named after the operations loop. */
+  deferred: DeferredInlineType[];
 }
 
-/** Enum name → `enumMembersKey` of its members. */
-type EnumRegistry = Map<string, string>;
-
 /**
- * Members of an enum, independent of order, so equal member sets compare
- * equal. Each member is JSON-encoded, so a number and its spelling (`1` and
- * `"1"`) stay apart and a `|` inside a string cannot run two members together.
+ * Name and materialize every deferred header, secondary-body, fallback-body
+ * and error-body schema, now that every primary model is known. The registry
+ * holds the component models first (with the inline models their fields
+ * mint), then every inline model the operations minted — request bodies,
+ * primary response bodies with their nested objects and union variants,
+ * envelope companions — so no deferred schema can take one of their names
+ * for a different shape, whichever operation minted it; each resolved
+ * schema's own models join it in turn, in document order (path order, then
+ * the response keys as written; a response's headers before its error body
+ * and its secondary bodies, a fallback's body before its headers), so the
+ * first owner of a name keeps it. Returns the models materialized, having set
+ * each target's `type`.
  */
-function enumMembersKey(values: readonly (string | number)[]): string {
-  return values
-    .map((value) => JSON.stringify(value))
-    .sort()
-    .join('|');
-}
-
-/** Every inline enum (one carrying `values`) reachable from a model's field types. */
-function nestedEnumRefs(model: Model): Array<EnumRef & { values: (string | number)[] }> {
-  const refs: Array<EnumRef & { values: (string | number)[] }> = [];
-  for (const field of model.fields) {
-    walkTypeRef(field.type, {
-      enum: (ref) => {
-        if (ref.values) refs.push(ref as EnumRef & { values: (string | number)[] });
-      },
-    });
+function resolveDeferredInlineTypes(
+  deferred: readonly DeferredInlineType[],
+  componentModels: readonly Model[],
+  inlineModels: readonly Model[],
+  operationOf: ReadonlyMap<Model, string>,
+): Model[] {
+  const registry: ModelShapeRegistry = new Map();
+  for (const model of componentModels) {
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model) });
   }
-  return refs;
-}
-
-/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'example', 'examples']);
-/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
-
-/**
- * Shape of a model, independent of field order, name and documentation:
- * every field's name, type, requiredness, limits, default and access flags,
- * plus the model's own limits, type parameters and discriminator. Two
- * schemas share a model only when this agrees, so a body that repeats
- * another's fields with a different `minLength` or `minProperties` keeps its
- * own model and its own limits.
- */
-function modelFingerprint(model: Model): string {
-  const fields = model.fields
-    .map((field) => `${field.name}:${stableStringify(omitKeys(field, FIELD_DOC_KEYS))}`)
-    .sort()
-    .join('|');
-  return `${fields}#${stableStringify(omitKeys(model, MODEL_IDENTITY_KEYS))}`;
-}
-
-/** The entries of `value` whose key is not in `keys` and whose value is set. */
-function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(value).filter(([key, entryValue]) => entryValue !== undefined && !keys.has(key)),
-  );
-}
-
-/** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    const entries = Object.keys(record)
-      .filter((key) => record[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
-    return `{${entries.join(',')}}`;
+  for (const model of inlineModels) {
+    if (registry.has(model.name)) continue;
+    registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
   }
-  return JSON.stringify(value) ?? 'undefined';
-}
-
-/** Hard cap on the attempts a name-stepping loop makes; the no-progress guard stops it long before in practice. */
-const MAX_NAME_STEP_ATTEMPTS = 32;
-
-/**
- * A minted name the registries already own with another shape or other
- * members, or one that two models of the same attempt carry with different
- * shapes.
- */
-interface NameCollision {
-  name: string;
-  /** The model registry's entry, when the clash is with a registered model (absent otherwise). */
-  owner?: { fingerprint: string; operation?: string };
-}
-
-interface MintAttempt {
-  models: Model[];
-  type: TypeRef;
-  /** Every model and inline enum name the attempt minted. */
-  names: string[];
-  collisions: NameCollision[];
-}
-
-/** Every model name the trial minted plus every inline enum named under them. */
-function mintedNames(trial: Model[]): string[] {
-  return [...trial.map((m) => m.name), ...trial.flatMap((m) => nestedEnumRefs(m).map((r) => r.name))];
-}
-
-function collidingNames(trial: Model[], ctx: HeaderExtractionContext, checkEnums: boolean): NameCollision[] {
-  const collisions: NameCollision[] = [];
-  const minted = new Map<string, string>();
-  for (const model of trial) {
-    const fingerprint = modelFingerprint(model);
-    const owner = ctx.registry.get(model.name);
-    if (owner !== undefined && owner.fingerprint !== fingerprint) collisions.push({ name: model.name, owner });
-    // Two models of one attempt under one name with different shapes: the
-    // later merge would keep one and point every reference at it.
-    const earlier = minted.get(model.name);
-    if (earlier !== undefined && earlier !== fingerprint) collisions.push({ name: model.name });
-    minted.set(model.name, fingerprint);
+  const models: Model[] = [];
+  for (const item of deferred) {
+    const type = materializeDeferredType(item, registry, models);
+    for (const target of item.targets) target.type = type;
   }
-  if (checkEnums) {
-    for (const model of trial) {
-      for (const ref of nestedEnumRefs(model)) {
-        const members = ctx.enums?.get(ref.name);
-        if (members !== undefined && members !== enumMembersKey(ref.values)) collisions.push({ name: ref.name });
-      }
-    }
-  }
-  return collisions;
+  return models;
 }
 
 /**
- * Mint `schema` as the one property `propertyName` (under `parentName`) and
- * type it from the same property, handing `reserved` to both sides as the
- * names a variant of the body must not take, then check every minted model
- * against the model registry and against the attempt's other models, and —
- * for error bodies — every inline enum under them against the enum registry.
- *
- * Nothing is renamed after the fact. The extractor and `schemaToTypeRef`
- * read the same reserved set through the same naming functions, so a `$ref`
- * keeps the component it names, a variant whose title is reserved is
- * qualified identically on both sides, and no two references can be bent
- * onto one model.
- */
-function mintUnderName(
-  schema: SchemaObject,
-  propertyName: string,
-  parentName: string | undefined,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-  ctx: HeaderExtractionContext,
-  checkEnums: boolean,
-  reserved: ReadonlySet<string>,
-): MintAttempt {
-  const reservedNames = reserved.size > 0 ? reserved : undefined;
-  const trial: Model[] = [];
-  extractInlineModelsFromProperties(
-    { properties: { [propertyName]: schema } },
-    trial,
-    parentName,
-    componentSchemas,
-    undefined,
-    reservedNames,
-  );
-  const type = schemaToTypeRef(schema, propertyName, parentName, undefined, reservedNames);
-  return { models: trial, type, names: mintedNames(trial), collisions: collidingNames(trial, ctx, checkEnums) };
-}
-
-/**
- * Try `candidate(0)`, `candidate(1)`, ... until `mintUnderName` reports no
- * collision; register what that attempt minted (a name the registry already
- * holds is shared, not re-added) and return its type.
- *
- * A clash on a name the candidate reaches — one containing its stem — is
- * left to the next candidate. A clash on a name it does not reach — a
- * variant named by its bare title (`Circle`, in a title-mapped union) or
- * anything named under it (`CircleState`) — would recur under every
- * candidate, so that name is reserved instead, together with every minted
- * model name it extends, and the same candidate is minted again:
- * `nameInlineVariants` then qualifies the variant with the base, as it does
- * whenever a title is taken by a sibling (`CircleGetPetError400`), and what
- * is named under it follows (`CircleGetPetError400State`), while a variant
- * that did not clash keeps its title and a `$ref` keeps its component. The
- * qualified name contains the stem, so a further clash on it is reached by
- * the next candidate.
- *
- * Two guards keep the loop finite whatever the schema: an attempt whose
- * minted names equal the previous attempt's has made no progress — the
- * titles of a union nested under a field are out of the reserved set's
- * reach — and `MAX_NAME_STEP_ATTEMPTS` caps the rest. Either way the last
- * attempt is kept, deterministically, with a warning naming what still
- * clashes; the later merge then reports the duplicate definition as it does
- * today. `onCollision` lets a caller reorder its candidates after a failed
- * one.
- */
-function mintUnderFreeName(
-  schema: SchemaObject,
-  candidate: (attempt: number) => string,
-  parentName: string | undefined,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-  ctx: HeaderExtractionContext,
-  models: Model[],
-  checkEnums: boolean,
-  label: string,
-  onCollision?: (attempt: number, collisions: NameCollision[]) => void,
-): TypeRef {
-  const reserved = new Set<string>();
-  let previous: string | undefined;
-  let attempt = 0;
-  for (let iteration = 0; ; iteration++) {
-    const propertyName = candidate(attempt);
-    const result = mintUnderName(schema, propertyName, parentName, componentSchemas, ctx, checkEnums, reserved);
-    const names = [...result.names].sort().join('\0');
-    const settled = result.collisions.length === 0;
-    if (settled || names === previous || iteration + 1 >= MAX_NAME_STEP_ATTEMPTS) {
-      if (!settled) {
-        const taken = [...new Set(result.collisions.map((c) => `"${c.name}"`))].join(', ');
-        console.warn(
-          `[oagen] Warning: No free name for ${label}: ${taken} already taken with a different shape — keeping "${propertyName}"`,
-        );
-      }
-      for (const model of result.models) {
-        if (ctx.registry.has(model.name)) continue;
-        ctx.registry.set(model.name, { fingerprint: modelFingerprint(model), operation: ctx.operationQualifier });
-        models.push(model);
-      }
-      if (checkEnums) {
-        for (const model of result.models) {
-          for (const ref of nestedEnumRefs(model)) {
-            if (!ctx.enums?.has(ref.name)) ctx.enums?.set(ref.name, enumMembersKey(ref.values));
-          }
-        }
-      }
-      return result.type;
-    }
-    previous = names;
-
-    const stem = toPascalCase(propertyName);
-    const unreached = result.collisions.filter((c) => !c.name.includes(stem));
-    if (unreached.length > 0) {
-      for (const { name } of unreached) {
-        reserved.add(name);
-        for (const model of result.models) if (name.startsWith(model.name)) reserved.add(model.name);
-      }
-    } else {
-      onCollision?.(attempt, result.collisions);
-      attempt++;
-    }
-  }
-}
-
-/**
- * Type a header's schema and materialize the inline models it names, under a
+ * Type a deferred schema and materialize the inline models it names, under a
  * property name that does not collide with a different shape anywhere in the
- * spec.
+ * spec — through `materializeInlineSchema`, the one retry loop every such
+ * schema goes through.
  *
- * Header models are named from the service and header name alone, so an
- * inline `X-Meta` on a `Documents` operation is `DocumentsXMeta` — the same
- * name a component schema, or the same header on a 429 or on another
- * `Documents` operation, may already own with a different shape. Left alone,
- * the later merge keeps one definition for the name and every other
- * reference silently gets the wrong fields (a request body using the
- * component would even change type without any emitter reading headers).
+ * A header model is named from the service and header name alone, so an
+ * inline `X-Meta` on a `Documents` operation is `DocumentsXMeta`; a secondary
+ * body from the operation's response stem and media type,
+ * `RenderPetCardTextHtmlResponse`; a fallback body from the stem and the
+ * response's label, `ListPetsDefaultResponse`; an error body from the stem
+ * and its status code, `GetPetError404` (`deriveErrorModelName`). Any of them
+ * is a name a component schema, a model nested in one (`GetPet.error404` owns
+ * `GetPetError404`), a primary body, the same header on a 429 or another
+ * operation may already own with a different shape. Left alone, the later
+ * merge keeps one definition for the name and every other reference silently
+ * gets the wrong fields (a request body using the component would even change
+ * type without any emitter reading headers).
  *
- * The first owner of a name keeps it: component models and the inline models
- * nested in them are seeded before any operation, operations are visited in
- * path order, and a single operation's
- * responses in ascending status-code order (integer-like keys iterate that
- * way), so the lowest code wins regardless of where it appears in the
- * document. A later header with a different shape — at any depth, a nested
- * object that differs counts — is re-derived under the first free candidate:
+ * The first owner of a name keeps it (see `resolveDeferredInlineTypes`), and
+ * a later schema with a different shape — at any depth, a nested object that
+ * differs counts — is re-derived under the first free candidate of its kind
+ * (`deferredNamingStem`):
  *
- *   1. the bare header name                `DocumentsXMeta`
- *   2. when the name is taken inside this operation, the status code
- *      (`DocumentsXMeta429`); when taken by a component or another
- *      operation, the operation (`DocumentsCreateDocumentXMeta`)
- *   3. the other of those two
- *   4. operation and status code            `DocumentsCreateDocumentXMeta429`
- *   5. a numeric suffix                     `DocumentsXMeta2`, `DocumentsXMeta3`, ...
+ *   header    1. the bare name                `DocumentsXMeta`
+ *             2. when the name is taken inside this operation, the status
+ *                code (`DocumentsXMeta429`); when taken by a component or
+ *                another operation, the operation (`DocumentsCreateDocumentXMeta`)
+ *             3. the other of those two
+ *             4. operation and status code    `DocumentsCreateDocumentXMeta429`
+ *             5. a numeric suffix             `DocumentsXMeta2`, `DocumentsXMeta3`, …
+ *   content   1. the bare name                `RenderPetCardTextHtmlResponse`
+ *             2. the status code              `RenderPetCardTextHtmlResponse201`
+ *             3. a numeric suffix             `…Response2`, `…Response3`, …
+ *   fallback  1. the bare name                `ListPetsDefaultResponse`
+ *             2. a numeric suffix             `ListPetsDefaultResponse2`, `…3`, …
+ *   error     1. the bare name                `GetPetError404`
+ *             2. a `Body` suffix              `GetPetError404Body`
+ *             3. a numbered `Body` suffix     `GetPetError404Body2`, `…Body3`, …
  *
  * Both the type and the models come from the same property name, so nested
  * models (`DocumentsXMeta429Origin`) line up by construction. A shape
  * identical to the name's current owner shares it and materializes nothing
- * new, which is also how a header reuses a matching component model.
+ * new, which is also how a header reuses a matching component model. A
+ * title-mapped union variant (`Circle`) is named from its title whatever the
+ * property name, so `materializeInlineSchema` reserves every taken name and
+ * such a variant falls back to its context-qualified name
+ * (`CircleDocumentsXMeta`, see `nameInlineVariants`). A clash neither a
+ * candidate nor a reservation can clear — a titled variant nested below the
+ * top level — is not looped on: the clashing models are renamed under the
+ * schema's root (`RenderPetCardTextHtmlResponseCircle`) with every reference
+ * rewritten, whatever the kind.
  *
- * Treating the header as a one-property object reuses the field-level
+ * Treating the schema as a one-property object reuses the field-level
  * extractor, whose names come from the same `qualifyInlineModelName(name,
  * parent)` rule `schemaToTypeRef` applies — the trick the inline request-body
- * path uses. A name no candidate reaches (a variant named by its bare title)
- * is reserved so the variant takes its qualified name, and the search is
- * bounded; see `mintUnderName` and `mintUnderFreeName`.
+ * path uses.
  */
-function typeHeaderSchema(
-  schema: SchemaObject,
-  name: string,
-  statusCode: number,
-  ctx: HeaderExtractionContext,
-  models: Model[],
-): TypeRef {
-  const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
-  const byStatus = `${name}${statusCode}`;
-  const byOperation = `${ctx.operationQualifier}${name}`;
-  const byBoth = `${ctx.operationQualifier}${name}${statusCode}`;
-  let candidates = [name, byStatus, byOperation, byBoth];
-
-  return mintUnderFreeName(
-    schema,
-    (attempt) => (attempt < candidates.length ? candidates[attempt] : `${name}${attempt - candidates.length + 2}`),
-    parentName,
-    ctx.componentSchemas,
-    ctx,
+function materializeDeferredType(item: DeferredInlineType, registry: ModelShapeRegistry, models: Model[]): TypeRef {
+  return materializeInlineSchema(item.schema, {
+    stem: deferredNamingStem(item),
+    parentName: item.parentName,
+    componentSchemas: item.componentSchemas,
+    registry,
+    operation: item.operationQualifier,
     models,
-    false,
-    `header "${name}" of ${ctx.operationQualifier || 'an operation'} (${statusCode})`,
-    (attempt, collisions) => {
-      // Decide the preference between candidates 2 and 3 from the bare name's
-      // owner: a clash within this operation reads best by status code, one
-      // with a component or another operation by operation name.
-      if (attempt === 0 && !collisions.every((c) => c.owner?.operation === ctx.operationQualifier)) {
-        candidates = [name, byOperation, byStatus, byBoth];
-      }
-    },
-  );
+  });
 }
 
-/**
- * Type an error response's inline body and materialize the models it names,
- * under an operation-qualified name (`deriveErrorModelName`) that collides
- * with no differently shaped model anywhere in the spec.
- *
- * The body is handed to the field-level extractor as a one-property object
- * under no parent — the trick `typeHeaderSchema` and the inline response
- * `oneOf` path use — so every shape is named exactly as `schemaToTypeRef`
- * references it from the same property: a plain or nullable object
- * (`GetPetError404`), the items of an array of inline objects, every inline
- * `oneOf`/`anyOf` variant (`GetPetError404`, `GetPetError404WithField`,
- * `<Const>GetPetError404`), an `allOf` merge with `$ref` branches, map values
- * and everything nested under those (`GetPetError404Details`). A `$ref` body
- * or a primitive mints nothing and is typed as is.
- *
- * The models share the header registry: a name a component schema, a model
- * nested in one (`GetPet.error404` owns `GetPetError404`) or an earlier
- * header or error model already owns with a different shape is stepped
- * around (`GetPetError404Body`, then `GetPetError404Body2`, ...), and a name
- * of the identical shape is shared without a second definition, as a header
- * reuses a matching component. Every model minted here is registered so a
- * later header or error model steps around it in turn — two operations whose
- * operationIds share a stem (`getPet`, `get-pet`) and declare different
- * inline 404 bodies get `GetPetError404` and `GetPetError404Body`.
- *
- * An enum nested in the body (`GetPetError422.severity` →
- * `GetPetError422Severity`) is checked the same way against the enum
- * registry: a name a component enum or component field enum owns with other
- * members is a collision too, and the whole body steps
- * (`GetPetError422Body`, `GetPetError422BodySeverity`) so the field's
- * reference and the promoted enum agree by construction, as for a nested
- * model; identical members share the existing enum. The nested enums are
- * registered with the models.
- *
- * A clash on a name the body's own name does not reach — a variant named by
- * its bare title (`Circle`) or an enum under it (`CircleState`) — cannot be
- * stepped this way; the title is reserved instead and the variant takes its
- * qualified name (`CircleGetPetError400`, `CircleGetPetError400State`), as
- * when a sibling owns the title. The search is bounded either way. See
- * `mintUnderName` and `mintUnderFreeName`.
- */
-function typeErrorSchema(
-  schema: SchemaObject,
-  name: string,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-  ctx: HeaderExtractionContext,
-  models: Model[],
-): TypeRef {
-  return mintUnderFreeName(
-    schema,
-    (attempt) => (attempt === 0 ? name : attempt === 1 ? `${name}Body` : `${name}Body${attempt}`),
-    undefined,
-    componentSchemas,
-    ctx,
-    models,
-    true,
-    `error body "${name}"`,
-  );
+/** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
+function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
+  const { name, statusCode, operationQualifier } = item;
+  const byStatus = `${name}${statusCode}`;
+  const byOperation = `${operationQualifier}${name}`;
+  const byBoth = `${operationQualifier}${name}${statusCode}`;
+  const numbered = (index: number): string => `${name}${index + 2}`;
+  switch (item.kind) {
+    case 'header':
+      // Decide the preference between candidates 2 and 3 from the bare
+      // name's owners: a clash within this operation reads best by status
+      // code, one with a component, a primary body or another operation by
+      // operation name.
+      return (index, firstClashOwners) => {
+        const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
+        const candidates = withinOperation
+          ? [name, byStatus, byOperation, byBoth]
+          : [name, byOperation, byStatus, byBoth];
+        return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
+      };
+    case 'content':
+      return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
+    case 'fallback':
+      return (index) => (index === 0 ? name : numbered(index - 1));
+    case 'error':
+      return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : `${name}Body${index}`);
+  }
 }
 
 /**
@@ -2404,15 +2392,17 @@ function typeErrorSchema(
  * survives so callers can leave the `headers` key off entirely.
  *
  * An object-shaped header schema (directly, inside an array, or as a oneOf
- * variant) becomes a `ModelRef`, so the model it names is appended to
- * `models` — otherwise the ref would dangle with nothing to emit.
+ * variant) becomes a `ModelRef`, so the model it names must be materialized
+ * — otherwise the ref would dangle with nothing to emit. That naming waits
+ * for every primary model (`resolveDeferredInlineTypes`), so a header with a
+ * schema is deferred and its `type` filled in then.
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
   operationLabel: string,
-  statusCode: number,
-  ctx: HeaderExtractionContext,
-  models: Model[],
+  // A status code, or the label of a fallback response (`Default`, `ClientError`).
+  statusCode: number | string,
+  ctx: ResponseTypingContext,
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
@@ -2429,17 +2419,26 @@ function extractResponseHeaders(
     // `content`, the first (only) media type's schema types the header.
     const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
     const schema = header.schema ?? contentSchema;
-    const type: TypeRef = schema
-      ? typeHeaderSchema(schema, name, statusCode, ctx, models)
-      : { kind: 'primitive', type: 'string' };
-
-    result.push({
+    const entry: ResponseHeader = {
       name,
-      type,
+      type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
       deprecated: header.deprecated || undefined,
-    });
+    };
+    if (schema) {
+      ctx.deferred.push({
+        kind: 'header',
+        schema,
+        name,
+        statusCode,
+        operationQualifier: ctx.operationQualifier,
+        parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
+        componentSchemas: ctx.componentSchemas,
+        targets: [entry],
+      });
+    }
+    result.push(entry);
   }
 
   return result.length > 0 ? result : undefined;
@@ -2542,65 +2541,11 @@ export function derivePathBasedName(
  * document's paths, operationIds and component names, never on their order,
  * and a path that stops colliding returns to its plain name.
  */
-/**
- * The inline models every operation's request body and 2xx JSON body will
- * mint, read with the same extractors under the same context names
- * `buildOperation` and `extractResponses` use, so the header/error registry
- * can be seeded with them before any operation is built
- * (`extractOperations`). The models themselves are discarded; what matters
- * is each name and the shape it will carry.
- *
- * Only what the operation will actually emit is reserved: `extractResponses`
- * keeps the models of the last 2xx that declares a JSON schema (an earlier
- * body's are dropped), so only that body's are read here — a header that
- * shared a reserved name must find the model emitted. When every 2xx body's
- * models are kept, read every body here too.
- */
-function operationBodyModels(
-  paths: Record<string, PathItem>,
-  pathModelBaseNames: ReadonlyMap<string, string>,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-  componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
-): Model[] {
-  const models: Model[] = [];
-  for (const [path, pathItem] of Object.entries(paths)) {
-    for (const method of HTTP_METHODS) {
-      const op = pathItem[method];
-      if (!op) continue;
-      const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
-      const opLabel = operationLabel(op, path, method);
-      // Each request into its own array, as buildOperation extracts it: the
-      // extractor steps around names already in the array it is given, so a
-      // shared one would reserve names no operation emits.
-      const requestModels: Model[] = [];
-      extractRequestBody(
-        resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel),
-        op,
-        pathModelBaseName,
-        requestModels,
-        componentSchemas,
-      );
-      models.push(...requestModels);
-      let kept: SchemaObject | undefined;
-      for (const [statusCode, resp] of Object.entries(op.responses ?? {})) {
-        const code = parseInt(statusCode, 10);
-        const schema = resp.content?.['application/json']?.schema;
-        if (code >= 200 && code < 300 && schema) kept = schema;
-      }
-      if (kept) {
-        models.push(
-          ...classifyAndExtractResponse(kept, deriveResponseName(op, pathModelBaseName), componentSchemas).inlineModels,
-        );
-      }
-    }
-  }
-  return models;
-}
-
 function resolvePathModelBaseNames(
   paths: Record<string, PathItem>,
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
+  componentResponses?: Record<string, Record<string, unknown>>,
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -2609,6 +2554,12 @@ function resolvePathModelBaseNames(
 
   for (const model of componentModels ?? []) {
     reservedNames.add(model.name);
+  }
+  // A shared response names its inline body after the component, not the
+  // operation (see componentResponseModelName), so its stem is reserved like
+  // an operationId's.
+  for (const componentName of Object.keys(componentResponses ?? {})) {
+    reservedNames.add(componentResponseModelBase(componentName));
   }
 
   for (const [path, pathItem] of Object.entries(paths)) {
@@ -2755,6 +2706,9 @@ function collectOperationConstPrefixes(
   for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
     const code = parseInt(statusCode, 10);
     if (code < 200 || code >= 300) continue;
+    // A `$ref` into `components/responses` has no `content` here and is not
+    // followed either: its inline body is named after the component, so the
+    // consts it pins never prefix a path-derived name.
     for (const media of Object.values(response.content ?? {})) {
       collectConstPrefixes(media?.schema, prefixes, 0);
     }
@@ -2805,6 +2759,167 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
 }
 
 /**
+ * The `components/responses` entry a response is written as a `$ref` to, or
+ * undefined for an inline response. Only the outermost ref counts: it is the
+ * name the operation uses, and the name a chain resolves through
+ * (`resolveResponseRef`) stays the component's own business. The pointer is
+ * matched whole and JSON Pointer escapes (RFC 6901 §4) undone, exactly as the
+ * resolver does, so the name agrees with what it resolved.
+ */
+function componentResponseNameOf(resp: ResponseObject | ReferenceObject): string | undefined {
+  if (!('$ref' in resp) || typeof resp.$ref !== 'string') return undefined;
+  const match = /^#\/components\/responses\/(.+)$/.exec(resp.$ref);
+  return match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
+/**
+ * `<Component>Response`: the inline body of a response declared once under
+ * `components/responses` and referenced from each operation that returns it.
+ * It is named after the component, not the operation, so every referrer
+ * shares one model (`PetFound` → `PetFoundResponse`) instead of minting a
+ * `<Op>Response` copy each; the suffix is not doubled when the component is
+ * already named `…Response`. Cleaned like an operationId-derived name, so
+ * the stem (`componentResponseModelBase`) prefixes everything derived from
+ * it — a list's `<Component>Item`, nested `<Component>Response…` models.
+ */
+function componentResponseModelName(componentName: string): string {
+  const base = toPascalCase(componentName);
+  return cleanSchemaName(base.endsWith('Response') ? base : base + 'Response');
+}
+
+/**
+ * The stem every model derived from a component response starts with (see
+ * operationIdModelBase for the argument). Reserved by resolvePathModelBaseNames
+ * so no path-derived name takes it.
+ */
+function componentResponseModelBase(componentName: string): string {
+  return cleanSchemaName(toPascalCase(componentName).replace(/Response$/, ''));
+}
+
+/**
+ * Media types the fixed-order response pick types as a plain string without
+ * reading their schema, in the order it checks them.
+ */
+const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html', 'text/xml', 'application/xml'];
+
+/** Where an inline body declared for a secondary media type gets its name. */
+interface ContentModelNaming {
+  /** The operation's response-model stem, e.g. `RenderPetCard`; with the response's label for a fallback, `ListPetsDefault`. */
+  base: string;
+  /** `Response` for a success or fallback entry, `Error` for an error entry. */
+  suffix: string;
+  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
+  statusCode: number | string;
+}
+
+/**
+ * Read a response's `content` map into the media types it declares — in
+ * document order and verbatim, parameters, vendor suffixes and wildcards
+ * included — with a type for each. A media type is typed the way `response`
+ * is when it is the only one declared, so the entry for `primaryContentType`
+ * (the one the fixed-order pick read `primaryType` from) carries that very
+ * TypeRef and every other entry goes through `typeSecondaryContent`. Returns
+ * `undefined` when the response declares no media type at all, so the caller
+ * leaves both keys off.
+ */
+function extractResponseContents(
+  content: Record<string, { schema?: SchemaObject }> | undefined,
+  primaryContentType: string | undefined,
+  primaryType: TypeRef | undefined,
+  naming: ContentModelNaming,
+  ctx: ResponseTypingContext,
+): { contentTypes: string[]; contents: ResponseContent[] } | undefined {
+  if (!content) return undefined;
+  const contentTypes = Object.keys(content);
+  if (contentTypes.length === 0) return undefined;
+  const contents = contentTypes.map((contentType) => {
+    const entry: ResponseContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+    entry.type =
+      primaryType !== undefined && contentType === primaryContentType
+        ? primaryType
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry);
+    return entry;
+  });
+  return { contentTypes, contents };
+}
+
+/**
+ * Type a media type the fixed-order pick did not choose, exactly as it would
+ * have been typed had it been the only one declared: `application/octet-stream`
+ * and `application/pdf` are binary and the text and XML types are strings
+ * whatever their schema says, any other media type is typed from its schema,
+ * and one without a schema is `unknown`. The one addition is that an inline
+ * object under such a media type is materialized — the primary pick's
+ * `...Response` name belongs to the primary body, so this one is named after
+ * its media type as well: `RenderPetCardTextHtmlResponse`. That naming waits
+ * for every primary model (`resolveDeferredInlineTypes`), so a schema is
+ * deferred and `target.type` — returned here as a placeholder — filled in
+ * then.
+ */
+function typeSecondaryContent(
+  contentType: string,
+  schema: SchemaObject | undefined,
+  naming: ContentModelNaming,
+  ctx: ResponseTypingContext,
+  target: ResponseContent,
+): TypeRef {
+  // Parameters and case do not change what a body is: `application/pdf;
+  // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
+  // as much a string as `text/plain`. The key itself stays as written.
+  const essence = mediaTypeEssence(contentType);
+  if (essence === 'application/octet-stream' || essence === 'application/pdf') {
+    return { kind: 'primitive', type: 'string', format: 'binary' };
+  }
+  if (TEXT_RESPONSE_MEDIA_TYPES.includes(essence)) return { kind: 'primitive', type: 'string' };
+  if (!schema) return { kind: 'primitive', type: 'unknown' };
+  ctx.deferred.push({
+    kind: 'content',
+    schema,
+    name: `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`,
+    statusCode: naming.statusCode,
+    operationQualifier: ctx.operationQualifier,
+    componentSchemas: ctx.componentSchemas,
+    targets: [target],
+  });
+  return target.type;
+}
+
+/**
+ * The PascalCase token that qualifies an inline model minted for a secondary
+ * media type: `text/html` → `TextHtml`, `application/vnd.api+json` →
+ * `ApplicationVndApiJson`. Parameters are part of it (`application/json;
+ * charset=utf-8` → `ApplicationJsonCharsetUtf8`) so two parameterizations of
+ * one type never share a model, and a wildcard segment reads as `Any`
+ * (`application/*` → `ApplicationAny`) since the caser would drop the `*`.
+ */
+function mediaTypeToken(contentType: string): string {
+  const token = toPascalCase(contentType.split('*').join('Any'));
+  return token.length > 0 ? token : 'Content';
+}
+
+/**
+ * A media type's essence — `type/subtype` without parameters, trimmed and
+ * lower-cased — which is what decides how its body is typed (RFC 9110
+ * §8.3.1). The content keys themselves stay as written.
+ */
+function mediaTypeEssence(contentType: string): string {
+  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
+}
+
+/**
+ * `<Op>DefaultResponse`, `<Op>ClientErrorResponse`: a fallback body's inline
+ * model, named like the primary body's `<Op>Response` with the response's
+ * label (`Default`, or the word for its range) in between. Starts with the
+ * operation's stem, so `operationIdModelBase` reserves it with the rest.
+ */
+function deriveFallbackResponseName(op: OperationObject | undefined, pathModelBaseName: string, label: string): string {
+  if (op?.operationId) {
+    return operationIdModelName(op.operationId, `${label}Response`);
+  }
+  return `${pathModelBaseName}${label}Response`;
+}
+
+/**
  * The model name an inline error body is materialized under: the operation's
  * stem plus `Error<code>` (`GetPetError404`), so two operations' inline 404s
  * never share one model, nor do two status codes of one operation. Built by
@@ -2820,6 +2935,221 @@ function deriveErrorModelName(op: OperationObject | undefined, pathModelBaseName
   return `${pathModelBaseName}Error${code}`;
 }
 
+/**
+ * Where the fallback responses (`default`, `1XX`–`5XX`) of one operation
+ * land while its responses are read, with what typing their bodies and
+ * headers needs. An entry is attached as its key is read; a body with an
+ * inline schema is deferred like a header's (`typeFallbackBody`) and its
+ * `type` filled in once every operation has been read.
+ */
+interface FallbackResponseSink {
+  op: OperationObject | undefined;
+  pathModelBaseName: string;
+  opLabel: string;
+  ctx: ResponseTypingContext;
+  defaultResponse?: DefaultResponse;
+  /** In document order. */
+  rangeResponses: RangeResponse[];
+}
+
+/** The range a key names, uppercased (`4xx` → `4XX`), or undefined when it names none. */
+function statusRangeOf(key: string): StatusRange | undefined {
+  const upper = key.toUpperCase();
+  const isRange = upper.length === 3 && upper.endsWith('XX') && upper[0] >= '1' && upper[0] <= '5';
+  return isRange ? (upper as StatusRange) : undefined;
+}
+
+/**
+ * Read a Responses Object key that is not a status code into `sink`, and
+ * say whether it was consumed: `default` and a range are kept; an `x-` key
+ * is a specification extension and carries no response; anything else
+ * OpenAPI does not define is warned about, then ignored, instead of being
+ * dropped silently. A numeric key returns false so the caller reads it as
+ * before — `parseInt` keeps `200`, `201 ` and the like exactly as they were.
+ */
+function readFallbackResponse(
+  key: string,
+  resp: ResponseObject | ReferenceObject,
+  sink: FallbackResponseSink,
+): boolean {
+  if (key.startsWith('x-')) return true;
+  const range = statusRangeOf(key);
+  if (key === 'default' || range) {
+    if (range && sink.rangeResponses.some((entry) => entry.range === range)) {
+      // `4XX` and `4xx` side by side: JSON allows the pair, OpenAPI does not.
+      console.warn(`[oagen] Warning: Duplicate "${range}" response on ${sink.opLabel}; keeping the first`);
+      return true;
+    }
+    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+    // Reference Object has no `headers` or `content` of its own to read.
+    const resolved = resolveResponseRef<ResponseObject>(
+      resp,
+      sink.ctx.componentResponses,
+      `${key} response of ${sink.opLabel}`,
+      sink.ctx.refSiblingDescriptions,
+    );
+    // The entry is filled in place: a deferred body's `type` lands on this
+    // very object once every operation has been read.
+    if (range) {
+      const entry: RangeResponse = { range };
+      fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink);
+      sink.rangeResponses.push(entry);
+    } else {
+      const entry: DefaultResponse = {};
+      fillFallbackResponse(entry, resolved, 'Default', sink);
+      sink.defaultResponse = entry;
+    }
+    return true;
+  }
+  if (Number.isNaN(parseInt(key, 10))) {
+    console.warn(
+      `[oagen] Warning: Ignoring response key "${key}" on ${sink.opLabel}: not a status code, a 1XX–5XX range, or "default"`,
+    );
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Read the body, media types and headers of one fallback response onto
+ * `entry`; a key is left off when absent. The body is read before the
+ * headers so its deferred models are named first, as they were when every
+ * fallback body was typed ahead of every header. The media types are read
+ * exactly as a success entry's: every one declared, the one `type` was read
+ * from sharing its TypeRef, each other typed on its own — an inline object
+ * under `text/plain` of the `default` response is `<Op>DefaultTextPlainResponse`.
+ */
+function fillFallbackResponse(
+  entry: DefaultResponse | RangeResponse,
+  resp: ResponseObject,
+  label: string,
+  sink: FallbackResponseSink,
+): void {
+  const contextName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
+  const json = jsonResponseSchema(resp);
+  // Shared by reference with the deferred body, so the content entry of the
+  // media type `type` was read from can join it once it exists.
+  const targets: Array<{ type?: TypeRef }> = [entry];
+  if (json) entry.type = typeFallbackBody(json.schema, contextName, label, sink, targets);
+  const contents = extractResponseContents(
+    resp.content,
+    json?.contentType,
+    entry.type,
+    { base: contextName.replace(/Response$/, ''), suffix: 'Response', statusCode: label },
+    sink.ctx,
+  );
+  if (contents) {
+    entry.contentTypes = contents.contentTypes;
+    entry.contents = contents.contents;
+    const own = contents.contents.find((content) => content.contentType === json?.contentType);
+    if (own) targets.push(own);
+  }
+  const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.ctx);
+  if (headers) entry.headers = headers;
+  // The response's own `description`, read as for a success or error entry —
+  // a sibling beside a `$ref` included, since `resolveResponseRef` kept it.
+  const description = presentText(resp.description);
+  if (description) entry.description = description;
+}
+
+/**
+ * Type a fallback body and materialize every model it names, under a name no
+ * other model owns. A `$ref` is the referenced model. An inline schema is
+ * deferred like a header's or a secondary body's: once every operation has
+ * been read (`resolveDeferredInlineTypes`) it is extracted as if it were a
+ * field named `contextName` of a parent with no name, through the extractor
+ * every field goes through — so every shape a field can take (a nullable
+ * object, an array or map of objects, `oneOf`/`anyOf` variants, an `allOf`
+ * merge, nested objects) is materialized under the name `schemaToTypeRef`
+ * references it by, by construction — and checked against the spec-wide
+ * registry, so a component, or another operation's body, that happens to be
+ * named like the fallback is never overwritten by `mergeInlineResponseModels`:
+ * a clash moves the whole body to the next free name (`<Op>DefaultResponse2`,
+ * `…3`), nested models and ref together. List envelope and resource-wrapper
+ * detection are skipped on purpose: a fallback body is not what the SDK
+ * method returns, so it must not drive pagination. Returns the placeholder
+ * the resolution replaces on `target`.
+ */
+function typeFallbackBody(
+  schema: SchemaObject,
+  contextName: string,
+  label: string,
+  sink: FallbackResponseSink,
+  targets: Array<{ type?: TypeRef }>,
+): TypeRef {
+  if (schema.$ref) return schemaToTypeRef(schema, contextName);
+  sink.ctx.deferred.push({
+    kind: 'fallback',
+    schema,
+    name: contextName,
+    statusCode: label,
+    operationQualifier: sink.ctx.operationQualifier,
+    componentSchemas: sink.ctx.componentSchemas,
+    targets,
+  });
+  return { kind: 'primitive', type: 'unknown' };
+}
+
+/**
+ * Type an error response's JSON body and materialize every model it names,
+ * under a name no other model owns (workos/oagen#236: `schemaToTypeRef` alone
+ * named a model — `Error404` — that nothing created). A `$ref` is the
+ * referenced model. An inline schema is deferred exactly like a fallback
+ * body's (`typeFallbackBody`): once every operation has been read
+ * (`resolveDeferredInlineTypes`) it is extracted as if it were a field named
+ * `contextName` of a parent with no name, so every shape a field can take — a
+ * plain or nullable object, an array or map of objects, `oneOf`/`anyOf`
+ * variants (`GetPetError400`, `GetPetError400WithCode`,
+ * `AuthGetPetError400`), an `allOf` merge with `$ref` branches, nested
+ * objects (`GetPetError404Details`) — is materialized under the name
+ * `schemaToTypeRef` references it by, by construction, and checked against
+ * the spec-wide registry: a name a component schema, a model nested in one
+ * (`GetPet.error404` owns `GetPetError404`), a header or another operation's
+ * body already owns with a different shape moves the whole body to the next
+ * free name (`GetPetError404Body`, `…Body2`), nested models and ref together;
+ * an identical shape shares it. A titled variant that clashes (`Circle`) is
+ * reserved and qualified (`CircleGetPetError400`), as under any deferred
+ * kind. A body that is itself an inline enum, or an array of one, mints no
+ * model and is promoted to `spec.enums` by `collectInlineEnumsFromOperations`.
+ * List envelope and resource-wrapper detection are skipped on purpose, as for
+ * a fallback body. Returns the placeholder the resolution replaces on every
+ * target.
+ */
+function typeErrorBody(
+  schema: SchemaObject,
+  contextName: string,
+  code: number,
+  ctx: ResponseTypingContext,
+  targets: Array<{ type?: TypeRef }>,
+): TypeRef {
+  if (schema.$ref) return schemaToTypeRef(schema, contextName);
+  ctx.deferred.push({
+    kind: 'error',
+    schema,
+    name: contextName,
+    statusCode: code,
+    operationQualifier: ctx.operationQualifier,
+    componentSchemas: ctx.componentSchemas,
+    targets,
+  });
+  return { kind: 'primitive', type: 'unknown' };
+}
+
+/**
+ * The schema of a response's JSON body, with the media type it was declared
+ * under as written: `application/json` first, else a `+json` media type
+ * (`application/problem+json` is the usual shape of a `default` error),
+ * matched by essence — parameters (`; charset=utf-8`) stripped, case folded.
+ * Other media types type nothing, for an error entry as for a fallback.
+ */
+function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
+  const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  const match =
+    entries.find(([mediaType]) => mediaTypeEssence(mediaType) === 'application/json') ??
+    entries.find(([mediaType]) => mediaTypeEssence(mediaType).endsWith('+json'));
+  return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
+}
+
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   op: OperationObject | undefined,
@@ -2827,13 +3157,19 @@ function extractResponses(
   path?: string,
   method?: HttpMethod,
   componentSchemas?: Record<string, SchemaObject>,
-  headerContext: HeaderExtractionContext = { operationQualifier: '', registry: new Map() },
+  ctx: ResponseTypingContext = { operationQualifier: '', deferred: [] },
 ): {
   response: TypeRef;
   responseHeaders?: ResponseHeader[];
+  responseContentTypes?: string[];
+  responseContents?: ResponseContent[];
   responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
+  /** The `default` response, when the operation declares one. */
+  defaultResponse?: DefaultResponse;
+  /** The `1XX`–`5XX` range responses in declaration order, when the operation declares any. */
+  rangeResponses?: RangeResponse[];
   inlineModels: Model[];
   isPaginated: boolean;
   dataPath?: string;
@@ -2845,6 +3181,8 @@ function extractResponses(
   const errors: ErrorResponse[] = [];
   let response: TypeRef = { kind: 'primitive', type: 'string' };
   let responseHeaders: ResponseHeader[] | undefined;
+  let responseContentTypes: string[] | undefined;
+  let responseContents: ResponseContent[] | undefined;
   let responseDescription: string | undefined;
   let inlineModels: Model[] = [];
   let isPaginated = false;
@@ -2858,116 +3196,247 @@ function extractResponses(
 
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
-  // Kept apart from `inlineModels`, which the latest 2xx body replaces
-  // wholesale below; merged once every status code has been read.
-  const headerModels: Model[] = [];
-  const errorModels: Model[] = [];
+  // Every 2xx body's classification, by status code. The models of all of
+  // them are kept — `successResponses` references each — while the paging
+  // fields are read from the status chosen as primary once every status code
+  // has been read.
+  const bodyResults = new Map<number, ResponseExtractionResult>();
+  // Names the inline body a secondary media type declares: this stem, the
+  // media type and the entry's role (`RenderPetCard` + `TextHtml` + `Response`).
+  const contentModelBase = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
+  const fallback: FallbackResponseSink = { op, pathModelBaseName, opLabel, ctx, rangeResponses: [] };
 
-  for (const [statusCode, resp] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of Object.entries(responses)) {
+    // `default` and `1XX`–`5XX` never parse as a status code (`parseInt('2XX')`
+    // is 2), so they are routed to their own fields before the numeric branches.
+    if (readFallbackResponse(statusCode, rawResponse, fallback)) continue;
     const code = parseInt(statusCode, 10);
+    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+    // Reference Object has no `headers` or `content` of its own to read, so
+    // the ref is resolved before either is. Only a status code one of the
+    // branches below reads is resolved: `default`, a `2XX` range and an `x-`
+    // extension are left as written, as nothing here reads them.
+    const resp =
+      code >= 200
+        ? resolveResponseRef<ResponseObject>(
+            rawResponse,
+            ctx.componentResponses,
+            `${statusCode} response of ${opLabel}`,
+            ctx.refSiblingDescriptions,
+          )
+        : rawResponse;
+    // Set when the response came from a component: its inline body is then
+    // named after the component, shared by every operation that returns it.
+    const componentName = code >= 200 ? componentResponseNameOf(rawResponse) : undefined;
+    const componentModelName = componentName === undefined ? undefined : componentResponseModelName(componentName);
     // Headers belong to the status code they are declared on, success or
-    // error alike: `Location` on a 201/302, `Retry-After` on a 429. A
-    // response no branch below keeps (`default`, 1xx) declares none worth
-    // materializing models for.
-    const headers =
-      code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, headerContext, headerModels) : undefined;
+    // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
+    // response, which no branch below keeps, declares none worth
+    // materializing models for; a fallback response's were read above.
+    const headers = code >= 200 ? extractResponseHeaders(resp.headers, opLabel, code, ctx) : undefined;
     // The response's own `description`, success or error alike. Blank text
     // counts as absent, the way an operation's summary is read, and the key is
     // only added when there is something to keep. A `$ref` into
-    // `components/responses` is not resolved here, so for one only a sibling
-    // `description` written next to the `$ref` (OAS 3.1) is visible.
+    // `components/responses` was resolved above, so the component's own
+    // `description` is read; a sibling written next to the `$ref` wins in an
+    // OAS 3.1 document and is ignored in 3.0 (`ctx.refSiblingDescriptions`).
     const description = presentText(resp.description);
 
     if (code >= 200 && code < 300) {
       let extractedType: TypeRef = { kind: 'primitive', type: 'unknown' };
-      const jsonContent = resp.content?.['application/json'];
-      if (jsonContent?.schema) {
-        const contextName = deriveResponseName(op, pathModelBaseName);
-        const result = classifyAndExtractResponse(jsonContent.schema, contextName, componentSchemas);
-        extractedType = result.response;
-        // Keep track of inline models and pagination from the latest 2xx with a schema
-        inlineModels = result.inlineModels;
-        isPaginated = result.isPaginated;
-        dataPath = result.dataPath;
-        dataDescription = result.dataDescription;
-        itemType = result.itemType;
-        envelopeFields = result.envelopeFields;
-        envelopeCompanions = result.envelopeCompanions;
-      } else if (resp.content) {
+      // The body schema to classify: the JSON one when a JSON media type is
+      // declared (`application/json` by essence, then `+json`), else — past
+      // the binary and text media types typed below without a schema — the
+      // first other media type that declares one. Either way it goes through
+      // `classifyAndExtractResponse`, so its inline models are created and
+      // the response never references a model the parser did not emit.
+      const json = jsonResponseSchema(resp);
+      let bodySchema = json?.schema;
+      // The media type the fixed-order pick reads `extractedType` from, as
+      // written, so its `contents` entry can share that TypeRef instead of
+      // re-deriving it.
+      let primaryContentType = json?.contentType;
+      if (!bodySchema && resp.content) {
         // Handle non-JSON response content types (text/plain, binary, XML, etc.)
-        if (resp.content['application/octet-stream'] || resp.content['application/pdf']) {
+        // Media types are compared by essence: `application/pdf; foo=bar` is
+        // as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much
+        // a string as `text/plain`. The keys themselves stay as written.
+        const content = resp.content;
+        const keyWithEssence = (essence: string): string | undefined =>
+          Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
+        const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
+        const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+        if (binaryKey) {
           extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
-        } else if (
-          resp.content['text/plain'] ||
-          resp.content['text/html'] ||
-          resp.content['text/xml'] ||
-          resp.content['application/xml']
-        ) {
+          primaryContentType = binaryKey;
+        } else if (textKey) {
           extractedType = { kind: 'primitive', type: 'string' };
+          primaryContentType = textKey;
         } else {
-          // Try the first available content type's schema
-          const firstKey = Object.keys(resp.content)[0];
-          if (firstKey) {
-            const firstContent = resp.content[firstKey];
-            if (firstContent?.schema) {
-              extractedType = schemaToTypeRef(firstContent.schema, deriveResponseName(op, pathModelBaseName));
-            }
+          // Try the first media type that declares a schema; when none does,
+          // the first declared is the primary and reads as unknown.
+          const entries = Object.entries(content);
+          const first = entries.find(([, media]) => media?.schema) ?? entries[0];
+          if (first) {
+            primaryContentType = first[0];
+            bodySchema = first[1]?.schema;
           }
         }
       }
+      if (bodySchema) {
+        const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
+        const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);
+        extractedType = result.response;
+        bodyResults.set(code, result);
+      }
+      const contents = extractResponseContents(
+        resp.content,
+        primaryContentType,
+        extractedType,
+        { base: contentModelBase, suffix: 'Response', statusCode: code },
+        ctx,
+      );
       allSuccessResponses.push({
         statusCode: code,
         type: extractedType,
         ...(headers && { headers }),
         ...(description && { description }),
+        ...contents,
       });
     } else if (code >= 300 && code < 400) {
-      // 3xx redirects — include so emitter can detect redirect endpoints
+      // 3xx redirects — include so emitter can detect redirect endpoints. The
+      // type is not read from any media type, so every content entry is typed
+      // on its own.
+      const contents = extractResponseContents(
+        resp.content,
+        undefined,
+        undefined,
+        { base: contentModelBase, suffix: 'Response', statusCode: code },
+        ctx,
+      );
       allSuccessResponses.push({
         statusCode: code,
         type: { kind: 'primitive', type: 'unknown' },
         ...(headers && { headers }),
         ...(description && { description }),
+        ...contents,
       });
     } else if (code >= 400) {
-      const jsonContent = resp.content?.['application/json'];
-      // An inline body is materialized, not merely named: `schemaToTypeRef`
-      // alone would point at a model nothing creates (workos/oagen#236).
-      const type = jsonContent?.schema
-        ? typeErrorSchema(
-            jsonContent.schema,
-            deriveErrorModelName(op, pathModelBaseName, code),
-            componentSchemas,
-            headerContext,
-            errorModels,
+      const json = jsonResponseSchema(resp);
+      // The entry is filled in place: an inline body is materialized under an
+      // operation-qualified name — or the component's, for a `$ref` response
+      // — once every operation has been read, and its `type` lands on this
+      // very object (`typeErrorBody`). The content entry the body was read
+      // from shares that TypeRef, so it joins the targets below.
+      const entry: ErrorResponse = { statusCode: code, type: undefined };
+      const targets: Array<{ type?: TypeRef }> = [entry];
+      const type = json
+        ? typeErrorBody(
+            json.schema,
+            componentModelName ?? deriveErrorModelName(op, pathModelBaseName, code),
+            code,
+            ctx,
+            targets,
           )
         : undefined;
-      errors.push({ statusCode: code, type, ...(headers && { headers }), ...(description && { description }) });
+      entry.type = type;
+      const contents = extractResponseContents(
+        resp.content,
+        json?.contentType,
+        type,
+        { base: contentModelBase, suffix: 'Error', statusCode: code },
+        ctx,
+      );
+      // An error's `type` is its JSON body by definition — `application/json`,
+      // else a `+json` media type (`jsonResponseSchema`) — so the lists are kept
+      // only when they say something `type` does not: another media type, a
+      // JSON body `type` could not be read from, or a JSON media type that is
+      // not the plain `application/json` a reader would otherwise assume. The
+      // common lone `application/json` with a schema keeps its shape.
+      const beyondType =
+        contents &&
+        (json?.contentType !== 'application/json' || contents.contents.some((content) => content.type !== type))
+          ? contents
+          : undefined;
+      if (headers) entry.headers = headers;
+      if (description) entry.description = description;
+      if (beyondType) {
+        entry.contentTypes = beyondType.contentTypes;
+        entry.contents = beyondType.contents;
+        const own = beyondType.contents.find((content) => content.contentType === json?.contentType);
+        if (own) targets.push(own);
+      }
+      errors.push(entry);
     }
   }
 
   // Primary response = lowest 2xx with a body schema, falling back to first 2xx
+  let primaryStatus: number | undefined;
   if (allSuccessResponses.length > 0) {
     const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
     const primary =
       sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
     response = primary.type;
     responseHeaders = primary.headers;
+    primaryStatus = primary.statusCode;
+    responseContentTypes = primary.contentTypes;
+    responseContents = primary.contents;
     // The operation-level description is the primary response's — the same
     // entry `response` and `responseHeaders` come from.
     responseDescription = primary.description;
   }
 
+  // The paging fields describe `response`, so they come from the primary's
+  // body — not from whichever 2xx body happened to be read last.
+  const primaryBody = primaryStatus === undefined ? undefined : bodyResults.get(primaryStatus);
+  if (primaryBody) {
+    isPaginated = primaryBody.isPaginated;
+    dataPath = primaryBody.dataPath;
+    dataDescription = primaryBody.dataDescription;
+    itemType = primaryBody.itemType;
+    envelopeFields = primaryBody.envelopeFields;
+    envelopeCompanions = primaryBody.envelopeCompanions;
+  }
+
+  // Keep the models of every 2xx body: `successResponses` references each of
+  // them, so keeping only one body's would leave the others dangling. Every
+  // status derives the same `<Op>Response` context name, so on a name clash
+  // the primary's definition — the one `response` points at — goes first and
+  // wins; the other bodies follow in status order.
+  // A dropped model whose shape differs from the kept one is warned about,
+  // since its status then points at a shape it did not declare.
+  const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
+    if (a === primaryStatus) return -1;
+    if (b === primaryStatus) return 1;
+    return a - b;
+  });
+  const keptByName = new Map<string, { model: Model; status: number }>();
+  for (const [status, result] of bodiesByPrimacy) {
+    for (const model of result.inlineModels) {
+      const kept = keptByName.get(model.name);
+      if (!kept) {
+        keptByName.set(model.name, { model, status });
+        inlineModels.push(model);
+      } else if (modelFingerprint(kept.model) !== modelFingerprint(model)) {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
+        );
+      }
+    }
+  }
+
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
-  if (errorModels.length > 0) inlineModels = [...inlineModels, ...errorModels];
-  if (headerModels.length > 0) inlineModels = [...inlineModels, ...headerModels];
 
   return {
     response,
     responseHeaders,
+    responseContentTypes,
+    responseContents,
     responseDescription,
     successResponses,
     errors,
+    defaultResponse: fallback.defaultResponse,
+    rangeResponses: fallback.rangeResponses.length > 0 ? fallback.rangeResponses : undefined,
     inlineModels,
     isPaginated,
     dataPath,

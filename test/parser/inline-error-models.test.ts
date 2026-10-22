@@ -222,7 +222,7 @@ describe("the issue's repro: an inline 404 body gets a model (#236)", () => {
     expect(modelNames(ir)).toEqual(['Pet']);
   });
 
-  it('an error without a JSON body keeps no type, and a `default` response is still left alone', async () => {
+  it('an error without a JSON body keeps no type; a `default` body is a fallback, never an error', async () => {
     const ir = await parseWithoutWarnings(
       doc(
         getPet({
@@ -231,8 +231,11 @@ describe("the issue's repro: an inline 404 body gets a model (#236)", () => {
         }),
       ),
     );
-    expect(onlyOperation(ir).errors).toEqual([{ statusCode: 404, description: 'nf' }]);
-    expect(modelNames(ir)).toEqual(['Pet']);
+    const op = onlyOperation(ir);
+    expect(op.errors).toEqual([{ statusCode: 404, description: 'nf' }]);
+    // The `default` body is read by the fallback path under `<Op>DefaultResponse`, not as an `<Op>Error<code>`.
+    expect(op.defaultResponse?.type).toEqual(model('GetPetDefaultResponse'));
+    expect(modelNames(ir)).toEqual(['Pet', 'GetPetDefaultResponse']);
   });
 });
 
@@ -726,7 +729,8 @@ describe('error models survive the other response merges', () => {
         ],
       },
     ]);
-    expect(modelNames(ir)).toEqual(['Pet', 'GetPetResponse', 'GetPetError404', 'PetsXMeta']);
+    // Materialized in document order: the 404's header is read before its body.
+    expect(modelNames(ir)).toEqual(['Pet', 'GetPetResponse', 'PetsXMeta', 'GetPetError404']);
     expectConsistent(ir, ['Pet']);
   });
 });
@@ -984,20 +988,23 @@ describe('round 1: the reserved set covers every name the component and header p
   const unprocessable = (schema: SchemaObject) => ({ '422': { description: 'unprocessable', ...json(schema) } });
   const severityBody = obj({ severity: en(['warning', 'fatal']) });
 
-  it('an enum nested in the body steps the whole body around a component enum of the same name and other members', async () => {
+  it('an enum nested in the body steps around a component enum of the same name and other members', async () => {
     const ir = await parseWithoutWarnings(
       doc(getPet(unprocessable(severityBody)), { GetPetError422Severity: en(['x', 'y']) }),
     );
+    // No model clashes, so the body keeps its name; the nested enum alone is
+    // renamed by the collision-aware pass that promotes every model's field
+    // enums (`collectInlineEnumsFromModels`), and the field reference and
+    // the promoted enum move together.
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422Body') },
+      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422') },
     ]);
-    // The field reference and the promoted enum move together, as for a nested model.
-    expect(fieldTypes(ir, 'GetPetError422Body')).toEqual({
-      severity: { kind: 'enum', name: 'GetPetError422BodySeverity', values: ['warning', 'fatal'] },
+    expect(fieldTypes(ir, 'GetPetError422')).toEqual({
+      severity: { kind: 'enum', name: 'GetPetError422Severity2', values: ['warning', 'fatal'] },
     });
     expect(enumValues(ir, 'GetPetError422Severity')).toEqual(['x', 'y']);
-    expect(enumValues(ir, 'GetPetError422BodySeverity')).toEqual(['warning', 'fatal']);
-    expect(modelNames(ir)).not.toContain('GetPetError422');
+    expect(enumValues(ir, 'GetPetError422Severity2')).toEqual(['warning', 'fatal']);
+    expect(enumNames(ir)).toEqual(['GetPetError422Severity', 'GetPetError422Severity2']);
     expectConsistent(ir);
   });
 
@@ -1016,22 +1023,26 @@ describe('round 1: the reserved set covers every name the component and header p
     expectConsistent(ir);
   });
 
-  it("a component field's inline enum reserves its name too (GetPet.error422_severity)", async () => {
+  it("a component field's inline enum keeps its name too (GetPet.error422_severity); the error's steps", async () => {
     const ir = await parseWithoutWarnings(
       doc(getPet(unprocessable(severityBody)), { GetPet: obj({ error422_severity: en(['x', 'y']) }) }),
     );
     expect(onlyOperation(ir).errors).toEqual([
-      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422Body') },
+      { statusCode: 422, description: 'unprocessable', type: model('GetPetError422') },
     ]);
+    // The component's field is promoted first, so it owns the bare name.
     expect(fieldTypes(ir, 'GetPet')).toEqual({
       error422_severity: { kind: 'enum', name: 'GetPetError422Severity', values: ['x', 'y'] },
     });
+    expect(fieldTypes(ir, 'GetPetError422')).toEqual({
+      severity: { kind: 'enum', name: 'GetPetError422Severity2', values: ['warning', 'fatal'] },
+    });
     expect(enumValues(ir, 'GetPetError422Severity')).toEqual(['x', 'y']);
-    expect(enumValues(ir, 'GetPetError422BodySeverity')).toEqual(['warning', 'fatal']);
+    expect(enumValues(ir, 'GetPetError422Severity2')).toEqual(['warning', 'fatal']);
     expectConsistent(ir, ['GetPet']);
   });
 
-  it("the enum check is scoped to error bodies: a header model's nested enum is named as before", async () => {
+  it("a header model's nested enum steps around a component enum of other members the same way", async () => {
     const ir = await parseWithoutWarnings(
       doc(
         {
@@ -1054,8 +1065,11 @@ describe('round 1: the reserved set covers every name the component and header p
     );
     expect(onlyOperation(ir).responseHeaders?.[0].type).toEqual(model('GetPetXMeta'));
     expect(fieldTypes(ir, 'GetPetXMeta')).toEqual({
-      level: { kind: 'enum', name: 'GetPetXMetaLevel', values: ['a', 'b'] },
+      level: { kind: 'enum', name: 'GetPetXMetaLevel2', values: ['a', 'b'] },
     });
+    expect(enumValues(ir, 'GetPetXMetaLevel')).toEqual(['x', 'y']);
+    expect(enumValues(ir, 'GetPetXMetaLevel2')).toEqual(['a', 'b']);
+    expectConsistent(ir);
   });
 });
 
@@ -1079,24 +1093,23 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
   });
 
   it(
-    'a nested enum under a titled variant colliding with a component enum of other members: terminates, qualified',
+    'a nested enum under a titled variant colliding with a component enum of other members: terminates, the enum renamed',
     { timeout: 10_000 },
     async () => {
       const ir = await parseWithoutWarnings(doc(getPet(bad(titled)), { CircleState: en(['x', 'y']) }));
       const op = onlyOperation(ir);
-      // The clashing enum's title is reserved: the variant takes its qualified name and the enum follows.
-      expect(op.errors).toEqual([
-        { statusCode: 400, description: 'bad', type: unionOf('CircleGetPetError400', 'Square') },
-      ]);
-      expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
+      // No model clashes, so the variant keeps its title; the nested enum
+      // alone is renamed by the collision-aware model pass, and the field
+      // reference and the promoted enum move together.
+      expect(op.errors).toEqual([{ statusCode: 400, description: 'bad', type: unionOf('Circle', 'Square') }]);
+      expect(fieldTypes(ir, 'Circle')).toEqual({
         kind: { kind: 'literal', value: 'circle' },
-        state: { kind: 'enum', name: 'CircleGetPetError400State', values: ['on', 'off'] },
+        state: { kind: 'enum', name: 'CircleState2', values: ['on', 'off'] },
         radius: primitive('number'),
       });
-      expect(modelNames(ir)).not.toContain('Circle');
       expect(enumValues(ir, 'CircleState')).toEqual(['x', 'y']);
-      expect(enumValues(ir, 'CircleGetPetError400State')).toEqual(['on', 'off']);
-      expect(enumNames(ir)).toEqual(['CircleState', 'CircleGetPetError400State']);
+      expect(enumValues(ir, 'CircleState2')).toEqual(['on', 'off']);
+      expect(enumNames(ir)).toEqual(['CircleState', 'CircleState2']);
       expectConsistent(ir);
     },
   );
@@ -1277,29 +1290,32 @@ describe('round 4: a clashing title is reserved, never renamed after the fact', 
   });
 
   it(
-    'a titled union nested under a field is out of the reserved set’s reach: parsing finishes with a warning',
+    'a titled union nested under a field is out of the reserved set’s reach: the variant is renamed under the body, no warning',
     { timeout: 10_000 },
     async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      try {
-        const ir = await parseTempSpec(
-          doc(getPet(bad(obj({ shape: { oneOf: [circleTitled({ state: en(['on', 'off']) }), square] } }))), {
-            Circle: obj({ unrelated: str }),
-          }),
-        );
-        const messages = warn.mock.calls.map((call) => String(call[0]));
-        expect(
-          messages.some((m) => m.includes('No free name for error body "GetPetError400"') && m.includes('"Circle"')),
-        ).toBe(true);
-        // The first owner keeps the name: the field points at the component, as the warning says.
-        expect(onlyOperation(ir).errors).toEqual([
-          { statusCode: 400, description: 'bad', type: model('GetPetError400') },
-        ]);
-        expect(fieldTypes(ir, 'GetPetError400')).toEqual({ shape: unionOf({ circle: 'Circle', square: 'Square' }) });
-        expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
-      } finally {
-        warn.mockRestore();
-      }
+      const ir = await parseWithoutWarnings(
+        doc(getPet(bad(obj({ shape: { oneOf: [circleTitled({ state: en(['on', 'off']) }), square] } }))), {
+          Circle: obj({ unrelated: str }),
+        }),
+      );
+      // Neither a candidate for the body's name nor a reservation reaches a
+      // title nested below the top level, so the clashing variant is renamed
+      // in place, qualified by the body (`materializeInlineSchema`): the
+      // component keeps its name and shape, the mapping entry and the enum
+      // named under the variant follow, and nothing dangles.
+      expect(onlyOperation(ir).errors).toEqual([
+        { statusCode: 400, description: 'bad', type: model('GetPetError400') },
+      ]);
+      expect(fieldTypes(ir, 'GetPetError400')).toEqual({
+        shape: unionOf({ circle: 'GetPetError400Circle', square: 'Square' }),
+      });
+      expect(fieldTypes(ir, 'GetPetError400Circle')).toEqual({
+        kind: literal('circle'),
+        state: { kind: 'enum', name: 'GetPetError400CircleState', values: ['on', 'off'] },
+      });
+      expect(fieldTypes(ir, 'Circle')).toEqual({ unrelated: primitive('string') });
+      expect(enumNames(ir)).toEqual(['GetPetError400CircleState']);
+      expectConsistent(ir, ['Circle']);
     },
   );
 });
@@ -1515,12 +1531,13 @@ describe('review round 1: a 2xx body reserves what it mints before any error bod
         GetPetError422Severity: { type: 'integer', enum: [1, 2] },
       }),
     );
-    // Different members: the body steps around the component enum, as for `['x', 'y']`.
-    expect(onlyOperation(ir).errors[0].type).toEqual(model('GetPetError422Body'));
-    expect(fieldTypes(ir, 'GetPetError422Body')).toEqual({
-      severity: { kind: 'enum', name: 'GetPetError422BodySeverity', values: ['1', '2'] },
+    // Different members: the nested enum steps around the component enum, as for `['x', 'y']`.
+    expect(onlyOperation(ir).errors[0].type).toEqual(model('GetPetError422'));
+    expect(fieldTypes(ir, 'GetPetError422')).toEqual({
+      severity: { kind: 'enum', name: 'GetPetError422Severity2', values: ['1', '2'] },
     });
     expect(ir.enums.find((e) => e.name === 'GetPetError422Severity')?.values.map((v) => v.value)).toEqual([1, 2]);
+    expect(ir.enums.find((e) => e.name === 'GetPetError422Severity2')?.values.map((v) => v.value)).toEqual(['1', '2']);
     expectConsistent(ir);
   });
 });

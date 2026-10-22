@@ -29,12 +29,11 @@ export function detectPagination(
   );
 
   if (cursorParam) {
-    const itemType: TypeRef = response.kind === 'array' ? response.items : response;
     return {
       strategy: 'cursor',
       param: cursorParam.name,
       dataPath: dataPath,
-      itemType,
+      itemType: paginatedItemType(response),
     };
   }
 
@@ -43,15 +42,24 @@ export function detectPagination(
   const limitParam = queryParams.find((p) => LIMIT_PARAMS.includes(p.name));
 
   if (offsetParam && limitParam) {
-    const itemType: TypeRef = response.kind === 'array' ? response.items : response;
     return {
       strategy: 'offset',
       param: offsetParam.name,
       limitParam: limitParam.name,
       dataPath: dataPath,
-      itemType,
+      itemType: paginatedItemType(response),
     };
   }
 
   return null;
+}
+
+/**
+ * The type an iterator yields from `response`: the items of a top-level
+ * array, under a nullable wrapper too (an OAS 3.0 `nullable: true` array
+ * response is `nullable<array<T>>`), else the response itself.
+ */
+export function paginatedItemType(response: TypeRef): TypeRef {
+  const inner = response.kind === 'nullable' ? response.inner : response;
+  return inner.kind === 'array' ? inner.items : response;
 }
