@@ -142,6 +142,11 @@ export interface OperationModified {
   operationName: string;
   paramChanges: ParamChange[];
   responseChanged: boolean;
+  /**
+   * The body appeared, disappeared, or changed type. Breaking, except that a
+   * body appearing with `requestBodyRequired` not `true` is additive: callers
+   * gain an argument they may leave out, like an optional `param-added`.
+   */
   requestBodyChanged: boolean;
   /**
    * The body stayed but its `requestBodyRequired` flipped. Optional → required
