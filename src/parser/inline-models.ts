@@ -1,5 +1,5 @@
 import type { Constraints, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -948,6 +948,13 @@ export interface InlineModelBundle {
   qualifier: string;
   roots: TypeRef[];
   models: Model[];
+  /**
+   * Told of every rename of one of `models`, for a site whose references are
+   * copied after it is settled — a component field's, whose inline model an
+   * operation's or webhook's `allOf` merge copies a reference to
+   * (`recordFieldModelRename`). Absent for a site nothing copies from.
+   */
+  renamed?: (from: string, to: string) => void;
 }
 
 /**
@@ -977,6 +984,23 @@ export interface FieldInlineModelGroup {
  */
 const inheritedModelRefs = new WeakSet<ModelRef>();
 const inheritedModelRefsByField = new Map<string, ModelRef[]>();
+/**
+ * The renames the merge passes have applied to the inline models of each
+ * component field (`settleFieldInlineModels`, before any operation or
+ * webhook is read), keyed `Parent.field`, so a reference an `allOf` merge
+ * copies from the field afterwards (`recordInheritedModelRefs`) — typed from
+ * the schema, which still mints the original name — is created under the
+ * settled name. Reset per document with the inherited references.
+ */
+const fieldModelRenames = new Map<string, Map<string, string>>();
+
+/** Record that the inline model `from` of `fieldName` of the component resolved to `parentName` is now named `to`. */
+export function recordFieldModelRename(parentName: string, fieldName: string, from: string, to: string): void {
+  const key = `${parentName}.${fieldName}`;
+  const renames = fieldModelRenames.get(key) ?? new Map<string, string>();
+  renames.set(from, to);
+  fieldModelRenames.set(key, renames);
+}
 
 /** Whether `ref` was copied from a component's property by an `allOf` merge (see `inheritedModelRefsOf`). */
 export function isInheritedModelRef(ref: ModelRef): boolean {
@@ -988,13 +1012,19 @@ export function inheritedModelRefsOf(parentName: string, fieldName: string): Mod
   return inheritedModelRefsByField.get(`${parentName}.${fieldName}`) ?? [];
 }
 
-/** Forget every inherited reference recorded so far: a new document is being read. */
+/** Forget every inherited reference and field-model rename recorded so far: a new document is being read. */
 export function resetInheritedModelRefs(): void {
   inheritedModelRefsByField.clear();
+  fieldModelRenames.clear();
 }
 
 function recordInheritedModelRefs(type: TypeRef, parentName: string, fieldName: string): void {
   const key = `${parentName}.${fieldName}`;
+  // A copy made after the field's models were settled names them as the
+  // schema does; it is moved to the settled names first, every reference
+  // minted for an inline model and never an explicit `$ref`.
+  const renames = fieldModelRenames.get(key);
+  if (renames) renameTypeRefModels(type, renames, (ref) => !isComponentModelRef(ref));
   walkTypeRef(type, {
     model: (ref) => {
       if (isComponentModelRef(ref)) return;

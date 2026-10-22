@@ -11,7 +11,7 @@
  * `materializeInlineSchema`).
  */
 import type { Model, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { renameModelRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
@@ -367,6 +367,7 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, stemAt:
           `schema also references; rename the inline schema's title or the component so the two can be told apart.`,
       );
     }
+    const renames = new Map([[from, to]]);
     for (const model of trial.models) {
       if (model.name === from) {
         model.name = to;
@@ -376,9 +377,10 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, stemAt:
         // collected first and the renamed model's field would point at it.
         for (const field of model.fields) rewriteEnumPrefix(field.type, from, to);
       }
-      for (const field of model.fields) rewriteModelRef(field.type, from, to);
+      // Fields, variants and discriminator mappings alike.
+      renameModelRefs(model, renames);
     }
-    rewriteModelRef(type, from, to);
+    renameTypeRefModels(type, renames);
   };
 
   let fingerprints = trial.fingerprints;
@@ -454,33 +456,6 @@ function rewriteEnumPrefix(ref: TypeRef, oldPrefix: string, newPrefix: string): 
         (r as { name: string }).name = newPrefix + r.name.slice(oldPrefix.length);
     },
   });
-}
-
-/** Rewrite every reference to `oldName` in `ref` in place — a union's discriminator mapping included. */
-function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
-  switch (ref.kind) {
-    case 'model':
-      if (ref.name === oldName) (ref as { name: string }).name = newName;
-      return;
-    case 'array':
-      rewriteModelRef(ref.items, oldName, newName);
-      return;
-    case 'nullable':
-      rewriteModelRef(ref.inner, oldName, newName);
-      return;
-    case 'map':
-      rewriteModelRef(ref.valueType, oldName, newName);
-      if (ref.keyType) rewriteModelRef(ref.keyType, oldName, newName);
-      return;
-    case 'union':
-      for (const variant of ref.variants) rewriteModelRef(variant, oldName, newName);
-      for (const [value, target] of Object.entries(ref.discriminator?.mapping ?? {})) {
-        if (target === oldName) ref.discriminator!.mapping[value] = newName;
-      }
-      return;
-    default:
-      return;
-  }
 }
 
 /** The component model names a schema references anywhere below it. */
