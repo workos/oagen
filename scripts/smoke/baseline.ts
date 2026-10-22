@@ -48,15 +48,10 @@ async function main() {
       const queryParams = generateQueryParams(op, spec);
       const body = generatePayload(op, spec);
 
-      // Default success status by HTTP method
-      const defaultSuccess: Record<string, number> = {
-        post: 201,
-        get: 200,
-        put: 200,
-        patch: 200,
-        delete: 204,
-      };
-      const status = defaultSuccess[op.httpMethod] ?? 200;
+      // The declared primary success status; 0 when the operation declares
+      // no 2xx or 3xx response, as a status the document does not describe
+      // cannot be predicted. Nothing is guessed from the HTTP method.
+      const status = op.responseStatusCode ?? 0;
 
       exchanges.push({
         operationId,
