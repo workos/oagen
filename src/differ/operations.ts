@@ -426,7 +426,7 @@ function diffResponseContentTypes(
     const old = pairs.get(entry);
     if (!old) continue;
     paired.add(old);
-    const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies);
+    const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies, shapes);
     const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
     const reparameterized = reparameterizedBodies(bodies);
     if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) continue;
