@@ -207,7 +207,8 @@ export function diffOperations(
       // parser prefers is added beside it (`application/json` beside a kept
       // `application/x-www-form-urlencoded`). A body without media-type
       // lists reads as breaking.
-      const requestBodyEncodingBreaking = requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp, shapes);
+      const requestBodyEncodingBreaking =
+        requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp, 'caller', shapes);
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
       // that changed shape, breaks them; one they can newly ask for, or one
