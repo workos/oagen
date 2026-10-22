@@ -49,6 +49,8 @@ export {
   mapTypeRef,
   collectModelRefs,
   collectEnumRefs,
+  collectModelTypeRefs,
+  renameModelRefs,
   collectFieldDependencies,
   assignModelsToServices,
   validateModelHints,
@@ -96,9 +98,9 @@ export type {
 
 export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 
-// Server URL templates
+// Server URL templates and server-list equality
 export type { ResolvedServerUrl } from './ir/server-url.js';
-export { resolveServerUrl } from './ir/server-url.js';
+export { resolveServerUrl, serverListsEqual } from './ir/server-url.js';
 
 // Errors
 export {
@@ -130,6 +132,7 @@ export type {
   ModelRemoved,
   ModelModified,
   FieldChange,
+  VariantChange,
   EnumAdded,
   EnumRemoved,
   EnumModified,
@@ -143,6 +146,15 @@ export type {
   WebhookRemoved,
   WebhookModified,
   ParamChange,
+  BehaviorChange,
+  ParamDefaultChanged,
+  DeprecatedChanged,
+  DeprecatedNode,
+  BaseUrlChanged,
+  ServerAdded,
+  ServerRemoved,
+  ServerModified,
+  ServerVariableChange,
 } from './differ/types.js';
 
 // Core parse + generate

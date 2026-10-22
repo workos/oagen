@@ -1,0 +1,187 @@
+openapi: 3.1.0
+info:
+  title: Component responses
+  version: '1'
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/PetFound'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /owners/{ownerId}:
+    get:
+      operationId: getOwner
+      parameters:
+        - name: ownerId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/OwnerCard'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /owners/{ownerId}/preview:
+    get:
+      operationId: previewOwner
+      parameters:
+        - name: ownerId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/OwnerCard'
+  /pets/{petId}/photos:
+    get:
+      operationId: listPetPhotos
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/PhotoPage'
+  /pets/{petId}/photos/{photoId}:
+    get:
+      operationId: getPetPhoto
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: photoId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/PhotoPage'
+  /pets/{petId}/adopt:
+    post:
+      operationId: adoptPet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          $ref: '#/components/responses/Adopted'
+        '409':
+          $ref: '#/components/responses/Conflict'
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        name:
+          type: string
+      required:
+        - name
+    Problem:
+      type: object
+      properties:
+        title:
+          type: string
+      required:
+        - title
+  headers:
+    RequestId:
+      description: Correlates the response with a request.
+      schema:
+        type: string
+  responses:
+    PetFound:
+      description: The pet
+      headers:
+        X-Rate-Limit:
+          schema:
+            type: integer
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Pet'
+    NotFound:
+      description: No such pet
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    OwnerCard:
+      description: An owner, declared inline and shared by two operations
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              display_name:
+                type: string
+              address:
+                type: object
+                properties:
+                  city:
+                    type: string
+              tier:
+                type: string
+                enum:
+                  - free
+                  - paid
+            required:
+              - display_name
+    PhotoPage:
+      description: A page of photos, declared inline and shared by two operations
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    url:
+                      type: string
+                  required:
+                    - url
+              list_metadata:
+                type: object
+                properties:
+                  after:
+                    type: string
+            required:
+              - data
+              - list_metadata
+    Adopted:
+      description: The pet is yours
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+    Conflict:
+      description: Already adopted, declared inline
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              adopted_by:
+                type: string

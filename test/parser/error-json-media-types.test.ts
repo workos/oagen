@@ -218,23 +218,23 @@ describe('error responses served as +json media types (issue #235)', () => {
   });
 
   describe('unchanged neighbours', () => {
-    it('names an inline +json body Error<code> exactly as an inline application/json body is', () => {
+    it('names an inline +json body `<Op>Error<code>` exactly as an inline application/json body is (#236)', () => {
       const inline = { type: 'object', properties: { detail: { type: 'string' } } };
       const viaJson = getPetWith404({ 'application/json': { schema: inline } });
       const viaProblem = getPetWith404({ 'application/problem+json': { schema: inline } });
       expect(viaJson.operation.errors).toEqual([
-        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'Error404' } },
+        { statusCode: 404, description: 'No such pet', type: { kind: 'model', name: 'GetPetError404' } },
       ]);
       expect(viaProblem.operation.errors[0].type).toEqual(viaJson.operation.errors[0].type);
-      expect(viaProblem.operation.errors[0].type).toEqual({ kind: 'model', name: 'Error404' });
+      expect(viaProblem.operation.errors[0].type).toEqual({ kind: 'model', name: 'GetPetError404' });
       // Only the media type lists differ: a lone plain application/json leaves them off.
       expect(viaProblem.operation.errors).toEqual([
         {
           statusCode: 404,
           description: 'No such pet',
-          type: { kind: 'model', name: 'Error404' },
+          type: { kind: 'model', name: 'GetPetError404' },
           contentTypes: ['application/problem+json'],
-          contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Error404' } }],
+          contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'GetPetError404' } }],
         },
       ]);
     });
