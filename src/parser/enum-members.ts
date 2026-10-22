@@ -106,14 +106,18 @@ export function enumShapeKey(values: readonly Pick<EnumValue, 'value' | 'depreca
   return `[${values.map(enumValueShapeKey).sort().join(',')}]`;
 }
 
-/** Order-insensitive: a reordering of the same members (`enumValueShapeKey`) is the same type. */
+/**
+ * Order-insensitive: a reordering of the same members (`enumValueShapeKey`)
+ * is the same type. Compared as complete sorted lists (`enumShapeKey`), not
+ * as sets, so a repeated member counts each time it occurs: `[a, a!, b]`
+ * and `[a, a, b]` are different types, and the second never shares the
+ * first's deprecation.
+ */
 export function sameEnumShape(
   a: readonly Pick<EnumValue, 'value' | 'deprecated'>[],
   b: readonly Pick<EnumValue, 'value' | 'deprecated'>[],
 ): boolean {
-  if (a.length !== b.length) return false;
-  const have = new Set(a.map(enumValueShapeKey));
-  return b.every((value) => have.has(enumValueShapeKey(value)));
+  return enumShapeKey(a) === enumShapeKey(b);
 }
 
 /**

@@ -677,6 +677,43 @@ describe('sharing an inline enum name', () => {
     ]);
     expectEnumsConsistent(spec);
   });
+
+  it('counts a repeated member each time it occurs, so `[a, a!, b]` never shares with `[a, a, b]` (Greptile)', async () => {
+    const anyOfParam = (variants: unknown[]) => ({
+      name: 'mode',
+      in: 'query',
+      schema: { type: 'string', anyOf: variants },
+    });
+    const spec = await parseDocument(
+      specDoc(
+        {},
+        {
+          '/a': getOp(
+            'getA',
+            { type: 'string' },
+            {
+              parameters: [anyOfParam([{ const: 'a' }, { const: 'a', deprecated: true }, { const: 'b' }])],
+            },
+          ),
+          '/b': getOp(
+            'getB',
+            { type: 'string' },
+            { parameters: [anyOfParam([{ const: 'a' }, { const: 'a' }, { const: 'b' }])] },
+          ),
+        },
+      ),
+    );
+
+    expect(spec.enums.map((e) => [e.name, e.values.map((v) => `${v.value}${v.deprecated ? '!' : ''}`)])).toEqual([
+      ['PetsMode', ['a', 'a!', 'b']],
+      ['PetsMode2', ['a', 'a', 'b']],
+    ]);
+    expect(spec.services.flatMap((s) => s.operations).map((op) => op.queryParams[0].type)).toEqual([
+      { kind: 'enum', name: 'PetsMode', values: ['a', 'a', 'b'] },
+      { kind: 'enum', name: 'PetsMode2', values: ['a', 'a', 'b'] },
+    ]);
+    expectEnumsConsistent(spec);
+  });
 });
 
 describe('enum-members helpers', () => {
@@ -729,6 +766,16 @@ describe('enum-members helpers', () => {
     expect(sameEnumShape(a, [toEnumValue({ value: 'x' }), toEnumValue({ value: 'y', deprecated: true })])).toBe(false);
     expect(sameEnumShape(a, [toEnumValue({ value: 'x' })])).toBe(false);
     expect(sameEnumShape([toEnumValue({ value: 5 })], [toEnumValue({ value: '5' })])).toBe(false);
+    // Repeated members count each time they occur: not a set comparison.
+    const dup = (flags: boolean[]) =>
+      flags.map((deprecated) => toEnumValue({ value: 'a', ...(deprecated ? { deprecated } : {}) }));
+    expect(
+      sameEnumShape(
+        [...dup([false, true]), toEnumValue({ value: 'b' })],
+        [...dup([false, false]), toEnumValue({ value: 'b' })],
+      ),
+    ).toBe(false);
+    expect(sameEnumShape(dup([true, false]), dup([false, true]))).toBe(true);
   });
 
   it('enumValueShapeKey tells apart type, text and deprecation, and no two members read alike (Greptile)', () => {
