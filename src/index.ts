@@ -110,7 +110,7 @@ export {
   isDefaultServerList,
   resolveServerUrl,
   serverListsEqual,
-  serversBeyondDefault,
+  serversOrDefault,
 } from './ir/server-url.js';
 
 // Errors

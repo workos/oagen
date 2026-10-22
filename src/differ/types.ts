@@ -675,6 +675,11 @@ export interface BaseUrlChanged {
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * A server the new document lists and the old did not. The `/` a document
+ * is only implied to have — its list means OpenAPI's default — is never
+ * reported here; `/` listed beside another server is, like any other (#291).
+ */
 export interface ServerAdded {
   kind: 'server-added';
   /** The URL template as written in the document, placeholders included. */
@@ -682,6 +687,11 @@ export interface ServerAdded {
   classification: 'additive';
 }
 
+/**
+ * A server the old document listed and the new does not. The `/` a document
+ * is only implied to have is never reported here; `/` listed beside another
+ * server is, like any other (#291).
+ */
 export interface ServerRemoved {
   kind: 'server-removed';
   /** The URL template as written in the document, placeholders included. */
