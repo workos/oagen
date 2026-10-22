@@ -1729,38 +1729,45 @@ function nameInlineObjectVariants(
 }
 
 /**
- * The TypeRef for an inline object variant referenced by the name its
- * extracted model carries, keeping every other type the variant allows.
- * Mirrors what `schemaToTypeRef` builds for the same schema — one member per
- * non-null entry of a `type` array, `union`-wrapped when there is more than
- * one, `nullable`-wrapped when `null` or OAS 3.0 `nullable: true` is present
- * — with the `object` member swapped for the named ref:
+ * The TypeRef for an inline object variant whose extracted model is
+ * `modelName`, keeping every other type the variant allows. Mirrors what
+ * `schemaToTypeRef` builds for the same schema — one member per non-null
+ * entry of a `type` array, `union`-wrapped when there is more than one,
+ * `nullable`-wrapped when `null` or OAS 3.0 `nullable: true` is present —
+ * with the `object` member swapped for a ref to `refName`: the model's own
+ * name, or the component the spec's `discriminator.mapping` points the
+ * variant's const at, which substitutes for the model exactly as it does
+ * inline (`mapVariantToDiscriminatorEntry`).
  * `type: ['object', 'string']` → `union[model, string]`,
  * `['object', 'integer', 'null']` → `nullable<union[model, integer]>`,
  * `['object', 'null']` / `nullable: true` → `nullable<model>`.
  * A `oneOf: [X, { type: 'null' }]` variant has no `properties` of its own
  * and never reaches this path; `schemaToTypeRef` types it directly.
  *
- * Anything inline under a non-object member is named from the variant, never
- * from the union's field: an `array` member types its items under the
- * variant as parent with the context `variantMemberKeys` picks (`item` →
- * `<Variant>Item`, or `array_item` → `<Variant>ArrayItem` when a property
- * claims `item`), and any other member under its `value` key
- * (`<Variant>Value` for an inline enum, else `<Variant>MemberValue`). Naming
- * them from the field would hand variant 0's model name to every variant's
- * items.
+ * Anything inline under a non-object member is named from the variant's
+ * model — never from the union's field, and never from the mapping: an
+ * `array` member types its items under `modelName` as parent with the
+ * context `variantMemberKeys` picks (`item` → `<Variant>Item`, or
+ * `array_item` → `<Variant>ArrayItem` when a property claims `item`), and
+ * any other member under its `value` key (`<Variant>Value` for an inline
+ * enum, else `<Variant>MemberValue`). The extractor materializes those
+ * members under the same model (`variantMemberSchemas`), which it builds
+ * whether or not the mapping redirects the object member; naming them from
+ * the mapped component would reference `CatItem`, which nothing extracts,
+ * and naming them from the field would hand variant 0's model name to every
+ * variant's items.
  */
-function inlineVariantTypeRef(variant: SchemaObject, name: string): TypeRef {
-  const modelRef: TypeRef = { kind: 'model', name };
+function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
+  const modelRef: TypeRef = { kind: 'model', name: refName };
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
-  const keys = variantMemberKeys(variant, name);
+  const keys = variantMemberKeys(variant, modelName);
   const members = typeList
     .filter((t) => t !== 'null')
     .map((t) =>
       t === 'object'
         ? modelRef
-        : schemaToTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, name),
+        : schemaToTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, modelName),
     );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
   return nullable ? asNullable(ref) : ref;
@@ -1968,8 +1975,12 @@ function planNamedUnion(
  * other variant is typed as the `variant_<n>` property of the plan's
  * synthetic object, under the union's name, exactly as the extractor
  * materializes it. The spec's own `mapping:` substitutes for an inline
- * variant's name exactly as it does inline (`mapVariantToDiscriminatorEntry`);
- * derived mappings are read from the same names, so they can only point at
+ * variant's name exactly as it does inline (`mapVariantToDiscriminatorEntry`)
+ * — on the object member only: the items or values of a multi-type variant's
+ * other members are named from the model the plan extracts for it
+ * (`inlineNames`, the name `extractNamedUnionVariantModels` builds them
+ * under), so the reference and the model agree whatever the mapping says.
+ * Derived mappings are read from the same names, so they can only point at
  * models that exist.
  */
 function namedUnionEntry(
@@ -1985,7 +1996,7 @@ function namedUnionEntry(
     const inlineName = inlineNames.get(raw);
     if (inlineName !== undefined) {
       const mappedName = discriminator ? mapVariantToDiscriminatorEntry(raw, discriminator) : null;
-      return inlineVariantTypeRef(raw, mappedName ?? inlineName);
+      return inlineVariantTypeRef(raw, inlineName, mappedName ?? inlineName);
     }
     if (raw.$ref) return schemaToTypeRef(raw);
     return schemaToTypeRef(raw, memberContexts.get(raw), name, memberProperties);
@@ -3049,7 +3060,8 @@ export function schemaToTypeRef(
     // OAS 3.0 `nullable: true`) keeps its wrapper, and a multi-type variant
     // (`['object', 'string']`) keeps its other alternatives in a union — see
     // `inlineVariantTypeRef`. The extractor emits the model under the same
-    // name in every case.
+    // name in every case, and a multi-type variant's other members are named
+    // from that model, not from the mapping, so their items resolve.
     const variants: TypeRef[] = [];
     // An array or map variant is typed under a context of its own
     // (`collectionVariantContexts`), so the models its items or values mint
@@ -3067,7 +3079,7 @@ export function schemaToTypeRef(
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
-        variants.push(inlineVariantTypeRef(v, mappedName ?? inlineName));
+        variants.push(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName));
       } else {
         variants.push(schemaToTypeRef(v, collectionContexts.get(v) ?? contextName, parentModelName));
       }

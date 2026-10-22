@@ -1351,3 +1351,149 @@ ${animals}`);
     expect(unresolvedRefs(stepped)).toEqual([]);
   });
 });
+
+describe("named unions: a mapped variant's other members are named from its own model", () => {
+  // An inline multi-type variant (`type: [object, array]`) whose const the
+  // spec's own `mapping:` points at a component: the object member follows
+  // the mapping, as it does inline, but the array member's items are named
+  // from the model the plan extracts for the variant, so the reference and
+  // the model agree.
+  const mapped = (type: string, mapping: string) => `${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - type: ${type}
+          properties:
+            kind: { const: cat }
+          items:
+            type: object
+            properties:
+              a: { type: string }
+              child:
+                type: object
+                properties:
+                  b: { type: string }
+        - $ref: '#/components/schemas/Dog'
+      discriminator:
+        propertyName: kind
+        mapping:
+${mapping}
+${animals}`;
+  const both = `          cat: '#/components/schemas/Cat'
+          dog: '#/components/schemas/Dog'`;
+  const dogOnly = `          dog: '#/components/schemas/Dog'`;
+
+  it('types the array member of a variant mapped to a component with the items the extractor mints', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseInline(mapped('[object, array]', both));
+      const pet = model(ir, 'Pet');
+      expect(pet.variants).toEqual([
+        { kind: 'union', variants: [modelRef('Cat'), { kind: 'array', items: modelRef('PetWithKindItem') }] },
+        modelRef('Dog'),
+      ]);
+      expect(pet.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } });
+      expect(model(ir, 'PetWithKind').fields.map((f) => f.name)).toEqual(['kind']);
+      expect(model(ir, 'PetWithKindItem').fields.map((f) => f.name)).toEqual(['a', 'child']);
+      expect(model(ir, 'PetWithKindItemChild').fields.map((f) => f.name)).toEqual(['b']);
+      expect(ir.models.some((m) => m.name === 'CatItem')).toBe(false);
+      expect(unresolvedRefs(ir)).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the nullable wrapper around a mapped multi-type variant', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseInline(mapped("[object, array, 'null']", both));
+      expect(model(ir, 'Pet').variants).toEqual([
+        {
+          kind: 'nullable',
+          inner: { kind: 'union', variants: [modelRef('Cat'), { kind: 'array', items: modelRef('PetWithKindItem') }] },
+        },
+        modelRef('Dog'),
+      ]);
+      expect(model(ir, 'PetWithKindItem').fields.map((f) => f.name)).toEqual(['a', 'child']);
+      expect(unresolvedRefs(ir)).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('leaves a variant the mapping does not name under its own model on both members', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseInline(mapped('[object, array]', dogOnly));
+      expect(model(ir, 'Pet').variants).toEqual([
+        { kind: 'union', variants: [modelRef('PetWithKind'), { kind: 'array', items: modelRef('PetWithKindItem') }] },
+        modelRef('Dog'),
+      ]);
+      expect(model(ir, 'Pet').discriminator).toEqual({ property: 'kind', mapping: { dog: 'Dog' } });
+      expect(model(ir, 'PetWithKindItem').fields.map((f) => f.name)).toEqual(['a', 'child']);
+      expect(unresolvedRefs(ir)).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('names the members the same way for the same union written inline on a field', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseInline(`
+openapi: 3.1.0
+info: { title: Test, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Req' }
+      responses:
+        '204': { description: Created }
+components:
+  schemas:
+    Req:
+      type: object
+      properties:
+        pet:
+          oneOf:
+            - type: [object, array]
+              properties:
+                kind: { const: cat }
+              items:
+                type: object
+                properties:
+                  a: { type: string }
+            - $ref: '#/components/schemas/Dog'
+          discriminator:
+            propertyName: kind
+            mapping:
+              cat: '#/components/schemas/Cat'
+              dog: '#/components/schemas/Dog'
+${animals}`);
+      const pet = model(ir, 'Req').fields.find((f) => f.name === 'pet');
+      expect(pet?.type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'union', variants: [modelRef('Cat'), { kind: 'array', items: modelRef('ReqPetItem') }] },
+          modelRef('Dog'),
+        ],
+        discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } },
+      });
+      expect(model(ir, 'ReqPetItem').fields.map((f) => f.name)).toEqual(['a']);
+      expect(unresolvedRefs(ir)).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
