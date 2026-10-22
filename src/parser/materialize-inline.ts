@@ -11,10 +11,10 @@
  * `materializeInlineSchema`).
  */
 import type { Model, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
+import { collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
+import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
 
 // The model-shape fingerprint lives beside the schema-shape key in
@@ -134,9 +134,12 @@ const MAX_RENAME_ROUNDS = 64;
  * parent that matched a registered model before and differs from it now
  * moves to the next free stem with its children, instead of being dropped at
  * commit as already defined. That rewrite cannot tell an inline model's
- * reference from a `$ref` to a component of the same name, so a schema that
- * both inlines a clashing `Circle` and references component `Circle` fails
- * loudly instead.
+ * reference from a `$ref` to a component MODEL of the same name, so a schema
+ * that both inlines a clashing `Circle` and references component model
+ * `Circle` fails loudly instead (`componentModelRefTargets`). A component
+ * ENUM of the name is no such bar: a `$ref` to it is an `EnumRef`, which the
+ * rewrite never touches, so the inline `Circle` is renamed under the root
+ * and the enum reference stays.
  */
 export function materializeInlineSchema(schema: SchemaObject, options: MaterializeInlineOptions): TypeRef {
   const { registry } = options;
@@ -271,8 +274,8 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
   const rootOf = (propertyName: string): string =>
     qualifyInlineModelName(toPascalCase(propertyName), options.parentName);
   let rootName = rootOf(trial.propertyName);
-  const referenced = componentRefTargets(trial.schema);
   const type = schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
+  const referenced = componentModelRefTargets(type, trial.models);
   const taken = new Set([...registry.keys(), ...trial.models.map((m) => m.name)]);
 
   /** `candidate(1)`, `candidate(2)`, ... until one nothing owns or uses; claimed. */
@@ -284,6 +287,10 @@ function renameClashing(trial: Trial, options: MaterializeInlineOptions, firstCl
     return name;
   };
   const rename = (from: string, to: string): void => {
+    // Only a reference to a component MODEL of this name is indistinguishable
+    // from the inline model's own references once both are plain names; a
+    // reference to a component enum of the name is an `EnumRef`, which the
+    // rewrite never touches, so the inline model is simply renamed past it.
     if (referenced.has(from)) {
       throw new Error(
         `Inline schema "${from}" under ${rootName} has another shape than component "${from}", which the same ` +
@@ -400,23 +407,16 @@ function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
 }
 
 /** The component model names a schema references anywhere below it. */
-function componentRefTargets(schema: SchemaObject): Set<string> {
+function componentModelRefTargets(type: TypeRef, models: readonly Model[]): Set<string> {
   const targets = new Set<string>();
-  const seen = new Set<object>();
-  const visit = (value: unknown): void => {
-    if (!value || typeof value !== 'object' || seen.has(value)) return;
-    seen.add(value);
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    if (typeof record['$ref'] === 'string') {
-      const segments = record['$ref'].split('/');
-      targets.add(resolveSchemaName(segments[segments.length - 1]));
-    }
-    Object.values(record).forEach(visit);
+  const collect = (ref: TypeRef): void => {
+    walkTypeRef(ref, {
+      model: (r) => {
+        if (isComponentModelRef(r)) targets.add(r.name);
+      },
+    });
   };
-  visit(schema);
+  collect(type);
+  for (const model of models) for (const ref of collectModelTypeRefs(model)) collect(ref);
   return targets;
 }
