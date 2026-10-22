@@ -36,6 +36,40 @@ oagen diff --old v1.yml --new v2.yml
 
 **Exit codes:** 0 = no changes, 1 = additive or modified changes, 2 = breaking changes.
 
+### Change kinds
+
+Every entry in `changes` carries a `kind` and a `classification` (`additive` or `breaking`). A `-modified` change also lists what changed inside it and is breaking when any of those is.
+
+| `kind`               | Classification                                          | Fields                                                                                                                                                         |
+| -------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base-url-changed`   | breaking; additive when the old spec declared no server | `oldBaseUrl`, `newBaseUrl` (`''` for no server)                                                                                                                |
+| `server-added`       | additive                                                | `url` (the template as written)                                                                                                                                |
+| `server-removed`     | breaking                                                | `url`                                                                                                                                                          |
+| `server-modified`    | from `variableChanges`                                  | `url`, `variableChanges[]`                                                                                                                                     |
+| `model-added`        | additive                                                | `name`                                                                                                                                                         |
+| `model-removed`      | breaking                                                | `name`                                                                                                                                                         |
+| `model-modified`     | from `fieldChanges`                                     | `name`, `fieldChanges[]`                                                                                                                                       |
+| `enum-added`         | additive                                                | `name`                                                                                                                                                         |
+| `enum-removed`       | breaking                                                | `name`                                                                                                                                                         |
+| `enum-modified`      | from `valueChanges`                                     | `name`, `valueChanges[]`                                                                                                                                       |
+| `service-added`      | additive                                                | `name`                                                                                                                                                         |
+| `service-removed`    | breaking                                                | `name`                                                                                                                                                         |
+| `operation-added`    | additive                                                | `serviceName`, `operationName`                                                                                                                                 |
+| `operation-removed`  | breaking                                                | `serviceName`, `operationName`                                                                                                                                 |
+| `operation-modified` | from `paramChanges` and the `…Changed` flags            | `serviceName`, `operationName`, `paramChanges[]`, `responseChanged`, `requestBodyChanged`, `pathChanged`, … (see `OperationModified` in `src/differ/types.ts`) |
+
+**Servers.** `baseUrl` is `servers[0]` with its variables' defaults filled in, so `base-url-changed` is reported once whenever that resolved host differs: alongside whichever server change moved it, and on its own when the list was only reordered. Servers are matched on their `url` template, independent of position, so a changed template is a `server-removed` plus a `server-added`. A template declared more than once is matched as a multiset: its old and new entries pair up by the strongest signal available, each pass taking the first unmatched candidate in declaration order — identical variables first (so a reordered list, or one whose duplicates are unchanged, reports nothing), then the same variable defaults, then the same resolved URL, then position — and the surplus on either side is a `server-added` or a `server-removed`. Within a matched server, `variableChanges` lists each variable by name; descriptions are not compared.
+
+| `variableChanges[].kind`      | Classification | Meaning                                                      |
+| ----------------------------- | -------------- | ------------------------------------------------------------ |
+| `variable-added`              | additive       | A client can now pick it                                     |
+| `variable-removed`            | breaking       | A client can no longer pick it                               |
+| `variable-default-changed`    | breaking       | The server's resolved URL moves (`oldDefault`, `newDefault`) |
+| `variable-enum-added`         | breaking       | Any value was accepted; now only the listed ones are         |
+| `variable-enum-removed`       | additive       | The restriction is lifted                                    |
+| `variable-enum-value-added`   | additive       | `value` can now be picked                                    |
+| `variable-enum-value-removed` | breaking       | `value` can no longer be picked                              |
+
 ## `oagen extract`
 
 Extract the public API surface from an existing SDK. Produces a JSON file used as input for compat overlay and verification.

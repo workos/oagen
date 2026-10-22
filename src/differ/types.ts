@@ -48,6 +48,10 @@ export type Change =
   | OperationAdded
   | OperationRemoved
   | OperationModified
+  | BaseUrlChanged
+  | ServerAdded
+  | ServerRemoved
+  | ServerModified
   | WebhookAdded
   | WebhookRemoved
   | WebhookModified;
@@ -262,5 +266,74 @@ export interface ParamChange {
    * cookie parameters may share a name).
    */
   paramLocation?: 'path' | 'query' | 'header' | 'cookie';
+  details?: string;
+}
+
+/**
+ * `ApiSpec.baseUrl` — the first server's URL with its variables' defaults
+ * filled in — differs, so a client built on the default host sends its
+ * requests somewhere else. Reported once per diff whatever moved it: a
+ * changed `servers[0]` template (also a `server-removed` plus a
+ * `server-added`), a changed variable default (also a `server-modified`), a
+ * reordered list, or a `servers` list that appeared or disappeared.
+ */
+export interface BaseUrlChanged {
+  kind: 'base-url-changed';
+  /** `''` when the old document declared no server. */
+  oldBaseUrl: string;
+  /** `''` when the new document declares no server. */
+  newBaseUrl: string;
+  /**
+   * Breaking when the default host moves or disappears. Additive when the old
+   * document declared no server: every existing caller had to name a host
+   * themselves and still can.
+   */
+  classification: 'additive' | 'breaking';
+}
+
+export interface ServerAdded {
+  kind: 'server-added';
+  /** The URL template as written in the document, placeholders included. */
+  url: string;
+  classification: 'additive';
+}
+
+export interface ServerRemoved {
+  kind: 'server-removed';
+  /** The URL template as written in the document, placeholders included. */
+  url: string;
+  classification: 'breaking';
+}
+
+/**
+ * A server present in both documents — matched on its `url` template,
+ * position-independent; a template declared more than once is matched as a
+ * multiset, see `diffServers` — whose variables changed. A changed template is
+ * a `server-removed` plus a `server-added` instead.
+ */
+export interface ServerModified {
+  kind: 'server-modified';
+  url: string;
+  variableChanges: ServerVariableChange[];
+  classification: 'additive' | 'breaking';
+}
+
+export interface ServerVariableChange {
+  kind:
+    | 'variable-added'
+    | 'variable-removed'
+    | 'variable-default-changed'
+    | 'variable-enum-added'
+    | 'variable-enum-removed'
+    | 'variable-enum-value-added'
+    | 'variable-enum-value-removed';
+  variableName: string;
+  classification: 'additive' | 'breaking';
+  /** For `variable-default-changed`: the previous default. */
+  oldDefault?: string;
+  /** For `variable-default-changed`: the new default. */
+  newDefault?: string;
+  /** For `variable-enum-value-added` / `variable-enum-value-removed`: the value. */
+  value?: string;
   details?: string;
 }
