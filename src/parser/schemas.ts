@@ -3278,18 +3278,32 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    // An `allOf` field is built by `materializeMergedAllOf`, exactly as the
-    // field extractor builds the same field anywhere else: `$ref` members
-    // resolved, nested `allOf` members and the inline object variants of a
-    // `oneOf`/`anyOf` member read in, inherited properties typed as their
-    // component types them and not read into again (so a component that
-    // extends itself through a field terminates), the model's own properties
-    // materialized under the field's nested name. Earlier members win on a
-    // shared name there as everywhere, and the fold places the schema's own
-    // properties first, so an own `kind` enum beside a member's plain `kind`
-    // stays the enum here as it does in a field or an array's items.
+    // An `allOf` field is read as `schemaToTypeRef` read it above
+    // (`readInlineAllOf`), so a model is built exactly when the field's type
+    // names one: a `'merged'` reading is built by `materializeMergedAllOf`,
+    // exactly as the field extractor builds the same field anywhere else —
+    // `$ref` members resolved, nested `allOf` members and the inline object
+    // variants of a `oneOf`/`anyOf` member read in, inherited properties
+    // typed as their component types them and not read into again (so a
+    // component that extends itself through a field terminates), the
+    // model's own properties materialized under the field's nested name;
+    // a lone member is re-entered as the field itself; a `'reference'`
+    // reading (`$ref` members with nothing inline beside them) is the
+    // component and mints nothing, so a component the document declares
+    // under the nested name is never replaced by an unused merged copy.
+    // Earlier members win on a shared name there as everywhere, and the fold
+    // places the schema's own properties first, so an own `kind` enum beside
+    // a member's plain `kind` stays the enum here as it does in a field or
+    // an array's items.
     if (kind === 'allOf' && composed.allOf) {
-      materializeMergedAllOf(qualifyNestedInlineName(name, fieldName), composed, nestedModels, schemas);
+      const reading = readInlineAllOf(composed.allOf);
+      if (reading === 'merged') {
+        materializeMergedAllOf(qualifyNestedInlineName(name, fieldName), composed, nestedModels, schemas);
+      } else if (reading === 'unwrapped') {
+        // The synthetic wrapper model is dropped, only its nested models kept.
+        const member = unwrappedAllOfMember(composed, composed.allOf[0]!);
+        nestedModels.push(...extractInlineModelDeep(name, { properties: { [fieldName]: member } }, schemas).slice(1));
+      }
     }
 
     const unionVariants = kind === 'union' ? (composed.oneOf ?? composed.anyOf) : undefined;
@@ -3493,30 +3507,28 @@ export function schemaToTypeRef(
   schema = foldSiblingProperties(schema);
   const inlineKind = classifyInlineSchema(schema);
 
-  // Handle allOf — merge properties from all sub-schemas.
-  // This handles patterns like: allOf: [{ type: object, properties: {...} }, { oneOf: [...] }]
-  // which are valid OAS 3.1 but weren't handled for field-level schemas. The
-  // model named here is built by `mergeAllOfMembers`, which reads every
-  // member the two tests below count — a `oneOf`/`anyOf` member's inline
-  // object variants included — so the reference always has its fields.
+  // Handle allOf, read the one way every site reads it (`readInlineAllOf`):
+  // a merged model — a `$ref` member augmented by an inline object member,
+  // or inline members one of which declares properties, a `oneOf`/`anyOf`
+  // member's inline object variants included — which `materializeMergedAllOf`
+  // builds under this very name; a lone member unwrapped; or a plain
+  // reference to the first `$ref` member.
   if (inlineKind === 'allOf' && schema.allOf) {
-    // If allOf contains a $ref, prefer the ref (it's a named type)
-    const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
-    if (refItem) {
-      // If allOf has $ref AND an inline object member (`isInlineAllOfMember`),
-      // return a merged model ref to avoid losing the augmentation properties
-      const hasAugmentation = schema.allOf.some(isInlineAllOfMember);
-      if (hasAugmentation) {
-        const baseName = toPascalCase(contextName ?? 'UnknownModel');
-        return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
-      }
-      return schemaToTypeRef(refItem, contextName, parentModelName);
+    const reading = readInlineAllOf(schema.allOf);
+    if (reading === 'merged') {
+      const baseName = toPascalCase(contextName ?? 'UnknownModel');
+      return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
     }
-    // If allOf has a single item, unwrap it. The wrapper is the schema the
-    // document wrote, so its link rides onto the member — an inline enum
-    // lifted from it carries the wrapper's link, as a model built from it
-    // does (`withWrapperExternalDocs`).
-    if (schema.allOf.length === 1) {
+    if (reading === 'reference') {
+      const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
+      // `'reference'` is only read with a `$ref` member among the members an
+      // `allOfTypesSchema` admits, so one is found here.
+      if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
+    } else {
+      // A single member, unwrapped. The wrapper is the schema the document
+      // wrote, so its link rides onto the member — an inline enum lifted from
+      // it carries the wrapper's link, as a model built from it does
+      // (`withWrapperExternalDocs`).
       return schemaToTypeRef(
         withWrapperExternalDocs(schema.allOf[0], schema),
         contextName,
@@ -3525,18 +3537,8 @@ export function schemaToTypeRef(
         reservedNames,
       );
     }
-    // If a member declares properties inline (`declaresInlineProperties`),
-    // treat as a merged model
-    const hasProperties = schema.allOf.some(declaresInlineProperties);
-    if (hasProperties) {
-      const baseName = toPascalCase(contextName ?? 'UnknownModel');
-      return {
-        kind: 'model',
-        name: qualifyInlineModelName(baseName, parentModelName),
-      };
-    }
-    // Unreachable: `allOfTypesSchema` admits only the three cases above. An
-    // `allOf` of bare limits is classified from the schema's own keywords.
+    // Unreachable: `allOfTypesSchema` admits only the three readings above.
+    // An `allOf` of bare limits is classified from the schema's own keywords.
   }
 
   // Handle oneOf / anyOf → Union or Nullable
@@ -3882,10 +3884,11 @@ import {
   extractInlineModelsFromProperties,
   firstFreeElementContext,
   isContestedTitle,
-  isInlineAllOfMember,
   mapValueSchema,
   markContestedTitles,
   materializeMergedAllOf,
+  readInlineAllOf,
+  unwrappedAllOfMember,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
