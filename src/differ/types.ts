@@ -274,6 +274,15 @@ export interface OperationModified {
    * is breaking (callers must now send a body); required → optional is additive.
    */
   requestBodyRequiredChanged: boolean;
+  /**
+   * True when, both specs declaring a body, it gained or lost a media type
+   * or a secondary media type's body type changed;
+   * `requestBodyContentTypeChange` says which. A body appearing or
+   * disappearing is `requestBodyChanged` alone.
+   */
+  requestBodyContentTypesChanged: boolean;
+  /** Present exactly when `requestBodyContentTypesChanged`. */
+  requestBodyContentTypeChange?: RequestBodyContentTypesChange;
   httpMethodChanged: boolean;
   pathChanged: boolean;
   paginatedChanged: boolean;
@@ -342,7 +351,13 @@ export interface OperationModified {
   /**
    * The operation's `tags` differ, compared in document order (an absent key
    * is an empty list). Always additive: tags group and document a method and
-   * change nothing a caller compiles against.
+   * change nothing a caller compiles against. Operations are matched by
+   * name within a service, so this flag only ever carries an edit that
+   * leaves the operation in a service of the same name; a first-tag change
+   * that the parser's grouping files under another service leaves nothing
+   * to match, and the diff reports the move instead — removed from the old
+   * service and added to the new one, or `service-removed` and
+   * `service-added` when a service goes or comes with it.
    */
   tagsChanged: boolean;
   /** Present exactly when `tagsChanged`: the lists on each side, old → new, `[]` for none. */
@@ -401,6 +416,40 @@ export interface ResponseContentTypesChange {
 }
 
 /**
+ * How an operation's or a webhook's request body media types changed: the
+ * `content` keys of its Request Body Object, compared the way a response
+ * entry's are (see `ResponseContentTypesChange`) — by essence, order aside,
+ * each reported as written in the spec that declares it, two keys of one
+ * essence kept apart. Compared only while both specs declare a body: one
+ * appearing or disappearing is `requestBodyChanged` alone, and the body
+ * `requestBody` is read from is left to `requestBodyChanged` when it changes
+ * type, so `retyped` only ever lists a secondary media type. Classified
+ * from the node's side. For an operation, the caller sends the body: a
+ * media type it could send that is gone, or whose body changed type, is
+ * breaking; one it can newly send is additive. For a webhook, the handler
+ * decodes the body the sender chose: a media type the sender can newly use,
+ * or whose body changed type, is breaking; one it can no longer use is
+ * additive.
+ */
+export interface RequestBodyContentTypesChange {
+  /** Media types the new spec declares and the old did not: a representation the caller can newly send. */
+  added: string[];
+  /** Media types the old spec declared and the new does not: a representation the caller could send is gone. */
+  removed: string[];
+  /**
+   * Media types declared by both whose body type changed, other than the
+   * one `requestBody` is read from, which `requestBodyChanged` reports.
+   */
+  retyped: string[];
+  /**
+   * From the caller's side on an operation: `breaking` when anything was
+   * removed or retyped, else `additive`. From the receiver's side on a
+   * webhook: `breaking` when anything was added or retyped, else `additive`.
+   */
+  classification: 'additive' | 'breaking';
+}
+
+/**
  * A webhook is identified by its `name` and `httpMethod` together, since one
  * `webhooks` key may declare several methods; a method change therefore
  * reports as one webhook removed and another added.
@@ -437,8 +486,18 @@ export interface WebhookModified {
   name: string;
   httpMethod: string;
   paramChanges: ParamChange[];
-  /** True when the payload's type, encoding, or `requestBodyRequired` changed; `details` says which. */
+  /**
+   * True when the payload's type, encoding or `requestBodyRequired` changed,
+   * or — both specs declaring a payload — the media types the sender may use
+   * did; `details` says which.
+   */
   requestBodyChanged: boolean;
+  /**
+   * Present exactly when the payload's media types changed: which were
+   * added, removed or retyped, classified from the receiver's side (see
+   * `RequestBodyContentTypesChange`).
+   */
+  requestBodyContentTypeChange?: RequestBodyContentTypesChange;
   /** True when the set of status codes the sender accepts changed; `details` says which (a code removed is breaking). */
   responsesChanged: boolean;
   /**

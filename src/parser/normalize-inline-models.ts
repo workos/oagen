@@ -3,6 +3,7 @@ import {
   walkTypeRef,
   collectResponseHeaders,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
   renameModelRefs,
@@ -110,6 +111,7 @@ export function reservedTypeNames(
       if (op.pagination) visit(op.pagination.itemType);
       for (const header of collectResponseHeaders(op)) visit(header.type);
       for (const { type } of collectResponseBodyTypes(op)) visit(type);
+      for (const { type } of collectRequestBodyTypes(op)) visit(type);
     }
   }
   for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) visit(ref);
@@ -259,13 +261,25 @@ function settleSharedNames(
       nameDeprecated = false;
     }
 
+    // The copies that agree with the name's flag and that the owner does
+    // not share, clustered by shape in document order: identical copies
+    // that must leave the owner's name share one model under it, as they
+    // would share the bare name without the owner (`keepLargestByName`).
+    const clashing = new Map<string, Model[]>();
     for (const copy of group) {
-      if (!!copy.deprecated === nameDeprecated) {
-        if (!owner) continue;
-        if (modelAdmits(owner, copy)) {
-          folded.set(copy, owner);
-          continue;
-        }
+      if (!!copy.deprecated !== nameDeprecated || !owner) continue;
+      const bundle = naming && bundleOf.get(copy);
+      if (ownerSharesWith(owner, copy, bundle)) {
+        folded.set(copy, owner);
+        continue;
+      }
+      const shape = modelFingerprint(copy);
+      clashing.set(shape, [...(clashing.get(shape) ?? []), copy]);
+    }
+    for (const cluster of clashing.values()) {
+      let renamed: string | undefined;
+      let leader: Model | undefined;
+      for (const copy of cluster) {
         const bundle = naming && bundleOf.get(copy);
         if (!bundle) {
           console.warn(
@@ -273,12 +287,24 @@ function settleSharedNames(
           );
           continue;
         }
-        const renamed = renameInlineCopy(copy, name, bundle, naming);
-        console.warn(
-          `[oagen] Renamed inline model "${name}" → "${renamed}": its shape differs from component schema "${name}"`,
-        );
-        continue;
+        if (renamed === undefined || leader === undefined) {
+          renamed = renameInlineCopy(copy, name, bundle, naming);
+          leader = copy;
+          continue;
+        }
+        repointSite(bundle, name, renamed);
+        folded.set(copy, leader);
       }
+      if (renamed !== undefined) {
+        const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
+        console.warn(
+          `[oagen] Renamed inline model "${name}" → "${renamed}": its shape differs from component schema "${name}"${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
+        );
+      }
+    }
+
+    for (const copy of group) {
+      if (!!copy.deprecated === nameDeprecated) continue;
       // A deprecated copy folds only when every live copy of the name is its
       // twin but for the flag: then whichever live definition the shared name
       // carries, the copy is interchangeable with it. Live copies that
@@ -310,24 +336,44 @@ function settleSharedNames(
 }
 
 /**
+ * Whether `owner`, a component, shares its name with `copy`: when it admits
+ * the shape (`modelAdmits`) — or, for a copy the SDK sends (`bundle.sent`:
+ * a request body, a parameter), only when the shapes are identical, since a
+ * caller typed against a looser component could leave out what the
+ * operation requires. The same question `ownerShares` answers for the
+ * shape registry.
+ */
+function ownerSharesWith(owner: Model, copy: Model, bundle: InlineModelBundle | undefined): boolean {
+  return bundle?.sent ? modelFingerprint(owner) === modelFingerprint(copy) : modelAdmits(owner, copy);
+}
+
+/**
  * Move `copy` off `name` to a free name qualified by its site
  * (`mintQualifiedName`), reserve it, and repoint exactly the references its
- * site minted (`inlineRefAdmit`): the site's own roots, copies of its field
- * included; then the references in the models minted beside it, which never
- * include what another site's field lent them — every reference kind alike,
- * a union's discriminator mapping following its variant
- * (`renameTypeRefModels`, `renameModelRefs`). A site that copies references
- * later is told (`InlineModelBundle.renamed`). Returns the new name.
+ * site minted (`repointSite`). Returns the new name.
  */
 function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, naming: InlineModelNaming): string {
   const renamed = mintQualifiedName(name, bundle.qualifier, naming.reserved);
   naming.reserved.add(renamed);
   copy.name = renamed;
+  repointSite(bundle, name, renamed);
+  return renamed;
+}
+
+/**
+ * Repoint exactly the references a site minted for `name` to `renamed`
+ * (`inlineRefAdmit`): the site's own roots, copies of its field included;
+ * then the references in the models minted beside it, which never include
+ * what another site's field lent them — every reference kind alike, a
+ * union's discriminator mapping following its variant
+ * (`renameTypeRefModels`, `renameModelRefs`). A site that copies references
+ * later is told (`InlineModelBundle.renamed`).
+ */
+function repointSite(bundle: InlineModelBundle, name: string, renamed: string): void {
   const renames = new Map([[name, renamed]]);
   for (const root of bundle.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
   for (const model of bundle.models) renameModelRefs(model, renames, inlineRefAdmit(false));
   bundle.renamed?.(name, renamed);
-  return renamed;
 }
 
 /**
@@ -446,6 +492,7 @@ function rewriteModelRefs(
       for (const error of op.errors) if (error.type) renameTypeRefModels(error.type, renames);
       for (const header of collectResponseHeaders(op)) renameTypeRefModels(header.type, renames);
       for (const { type } of collectResponseBodyTypes(op)) renameTypeRefModels(type, renames);
+      for (const { type } of collectRequestBodyTypes(op)) renameTypeRefModels(type, renames);
     }
   }
   for (const webhook of webhooks) {
