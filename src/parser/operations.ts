@@ -2557,8 +2557,9 @@ function resolvePathModelBaseNames(
   // its `…Response` is exactly such a nested name, and the later merge would
   // keep one shape for both. The names are read by the extractor the
   // operation will use, under the same context name, so they agree by
-  // construction; a chain of refs is followed to the body silently, since the
-  // operation declaring the ref warns when it reads it.
+  // construction, under whatever media type the body is declared (the same
+  // fixed-order pick, `primaryBodySchema`); a chain of refs is followed to the
+  // body silently, since the operation declaring the ref warns when it reads it.
   for (const [componentName, component] of Object.entries(componentResponses ?? {})) {
     reservedNames.add(componentResponseModelBase(componentName));
     const resolved = resolveResponseRef<ResponseObject>(
@@ -2568,9 +2569,9 @@ function resolvePathModelBaseNames(
       'override',
       'silent',
     );
-    const json = jsonResponseSchema(resolved);
-    if (!json) continue;
-    const body = classifyAndExtractResponse(json.schema, componentResponseModelName(componentName), componentSchemas);
+    const { schema } = primaryBodySchema(resolved);
+    if (!schema) continue;
+    const body = classifyAndExtractResponse(schema, componentResponseModelName(componentName), componentSchemas);
     for (const model of body.inlineModels) reservedNames.add(model.name);
     for (const companion of body.envelopeCompanions ?? []) {
       for (const model of companion.models) reservedNames.add(model.name);
@@ -3090,6 +3091,38 @@ function typeFallbackBody(
 }
 
 /**
+ * The fixed-order pick of a success response's body: the JSON schema when a
+ * JSON media type is declared (`application/json` by essence, then `+json`);
+ * else a binary (`application/octet-stream`, `application/pdf`) or text
+ * (`TEXT_RESPONSE_MEDIA_TYPES`) media type, typed as a string without reading
+ * its schema; else the first media type that declares a schema; else the
+ * first declared, which reads as `unknown`. Media types are compared by
+ * essence (`application/pdf; foo=bar` is as binary as `application/pdf`,
+ * `TEXT/PLAIN; charset=utf-8` as much a string as `text/plain`) and
+ * `contentType` is the key as written. `extractResponses` reads a 2xx body
+ * through this, and `resolvePathModelBaseNames` asks the same question of a
+ * component response, so the names it reserves are the ones the operation
+ * will mint, whatever media type the body is declared under.
+ */
+function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema?: SchemaObject; type?: TypeRef } {
+  const json = jsonResponseSchema(resp);
+  if (json) return { contentType: json.contentType, schema: json.schema };
+  const content = resp.content;
+  if (!content) return {};
+  const keyWithEssence = (essence: string): string | undefined =>
+    Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
+  const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
+  if (binaryKey) return { contentType: binaryKey, type: { kind: 'primitive', type: 'string', format: 'binary' } };
+  const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+  if (textKey) return { contentType: textKey, type: { kind: 'primitive', type: 'string' } };
+  // The first media type that declares a schema; when none does, the first
+  // declared is the primary and reads as unknown.
+  const entries = Object.entries(content);
+  const first = entries.find(([, media]) => media?.schema) ?? entries[0];
+  return first ? { contentType: first[0], schema: first[1]?.schema } : {};
+}
+
+/**
  * The schema of a response's JSON body, with the media type it was declared
  * under as written: `application/json` first, else a `+json` media type
  * (`application/problem+json` is the usual shape of a `default` error),
@@ -3204,39 +3237,13 @@ function extractResponses(
       // first other media type that declares one. Either way it goes through
       // `classifyAndExtractResponse`, so its inline models are created and
       // the response never references a model the parser did not emit.
-      const json = jsonResponseSchema(resp);
-      let bodySchema = json?.schema;
-      // The media type the fixed-order pick reads `extractedType` from, as
-      // written, so its `contents` entry can share that TypeRef instead of
-      // re-deriving it.
-      let primaryContentType = json?.contentType;
-      if (!bodySchema && resp.content) {
-        // Handle non-JSON response content types (text/plain, binary, XML, etc.)
-        // Media types are compared by essence: `application/pdf; foo=bar` is
-        // as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much
-        // a string as `text/plain`. The keys themselves stay as written.
-        const content = resp.content;
-        const keyWithEssence = (essence: string): string | undefined =>
-          Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
-        const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
-        const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
-        if (binaryKey) {
-          extractedType = { kind: 'primitive', type: 'string', format: 'binary' };
-          primaryContentType = binaryKey;
-        } else if (textKey) {
-          extractedType = { kind: 'primitive', type: 'string' };
-          primaryContentType = textKey;
-        } else {
-          // Try the first media type that declares a schema; when none does,
-          // the first declared is the primary and reads as unknown.
-          const entries = Object.entries(content);
-          const first = entries.find(([, media]) => media?.schema) ?? entries[0];
-          if (first) {
-            primaryContentType = first[0];
-            bodySchema = first[1]?.schema;
-          }
-        }
-      }
+      // The fixed-order pick (`primaryBodySchema`): `primaryContentType` is
+      // the media type `extractedType` is read from, as written, so its
+      // `contents` entry can share that TypeRef instead of re-deriving it.
+      const pick = primaryBodySchema(resp);
+      const bodySchema = pick.schema;
+      const primaryContentType = pick.contentType;
+      if (pick.type) extractedType = pick.type;
       if (bodySchema) {
         const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas);

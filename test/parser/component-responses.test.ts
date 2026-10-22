@@ -447,6 +447,25 @@ describe('responses written as $ref into components/responses (issue #234)', () 
       expect(own[0].fields.map((f) => f.name)).toEqual(['line1']);
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it('reserves the names a non-JSON component body mints too (the first media type with a schema)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const yamlCard = {
+        description: 'An owner card',
+        content: { 'application/yaml': addressCard.content['application/json'] },
+      };
+      const { services, inlineModels } = extract(
+        { ...cardOwner, ...unnamedAddress },
+        { responses: { OwnerCard: yamlCard } },
+      );
+      const byPath = new Map(services.flatMap((s) => s.operations).map((op) => [op.path, op.response]));
+      expect(byPath.get('/owners/{ownerId}')).toEqual({ kind: 'model', name: 'OwnerCardResponse' });
+      expect(inlineModels.filter((m) => m.name === 'OwnerCardResponseAddressGetResponse')).toHaveLength(1);
+      const pathDerived = byPath.get('/owner/card/response/address') as { kind: string; name: string };
+      expect(pathDerived.name).not.toBe('OwnerCardResponseAddressGetResponse');
+      expect(inlineModels.filter((m) => m.name === pathDerived.name)[0].fields.map((f) => f.name)).toEqual(['line1']);
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   describe('an operation returning different shared bodies at two success codes', () => {
