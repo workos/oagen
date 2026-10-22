@@ -29,7 +29,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
+import { mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -3836,26 +3836,13 @@ function typeSecondaryContent(
   ctx.deferred.push({
     kind: 'content',
     schema,
-    name: `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`,
+    name: `${naming.base}${mediaTypeNameFragment(contentType)}${naming.suffix}`,
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
   });
   return target.type;
-}
-
-/**
- * The PascalCase token that qualifies an inline model minted for a secondary
- * media type: `text/html` → `TextHtml`, `application/vnd.api+json` →
- * `ApplicationVndApiJson`. Parameters are part of it (`application/json;
- * charset=utf-8` → `ApplicationJsonCharsetUtf8`) so two parameterizations of
- * one type never share a model, and a wildcard segment reads as `Any`
- * (`application/*` → `ApplicationAny`) since the caser would drop the `*`.
- */
-function mediaTypeToken(contentType: string): string {
-  const token = toPascalCase(contentType.split('*').join('Any'));
-  return token.length > 0 ? token : 'Content';
 }
 
 /**
