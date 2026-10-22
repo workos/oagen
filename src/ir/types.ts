@@ -100,6 +100,10 @@ export interface ApiSpec {
  * this to generate a payload type or a typed handler per event. A webhook is
  * never an SDK method: it has no path, belongs to no `Service`, and gets no
  * resolved operation name.
+ *
+ * An operation's `callbacks` (OpenAPI 3.x), whose path items have this
+ * shape, are not read into `Webhook` or anywhere else; the parser warns at
+ * every site that declares any (see `warnOnIgnoredCallbacks`).
  */
 export interface Webhook {
   /** The key under `webhooks`, verbatim (`petAdopted`, `user.created`). */
@@ -107,13 +111,25 @@ export interface Webhook {
   /** The operation's `operationId`, when the document declares one. */
   operationId?: string;
   httpMethod: HttpMethod;
-  /** The document's `summary` alone, as on `Operation.summary`. */
+  /**
+   * The `summary` alone, read as `Operation.summary` is: the operation's own,
+   * else the path item's. Absent when neither has content.
+   */
   summary?: string;
-  /** Combined doc text, built exactly as `Operation.description` is. */
+  /**
+   * Combined doc text, built as `Operation.description` is from the same
+   * two-level read. Absent when neither level gives any text.
+   */
   description?: string;
+  /**
+   * The operation's own `externalDocs`, when it declares a usable one, as on
+   * `Operation.externalDocs`. A Path Item Object has no `externalDocs`, so
+   * there is nothing to fall back to.
+   */
+  externalDocs?: ExternalDocs;
   /** Present, and `true`, only when the document marks the webhook deprecated. */
   deprecated?: boolean;
-  /** The operation's `tags`, in document order; present only when non-empty. */
+  /** The operation's `tags`, read exactly as `Operation.tags` is. */
   tags?: string[];
   /** Header parameters the request carries, typed like `Operation.headerParams`. */
   headerParams: Parameter[];
@@ -191,20 +207,23 @@ export type SecurityRequirementSet = SecurityRequirement[];
 export interface Operation {
   name: string;
   /**
-   * The document's `summary` alone. Present only when the OpenAPI operation
-   * declares one with non-whitespace content; an empty or whitespace-only
-   * summary is treated as absent. Read this to use the summary as a one-line
-   * label; `description` below still carries the combined form, so emitters
-   * that only print `description` are unchanged.
+   * The `summary` alone: the OpenAPI operation's own, or — when the operation
+   * declares none with non-whitespace content — the `summary` of the Path
+   * Item it sits on, which OpenAPI applies to every operation on that path.
+   * Present only when one of the two has content; an empty or whitespace-only
+   * summary is treated as absent at either level. Read this to use the
+   * summary as a one-line label; `description` below still carries the
+   * combined form, so emitters that only print `description` are unchanged.
    */
   summary?: string;
   /**
-   * Doc text for the operation. When the document declares both a `summary`
-   * and a `description` with content, this is `summary + "\n\n" + description`;
-   * when only one has content (or both are identical), this is that one. An
-   * empty or whitespace-only value is treated as absent, and text with content
-   * is kept verbatim. The parts are not separable from this field alone — use
-   * `summary` for that.
+   * Doc text for the operation, combined from a `summary` and a `description`
+   * each read as `summary` above is: the operation's own, else the Path
+   * Item's, field by field. When both have content, this is
+   * `summary + "\n\n" + description`; when only one has content (or both are
+   * identical), this is that one. An empty or whitespace-only value is
+   * treated as absent, and text with content is kept verbatim. The parts are
+   * not separable from this field alone — use `summary` for that.
    */
   description?: string;
   /** The operation's own `externalDocs`, when it declares a usable one. */
@@ -254,9 +273,10 @@ export interface Operation {
    * `responseHeaders` and `responseDescription` come from the same entry.
    * Never promoted from a `2XX` range or the `default` response: an
    * operation declaring no 2xx or 3xx response at all (only `default` or
-   * `2XX`, or only a `404`) keeps the parser's initial
-   * `{ kind: 'primitive', type: 'string' }` here, with no `responseHeaders`
-   * or `responseDescription`, and an emitter should take the success body
+   * `2XX`, only a `404`, an empty `responses` map, or no `responses` key)
+   * has `{ kind: 'primitive', type: 'unknown' }` here — the type of a body
+   * the document does not describe — with no `responseHeaders` or
+   * `responseDescription`, and an emitter should take the success body
    * from `rangeResponses` (`2XX`), then `defaultResponse` — the same order
    * it resolves any status: the explicit entry, then the matching range,
    * then the default.
@@ -345,6 +365,14 @@ export interface Operation {
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
   async?: boolean;
+  /**
+   * The operation's `tags`, in document order, with every entry that is not
+   * a non-empty string dropped. Present only when at least one remains. The
+   * parser has already named the service from the document's first tag
+   * entry; this list is kept so an emitter can group or document the method
+   * by every tag.
+   */
+  tags?: string[];
   /**
    * Per-operation security requirements, mirroring the OpenAPI document:
    * - `undefined` — the operation declares nothing and inherits
@@ -809,10 +837,29 @@ export interface Enum {
   deprecated?: boolean;
 }
 
+/**
+ * One member of an enum. An enum schema is an `enum:` list or a
+ * `oneOf`/`anyOf` whose every non-null variant is a string `const` schema
+ * (the OAS 3.1 spelling that documents values one by one); both give one
+ * `EnumValue` per member, in document order.
+ */
 export interface EnumValue {
+  /** UPPER_SNAKE_CASE form of `value`. */
   name: string;
+  /** The value as written; a number stays a number. */
   value: string | number;
+  /**
+   * The value's own documentation: a `const` member's `description`, else
+   * the entry for the value in the enum schema's `x-enum-descriptions` /
+   * `x-enumDescriptions` extension. Present only when that text has
+   * non-whitespace content; absent otherwise.
+   */
   description?: string;
+  /**
+   * Present, and `true`, when the value's `const` member says
+   * `deprecated: true`; absent otherwise. An `enum:` list has no per-value
+   * keyword, so its values never carry it.
+   */
   deprecated?: boolean;
 }
 

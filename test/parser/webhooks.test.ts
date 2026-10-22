@@ -774,6 +774,23 @@ describe('webhooks', () => {
         ]);
       });
 
+      it("carries the operation's externalDocs, and the path item's summary and description where the operation has none (issue #270)", () => {
+        const { webhooks } = extractWebhooks({
+          petAdopted: {
+            summary: 'Pet adopted',
+            description: 'Sent when a pet is adopted.',
+            post: { externalDocs: { url: 'https://example.com/adopted' }, responses: { '200': { description: 'ok' } } },
+            put: { summary: 'Pet re-adopted', responses: { '200': { description: 'ok' } } },
+          },
+        });
+        expect(webhooks.map((w) => [w.httpMethod, w.summary, w.description, w.externalDocs])).toEqual([
+          ['post', 'Pet adopted', 'Pet adopted\n\nSent when a pet is adopted.', { url: 'https://example.com/adopted' }],
+          ['put', 'Pet re-adopted', 'Pet re-adopted\n\nSent when a pet is adopted.', undefined],
+        ]);
+        expect('externalDocs' in webhooks[1]).toBe(false);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
       it('yields one webhook per method and skips a method that is not an object', () => {
         const { webhooks } = extractWebhooks({
           petUpdated: { post: { responses: {} }, put: null, delete: { responses: {} } },

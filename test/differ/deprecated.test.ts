@@ -372,6 +372,8 @@ describe('diffOperations – deprecated (issue #256)', () => {
         serversChanged: false,
         deprecatedChanged: true,
         ...became,
+        securityChanged: false,
+        tagsChanged: false,
         classification: 'additive',
       },
     ]);
@@ -612,6 +614,8 @@ describe('diffWebhooks – deprecated (Greptile round 2)', () => {
         responsesChanged: false,
         deprecatedChanged: true,
         ...became,
+        securityChanged: false,
+        tagsChanged: false,
         classification: 'additive',
       },
     ]);
@@ -660,6 +664,8 @@ describe('diffWebhooks – deprecated (Greptile round 2)', () => {
         requestBodyChanged: false,
         responsesChanged: false,
         deprecatedChanged: false,
+        securityChanged: false,
+        tagsChanged: false,
         classification: 'additive',
       },
     ]);
@@ -946,6 +952,8 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
         serversChanged: false,
         deprecatedChanged: true,
         ...became,
+        securityChanged: false,
+        tagsChanged: false,
         classification: 'additive',
       },
     ]);
@@ -1071,6 +1079,8 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
         responsesChanged: false,
         deprecatedChanged: true,
         ...became,
+        securityChanged: false,
+        tagsChanged: false,
         classification: 'additive',
       },
     ]);

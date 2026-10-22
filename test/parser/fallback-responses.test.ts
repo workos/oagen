@@ -11,6 +11,8 @@ import type { ApiSpec, Enum, Model, Operation, TypeRef } from '../../src/ir/type
 
 const info = { title: 'Pets', version: '1' };
 const str: TypeRef = { kind: 'primitive', type: 'string' };
+/** The type of a body the document does not describe (issue #264). */
+const untyped: TypeRef = { kind: 'primitive', type: 'unknown' };
 const int: TypeRef = { kind: 'primitive', type: 'integer' };
 const model = (name: string): TypeRef => ({ kind: 'model', name });
 const json = (schema: unknown) => ({ 'application/json': { schema } });
@@ -153,7 +155,7 @@ describe('the default response (issue #214)', () => {
       ),
     );
 
-    expect(op.response).toEqual(str);
+    expect(op.response).toEqual(untyped);
     expect(op.successResponses).toBeUndefined();
     expect(op.errors).toEqual([]);
     expect(op.defaultResponse).toEqual({ type: model('Error'), ...jsonBody(model('Error')), description: 'err' });
@@ -357,7 +359,7 @@ describe('range responses (1XX–5XX)', () => {
   it('does not promote a 2XX range to the primary response', async () => {
     const op = only(await parseWithoutWarnings(petsSpec({ '2XX': ok })));
 
-    expect(op.response).toEqual(str);
+    expect(op.response).toEqual(untyped);
     expect(op.rangeResponses).toEqual([
       { range: '2XX', type: model('Pet'), ...jsonBody(model('Pet')), description: 'ok' },
     ]);

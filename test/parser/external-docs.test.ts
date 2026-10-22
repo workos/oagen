@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { readExternalDocs, externalDocsEntry } from '../../src/parser/external-docs.js';
 import { extractOperations } from '../../src/parser/operations.js';
+import { extractWebhooks } from '../../src/parser/webhooks.js';
 import { extractSchemas, extractInlineModelsFromSchemas, clearSchemaNameTransform } from '../../src/parser/schemas.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import type { Model } from '../../src/ir/types.js';
@@ -170,6 +171,28 @@ describe('extractOperations – Operation.externalDocs (issue #217)', () => {
     expect(byName(inlineModels, 'GetPetResponseOwner').externalDocs).toEqual({
       url: 'https://docs.example.com/owners',
     });
+  });
+});
+
+describe('extractWebhooks – Webhook.externalDocs (issue #270)', () => {
+  it("carries a webhook operation's externalDocs, read as an operation's is", () => {
+    const { webhooks } = extractWebhooks({
+      petAdopted: { post: { externalDocs: describedLink, responses } },
+      petReturned: { post: { externalDocs: link, responses } },
+    });
+    expect(webhooks.map((hook) => hook.externalDocs)).toEqual([describedLink, link]);
+  });
+
+  it('leaves the key absent on a webhook without one, with a malformed one, or with one on the path item only', () => {
+    const { webhooks } = extractWebhooks({
+      none: { post: { responses } },
+      noUrl: { post: { externalDocs: { description: 'no url' }, responses } },
+      notAnObject: { post: { externalDocs: 'https://docs.example.com', responses } },
+      // A Path Item Object has no `externalDocs` field; one written there is not read.
+      onPathItem: { externalDocs: link, post: { responses } },
+    });
+    expect(webhooks.map((hook) => hook.name)).toEqual(['none', 'noUrl', 'notAnObject', 'onPathItem']);
+    for (const hook of webhooks) expect('externalDocs' in hook, hook.name).toBe(false);
   });
 });
 

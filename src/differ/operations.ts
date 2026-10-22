@@ -11,8 +11,9 @@ import type {
 import { resolveServerUrl } from '../ir/server-url.js';
 import { diffServers } from './servers.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
-import { classifyParamChange, deprecationDetails, deprecationFlip } from './classify.js';
+import { classifyParamChange, deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
+import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
 /**
  * The two documents' `servers`, so `diffOperations` can resolve what an
@@ -25,11 +26,18 @@ export interface DocumentServers {
   new: ServerEntry[] | undefined;
 }
 
+/**
+ * `documentSecurity` — the two documents' `security` — lets an operation that
+ * declares none of its own be compared on what it inherits, exactly as
+ * `documentServers` does for `servers`; `diffSpecs` passes both, a direct
+ * caller may leave either out.
+ */
 export function diffOperations(
   serviceName: string,
   oldOps: Operation[],
   newOps: Operation[],
   documentServers?: DocumentServers,
+  documentSecurity?: DocumentSecurity,
 ): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldOps.map((o) => [o.name, o]));
@@ -107,6 +115,15 @@ export function diffOperations(
     const serversChanged =
       (!!oldOp.servers || !!newOp.servers) &&
       effectiveServersChanged(oldOp.servers ?? documentServers?.old ?? [], newOp.servers ?? documentServers?.new ?? []);
+    // What the operation's requests must carry, `op.security ?? document
+    // security` on each side, by the same rule as `servers`: absent on both
+    // sides inherits twice and is the document-level diff's to report.
+    const security = securityShift(oldOp, newOp, documentSecurity);
+    const securityChanged = security !== undefined;
+    // Additive always: tags group and document the method and change nothing
+    // a caller compiles against, but a changelog has to say it.
+    const tags = tagsShift(oldOp, newOp);
+    const tagsChanged = tags !== undefined;
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -127,7 +144,9 @@ export function diffOperations(
       responseContentTypesChanged ||
       fallbackResponsesChanged ||
       deprecatedChanged ||
-      serversChanged;
+      serversChanged ||
+      securityChanged ||
+      tagsChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -154,6 +173,11 @@ export function diffOperations(
       // that changed shape, breaks them; one they can newly ask for does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
       const fallbackBreaking = fallbackDiff === 'breaking';
+      // security: breaking when a request built for the old requirements no
+      // longer satisfies the new ones, read from the caller's side.
+      const securityBreaking =
+        security !== undefined &&
+        classifySecurityChange(security.oldSecurity, security.newSecurity, 'caller') === 'breaking';
 
       // servers: any change is breaking (the operation's requests go elsewhere)
       const hasBreaking =
@@ -176,6 +200,7 @@ export function diffOperations(
         responseContentTypesBreaking ||
         fallbackBreaking ||
         serversChanged ||
+        securityBreaking ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
         kind: 'operation-modified',
@@ -202,6 +227,10 @@ export function diffOperations(
         deprecatedChanged,
         ...deprecation,
         serversChanged,
+        securityChanged,
+        ...security,
+        tagsChanged,
+        ...tags,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }

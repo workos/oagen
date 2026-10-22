@@ -204,8 +204,8 @@ The spec differ (used by `oagen diff`) returns a `DiffReport`:
 interface DiffReport {
   oldVersion: string;
   newVersion: string;
-  changes: Change[]; // BaseUrlChanged, ServerAdded, ModelAdded, ModelRemoved, EnumAdded, OperationAdded, etc.
-  behaviorChanges: BehaviorChange[]; // param-default-changed (breaking), deprecated-changed (additive)
+  changes: Change[]; // BaseUrlChanged, ServerAdded, DocumentSecurityChanged, ModelAdded, ModelRemoved, EnumAdded, OperationAdded, etc.
+  behaviorChanges: BehaviorChange[]; // param-default-changed (breaking), deprecated-changed (additive), security-changed (either)
   summary: { added; removed; modified; breaking; additive; behaviorChanges };
 }
 ```

@@ -117,9 +117,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     );
   }
 
+  // The whole document goes along so the rules that read every inline schema
+  // of a root at once see the operations' and webhooks' schemas too, not
+  // only the components' (`SchemaExtractionOptions.document`).
   const { models, enums } = extractSchemas(
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-    { schemaNameTransform: options?.schemaNameTransform },
+    { schemaNameTransform: options?.schemaNameTransform, document: transformed },
   );
 
   // Before the operations: an operation carries its own `servers` only when
@@ -271,7 +274,9 @@ function applyFieldHints(
  * the standard key only: an extension has no agreed shape to parse, and
  * reading it silently would make the IR depend on a convention the document
  * never declared. A document that carries one is told so, once, so the
- * omission is a visible choice rather than a quiet loss.
+ * omission is a visible choice rather than a quiet loss. An operation's
+ * `callbacks`, which are not read either, are reported per operation by
+ * `warnOnIgnoredCallbacks` at the sites that read Operation Objects.
  */
 function warnOnLegacyWebhooks(legacy: unknown): void {
   if (typeof legacy !== 'object' || legacy === null) return;
