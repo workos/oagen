@@ -21,7 +21,7 @@ import type {
   ServerEntry,
 } from '../ir/types.js';
 import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
-import { serverListsEqual, serversBeyondDefault } from '../ir/server-url.js';
+import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -1334,18 +1334,27 @@ function inferAction(
  * carry — `Teams` in `/org/teams/members` and `/org/teams/{teamId}/members`,
  * whether it comes out as `Teams` or `Team` — is never added, and the next
  * pass tells them apart: `listMembers` and `listMembersByTeamId`; a proposal
- * an operation outside the group already has is not taken, so a pass never
- * hands out a name only for the numeric suffix to follow it
+ * another operation already has is not taken, so a pass never hands a member
+ * a name another operation had with the number then landing on it
  * (`/org/members/archived` beside `/org/archived_members` is never
  * `listArchivedMembers2`, and `/api/notes` beside `operationId: listNotes` is
- * never `listNotes2`); and members whose proposals say the same thing take one
- * spelling and stay one group for the next pass. A qualifier never puts the
+ * never `listNotes2`) — unless every operation that has it is path-named and
+ * names the same noun, which the member then joins (nameIsFree): `/notes`
+ * restoring `Notes` beside `/notes/{noteId}/notes` is `listNotes` with the
+ * nested collection `listNotesByNoteId`; and members whose proposals say the
+ * same thing take one spelling and stay one group for the next pass, numbered
+ * on it when nothing after tells them apart. A qualifier never puts the
  * same word twice in a row into a name, whether the name already ends with it
  * (`listNotes` never becomes `listNotesNotes`) or the qualifier repeats it
  * itself (`/api/analytics/analytics/teams` → `listTeamsAnalytics`), compared
  * word by word on the camelCase boundary rather than as a substring:
  *
- *   1. the resource noun (inferResourceFromPath);
+ *   1. the resource noun (inferResourceFromPath); for the service's own
+ *      path, whose plain name left that noun off, the service noun
+ *      (inferServiceNoun) when a path-named operation outside the group
+ *      already carries it under the name it would make, so that `/notes`
+ *      beside `operationId: list` joins `/notes/{noteId}/notes` at
+ *      `listNotes` and the parameter then tells them apart;
  *   2. the path segments between the service and the resource
  *      (inferDeeperContext), each singular when a path parameter follows it
  *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
@@ -1417,9 +1426,17 @@ function disambiguateOperationNames(
   const rename = (op: Operation, name: string) => {
     (op as { name: string }).name = name;
   };
+  // The noun an operation's path names: its resource, or, for the service's
+  // own path, the service noun the plain name left off (`Notes` for `/notes`
+  // and for `/notes/{noteId}/notes` alike, `Note` for their items). What
+  // nameIsFree compares when another path-named operation holds a proposal.
+  const nounOf = (op: Operation): string | null => {
+    const root = apiRootLengthOf(op);
+    return inferResourceFromPath(op.path, root) ?? inferServiceNoun(op.path, root);
+  };
   /** One pass on one group, through the rule every pass shares (qualifyGroup). */
   const qualify = (group: Operation[], proposal: (op: Operation) => string, key: (name: string) => string) =>
-    qualifyGroup(group, operations, pathNamed, proposal, key, rename);
+    qualifyGroup(group, operations, pathNamed, nounOf, proposal, key, rename);
 
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
@@ -1428,9 +1445,23 @@ function disambiguateOperationNames(
   // Each qualifier, given the group, is the word or words a path-named
   // member would add to its name: `null` or `''` when its path has none.
   const qualifiers: Array<(group: Operation[]) => (op: Operation) => string | null> = [
-    () => (op) => {
+    (group) => (op) => {
       const root = apiRootLengthOf(op);
-      return inferResourceFromPath(qualifierPath(op, root, !demoted.has(op)), root);
+      const resource = inferResourceFromPath(qualifierPath(op, root, !demoted.has(op)), root);
+      if (resource !== null) return resource;
+      // The service's own path left its noun off the plain name (`list` for
+      // `/notes`). It is proposed here, ahead of the service-noun pass, when a
+      // path-named operation outside the group already carries it under the
+      // name it would make — the nested collection of the same word,
+      // `/notes/{noteId}/notes` as `listNotes` — so the two take one spelling
+      // (nameIsFree) and the parameters tell them apart, `listNotes` and
+      // `listNotesByNoteId`, rather than the nested collection keeping the
+      // name the service's own path restores beside an operationId.
+      const noun = inferServiceNoun(op.path, root);
+      if (noun === null) return null;
+      const name = appendQualifier(op.name, noun);
+      const held = operations.some((other) => !group.includes(other) && pathNamed.has(other) && other.name === name);
+      return held && nameIsFree(group, operations, pathNamed, nounOf, op, name) ? noun : null;
     },
     () => (op) => {
       const root = apiRootLengthOf(op);
@@ -1712,11 +1743,11 @@ function qualifyGroup(
   group: readonly Operation[],
   operations: readonly Operation[],
   pathNamed: ReadonlySet<Operation>,
+  nounOf: (op: Operation) => string | null,
   proposal: (op: Operation) => string,
   key: (name: string) => string,
   rename: (op: Operation, name: string) => void,
 ): void {
-  const taken = new Set(operations.filter((op) => !group.includes(op)).map((op) => op.name));
   const proposals = new Map(group.map((op) => [op, pathNamed.has(op) ? proposal(op) : op.name]));
   const clusters = new Map<string, Operation[]>();
   for (const op of [...group].sort(comparePaths)) {
@@ -1725,12 +1756,43 @@ function qualifyGroup(
   }
   if (clusters.size <= 1) return;
   for (const members of clusters.values()) {
-    const spelling = members.map((op) => proposals.get(op) ?? op.name).find((name) => !taken.has(name));
+    const spelling = members
+      .map((op) => proposals.get(op) ?? op.name)
+      .find((name, i) => nameIsFree(group, operations, pathNamed, nounOf, members[i], name));
     if (spelling === undefined) continue;
     for (const op of members) {
       if (pathNamed.has(op)) rename(op, spelling);
     }
   }
+}
+
+/**
+ * Whether `name` is free for `op`, a member of `group`: no operation outside
+ * the group has it, or every operation that has it is path-named and names
+ * the noun `op` names (`nounOf`, compared as nounKey compares) — the nested
+ * collection of the service's own word, `/notes/{noteId}/notes` as
+ * `listNotes` beside `/notes`. Such a name the member takes and joins the
+ * group of, and the passes after tell the two apart by what does differ
+ * between their paths: `listNotes` and `listNotesByNoteId`, `getNote` and
+ * `getNoteByChildId`. A name an operationId-named operation has is never
+ * free, nor is one a path-named operation of another noun has:
+ * `listArchivedMembers` on `/org/archived_members` beside the `Archived` of
+ * `/org/members/archived`, which nothing after could tell apart.
+ */
+function nameIsFree(
+  group: readonly Operation[],
+  operations: readonly Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  nounOf: (op: Operation) => string | null,
+  op: Operation,
+  name: string,
+): boolean {
+  const noun = nounOf(op);
+  return operations.every((other) => {
+    if (group.includes(other) || other.name !== name) return true;
+    const otherNoun = pathNamed.has(other) ? nounOf(other) : null;
+    return noun !== null && otherNoun !== null && nounKey(otherNoun) === nounKey(noun);
+  });
 }
 
 /**
@@ -2428,7 +2490,7 @@ function buildOperation(
     inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   }
   if (reqBodyModels.length > 0 && requestBody) {
-    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
   return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
@@ -3455,16 +3517,18 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * document's servers under a Path Item that diverges inherits, not the Path
  * Item's.
  *
- * Both lists go through `serversBeyondDefault` before they are compared, so
- * OpenAPI's default server is one thing however it is spelled (#291): a
- * document without `servers` (or with `servers: []`) and one whose only
- * server is `/` both compare as an empty list, the entry's description and
- * variables aside (the default server has neither, and `/` references no
- * variable, so one declared on it changes nothing — #292). An operation or
- * Path Item that writes `/` out under a document that declares nothing
- * therefore inherits — description and variables included — and any other
- * usable list under such a document is kept, as `/` is under a document that
- * names a host.
+ * OpenAPI's default server is one thing however it is spelled (#291): a list
+ * that means it — no servers, `servers: []`, or nothing but `/`, by
+ * `isDefaultServerList`, description and variables aside (the default server
+ * has neither, and `/` references no variable, so one declared on it changes
+ * nothing — #292) — under a document whose list means it too is inherited as
+ * well. So an operation or Path Item that writes `/` out under a document
+ * that declares nothing inherits, the entry's description and variables
+ * included. Any other list is compared
+ * entry for entry as written, `/` entries included, because position decides
+ * the default host: `/` under a document that names a host is kept, a named
+ * host under a document that writes `/` out is kept, and a named host alone
+ * under a document that lists `/` before that host is kept.
  */
 function operationServers(
   own: ServerEntry[] | undefined,
@@ -3473,9 +3537,8 @@ function operationServers(
 ): ServerEntry[] | undefined {
   const effective = own ?? pathLevel;
   if (!effective) return undefined;
-  return serverListsEqual(serversBeyondDefault(effective), serversBeyondDefault(documentServers))
-    ? undefined
-    : effective;
+  if (serverListsEqual(effective, documentServers ?? [])) return undefined;
+  return isDefaultServerList(effective) && isDefaultServerList(documentServers) ? undefined : effective;
 }
 
 /**
@@ -3562,17 +3625,17 @@ interface ResponseTypingContext {
  * (`ownerShares`), then every inline model the operations minted — request
  * bodies, primary response bodies with their nested objects and union
  * variants, envelope companions — shared on an identical shape only, so no
- * deferred schema can take one of their names for a shape the owner does
- * not share, whichever operation minted it; each resolved schema's own
- * models join it in turn, in document order (path order, then an
- * operation's secondary request bodies in content order, then the response
- * keys as written; a response's headers before its error body and its
- * secondary bodies, a fallback's body before its headers), so the first
- * owner of a name keeps it. The sites that derive from one bare name — one
- * kind, parent and name: the same header on several status codes or
- * operations, one media type's body on several status codes — share a
- * record of the stems they settled on and the renames made under them, so a
- * later one shares an identical shape under whichever name the earlier took
+ * deferred schema can take one of their names for a shape the owner does not
+ * share, whichever operation minted it; each resolved schema's own models
+ * join it in turn, in document order (path order, then an operation's
+ * secondary request bodies in content order, then the response keys as
+ * written; a response's headers before its error body and its secondary
+ * bodies, a fallback's body before its headers), so the first owner of a
+ * name keeps it. The sites that derive from one bare name — one kind, parent
+ * and name: the same header on several status codes or operations, one media
+ * type's body on several status codes — share a record of the stems they
+ * settled on and the renames made under them, so a later one shares an
+ * identical shape under whichever name the earlier took
  * (`materializeInlineSchema`). Returns the models materialized, having set
  * each target's `type`.
  */
@@ -3607,7 +3670,12 @@ function resolveDeferredInlineTypes(
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
     // model minted nothing here, see `attachSharedDeferredRefs`).
-    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
+    bundles.push({
+      qualifier: item.operationQualifier,
+      roots: [type],
+      models: models.slice(minted),
+      ...(isSentSite(item) ? { sent: true } : {}),
+    });
   }
   return { models, bundles };
 }
@@ -3771,8 +3839,14 @@ function materializeDeferredType(
     componentSchemas: item.componentSchemas,
     registry,
     operation: item.operationQualifier,
+    sent: isSentSite(item),
     models,
   });
+}
+
+/** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
+function isSentSite(item: DeferredInlineType): boolean {
+  return item.kind === 'request' || item.kind === 'param';
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */

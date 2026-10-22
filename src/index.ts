@@ -105,8 +105,9 @@ export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 // Server URL templates, their RFC 3986 comparison form and server-list equality
 export type { ResolvedServerUrl } from './ir/server-url.js';
 export {
+  baseUrlBeyondDefault,
+  isDefaultServerEntry,
   isDefaultServerList,
-  isDefaultServerSet,
   normalizeServerUrl,
   resolveServerUrl,
   serverListsEqual,
