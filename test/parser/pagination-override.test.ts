@@ -610,7 +610,13 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         expect(job?.kind).toBe('model');
         if (job?.kind === 'model') expect(ir.models.some((m) => m.name === job.name)).toBe(true);
         // validateModelRefs would have warned about any dangling reference.
-        expect(warn).not.toHaveBeenCalled();
+        // The one warning is #240's: the 202's inline body takes the 200's
+        // `<Op>Response` name with another shape, and the primary's is kept.
+        expect(warn.mock.calls.map((call) => call[0])).toEqual([
+          expect.stringContaining(
+            'Inline model "ListPetsResponse" from the 202 response has different fields than the 200 response\'s',
+          ),
+        ]);
       });
     });
 

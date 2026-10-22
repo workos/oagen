@@ -65,6 +65,15 @@ export interface ApiSpec {
   baseUrl: string;
   servers?: ServerEntry[];
   services: Service[];
+  /**
+   * The requests the API sends to its users, from the document's top-level
+   * `webhooks` map (OpenAPI 3.1), in document order. Absent — not an empty
+   * list — when the document declares none, so the IR of a document without
+   * webhooks is unchanged. A webhook is not an SDK method: it belongs to no
+   * service, gets no resolved operation name, and is untouched by operation
+   * hints and mount rules. See `Webhook`.
+   */
+  webhooks?: Webhook[];
   models: Model[];
   enums: Enum[];
   auth?: AuthScheme[];
@@ -76,6 +85,75 @@ export interface ApiSpec {
   security?: SecurityRequirementSet[];
   /** Language-agnostic runtime policies (retry, errors, telemetry, etc.). */
   sdk: SdkBehavior;
+}
+
+/**
+ * A request the API sends to its users: one HTTP method of one entry in the
+ * document's top-level `webhooks` map (OpenAPI 3.1). An entry whose path item
+ * declares several methods yields one `Webhook` per method, so `name` alone
+ * does not identify a webhook; `name` + `httpMethod` does.
+ *
+ * Everything here is read from the receiver's side of the wire: the request
+ * body is the payload the receiver is handed, the parameters are the headers
+ * (signatures, event types) and query values the request carries, and
+ * `responses` are the status codes the sender expects back. An emitter uses
+ * this to generate a payload type or a typed handler per event. A webhook is
+ * never an SDK method: it has no path, belongs to no `Service`, and gets no
+ * resolved operation name.
+ */
+export interface Webhook {
+  /** The key under `webhooks`, verbatim (`petAdopted`, `user.created`). */
+  name: string;
+  /** The operation's `operationId`, when the document declares one. */
+  operationId?: string;
+  httpMethod: HttpMethod;
+  /** The document's `summary` alone, as on `Operation.summary`. */
+  summary?: string;
+  /** Combined doc text, built exactly as `Operation.description` is. */
+  description?: string;
+  /** Present, and `true`, only when the document marks the webhook deprecated. */
+  deprecated?: boolean;
+  /** The operation's `tags`, in document order; present only when non-empty. */
+  tags?: string[];
+  /** Header parameters the request carries, typed like `Operation.headerParams`. */
+  headerParams: Parameter[];
+  /** Query parameters the request carries, typed like `Operation.queryParams`. */
+  queryParams: Parameter[];
+  /** Cookie parameters; present only when the document declares at least one. */
+  cookieParams?: Parameter[];
+  /**
+   * The payload the receiver is handed. An inline object schema is
+   * materialized as a model named `<Stem>Payload`, where the stem is the
+   * `operationId` when there is one and the webhook's name otherwise (see the
+   * parser's `resolveWebhookModelStems` for how the stem is kept unique).
+   * Absent when the operation declares no `requestBody` or one with no usable
+   * content.
+   */
+  requestBody?: TypeRef;
+  /** How the payload is encoded, read like `Operation.requestBodyEncoding`. */
+  requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+  /** Present, and `true`, only when the document marks the request body `required`. */
+  requestBodyRequired?: boolean;
+  /**
+   * The responses the sender expects from the receiver, in document order:
+   * one entry per three-digit status code the operation declares. `default`
+   * and range (`2XX`) keys are not carried. Body schemas on these responses
+   * are not carried either: a webhook response is an acknowledgement, and
+   * typing it would mint models no handler needs.
+   */
+  responses: WebhookResponse[];
+  /**
+   * The security the request carries, mirroring the OpenAPI document exactly
+   * as `Operation.security` does: `undefined` inherits `ApiSpec.security`,
+   * `[]` means none, otherwise one alternative per requirement object.
+   */
+  security?: SecurityRequirementSet[];
+}
+
+/** One status code a webhook's sender expects back, with the document's description of it. */
+export interface WebhookResponse {
+  statusCode: number;
+  description?: string;
 }
 
 /** A service groups related operations (maps to an SDK resource class) */
@@ -155,6 +233,15 @@ export interface Operation {
    * `requestBody` is; an operation without a body has no entry.
    */
   requestBodyRequired?: boolean;
+  /**
+   * The primary success body: the lowest explicit 2xx with a body schema,
+   * else the first explicit 2xx. Never promoted from a `2XX` range or the
+   * `default` response, so when an operation declares no explicit 2xx this is
+   * `{ kind: 'primitive', type: 'string' }` and an emitter should take the
+   * success body from `rangeResponses` (`2XX`), then `defaultResponse` —
+   * the same order it resolves any status: the explicit entry, then the
+   * matching range, then the default.
+   */
   response: TypeRef;
   /**
    * Headers the primary success response declares (the one `response` is the
@@ -164,6 +251,22 @@ export interface Operation {
    * need a home of their own.
    */
   responseHeaders?: ResponseHeader[];
+  /**
+   * Media types the primary success response declares under `content`, in
+   * document order and exactly as written (`application/json; charset=utf-8`,
+   * `application/vnd.api+json`, a wildcard such as `application/*`). Present
+   * only when it declares at least one. Like `responseHeaders`, this lifts
+   * the primary entry's `contentTypes`, because `successResponses` only
+   * exists when an operation has more than one 2xx.
+   */
+  responseContentTypes?: string[];
+  /**
+   * One entry per `responseContentTypes` entry, in the same order, with the
+   * type that media type's schema resolves to. The entry for the media type
+   * `response` was read from carries that same TypeRef. Present only when
+   * `responseContentTypes` is.
+   */
+  responseContents?: ResponseContent[];
   /**
    * The `description` of the primary success response (the one `response` is
    * the body of), e.g. "The pet, with its owner." — often the clearest
@@ -177,6 +280,29 @@ export interface Operation {
   responseDescription?: string;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
+  /**
+   * The document's `default` response: what the operation returns for every
+   * status it does not list explicitly or by range. Present only when the
+   * spec declares one. It is kept apart from `errors` because it carries no
+   * status code (`ErrorResponse.statusCode` is a number emitters compare and
+   * format as one) and is not always an error — a spec may use it for its
+   * success body too. An emitter should treat its `type` as the fallback for
+   * any status that neither `errors`/`successResponses` nor `rangeResponses`
+   * covers. `response` is never promoted from it: when the operation declares
+   * no explicit 2xx, the emitter takes the success body from the `2XX` entry
+   * of `rangeResponses`, then from here.
+   */
+  defaultResponse?: DefaultResponse;
+  /**
+   * The document's `1XX`–`5XX` range responses, in declaration order. Present
+   * only when the spec declares at least one. A range covers every status in
+   * its hundred that the operation does not list explicitly, so an emitter
+   * resolves a status in the order OpenAPI does: the explicit entry, then
+   * the range, then `defaultResponse`. Ranges never feed `response`,
+   * `successResponses` or `errors`, whose numeric `statusCode` could not say
+   * which codes an entry stands for.
+   */
+  rangeResponses?: RangeResponse[];
   pagination?: PaginationMeta;
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
@@ -834,6 +960,11 @@ export function assignModelsToServices(
           referencedModels.add(name);
         }
       }
+      for (const { type } of collectResponseBodyTypes(op)) {
+        for (const name of collectModelRefs(type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -933,6 +1064,8 @@ export function collectResponseHeaders(op: Operation): ResponseHeader[] {
     op.responseHeaders,
     ...(op.successResponses ?? []).map((r) => r.headers),
     ...op.errors.map((e) => e.headers),
+    op.defaultResponse?.headers,
+    ...(op.rangeResponses ?? []).map((r) => r.headers),
   ];
   for (const list of lists) {
     if (!list || seen.has(list)) continue;
@@ -940,6 +1073,41 @@ export function collectResponseHeaders(op: Operation): ResponseHeader[] {
     result.push(...list);
   }
   return result;
+}
+
+/**
+ * The body type of every fallback response an operation declares: the
+ * `default` response's, then each range response's in declaration order,
+ * skipping entries that declare no body. Feeds `collectResponseBodyTypes`,
+ * which every pass that walks an operation's type refs goes through (as it
+ * goes through `collectResponseHeaders` for headers), so a model reached
+ * only as the body of a `default` or `4XX` response is materialized,
+ * assigned, renamed and validated like a primary response body.
+ */
+export function collectFallbackResponseTypes(op: Operation): TypeRef[] {
+  const result: TypeRef[] = [];
+  if (op.defaultResponse?.type) result.push(op.defaultResponse.type);
+  for (const range of op.rangeResponses ?? []) {
+    if (range.type) result.push(range.type);
+  }
+  return result;
+}
+
+/**
+ * Every type reference a webhook carries: its parameters' types and its
+ * request body. Every pass that walks an operation's type refs (reachability,
+ * ref rewriting and validation, the differ's direction index, inline-enum
+ * collection) walks a webhook's through this, so a model reached only through
+ * a webhook payload or header is treated the way one reached through an
+ * operation is, and a field added to `Webhook` later has one place to join.
+ */
+export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
+  const refs: TypeRef[] = [];
+  for (const param of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
+    refs.push(param.type);
+  }
+  if (webhook.requestBody) refs.push(webhook.requestBody);
+  return refs;
 }
 
 /**
@@ -961,6 +1129,23 @@ export interface ErrorResponse {
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
   /**
+   * Media types declared under `content`, in document order and as written.
+   * `type` is by definition the JSON body (`application/json`, else the first
+   * `+json` media type), so the list is present only when it says something
+   * `type` does not: the error declares another media type, a JSON media type
+   * other than plain `application/json` (`application/problem+json` alone,
+   * `application/json; charset=utf-8`), or a JSON body `type` could not be
+   * read from. An error that declares only `application/json` with a schema
+   * keeps its shape.
+   */
+  contentTypes?: string[];
+  /**
+   * One entry per `contentTypes` entry, in the same order. The entry for the
+   * media type `type` was read from carries the same TypeRef as `type`.
+   * Present only when `contentTypes` is.
+   */
+  contents?: ResponseContent[];
+  /**
    * The response's `description` as written in the document (e.g. "Not
    * found"). Present only when it has non-whitespace content; kept verbatim.
    */
@@ -974,9 +1159,153 @@ export interface SuccessResponse {
   /** Declared response headers. Present only when the spec declares at least one. */
   headers?: ResponseHeader[];
   /**
+   * Media types declared under `content`, in document order and as written.
+   * Present only when there is at least one.
+   */
+  contentTypes?: string[];
+  /**
+   * One entry per `contentTypes` entry, in the same order. The entry for the
+   * media type `type` was read from carries that same TypeRef. Present only
+   * when `contentTypes` is.
+   */
+  contents?: ResponseContent[];
+  /**
    * The response's `description` as written in the document (e.g. "The pet,
    * with its owner."). Present only when it has non-whitespace content; kept
    * verbatim.
    */
+  description?: string;
+}
+
+/**
+ * One media type a response declares under `content`, with the type its
+ * schema resolves to. `contentType` is kept exactly as written in the spec,
+ * parameters and all, so it can be sent back verbatim in an `Accept` header.
+ */
+export interface ResponseContent {
+  contentType: string;
+  type: TypeRef;
+}
+
+/**
+ * A response body type other than `Operation.response`, with where it comes
+ * from for diagnostics.
+ */
+export interface ResponseBodyType {
+  type: TypeRef;
+  /**
+   * The entry it belongs to: `contents.<media type>` for a secondary media
+   * type, `defaultResponse` for the `default` response's body,
+   * `rangeResponses.<range>` (`rangeResponses.4XX`) for a range response's.
+   */
+  source: string;
+}
+
+/**
+ * Every response body type an operation declares besides `response`: the
+ * bodies of its secondary media types (`collectAlternateResponseContents`,
+ * fallback responses' included), then the fallback bodies of its `default`
+ * and range responses (`collectFallbackResponseTypes`), and any body a later
+ * field adds. The primary type of each alternate 2xx and error entry is not
+ * included — walkers reach those through `successResponses[].type` and
+ * `errors[].type` where they do today. Every pass that walks an operation's
+ * type refs (reachability, model assignment, ref rewriting and validation,
+ * direction, compat filtering, enum collection) calls this beside
+ * `collectResponseHeaders`, so a new kind of body is reached everywhere by
+ * extending this one function.
+ */
+export function collectResponseBodyTypes(op: Operation): ResponseBodyType[] {
+  const result: ResponseBodyType[] = alternateResponseContents(op).map(({ content, source }) => ({
+    type: content.type,
+    source: `${source}.${content.contentType}`,
+  }));
+  if (op.defaultResponse?.type) result.push({ type: op.defaultResponse.type, source: 'defaultResponse' });
+  for (const range of op.rangeResponses ?? []) {
+    if (range.type) result.push({ type: range.type, source: `rangeResponses.${range.range}` });
+  }
+  return result;
+}
+
+/**
+ * Every response content entry whose type is reachable only through it: the
+ * entries of each success, error and fallback response other than the one
+ * the response's own `type` was read from, which shares that very TypeRef
+ * and is already reached through `response`, `successResponses[].type`,
+ * `errors[].type` or `collectFallbackResponseTypes`. The primary list is the
+ * same array as its `successResponses` entry when both exist, so it is
+ * visited once. Feeds `collectResponseBodyTypes`, which the walkers call.
+ */
+export function collectAlternateResponseContents(op: Operation): ResponseContent[] {
+  return alternateResponseContents(op).map(({ content }) => content);
+}
+
+/** `collectAlternateResponseContents`, each entry with the list it was read from (`contents`, `defaultResponse.contents`, `rangeResponses.4XX.contents`). */
+function alternateResponseContents(op: Operation): Array<{ content: ResponseContent; source: string }> {
+  const result: Array<{ content: ResponseContent; source: string }> = [];
+  const seen = new Set<ResponseContent[]>();
+  const owners: Array<{ contents?: ResponseContent[]; type?: TypeRef; source: string }> = [
+    { contents: op.responseContents, type: op.response, source: 'contents' },
+    ...(op.successResponses ?? []).map((entry) => ({ ...entry, source: 'contents' })),
+    ...op.errors.map((entry) => ({ ...entry, source: 'contents' })),
+    ...(op.defaultResponse ? [{ ...op.defaultResponse, source: 'defaultResponse.contents' }] : []),
+    ...(op.rangeResponses ?? []).map((entry) => ({ ...entry, source: `rangeResponses.${entry.range}.contents` })),
+  ];
+  for (const { contents, type, source } of owners) {
+    if (!contents || seen.has(contents)) continue;
+    seen.add(contents);
+    for (const content of contents) if (content.type !== type) result.push({ content, source });
+  }
+  return result;
+}
+
+/**
+ * The `default` response: the body and headers for every status the
+ * operation does not list. See `Operation.defaultResponse`.
+ */
+export interface DefaultResponse {
+  /**
+   * Response body type: the `application/json` body, else the first `+json`
+   * one; absent when the response declares neither.
+   */
+  type?: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
+  /**
+   * Media types declared under `content`, in document order and as written,
+   * exactly as on `SuccessResponse`. Present only when there is at least one.
+   */
+  contentTypes?: string[];
+  /**
+   * One entry per `contentTypes` entry, in the same order. The entry for the
+   * media type `type` was read from carries that same TypeRef. Present only
+   * when `contentTypes` is.
+   */
+  contents?: ResponseContent[];
+  /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
+  description?: string;
+}
+
+/** A Responses Object range key, uppercase as OpenAPI writes it (`4xx` is read as `4XX`). */
+export type StatusRange = '1XX' | '2XX' | '3XX' | '4XX' | '5XX';
+
+/**
+ * A range response: the body and headers for every status in one hundred
+ * (`4XX` → 400–499) that the operation does not list explicitly. See
+ * `Operation.rangeResponses`.
+ */
+export interface RangeResponse {
+  range: StatusRange;
+  /**
+   * Response body type: the `application/json` body, else the first `+json`
+   * one; absent when the response declares neither.
+   */
+  type?: TypeRef;
+  /** Declared response headers. Present only when the spec declares at least one. */
+  headers?: ResponseHeader[];
+  /** Media types declared under `content`, as on `DefaultResponse`. */
+  contentTypes?: string[];
+  /** One entry per `contentTypes` entry, as on `DefaultResponse`. */
+  contents?: ResponseContent[];
+  /** The response's own `description`, as on `SuccessResponse`/`ErrorResponse`; present only with non-whitespace content. */
   description?: string;
 }
