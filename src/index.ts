@@ -169,6 +169,7 @@ export type {
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  ServerChange,
 } from './differ/types.js';
 
 // Core parse + generate
