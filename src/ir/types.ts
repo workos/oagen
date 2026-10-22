@@ -819,12 +819,15 @@ export interface TypeParam {
 /**
  * Model definition (maps to an SDK model/data class). Every
  * `components/schemas` entry becomes one, except an enum (`Enum`) and an
- * array component — a schema that is an array and declares `items` — which
+ * array component — a schema that is an array and declares `items`, or an
+ * alias of one (a bare `$ref`, or an `allOf` of a `$ref` and limits) — which
  * becomes no model at all: a `$ref` to it resolves to the array it declares
  * (`{ kind: 'array' }`, under `nullable` when the component admits null),
- * and what its items reference is extracted under `<Component>Item…`. The
- * inline schemas the parser materializes — request bodies, responses, union
- * variants, nested objects, array items, map values — are models too.
+ * and what its items reference is extracted under `<Component>Item…`; the
+ * component's own `description`, `deprecated` and `externalDocs` are read
+ * by a field that names it with a bare `$ref` (`Field`). The inline schemas
+ * the parser materializes — request bodies, responses, union variants,
+ * nested objects, array items, map values — are models too.
  */
 export interface Model {
   name: string;
@@ -894,17 +897,31 @@ export interface Field {
   domainName?: string;
   type: TypeRef;
   required: boolean;
+  /**
+   * The field schema's own `description`; for a bare `$ref` to an array
+   * component — which names no model to carry the component's text — the
+   * component's, as `example` falls back to it. A `$ref` to a model, named
+   * union or enum leaves the text on it.
+   */
   description?: string;
   /**
    * The field schema's own `externalDocs`, when it declares a usable one —
    * read like `description`: for a `$ref` with an `externalDocs` sibling
    * (legal in OAS 3.1), the sibling's link, while the referenced model keeps
-   * its own; a bare `$ref` yields none. Absent otherwise. Documentation, not
+   * its own; a bare `$ref` yields none, unless it names an array component,
+   * whose link the field then carries. Absent otherwise. Documentation, not
    * shape: two fields that differ only here are one shape.
    */
   externalDocs?: ExternalDocs;
   readOnly?: boolean;
   writeOnly?: boolean;
+  /**
+   * Present, and `true`, when the field schema says `deprecated: true` — a
+   * keyword written beside a `$ref` included — or when a bare `$ref` names
+   * an array component that says so, since no model carries that
+   * component's flag. The flag of a model, named union or enum a `$ref`
+   * names stays on it.
+   */
   deprecated?: boolean;
   default?: unknown;
   /**

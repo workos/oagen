@@ -2467,7 +2467,7 @@ function buildOperation(
     inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   }
   if (reqBodyModels.length > 0 && requestBody) {
-    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
   return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
@@ -3586,17 +3586,17 @@ interface ResponseTypingContext {
  * (`ownerShares`), then every inline model the operations minted — request
  * bodies, primary response bodies with their nested objects and union
  * variants, envelope companions — shared on an identical shape only, so no
- * deferred schema can take one of their names for a shape the owner does
- * not share, whichever operation minted it; each resolved schema's own
- * models join it in turn, in document order (path order, then an
- * operation's secondary request bodies in content order, then the response
- * keys as written; a response's headers before its error body and its
- * secondary bodies, a fallback's body before its headers), so the first
- * owner of a name keeps it. The sites that derive from one bare name — one
- * kind, parent and name: the same header on several status codes or
- * operations, one media type's body on several status codes — share a
- * record of the stems they settled on and the renames made under them, so a
- * later one shares an identical shape under whichever name the earlier took
+ * deferred schema can take one of their names for a shape the owner does not
+ * share, whichever operation minted it; each resolved schema's own models
+ * join it in turn, in document order (path order, then an operation's
+ * secondary request bodies in content order, then the response keys as
+ * written; a response's headers before its error body and its secondary
+ * bodies, a fallback's body before its headers), so the first owner of a
+ * name keeps it. The sites that derive from one bare name — one kind, parent
+ * and name: the same header on several status codes or operations, one media
+ * type's body on several status codes — share a record of the stems they
+ * settled on and the renames made under them, so a later one shares an
+ * identical shape under whichever name the earlier took
  * (`materializeInlineSchema`). Returns the models materialized, having set
  * each target's `type`.
  */
@@ -3631,7 +3631,12 @@ function resolveDeferredInlineTypes(
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
     // model minted nothing here, see `attachSharedDeferredRefs`).
-    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
+    bundles.push({
+      qualifier: item.operationQualifier,
+      roots: [type],
+      models: models.slice(minted),
+      ...(isSentSite(item) ? { sent: true } : {}),
+    });
   }
   return { models, bundles };
 }
@@ -3795,8 +3800,14 @@ function materializeDeferredType(
     componentSchemas: item.componentSchemas,
     registry,
     operation: item.operationQualifier,
+    sent: isSentSite(item),
     models,
   });
+}
+
+/** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
+function isSentSite(item: DeferredInlineType): boolean {
+  return item.kind === 'request' || item.kind === 'param';
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
