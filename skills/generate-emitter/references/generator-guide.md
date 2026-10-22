@@ -159,6 +159,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
 - Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `default?`, `example?`, `examples?`, `style?`, `explode?`, `constraints?`
+  - `type` may reference a model the parser created for an inline object parameter (`style: deepObject` → `PetsFilter`), or an array, map or union of such, exactly as a response header's does; render it as that model and serialize it per `style`/`explode`
 - Output: One file per service/resource
 - Handle:
   - Path parameter interpolation (e.g., `/orgs/{id}` to target language's format string mechanism)

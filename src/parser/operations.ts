@@ -43,6 +43,7 @@ import {
   constraintsEntry,
   deprecatedEntry,
   collapsedNullableBranch,
+  foldSiblingProperties,
   nonObjectVariantContexts,
   unwrapNullableField,
 } from './schemas.js';
@@ -1835,29 +1836,52 @@ function buildOperation(
   // Use the service name as context so inline parameter enums get qualified
   // names. e.g., service "Auth" + param "provider" → "AuthProvider".
   const opContext = serviceName;
-  const pathParams = extractParams(wireParams, 'path', opContext, componentSchemas, componentExamples, opLabel);
-  const queryParams = extractParams(wireParams, 'query', opContext, componentSchemas, componentExamples, opLabel);
-  const headerParams = extractParams(
-    wireParams,
-    'header',
-    opContext,
+  // Names this operation's models in the shape registry, and qualifies a
+  // deferred model's name when one of them is taken across operations.
+  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
+  // What the typing of a parameter, a response header or a secondary,
+  // fallback or error body reads from the operation and the spec; a schema
+  // deferred through it is typed once every operation has been read
+  // (`resolveDeferredInlineTypes`).
+  const typing: ResponseTypingContext = {
+    componentHeaders,
     componentSchemas,
-    componentExamples,
-    opLabel,
-  ).filter((p) => p.name.toLowerCase() !== 'idempotency-key');
-  const cookieParams = extractParams(wireParams, 'cookie', opContext, componentSchemas, componentExamples, opLabel);
+    componentResponses,
+    serviceName: opContext,
+    operationQualifier,
+    deferred,
+    refSiblingDescriptions,
+    componentResponseModelNames,
+  };
+  // One location's parameters, typed by `extractParams`; a parameter whose
+  // inline schema mints a model is then deferred so the model is created
+  // under a name nothing else owns (`deferParameterModels`).
+  const extract = (location: ParameterObject['in'], source: ParameterObject[] = wireParams): Parameter[] => {
+    const params = extractParams(source, location, opContext, componentSchemas, componentExamples, opLabel);
+    deferParameterModels(
+      source.filter((p) => p.in === location),
+      params,
+      location,
+      typing,
+    );
+    return params;
+  };
+  const pathParams = extract('path');
+  const queryParams = extract('query');
+  // The idempotency header is the SDK's to inject (`injectIdempotencyKey`), not a parameter to type.
+  const headerParams = extract(
+    'header',
+    wireParams.filter((p) => !(p.in === 'header' && p.name.toLowerCase() === 'idempotency-key')),
+  );
+  const cookieParams = extract('cookie');
   // Keep the body-owned declarations on the operation so downstream passes
   // (inline-enum collection, the compat surface) still see what the spec
   // declared, even though no emitter serializes them to the URL.
   const bodyOwnedQueryParams =
     bodyOwnedNames.size > 0
-      ? extractParams(
-          allParams.filter((p) => p.in === 'query' && bodyOwnedNames.has(p.name)),
+      ? extract(
           'query',
-          opContext,
-          componentSchemas,
-          componentExamples,
-          opLabel,
+          allParams.filter((p) => p.in === 'query' && bodyOwnedNames.has(p.name)),
         )
       : [];
 
@@ -1875,9 +1899,6 @@ function buildOperation(
   // to `false`, and a non-boolean value is not a declaration of requiredness.
   // Set exactly when a body is, so the two fields can be read together.
   const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
-  // Names this operation's models in the shape registry, and qualifies a
-  // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
 
   // The page parameter's first value is read from its schema as written, so a
   // `default`/`minimum` behind `allOf: [{ $ref }]` or a nullable wrapper —
@@ -1928,29 +1949,11 @@ function buildOperation(
     endOfIteration: responseEndOfIteration,
     overrideItemType,
     envelopeCompanions,
-  } = extractResponses(
-    op.responses,
-    op,
-    pathModelBaseName,
-    path,
-    method,
-    componentSchemas,
-    {
-      componentHeaders,
-      componentSchemas,
-      componentResponses,
-      serviceName: opContext,
-      operationQualifier,
-      deferred,
-      refSiblingDescriptions,
-      componentResponseModelNames,
-    },
-    {
-      disabled: paginationDisabled,
-      dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
-      componentModels,
-    },
-  );
+  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, typing, {
+    disabled: paginationDisabled,
+    dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
+    componentModels,
+  });
   const inlineModels = [...responseModels, ...reqBodyModels];
 
   // An explicit `dataPath` that does not reach an array cannot type the
@@ -2591,6 +2594,13 @@ function extractRequestBody(
   // left pointing at a model with someone else's fields.
   const contextName = op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
 
+  // `properties` written beside a typing `allOf`/`oneOf`/`anyOf` are folded
+  // into the composition, as `schemaToTypeRef` and the field extractor read
+  // them (`foldSiblingProperties`), so the body is read the one way a field
+  // of the same schema is: the object branch below reads `properties` first
+  // and would otherwise drop the composition.
+  schema = foldSiblingProperties(schema);
+
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
   // compiles to a `oneOf` that code generators can't spread into named method
   // arguments — the caller is handed an opaque union and the generated snippets
@@ -2951,15 +2961,19 @@ type ModelShapeRegistry = InlineModelRegistry;
  * then the target carries a placeholder.
  */
 interface DeferredInlineType {
-  kind: 'header' | 'content' | 'fallback' | 'error';
+  kind: 'header' | 'content' | 'fallback' | 'error' | 'param';
   schema: SchemaObject;
   /**
    * The bare name the models derive from: the header name, the response stem
-   * + media type + role, a fallback body's `<Op><Label>Response` or an error
-   * body's `<Op>Error<code>`.
+   * + media type + role, a fallback body's `<Op><Label>Response`, an error
+   * body's `<Op>Error<code>` or a parameter's name.
    */
   name: string;
-  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
+  /**
+   * What tells this site from another of the same name within one operation:
+   * a status code, the label of a fallback response (`Default`,
+   * `ClientError`), or a parameter's location (`query`).
+   */
   statusCode: number | string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
@@ -3172,7 +3186,73 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
       return (index) => (index === 0 ? name : numbered(index - 1));
     case 'error':
       return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : `${name}Body${index}`);
+    case 'param': {
+      // Named like a header, with the location where a header has its
+      // status code: a clash within this operation (one name in two
+      // locations) reads best by location, one with a component, a primary
+      // body or another operation by operation name. Joined with `_` so a
+      // lower-case parameter name still starts a word (`ListPets_filter` →
+      // `ListPetsFilter`).
+      const byLocation = `${statusCode}_${name}`;
+      const byOperationName = `${operationQualifier}_${name}`;
+      const byOperationAndLocation = `${operationQualifier}_${statusCode}_${name}`;
+      return (index, firstClashOwners) => {
+        const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
+        const candidates = withinOperation
+          ? [name, byLocation, byOperationName, byOperationAndLocation]
+          : [name, byOperationName, byLocation, byOperationAndLocation];
+        return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
+      };
+    }
   }
+}
+
+/**
+ * Defer the typing of every parameter of one location whose inline schema
+ * mints a model — an object (`style: deepObject`), an array or map of
+ * objects, a union with an inline object variant, a nullable wrapper around
+ * one, at any depth — so the model is created, as a response header's is,
+ * once every primary model is known (`resolveDeferredInlineTypes`), under a
+ * name nothing else owns: `<Service><Param>` (`PetsFilter`), else the
+ * location-, operation- or number-qualified candidates `deferredNamingStem`
+ * lists. `extractParams` typed the parameter as the property of its name
+ * under the service, and the trial extraction here reads the same synthetic
+ * property, so the deferred site's first candidate is the name the
+ * parameter already references and a parameter that mints no model — a
+ * primitive, a `$ref`, an inline enum, an array of either — keeps the type
+ * it has and is not deferred. `raw` and `typed` are the location's
+ * parameters in document order, `typed[i]` built from `raw[i]`
+ * (`extractParams` maps the filtered list one to one).
+ */
+function deferParameterModels(
+  raw: readonly ParameterObject[],
+  typed: readonly Parameter[],
+  location: ParameterObject['in'],
+  ctx: ResponseTypingContext,
+): void {
+  const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
+  raw.forEach((param, index) => {
+    const target = typed[index];
+    if (!param.schema || !target) return;
+    const trial: Model[] = [];
+    extractInlineModelsFromProperties(
+      { properties: { [param.name]: param.schema } },
+      trial,
+      parentName,
+      ctx.componentSchemas,
+    );
+    if (trial.length === 0) return;
+    ctx.deferred.push({
+      kind: 'param',
+      schema: param.schema,
+      name: param.name,
+      statusCode: location,
+      operationQualifier: ctx.operationQualifier,
+      parentName,
+      componentSchemas: ctx.componentSchemas,
+      targets: [target],
+    });
+  });
 }
 
 /**

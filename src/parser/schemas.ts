@@ -440,19 +440,24 @@ export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } 
  */
 export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
   if (schema.$ref) return schema;
-  if (Array.isArray(schema.type)) {
-    const nonNullTypes = schema.type.filter((t) => t !== 'null');
-    if (nonNullTypes.length !== 1) return schema;
-    return unwrapNullableSchema({ ...schema, type: nonNullTypes[0], nullable: false });
+  // `properties` beside a typing composition are folded into it before any
+  // wrapper is stripped (`foldSiblingProperties`), so a nullable union
+  // written beside them collapses onto a variant that already carries them,
+  // and every site dispatches on the one shape `schemaToTypeRef` typed.
+  const folded = foldSiblingProperties(schema);
+  if (Array.isArray(folded.type)) {
+    const nonNullTypes = folded.type.filter((t) => t !== 'null');
+    if (nonNullTypes.length !== 1) return folded;
+    return unwrapNullableSchema({ ...folded, type: nonNullTypes[0], nullable: false });
   }
-  if (schema.nullable && schema.type) {
-    return unwrapNullableSchema({ ...schema, nullable: false });
+  if (folded.nullable && folded.type) {
+    return unwrapNullableSchema({ ...folded, nullable: false });
   }
   // A nullable union collapses onto its one non-null variant — decided by
   // `nullableUnionBranch`, the same definition `collapsedNullableBranch`
   // checks, so the check and the unwrap cannot disagree.
-  const branch = nullableUnionBranch(schema);
-  return branch ? unwrapNullableSchema(branch) : schema;
+  const branch = nullableUnionBranch(folded);
+  return branch ? unwrapNullableSchema(branch) : folded;
 }
 
 /**
@@ -463,9 +468,11 @@ export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
  * nullable union wrapper on the model side, shared by `unwrapNullableSchema`
  * and `collapsedNullableBranch`. `undefined` otherwise: no union, a union
  * under `allOf` (which `schemaToTypeRef` gives precedence), no `null`
- * variant, or more than one non-null variant.
+ * variant, or more than one non-null variant. Exported for the response
+ * path, which wraps an array it builds itself in `nullable` exactly when
+ * `schemaToTypeRef` would (`nullableIf`).
  */
-function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
+export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
   const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
   if (!variants) return undefined;
   const nonNull = variants.filter((v) => !isNullSchema(v));
@@ -711,8 +718,10 @@ export function extractSchemas(
   // a name oagen synthesised.
   activeComponentSchemaKeys = new Set(Object.keys(schemas));
   // A new document: the references an `allOf` merge inherits from a
-  // component's property (`inheritedModelRefsOf`) are recorded per document.
+  // component's property (`inheritedModelRefsOf`) are recorded per document,
+  // and so are the unions whose uncarried `properties` were reported.
   resetInheritedModelRefs();
+  resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
   // the same (cleaned, raw) pair resolveSchemaName() will hand it, so a
@@ -1066,7 +1075,10 @@ function extractNestedSchema(
   // One keyword types the schema (`classifyInlineSchema`, the order
   // `schemaToTypeRef` follows), so exactly one branch below runs: a schema
   // carrying both `items` and `properties` is an array here as it is there,
-  // and never also an object model under the same name.
+  // and never also an object model under the same name. `properties` beside
+  // the composition that types the schema are folded into it first, as
+  // `schemaToTypeRef` folds them, so the variants built here carry them.
+  schema = foldSiblingProperties(schema);
   const kind = classifyInlineSchema(schema);
   if (kind === 'union' && schema.oneOf) {
     const models: Model[] = [];
@@ -1729,6 +1741,141 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
 function isNullVariantSchema(schema: SchemaObject): boolean {
   return (
     schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
+  );
+}
+
+/**
+ * The schema `schemaToTypeRef` and every extractor dispatch on when a schema
+ * writes `properties` beside a composition that types it: the composition,
+ * carrying the properties. JSON Schema applies every keyword of one schema
+ * at once, so `{ properties: { id }, allOf: [{ $ref: Pet }] }` is a `Pet`
+ * that also has `id`, and `{ properties: { id }, oneOf: [pet, note] }` is
+ * one of `pet` or `note` with `id` in either case. The parser reads a
+ * composition before `properties` (`classifyInlineSchema`), so left as
+ * written the properties would be dropped — while the response and
+ * request-body paths, which read `properties` first, would drop the
+ * composition instead and type the same schema two ways.
+ *
+ * An `allOf` gains the schema's own `properties` and `required` as its first
+ * member, so the merge the parser already makes of such an `allOf` — the
+ * augmentation of a `$ref` member, a model merged from inline members, a
+ * single member unwrapped — carries them, the schema's own first. Each inline
+ * object variant of a `oneOf`/`anyOf` (`isInlineObjectSchema`: `properties`
+ * with `type: 'object'`, no `type`, or a type list naming `object`, so a
+ * nullable or multi-typed object variant included) gains them, the schema's
+ * own first and its own declaration kept where the variant declares the same
+ * property, so the union keeps every variant and each carries the shared
+ * properties. Every other variant is typed as written: a `$ref` names a
+ * component the parser never merges properties into (it may be an enum or a
+ * union it could not augment); a primitive, an array or an enum is no object,
+ * so `properties` constrains nothing in it; a nested composition or a
+ * nullable union wrapper is left to its own variants. `schemaToTypeRef`
+ * reports the variants that may be objects and did not take the properties
+ * (`warnOnUncarriedProperties`).
+ *
+ * Applies only when the schema's `type` admits an object (`object`, a type
+ * list naming it, or none) and the composition is what types the schema —
+ * an `allOf` or `oneOf` of bare limits beside `properties` leaves the schema
+ * the object it is. Returns the schema itself when nothing folds, else a
+ * copy with no `properties` or `required` of its own, every other keyword —
+ * `description`, `nullable`, limits, `discriminator`, `additionalProperties`
+ * — kept; so folding a folded schema changes nothing. A folded variant is a
+ * copy of the document's, and `foldedVariantOrigin` gives the document's
+ * back, so a decision recorded against it (a contested title,
+ * `isContestedTitle`) reaches the copy.
+ */
+export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
+  if (!hasFoldableProperties(schema)) return schema;
+  const kind = classifyInlineSchema(schema);
+  if (kind !== 'allOf' && kind !== 'union') return schema;
+  const { properties, required, ...rest } = schema;
+  const own: SchemaObject = { type: 'object', properties, ...(required && required.length > 0 && { required }) };
+  if (kind === 'allOf') return { ...rest, allOf: [own, ...(schema.allOf ?? [])] };
+  const conjoin = (variant: SchemaObject): SchemaObject => conjoinSiblingProperties(variant, own);
+  return schema.oneOf
+    ? { ...rest, oneOf: schema.oneOf.map(conjoin) }
+    : { ...rest, anyOf: (schema.anyOf ?? []).map(conjoin) };
+}
+
+/** Whether `schema` declares `properties` of its own that a composition beside them could carry (see `foldSiblingProperties`). */
+function hasFoldableProperties(schema: SchemaObject): boolean {
+  if (schema.$ref || schema.properties === undefined) return false;
+  const { type } = schema;
+  return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
+}
+
+/**
+ * `variant` carrying `own`'s properties and required names when it is an
+ * inline object (`isInlineObjectSchema`), itself otherwise. The schema's own
+ * properties come first and win where both declare a name; the required
+ * names are the union of both lists.
+ */
+function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): SchemaObject {
+  if (!isInlineObjectSchema(variant)) return variant;
+  const properties: Record<string, SchemaObject | undefined> = { ...own.properties };
+  for (const [name, property] of Object.entries(variant.properties ?? {})) {
+    if (!(name in properties)) properties[name] = property;
+  }
+  const required = [...new Set([...(own.required ?? []), ...(variant.required ?? [])])];
+  const folded: SchemaObject = { ...variant, properties, ...(required.length > 0 && { required }) };
+  foldedVariantOrigins.set(folded, foldedVariantOrigin(variant) ?? variant);
+  return folded;
+}
+
+/** The document's variant each folded copy was made from (`conjoinSiblingProperties`). */
+const foldedVariantOrigins = new WeakMap<SchemaObject, SchemaObject>();
+
+/** The document's variant `variant` is a folded copy of, or `undefined` when it is the document's own. */
+export function foldedVariantOrigin(variant: SchemaObject): SchemaObject | undefined {
+  return foldedVariantOrigins.get(variant);
+}
+
+/**
+ * The `oneOf`/`anyOf` lists `warnOnUncarriedProperties` has reported, so a
+ * union is reported once however many times it is typed. Keyed by the list,
+ * which every nullable unwrap keeps while it copies the schema around it.
+ * Replaced per document (`resetFoldWarnings`).
+ */
+let reportedUncarriedProperties = new WeakSet<readonly SchemaObject[]>();
+
+/** Forget which unions `warnOnUncarriedProperties` has reported; called once per document (`extractSchemas`). */
+export function resetFoldWarnings(): void {
+  reportedUncarriedProperties = new WeakSet();
+}
+
+/**
+ * Warn, once per union, when `properties` written beside a typing
+ * `oneOf`/`anyOf` are not carried into a variant that may be an object — a
+ * `$ref`, an `allOf`, a nested union, a map, or a nullable union wrapper
+ * around an object — because only an inline object variant takes them
+ * (`foldSiblingProperties`). A primitive, array or enum variant is no object
+ * and is not reported. Called by `schemaToTypeRef` with the context it types
+ * the schema under, before the fold, on the schema as written.
+ */
+function warnOnUncarriedProperties(
+  schema: SchemaObject,
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): void {
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (!variants || !hasFoldableProperties(schema) || classifyInlineSchema(schema) !== 'union') return;
+  if (reportedUncarriedProperties.has(variants)) return;
+  const uncarried: number[] = [];
+  variants.forEach((variant, index) => {
+    if (isNullVariantSchema(variant) || isInlineObjectSchema(variant)) return;
+    const kind = classifyInlineSchema(unwrapNullableSchema(variant));
+    if (kind === 'ref' || kind === 'allOf' || kind === 'union' || kind === 'map' || kind === 'object') {
+      uncarried.push(index + 1);
+    }
+  });
+  if (uncarried.length === 0) return;
+  reportedUncarriedProperties.add(variants);
+  const keyword = schema.oneOf ? 'oneOf' : 'anyOf';
+  const which = uncarried.length === 1 ? `variant ${uncarried[0]} is` : `variants ${uncarried.join(', ')} are`;
+  const context =
+    contextName === undefined ? '' : ` (context: ${parentModelName ? `${parentModelName}.` : ''}${contextName})`;
+  console.warn(
+    `[oagen] Warning: \`properties\` beside \`${keyword}\` are carried into its inline object variants only; ${which} typed as written, without them${context}`,
   );
 }
 
@@ -2992,8 +3139,11 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
     // One keyword types the field (`classifyInlineSchema`, the order
     // `schemaToTypeRef` follows), so exactly one branch below runs and the
     // models it builds are the ones the field's type references — never an
-    // `allOf` model and a `oneOf` variant under the same name.
-    const kind = classifyInlineSchema(fieldSchema);
+    // `allOf` model and a `oneOf` variant under the same name. `properties`
+    // beside the composition that types the field are folded into it first,
+    // as `schemaToTypeRef` typed the field above (`foldSiblingProperties`).
+    const composed = foldSiblingProperties(fieldSchema);
+    const kind = classifyInlineSchema(composed);
 
     if (kind === 'object' && fieldSchema.type === 'object' && fieldSchema.properties) {
       nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema, schemas));
@@ -3019,10 +3169,10 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    if (kind === 'allOf' && fieldSchema.allOf) {
+    if (kind === 'allOf' && composed.allOf) {
       const mergedProperties: Record<string, SchemaObject | undefined> = {};
       const mergedRequired: string[] = [];
-      for (const sub of fieldSchema.allOf) {
+      for (const sub of composed.allOf) {
         if (sub.properties) Object.assign(mergedProperties, sub.properties);
         if (sub.required) mergedRequired.push(...sub.required);
       }
@@ -3046,7 +3196,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    const unionVariants = kind === 'union' ? (fieldSchema.oneOf ?? fieldSchema.anyOf) : undefined;
+    const unionVariants = kind === 'union' ? (composed.oneOf ?? composed.anyOf) : undefined;
     if (unionVariants) {
       const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
       // Decided once, for the object variants' models and for the other
@@ -3054,7 +3204,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       const variantNames: ReadonlyMap<SchemaObject, string> =
         inlineObjectVariants.length > 0
           ? nameInlineVariants(
-              fieldSchema,
+              composed,
               qualifyNestedInlineName(name, fieldName),
               reservedInlineNames(fieldName, siblings, name),
             )
@@ -3063,7 +3213,7 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
         // A nullable wrapper's one branch is built with the wrapper's
         // `deprecated` and limits, as everywhere else; a multi-variant union's
         // variants are built as written (`collapsedNullableBranch`).
-        const branch = collapsedNullableBranch(fieldSchema);
+        const branch = collapsedNullableBranch(composed);
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;
@@ -3235,9 +3385,14 @@ export function schemaToTypeRef(
     );
   }
 
-  // From here on the nullable wrappers are gone, so one classification
-  // decides which keyword types the schema — the same one the inline-model
+  // From here on the nullable wrappers are gone. `properties` written beside
+  // a typing `allOf`/`oneOf`/`anyOf` are folded into it (the extractors
+  // dispatch on the same fold, through `unwrapNullableSchema`), the variants
+  // that cannot take them reported, and then one classification decides
+  // which keyword types the schema — the same one the inline-model
   // extractors dispatch on, so the models they build are the ones referenced.
+  warnOnUncarriedProperties(schema, contextName, parentModelName);
+  schema = foldSiblingProperties(schema);
   const inlineKind = classifyInlineSchema(schema);
 
   // Handle allOf — merge properties from all sub-schemas.

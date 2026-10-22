@@ -462,10 +462,12 @@ describe('response media types are matched by essence (issue #237)', () => {
       }
     });
 
-    it('a composed schema that also carries `items` stays on the union path, so a nullable array keeps its null', () => {
+    it('a nullable array written as a `oneOf`/`anyOf` beside `items` is the array it is, null kept', () => {
       // `classifyInlineSchema` types a schema with `items` beside a `oneOf` /
       // `anyOf` as a union — `schemaToTypeRef` reads it as a nullable array —
-      // so the array branch must step aside for it, or the null is lost.
+      // and the response path reads the array under the wrapper
+      // (`arraySchemaOf`, #282), so its items are `<Op>Item` exactly as under
+      // `type: ['array', 'null']`, and the null is kept.
       const nullableArray = (items: unknown, keyword: 'oneOf' | 'anyOf') => ({
         items,
         [keyword]: [{ type: 'array', items }, { type: 'null' }],
@@ -487,9 +489,9 @@ describe('response media types are matched by essence (issue #237)', () => {
         const { op, inlineModels } = getPet({ 'application/json': { schema } });
         expect(op.response, keyword).toEqual({
           kind: 'nullable',
-          inner: { kind: 'array', items: { kind: 'model', name: 'GetPetResponse' } },
+          inner: { kind: 'array', items: { kind: 'model', name: 'GetPetItem' } },
         });
-        expect(fieldNames(inlineModels, 'GetPetResponse'), keyword).toEqual(['email']);
+        expect(fieldNames(inlineModels, 'GetPetItem'), keyword).toEqual(['email']);
         expectClosed(op, inlineModels);
       }
     });
