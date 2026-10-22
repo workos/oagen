@@ -728,10 +728,11 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       });
     });
 
-    describe('items only the document can type (Greptile)', () => {
-      // A `$ref` wrapper whose array is itself a component: the IR walk ends
-      // on that component's model, so the items are read from the document,
-      // and whatever they reference must be materialized there — every shape.
+    describe('items behind an array component (Greptile)', () => {
+      // A `$ref` wrapper whose array is itself a component: the wrapper's
+      // field is typed as that array (#284), so the IR walk reaches the items
+      // the component pass materialized under the component's name, and
+      // whatever they reference must exist there — every shape.
       const id = { type: 'object', properties: { id: { type: 'string' } } };
       const shapes: Record<string, unknown> = {
         'a nullable object (type list)': { ...id, type: ['object', 'null'] },
@@ -777,12 +778,16 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
             for (const field of model.fields)
               for (const nested of modelNamesIn(field.type)) expect(names).toContain(nested);
           }
-          // Named from the path as the inline extractor names a field's items
-          // (`records` → `ListPetsRecord`): never from the response, nor the
-          // `<Op>Item` a recognized envelope's data array owns.
-          for (const name of referenced) expect(name).toContain('ListPetsRecord');
+          // Named from the array component as its items (`PetList` →
+          // `PetListItem`, #284): never from the path (`ListPetsRecord`), the
+          // response, nor the `<Op>Item` a recognized envelope's data array owns.
+          for (const name of referenced) expect(name).toContain('PetListItem');
+          for (const name of names) expect(name).not.toContain('ListPetsRecord');
           expect(names).not.toContain('ListPetsResponse');
           expect(names).not.toContain('ListPetsItem');
+          // The iterator yields exactly what the wrapper's field holds.
+          const records = ir.models.find((m) => m.name === 'Wrapper')?.fields.find((f) => f.name === 'records');
+          expect(records?.type).toEqual({ kind: 'array', items: op.pagination!.itemType });
           expect(warn).not.toHaveBeenCalled();
         },
       );
@@ -791,16 +796,15 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         const ir = await parseJson(wrapperSpec({ ...id, type: ['object', 'null'] }));
         expect(onlyOperation(ir).pagination?.itemType).toEqual({
           kind: 'nullable',
-          inner: { kind: 'model', name: 'ListPetsRecord' },
+          inner: { kind: 'model', name: 'PetListItem' },
         });
-        expect(ir.models.find((m) => m.name === 'ListPetsRecord')?.fields.map((f) => f.name)).toEqual(['id']);
+        expect(ir.models.find((m) => m.name === 'PetListItem')?.fields.map((f) => f.name)).toEqual(['id']);
       });
 
-      // An item type the document alone types is a reference nothing else in
-      // the IR holds — `response` is the wrapper — so every pass that walks an
-      // operation's types has to reach `pagination.itemType` on its own: the
-      // enum lift, the Json-suffix fold's rename, reference validation
-      // (Greptile, after the merge with main).
+      // The item type is the TypeRef the wrapper's `records` field holds, so
+      // every pass that walks a model's fields reaches it: the enum lift, the
+      // Json-suffix fold's guard, reference validation (Greptile, after the
+      // merge with main).
       const enumItems = { type: 'string', enum: ['cat', 'dog'] };
       const enumShapes: Record<string, unknown> = {
         'an inline enum': enumItems,
@@ -821,40 +825,81 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         },
       );
 
-      it('names the iterator enum from the path, stepping past a component enum with other members', async () => {
+      it('names the iterator enum from the array component, stepping past a component enum with other members', async () => {
         const ir = await parseJson(wrapperSpec(enumItems));
-        expect(onlyOperation(ir).pagination?.itemType).toMatchObject({ kind: 'enum', name: 'ListPetsRecord' });
-        expect(ir.enums.map((e) => e.name)).toEqual(['ListPetsRecord']);
+        expect(onlyOperation(ir).pagination?.itemType).toMatchObject({ kind: 'enum', name: 'PetListItem' });
+        expect(ir.enums.map((e) => e.name)).toEqual(['PetListItem']);
 
         // The name a component enum already owns with other members is not
-        // shared: the reference is renamed before it is promoted, like a
-        // header or error-body enum's.
-        const taken = await parseJson(wrapperSpec(enumItems, { ListPetsRecord: { type: 'string', enum: ['fish'] } }));
-        const itemType = onlyOperation(taken).pagination!.itemType;
-        expect(itemType).toMatchObject({ kind: 'enum', name: 'ListPetsRecord2' });
-        expect(taken.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
-          ['ListPetsRecord', ['fish']],
-          ['ListPetsRecord2', ['cat', 'dog']],
-        ]);
-      });
-
-      it('follows the Json-suffix fold when the items are a `…Json` component (Greptile)', async () => {
-        const ir = await parseJson(
-          wrapperSpec(
-            { $ref: '#/components/schemas/ItemJson' },
+        // shared: the array component's items step around it when they are
+        // named (`PetsItemItem`), as a named union's variants do, so the
+        // reference never needs renaming before it is promoted. (`PetList`'s
+        // own items cannot be claimed: a component key `PetListItem` cleans
+        // to `Pet`, so the array component is `Pets` here.)
+        const taken = await parseJson(
+          petsSpec(
             {
-              Item: { type: 'object', properties: { id: { type: 'string' } } },
-              ItemJson: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+              responses: jsonResponse({ $ref: '#/components/schemas/Wrapper' }),
+              'x-pagination': { dataPath: 'records' },
+            },
+            {
+              schemas: {
+                Wrapper: {
+                  type: 'object',
+                  properties: { records: { $ref: '#/components/schemas/Pets' }, total: { type: 'integer' } },
+                },
+                Pets: { type: 'array', items: enumItems },
+                PetsItem: { type: 'string', enum: ['fish'] },
+              },
             },
           ),
         );
-        expect(onlyOperation(ir).pagination?.itemType).toEqual({ kind: 'model', name: 'Item' });
-        expect(ir.models.map((m) => m.name)).not.toContain('ItemJson');
-        expect(ir.models.find((m) => m.name === 'Item')?.fields.map((f) => f.name)).toEqual(['id', 'name']);
-        // The fold's own notice, and no unresolved reference.
-        expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
-          '[oagen] Merged "ItemJson" into "Item" (2 fields, superset)',
+        const itemType = onlyOperation(taken).pagination!.itemType;
+        expect(itemType).toMatchObject({ kind: 'enum', name: 'PetsItemItem' });
+        expect(taken.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+          ['PetsItem', ['fish']],
+          ['PetsItemItem', ['cat', 'dog']],
         ]);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('keeps a `…Json` component the wrapper references through the array component, as for the array written inline (Greptile)', async () => {
+        const jsonModels = {
+          Item: { type: 'object', properties: { id: { type: 'string' } } },
+          ItemJson: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+        };
+        const ir = await parseJson(wrapperSpec({ $ref: '#/components/schemas/ItemJson' }, jsonModels));
+        // `Wrapper.records` is `array<ItemJson>`, a reference from a third
+        // model, which the fold's guard keeps both models for.
+        expect(onlyOperation(ir).pagination?.itemType).toEqual({ kind: 'model', name: 'ItemJson' });
+        expect(ir.models.map((m) => m.name)).toEqual(['Wrapper', 'Item', 'ItemJson']);
+        expect(ir.models.find((m) => m.name === 'Item')?.fields.map((f) => f.name)).toEqual(['id']);
+        expect(warn).not.toHaveBeenCalled();
+
+        // The same wrapper with the array written inline reads identically.
+        const inline = await parseJson(
+          petsSpec(
+            {
+              responses: jsonResponse({ $ref: '#/components/schemas/Wrapper' }),
+              'x-pagination': { dataPath: 'records' },
+            },
+            {
+              schemas: {
+                Wrapper: {
+                  type: 'object',
+                  properties: {
+                    records: { type: 'array', items: { $ref: '#/components/schemas/ItemJson' } },
+                    total: { type: 'integer' },
+                  },
+                },
+                ...jsonModels,
+              },
+            },
+          ),
+        );
+        expect(inline.models).toEqual(ir.models);
+        expect(onlyOperation(inline).pagination).toEqual(onlyOperation(ir).pagination);
+        expect(warn).not.toHaveBeenCalled();
       });
     });
   });

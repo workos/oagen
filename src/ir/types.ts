@@ -680,8 +680,9 @@ export interface Parameter {
    * Validation keywords from the parameter's schema. When that schema is a
    * `$ref`, the target's keywords are merged underneath the parameter's own
    * — the per-value fallback `default` and `example` use — so a parameter
-   * can be read on its own without chasing the fieldless alias model the
-   * target also becomes. Absent when neither declares any.
+   * can be read on its own without chasing the target (a primitive
+   * component becomes a fieldless model; an array component becomes no
+   * model). Absent when neither declares any.
    */
   constraints?: Constraints;
 }
@@ -747,7 +748,16 @@ export interface TypeParam {
   default?: TypeRef;
 }
 
-/** Model definition (maps to an SDK model/data class) */
+/**
+ * Model definition (maps to an SDK model/data class). Every
+ * `components/schemas` entry becomes one, except an enum (`Enum`) and an
+ * array component — a schema that is an array and declares `items` — which
+ * becomes no model at all: a `$ref` to it resolves to the array it declares
+ * (`{ kind: 'array' }`, under `nullable` when the component admits null),
+ * and what its items reference is extracted under `<Component>Item…`. The
+ * inline schemas the parser materializes — request bodies, responses, union
+ * variants, nested objects, array items, map values — are models too.
+ */
 export interface Model {
   name: string;
   description?: string;

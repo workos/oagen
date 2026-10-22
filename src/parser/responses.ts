@@ -14,6 +14,7 @@ import {
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
+  isArrayComponentRef,
   isArraySchema,
   isInlineObjectSchema,
   collapsedNullableBranch,
@@ -200,13 +201,15 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   }
 
   // Find array properties (typed, nullable, or `items` with no `type` —
-  // `isArraySchema`) and non-array companion properties
+  // `isArraySchema` — or a `$ref` to an array component, which
+  // `schemaToTypeRef` types as the array it declares) and non-array
+  // companion properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (isArraySchema(propSchema)) {
+    if (isArraySchema(propSchema) || isArrayComponentRef(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -257,7 +260,18 @@ function extractListResponse(
   // The property's own text, as `buildFieldFromSchema` keeps it for every
   // companion beside it; an item schema's description belongs to the item.
   const dataDescription = dataProp?.description;
-  if (dataProp && isArraySchema(dataProp) && dataProp.items) {
+  // The data array's type when it is a `$ref` to an array component: the
+  // array the component declares, with the component's own nullability.
+  let dataType: TypeRef | undefined;
+  if (dataProp && isArrayComponentRef(dataProp)) {
+    // A `$ref` to an array component, under any nullable wrapper, is the
+    // array the component declares, its items named under the component
+    // (`<Component>Item…`) and already materialized by the component pass —
+    // nothing is minted here, and `<Operation>Item` stays free.
+    dataType = schemaToTypeRef(dataProp, contextName);
+    const array = dataType.kind === 'nullable' ? dataType.inner : dataType;
+    if (array.kind === 'array') itemTypeRef = array.items;
+  } else if (dataProp && isArraySchema(dataProp) && dataProp.items) {
     const items = dataProp.items;
     const itemName = contextName.replace(/Response$/, '') + 'Item';
     if (items.$ref) {
@@ -304,10 +318,11 @@ function extractListResponse(
     // the SDK returns may be null, so the wrapper `schemaToTypeRef` would give
     // the field stays on `response` — `envelopeFields` leaves `data` out, so
     // nothing else records it — while `itemType` is still what an iterator
-    // yields (`paginatedItemType` unwraps the same wrapper).
-    response: dataProp
-      ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef })
-      : { kind: 'array', items: itemTypeRef },
+    // yields (`paginatedItemType` unwraps the same wrapper). A `$ref` to an
+    // array component carries the component's nullability the same way.
+    response:
+      dataType ??
+      (dataProp ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef }) : { kind: 'array', items: itemTypeRef }),
     inlineModels,
     isPaginated: true,
     dataPath,
