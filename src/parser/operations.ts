@@ -2253,7 +2253,7 @@ function buildOperation(
     inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   }
   if (reqBodyModels.length > 0 && requestBody) {
-    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
   return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
@@ -3417,7 +3417,12 @@ function resolveDeferredInlineTypes(
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
     // model minted nothing here, see `attachSharedDeferredRefs`).
-    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
+    bundles.push({
+      qualifier: item.operationQualifier,
+      roots: [type],
+      models: models.slice(minted),
+      ...(isSentSite(item) ? { sent: true } : {}),
+    });
   }
   return { models, bundles };
 }
@@ -3581,8 +3586,14 @@ function materializeDeferredType(
     componentSchemas: item.componentSchemas,
     registry,
     operation: item.operationQualifier,
+    sent: isSentSite(item),
     models,
   });
+}
+
+/** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
+function isSentSite(item: DeferredInlineType): boolean {
+  return item.kind === 'request' || item.kind === 'param';
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */

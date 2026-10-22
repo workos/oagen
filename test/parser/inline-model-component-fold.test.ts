@@ -6,6 +6,7 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { modelAdmits } from '../../src/parser/inline-models.js';
 import {
   collectModelRefs,
+  collectRequestBodyTypes,
   collectResponseHeaders,
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
@@ -90,6 +91,7 @@ function operationRefs(op: Operation): Array<[string, TypeRef]> {
   if (op.pagination) refs.push([`${op.name}.items`, op.pagination.itemType]);
   for (const h of collectResponseHeaders(op)) refs.push([`${op.name}.${h.name}`, h.type]);
   for (const { source, type } of collectResponseBodyTypes(op)) refs.push([`${op.name}.${source}`, type]);
+  for (const { source, type } of collectRequestBodyTypes(op)) refs.push([`${op.name}.${source}`, type]);
   for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
     refs.push([`${op.name}(${p.name})`, p.type]);
   }
@@ -561,6 +563,131 @@ describe('a component whose inline child is named like another component (Grepti
     expect(opsOf(spec).createHolder?.requestBody).toEqual({ kind: 'model', name: 'CreateHolderRequest' });
     expect(warnings).toEqual([renamed('HolderMeta', 'HolderMeta2')]);
     expectSound(spec, { Holder: ['meta'], HolderMeta: ['legacyId'] });
+  });
+});
+
+describe('what the SDK sends shares a component only on an identical shape (review)', () => {
+  const required = obj({ title: str }, { required: ['title'] });
+  const optional = obj({ title: str });
+
+  it('a request body: a looser component would let a caller omit what the operation requires', async () => {
+    const { spec, warnings } = await parse(
+      'request-looser-component',
+      specDoc({ CreateNoteRequest: optional }, { '/notes': postOp('createNote', required) }),
+    );
+    expect(describeModels(spec)).toEqual([
+      'CreateNoteRequest { title: string }',
+      'CreateNoteRequest2 { title!: string }',
+    ]);
+    expect(opsOf(spec).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
+    expect(warnings).toEqual([renamed('CreateNoteRequest', 'CreateNoteRequest2')]);
+    expectSound(spec, { CreateNoteRequest: ['title'] });
+    // An identical component is shared, as for any site.
+    const same = await parse(
+      'request-same-component',
+      specDoc({ CreateNoteRequest: required }, { '/notes': postOp('createNote', required) }),
+    );
+    expect(describeModels(same.spec)).toEqual(['CreateNoteRequest { title!: string }']);
+    expect(same.warnings).toEqual([]);
+  });
+
+  it('a secondary request body, through the shape registry', async () => {
+    const post = {
+      post: {
+        operationId: 'createNote',
+        requestBody: { content: { 'application/json': { schema: str }, 'application/xml': { schema: required } } },
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: str } } } },
+      },
+    };
+    const { spec, warnings } = await parse(
+      'secondary-request-looser-component',
+      specDoc({ CreateNoteApplicationXmlRequest: optional }, { '/notes': post }),
+    );
+    const types = collectRequestBodyTypes(opsOf(spec).createNote!).map(({ type }) => type);
+    expect(types).toContainEqual({ kind: 'model', name: 'CreateNoteApplicationXmlRequest2' });
+    expect(describeModels(spec)).toEqual([
+      'CreateNoteApplicationXmlRequest { title: string }',
+      'CreateNoteApplicationXmlRequest2 { title!: string }',
+    ]);
+    expect(warnings).toEqual([]);
+    expectSound(spec, { CreateNoteApplicationXmlRequest: ['title'] });
+  });
+});
+
+describe('identical bodies that must leave a component’s name share one model (review)', () => {
+  const widget = obj({ object: { type: 'string', const: 'widget' }, id: str, name: str });
+
+  it('under the first site’s qualified name, in either path order', async () => {
+    for (const { order, spec, warnings } of await parseBothOrders('twins', { Widget: obj({ id: str }) }, [
+      ['/a-widgets/{id}', getOp('getAWidget', widget)],
+      ['/b-widgets/{id}', getOp('getBWidget', widget)],
+    ])) {
+      const first = order === 'as-written' ? 'GetAWidget' : 'GetBWidget';
+      expect(describeModels(spec), order).toEqual([
+        'Widget { id: string }',
+        `${first}Widget { object: literal, id: string, name: string }`,
+      ]);
+      expect(opsOf(spec).getAWidget?.response, order).toEqual({ kind: 'model', name: `${first}Widget` });
+      expect(opsOf(spec).getBWidget?.response, order).toEqual({ kind: 'model', name: `${first}Widget` });
+      expect(warnings, order).toEqual([`${renamed('Widget', `${first}Widget`)} (shared by 2 sites)`]);
+      expectSound(spec, { Widget: ['id'] });
+    }
+  });
+});
+
+describe('two webhook keys sharing one path item (Greptile round 2)', () => {
+  const titled = (title: string, tag: string, field: string) =>
+    obj({ kind: { type: 'string', const: tag }, [field]: str }, { title });
+  const doc = {
+    openapi: '3.1.0',
+    info: { title: 'hooks', version: '1' },
+    paths: {},
+    webhooks: {
+      'pet.adopted': { $ref: '#/components/pathItems/shared' },
+      'pet.returned': { $ref: '#/components/pathItems/shared' },
+    },
+    components: {
+      schemas: { Comp: obj({ id: str }) },
+      pathItems: {
+        shared: {
+          post: {
+            operationId: 'shared',
+            parameters: [{ name: 'X-Comp', in: 'header', schema: { $ref: '#/components/schemas/Comp' } }],
+            requestBody: {
+              content: { 'application/json': { schema: { oneOf: [titled('Comp', 'c', 'c'), titled('B', 'b', 'b')] } } },
+            },
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+    },
+  };
+
+  it('renames the shared variant on both and keeps an explicit `$ref` to the component on both', async () => {
+    const { spec, warnings } = await parse('shared-webhooks', doc);
+    expect(spec.webhooks?.map((w) => w.name)).toEqual(['pet.adopted', 'pet.returned']);
+    for (const webhook of spec.webhooks ?? []) {
+      expect(webhook.requestBody, webhook.name).toEqual({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'SharedComp' },
+          { kind: 'model', name: 'B' },
+        ],
+        compositionKind: 'oneOf',
+        discriminator: { property: 'kind', mapping: { c: 'SharedComp', b: 'B' } },
+      });
+      expect(
+        webhook.headerParams.map((p) => [p.name, p.type]),
+        webhook.name,
+      ).toEqual([['X-Comp', { kind: 'model', name: 'Comp' }]]);
+    }
+    expect(describeModels(spec).sort()).toEqual([
+      'B { kind: literal, b: string }',
+      'Comp { id: string }',
+      'SharedComp { kind: literal, c: string }',
+    ]);
+    expect(warnings).toEqual([renamed('Comp', 'SharedComp')]);
+    expectSound(spec, { Comp: ['id'] });
   });
 });
 

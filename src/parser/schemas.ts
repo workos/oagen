@@ -3801,6 +3801,11 @@ export function isComponentModelRef(ref: ModelRef): boolean {
   return componentModelRefs.has(ref);
 }
 
+/** Record `ref` as built from a `$ref` to a component: for a copy of a marked reference (`cloneTypeRef`), which a structural clone would leave unmarked. */
+export function markComponentModelRef(ref: ModelRef): void {
+  componentModelRefs.add(ref);
+}
+
 export function schemaToTypeRef(
   schema: SchemaObject,
   contextName?: string,

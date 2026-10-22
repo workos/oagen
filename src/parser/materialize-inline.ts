@@ -58,10 +58,13 @@ export interface InlineModelOwner {
  * `fingerprint`: a declared model (`owner.model`) when it admits the shape —
  * the same fields and types, the owner no stricter on requiredness or
  * nullability, everything else identical — and an operation's model when the
- * fingerprints agree. The one question every clash check below asks.
+ * fingerprints agree. A shape the SDK sends (`sent`: a request body, a
+ * parameter) shares a declared model's name on an identical fingerprint
+ * only: typed as a looser component, a caller could leave out what the
+ * operation requires. The one question every clash check below asks.
  */
-export function ownerShares(owner: InlineModelOwner, model: Model, fingerprint: string): boolean {
-  return owner.model ? modelAdmits(owner.model, model) : owner.fingerprint === fingerprint;
+export function ownerShares(owner: InlineModelOwner, model: Model, fingerprint: string, sent = false): boolean {
+  return owner.model && !sent ? modelAdmits(owner.model, model) : owner.fingerprint === fingerprint;
 }
 
 /** Record every model of `models` the registry does not know yet as owned by `operation`; the first owner keeps a name. */
@@ -148,6 +151,8 @@ export interface MaterializeInlineOptions {
   registry: InlineModelRegistry;
   /** Recorded as the owner of every model registered here. */
   operation?: string;
+  /** The schema is what the SDK sends (a request body, a parameter): a component shares its name only on an identical shape (`ownerShares`). */
+  sent?: boolean;
   /** Where the materialized models go. */
   models: Model[];
 }
@@ -351,7 +356,7 @@ function runTrial(
   const clashing = models
     .filter((model) => {
       const owner = options.registry.get(model.name);
-      return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!);
+      return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!, options.sent);
     })
     .map((model) => model.name)
     .sort();
@@ -378,7 +383,7 @@ function commit(trial: Trial, options: MaterializeInlineOptions): TypeRef {
   for (const model of trial.models) {
     const fingerprint = trial.fingerprints.get(model)!;
     const owner = options.registry.get(model.name);
-    if (owner && ownerShares(owner, model, fingerprint)) continue;
+    if (owner && ownerShares(owner, model, fingerprint, options.sent)) continue;
     if (owner !== undefined) {
       throw new Error(
         `Inline model "${model.name}" would overwrite a model of another shape; this is a bug in materializeInlineSchema.`,
@@ -532,7 +537,7 @@ function renameClashing(
           if (model.name === oldRoot) return true;
           if (!model.name.startsWith(oldRoot)) return false;
           const owner = registry.get(model.name);
-          return owner === undefined || !ownerShares(owner, model, fingerprints.get(model)!);
+          return owner === undefined || !ownerShares(owner, model, fingerprints.get(model)!, options.sent);
         })
         .map((model) => model.name);
       for (const name of moving) {
@@ -554,7 +559,7 @@ function renameClashing(
     clashing = trial.models
       .filter((model) => {
         const owner = registry.get(model.name);
-        return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!);
+        return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!, options.sent);
       })
       .map((model) => model.name)
       .sort();

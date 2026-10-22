@@ -1191,20 +1191,22 @@ describe('a name an operation mints too (MichaelDeBoey, #285)', () => {
   // derived from an explicit identifier — a component key, an operationId —
   // are used verbatim on both sides, and the clash between an
   // operation-minted name and a component-owned one is #285's: the
-  // component's definition wins, with the parser's existing warning.
+  // component's definition stands, and the operation's items take a name of
+  // their own when the component does not admit them.
   const component = {
     ListPets: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } } } },
     Holder: { type: 'object', properties: { l: ref('ListPets') } },
   };
   const listPets = (items: unknown) => ({ '/pets': getOp('listPets', { type: 'array', items }) });
 
-  it('keeps the component’s items under the shared name and warns when the shapes differ', async () => {
+  it('keeps the component’s items under the shared name and renames the operation’s when the shapes differ', async () => {
     const spec = await parse(specDoc(component, listPets({ type: 'object', properties: { id: { type: 'string' } } })));
-    expect(opsOf(spec).listPets.response).toEqual(array(model('ListPetsItem')));
+    expect(opsOf(spec).listPets.response).toEqual(array(model('ListPetsItem2')));
     expect(fieldType(spec, 'Holder', 'l')).toEqual(array(model('ListPetsItem')));
     expect(spec.models.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name)).toEqual(['name']);
+    expect(spec.models.find((m) => m.name === 'ListPetsItem2')?.fields.map((f) => f.name)).toEqual(['id']);
     expect(warnings()).toEqual([
-      '[oagen] Warning: Inline model "ListPetsItem" has different fields than component schema — using component schema',
+      '[oagen] Renamed inline model "ListPetsItem" → "ListPetsItem2": its shape differs from component schema "ListPetsItem"',
     ]);
   });
 
