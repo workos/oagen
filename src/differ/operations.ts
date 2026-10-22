@@ -280,9 +280,10 @@ function endOfIterationEqual(
  * carry that distinction. Descriptions on a server or a variable, enum order,
  * a repeated enum value and position do not count there, so they do not here.
  * Neither does the spelling of OpenAPI's default server (#291): a list that
- * is empty and one that is `/` alone without variables are the same list
- * there, so an operation served from `/` written out and one served from a
- * document that declares nothing are served from the same place.
+ * is empty and one that is `/` alone (description and variables aside, since
+ * `/` references no variable) are the same list there, so an operation served
+ * from `/` written out and one served from a document that declares nothing
+ * are served from the same place.
  */
 function effectiveServersChanged(oldServers: ServerEntry[], newServers: ServerEntry[]): boolean {
   return diffServers(asDocument(oldServers), asDocument(newServers)).length > 0;

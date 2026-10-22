@@ -4,7 +4,7 @@ import { diffServers } from '../../src/differ/servers.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import { resolveServerUrl } from '../../src/ir/server-url.js';
+import { isDefaultServerList, resolveServerUrl, serversBeyondDefault } from '../../src/ir/server-url.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Operation, ServerEntry, ServerVariable } from '../../src/ir/types.js';
 
@@ -414,5 +414,40 @@ describe("an operation's servers – the comment on #292", () => {
         classification: 'additive',
       },
     ]);
+  });
+});
+
+describe("OpenAPI's default server with a variable (#291 read by the #292 rule)", () => {
+  const rootWithPort: ServerEntry[] = [{ url: '/', variables: { port: { default: '443' } } }];
+  const listNotes: Operation = {
+    name: 'listNotes',
+    httpMethod: 'get',
+    path: '/notes',
+    pathParams: [],
+    queryParams: [],
+    headerParams: [],
+    response: { kind: 'primitive', type: 'string' },
+    errors: [],
+    injectIdempotencyKey: false,
+  };
+
+  it('is the default: `/` references no variable, so writing one on it declares nothing beyond the default', () => {
+    expect(isDefaultServerList(rootWithPort)).toBe(true);
+    expect(serversBeyondDefault(rootWithPort)).toEqual([]);
+  });
+
+  it('reports nothing against a document without servers or one that writes `/` out, in either direction', () => {
+    expect(diffServers(spec(rootWithPort), spec())).toEqual([]);
+    expect(diffServers(spec(), spec(rootWithPort))).toEqual([]);
+    expect(diffServers(spec([{ url: '/' }]), spec(rootWithPort))).toEqual([]);
+    expect(diffServers(spec(rootWithPort), spec([{ url: '/' }]))).toEqual([]);
+  });
+
+  it('does not flip serversChanged for an operation that gains `/` with a variable under a document without servers', () => {
+    const changes = diffOperations('Notes', [listNotes], [{ ...listNotes, servers: rootWithPort }], {
+      old: undefined,
+      new: undefined,
+    });
+    expect(changes).toEqual([]);
   });
 });

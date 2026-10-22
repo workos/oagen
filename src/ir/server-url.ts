@@ -161,12 +161,13 @@ const DEFAULT_SERVER_URL = '/';
  * OpenAPI gives a document with no `servers`, or `servers: []`, a single
  * server with `url: '/'`; a document that writes that server out declares
  * nothing beyond it. So `undefined`, an empty list, and a list of exactly one
- * entry whose `url` is `/` and which declares no variables (`variables`
- * absent or empty, by own key) are all the default. The entry's `description`
- * does not count: the default server has none, and a description changes
- * nothing about where a request goes. A `/` entry that declares a variable, a
- * template that merely resolves to `/`, and `/` listed beside another server
- * are not the default.
+ * entry whose `url` is `/` are all the default. Neither the entry's
+ * `description` nor its `variables` count: the default server has neither, a
+ * description changes nothing about where a request goes, and `/` contains no
+ * placeholder (`serverUrlPlaceholders('/')` is empty), so a variable declared
+ * on it is never referenced and cannot change where it points either (#292).
+ * A template that merely resolves to `/` (a referenced variable whose default
+ * is `/`) and `/` listed beside another server are not the default.
  *
  * The parser (`Operation.servers`) and the differ (`base-url-changed`,
  * `server-added`, `server-removed`, `serversChanged`) read lists through
@@ -175,18 +176,16 @@ const DEFAULT_SERVER_URL = '/';
  */
 export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
   if (!servers || servers.length === 0) return true;
-  if (servers.length !== 1) return false;
-  const [only] = servers;
-  return only.url === DEFAULT_SERVER_URL && Object.keys(only.variables ?? {}).length === 0;
+  return servers.length === 1 && servers[0].url === DEFAULT_SERVER_URL;
 }
 
 /**
  * The servers a list declares beyond OpenAPI's default: `servers` itself
  * (the same array, not a copy) when it is not the default by
  * `isDefaultServerList`, else an empty list. A document without `servers`,
- * one with `servers: []`, and one whose only server is `/` without variables
- * all come out as `[]`, which is how the parser and the differ compare them
- * as one thing.
+ * one with `servers: []`, and one whose only server is `/` (description and
+ * variables aside) all come out as `[]`, which is how the parser and the
+ * differ compare them as one thing.
  */
 export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
   return servers && !isDefaultServerList(servers) ? servers : [];

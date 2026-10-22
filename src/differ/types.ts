@@ -334,7 +334,8 @@ export interface OperationModified {
    * document is the document-level diff's to report. So a document that moves
    * to where an operation already pointed is not a change to that operation.
    * OpenAPI's default server is one list however it is spelled (#291): no
-   * servers and `/` alone without variables are served from the same place.
+   * servers and `/` alone — description and variables aside, since `/`
+   * references no variable — are served from the same place.
    */
   serversChanged: boolean;
   /**

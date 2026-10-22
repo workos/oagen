@@ -661,12 +661,11 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
     ]);
   });
 
-  it('still treats `/` with a variable as a server of its own', () => {
+  it('treats `/` with a variable as the default too: `/` references no variable, so none can move it (#292)', () => {
     const rootWithPort = server('/', { port: { default: '443' } });
-    expect(diffServers(spec([rootWithPort]), spec())).toEqual([
-      { kind: 'base-url-changed', oldBaseUrl: '/', newBaseUrl: '', classification: 'breaking' },
-      { kind: 'server-removed', url: '/', classification: 'breaking' },
-    ]);
+    expect(diffServers(spec([rootWithPort]), spec())).toEqual([]);
+    expect(diffServers(spec(), spec([rootWithPort]))).toEqual([]);
+    expect(diffServers(spec([root]), spec([rootWithPort]))).toEqual([]);
   });
 
   it('still treats a template that merely resolves to `/` as a server of its own', () => {
