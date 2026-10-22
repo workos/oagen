@@ -428,13 +428,23 @@ export function extractOperations(
     ),
   );
 
+  // The API root each operation's path sits under, for every step below: none
+  // for a tagged operation, whose service is its tag.
+  const rootLengthOf = (op: Operation) => (tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot));
+
   // Split services when a single tag groups operations from multiple path prefixes.
   // Example: /organizations and /organization_domains both tagged "organizations"
   // should become separate services based on their first path segment.
+  // The segment compared is the one the service would be named from without
+  // the tag (see serviceSegmentIndex): the first for a tagged operation, the
+  // first past the API root for an untagged one, so `/notes` and
+  // `/api/v1/notes` stay together in `Notes` rather than the latter being
+  // moved to `Api` after its name was shortened for `Notes`.
   for (const [serviceName, operations] of serviceMap) {
     const pathGroups = new Map<string, Operation[]>();
     for (const op of operations) {
-      const firstSeg = op.path.split('/').filter(Boolean)[0] ?? '';
+      const segments = op.path.split('/').filter(Boolean);
+      const firstSeg = segments[serviceSegmentIndex(segments, rootLengthOf(op))] ?? '';
       const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
       const group = pathGroups.get(groupKey) ?? [];
       group.push(op);
@@ -459,9 +469,7 @@ export function extractOperations(
   // Multiple operations can get the same name (e.g., several "list" endpoints
   // in UserManagement for users, invitations, auth factors, etc.).
   for (const [serviceName, operations] of serviceMap) {
-    disambiguateOperationNames(operations, pathNamed, serviceName, (op) =>
-      tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot),
-    );
+    disambiguateOperationNames(operations, pathNamed, serviceName, rootLengthOf);
   }
 
   const declaredTags = indexDocumentTags(documentTags);
@@ -606,10 +614,16 @@ function pathRootLength(segments: readonly string[]): number {
  * `/api/v1/notes` contributes `api/v1`, `/wiki/rest/api/content` contributes
  * `wiki/rest/api`, `/api/user_management/users` contributes `api` alone and
  * `/api/{tenant}/notes` contributes `api`, a parameter ending the run. The
- * document root is the longest marker-terminated prefix every contribution
- * shares, compared verbatim: `/api/v1/…` beside `/api/v2/…` gives `api`, and
- * `/v1/…` beside `/v2/…` gives nothing, so the two versions stay apart
- * instead of merging into one service per resource.
+ * document root is the longest marker-terminated prefix shared, compared
+ * verbatim, by every contribution that no other contribution extends:
+ * `/api/v1/…` beside `/api/v2/…` gives `api`, and `/v1/…` beside `/v2/…`
+ * gives nothing, so the two versions stay apart instead of merging into one
+ * service per resource. A contribution that is a prefix of another —
+ * `/api/openapi.json` or `/api/admin/users` beside `/api/v1/notes` — does not
+ * shorten the root to `api` for every path: it skips only its own `api`
+ * (see apiRootLengthOf), and `/api/v1/notes` stays `Notes` rather than
+ * landing in `V1`. Only a second version disagrees with the first, and that
+ * alone is what needs the shorter root.
  *
  * A path with no marker at all (`/health`, `/openapi.json`) contributes
  * nothing: it sits outside any root and keeps its own first segment, and it
@@ -622,7 +636,7 @@ function pathRootLength(segments: readonly string[]): number {
  * root; nor do path items that declare no operation.
  */
 function documentApiRoot(paths: Record<string, PathItem>): string[] {
-  let root: string[] | undefined;
+  const contributions: string[][] = [];
   for (const [path, pathItem] of Object.entries(paths)) {
     // Same truthiness check as inferServiceName: a first tag names the service.
     const hasUntaggedOperation = HTTP_METHODS.some((method) => {
@@ -632,27 +646,47 @@ function documentApiRoot(paths: Record<string, PathItem>): string[] {
     if (!hasUntaggedOperation) continue;
     const segments = path.split('/').filter(Boolean);
     const own = segments.slice(0, pathRootLength(segments));
-    if (own.length === 0) continue;
+    if (own.length > 0) contributions.push(own);
+  }
+  // Every strict prefix of a contribution, so a contribution another one
+  // extends can be left out. Segments never contain `/`, so the join is exact.
+  const extended = new Set<string>();
+  for (const own of contributions) {
+    for (let length = 1; length < own.length; length++) extended.add(own.slice(0, length).join('/'));
+  }
+  let root: string[] | undefined;
+  for (const own of contributions) {
+    if (extended.has(own.join('/'))) continue;
     if (root === undefined) {
       root = own;
       continue;
     }
-    let shared = 0;
-    while (shared < root.length && shared < own.length && root[shared] === own[shared]) shared++;
-    root = root.slice(0, shared);
+    root = root.slice(0, sharedPrefixLength(root, own));
   }
   if (root === undefined) return [];
   return root.slice(0, pathRootLength(root));
 }
 
+/** How many leading segments two paths share, compared verbatim. */
+function sharedPrefixLength(a: readonly string[], b: readonly string[]): number {
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared++;
+  return shared;
+}
+
 /**
- * How many leading segments of a path are the document's API root: the root's
- * length when the path starts with it, compared verbatim, else `0` for a path
- * outside the root, which is named as if the document had none.
+ * How many leading segments of a path are the document's API root: as much
+ * of the path's own root (pathRootLength) as the document root shares,
+ * compared verbatim. For a path that starts with the whole root that is the
+ * root's length; for one that stops short of it — `/api/openapi.json` under a
+ * root of `api/v1` — it is the path's own `api`, skipped for that path alone;
+ * and `0` for a path outside the root, which is named as if the document had
+ * none. The two roots are prefixes of one contribution whenever the path is
+ * untagged, so what they share always ends on a marker.
  */
 function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
   const segments = path.split('/').filter(Boolean);
-  return apiRoot.length > 0 && apiRoot.every((segment, i) => segments[i] === segment) ? apiRoot.length : 0;
+  return sharedPrefixLength(apiRoot, segments.slice(0, pathRootLength(segments)));
 }
 
 /**
@@ -928,12 +962,25 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *   2. the path segments between the service and the resource
  *      (inferDeeperContext): `GET /users/{id}/sso/factors` next to
  *      `GET /users/{id}/factors` → `listFactorsSso`;
- *   3. `By<Param>` for each path parameter, in path order, when the
- *      parameters are what tell the paths apart: `GET /v1/notes` keeps `list`
- *      while `GET /v1/{teamId}/notes` becomes `listByTeamId`, and with no
- *      root `GET /users/teams` keeps `listTeams` while `GET /users/{id}/teams`
- *      becomes `listTeamsById`;
- *   4. for a path-named item operation whose singular name none of those
+ *   3. `By<Param>` for each path parameter the colliding paths do not all
+ *      share, in path order, when those are what tell the paths apart:
+ *      `GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes
+ *      `listByTeamId`, with no root `GET /users/teams` keeps `listTeams` while
+ *      `GET /users/{id}/teams` becomes `listTeamsById`, and
+ *      `GET /api/notes/{noteId}` keeps `get` while
+ *      `GET /api/{teamId}/notes/{noteId}` becomes `getByTeamId`, the shared
+ *      `noteId` adding nothing;
+ *   4. the API root words a path skipped beyond those the colliding rooted
+ *      paths all skipped, when the paths sit under different lengths of the
+ *      document root: `GET /api/notes` keeps `list` while `GET /api/v1/notes`
+ *      becomes `listV1`. A root-less path takes no part;
+ *   5. the resource noun the plain name left off because it names the
+ *      service (inferServiceNoun), when the colliding paths do not all drop
+ *      the same one. This is what tells a path-named operation from an
+ *      operationId it collides with, which is never renamed and which the
+ *      parameters above cannot touch: `GET /api/notes` beside
+ *      `operationId: list` on `GET /api/{teamId}/notes` is `listNotes`;
+ *   6. for a path-named item operation whose singular name none of those
  *      could tell from an operationId — `GET /store/pets/{id}` is `getPet`,
  *      and so is `operationId: getPet` on `/store/featured/{id}` — the plural
  *      name it had before item resources were singularised, `getPets`
@@ -943,13 +990,18 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      says nothing. Two path-named operations never need it: their paths
  *      differ, so a qualifier above tells them apart. A name a qualifier has
  *      already extended, and an action, go straight to the suffix;
- *   5. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
+ *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
- *      operation keeps the plain name over a path-named one; otherwise the
- *      lexically first path keeps it, whatever the document order. The suffix
- *      is silent for a path-derived name, like a hashed inline model name; it
- *      comes with a warning when the document reuses an operationId, since
- *      that changes a name the author chose.
+ *      operation keeps the plain name over a path-named one; then the path
+ *      that skipped the shorter root, so `/health` or a tagged `/notes` keeps
+ *      `list` over `/api/health` or `/api/v1/notes`; otherwise the lexically
+ *      first path keeps it, whatever the document order. The suffix is silent
+ *      for a path-derived name, like a hashed inline model name; it comes
+ *      with a warning when the document reuses an operationId, since that
+ *      changes a name the author chose.
+ *
+ * Each qualifier depends only on the paths in the group, never on their
+ * document order, and each runs once, so the result is deterministic.
  */
 function disambiguateOperationNames(
   operations: Operation[],
@@ -978,15 +1030,54 @@ function disambiguateOperationNames(
       }
     },
     (group) => {
-      // Parameters only help when they differ between the colliding paths:
-      // `/v1/{id}/notes` and `/v1/{id}/Notes` would both gain `ById` and
-      // still collide, further from the plain name. Every path-named
-      // operation takes part, under an API root or not: a service must not
-      // hand an emitter two methods with one name.
-      const suffixes = group.map((op) => inferByParamsSuffix(op.path));
+      // Parameters only help when they differ between the colliding paths,
+      // so one every path carries is left out — `/api/notes/{noteId}` and
+      // `/api/{teamId}/notes/{noteId}` are told apart by `teamId` alone —
+      // and when none does the pass is skipped: `/v1/{id}/notes` and
+      // `/v1/{id}/Notes` would both gain `ById` and still collide, further
+      // from the plain name. Every path-named operation takes part, under an
+      // API root or not: a service must not hand an emitter two methods with
+      // one name.
+      const shared = sharedPathParams(group.map((op) => op.path));
+      const suffixes = group.map((op) => inferByParamsSuffix(op.path, shared));
       if (new Set(suffixes).size <= 1) return;
       group.forEach((op, i) => {
         if (pathNamed.has(op)) rename(op, appendQualifier(op.name, suffixes[i]));
+      });
+    },
+    (group) => {
+      // Paths under the document root that skipped different lengths of it
+      // differ by a version or mount word the plain name left off: `/api/notes`
+      // beside `/api/v1/notes` in `Notes`. The words a path skipped beyond the
+      // root the rooted paths all share are what tell them apart (`listV1`),
+      // the one place a root word belongs in a name. A root-less path — outside
+      // the root, or tagged — is named as if the document had none and takes
+      // no part; it keeps the plain name in the numeric pass instead.
+      const roots = group.map((op) => op.path.split('/').filter(Boolean).slice(0, apiRootLengthOf(op)));
+      const rooted = roots.filter((root) => root.length > 0);
+      if (rooted.length === 0) return;
+      let shared = rooted[0];
+      for (const root of rooted) shared = shared.slice(0, sharedPrefixLength(shared, root));
+      const words = roots.map((root) => (root.length === 0 ? '' : toPascalCase(root.slice(shared.length).join('_'))));
+      if (new Set(words).size <= 1) return;
+      group.forEach((op, i) => {
+        if (pathNamed.has(op)) rename(op, appendQualifier(op.name, words[i]));
+      });
+    },
+    (group) => {
+      // The plain name leaves off the resource noun that names the service
+      // (`GET /api/notes` in `Notes` is `list`); it is restored when it is
+      // what tells the group apart. An operationId-named operation is never
+      // renamed, so it contributes nothing here: next to `operationId: list`
+      // on `/api/{teamId}/notes`, path-named `/api/notes` becomes
+      // `listNotes`. When every path drops the same noun (`/notes` and
+      // `/api/v1/notes`), restoring it would only move the collision.
+      const nouns = group.map((op) =>
+        pathNamed.has(op) ? (inferServiceNoun(op.path, apiRootLengthOf(op)) ?? '') : '',
+      );
+      if (new Set(nouns).size <= 1) return;
+      group.forEach((op, i) => {
+        if (pathNamed.has(op)) rename(op, appendQualifier(op.name, nouns[i]));
       });
     },
   ];
@@ -1025,10 +1116,18 @@ function disambiguateOperationNames(
   for (const group of collidingGroups(operations)) {
     const name = group[0].name;
     // An operationId-named operation outranks a path-named one for the plain
-    // name; within a rank the lexically first path wins, so the outcome does
-    // not depend on document order. Operations on one path share the outcome.
+    // name; then the path that skipped the shorter API root, so a root-less
+    // path (`/health`, or a tagged `/notes`) keeps the name it has always had
+    // over `/api/health` or `/api/v1/notes`; within that the lexically first
+    // path wins. The outcome never depends on document order, and operations
+    // on one path share it.
     const rank = (op: Operation) => (pathNamed.has(op) ? 1 : 0);
-    const ordered = [...group].sort((a, b) => rank(a) - rank(b) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const ordered = [...group].sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        apiRootLengthOf(a) - apiRootLengthOf(b) ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    );
     const keeper = ordered[0];
     const nameByPath = new Map<string, string>([[keeper.path, name]]);
     let n = 2;
@@ -1115,17 +1214,50 @@ function qualifierPath(op: Operation, apiRootLength: number): string {
 }
 
 /**
- * `By<Param>` for each path parameter, in path order, as one qualifier:
- * `/v1/{teamId}/notes` → `ByTeamId`, `/a/{x}/b/{y}/c` → `ByXByY`. Empty for a
- * path without parameters. Mirrors derivePathModelBaseName's `By` + PascalCase
- * spelling of a parameter segment, so `{team_id}` and `{teamId}` read alike.
+ * The path parameters in path order, each as the PascalCase word that
+ * `By<Param>` spells it with. Mirrors derivePathModelBaseName's spelling of a
+ * parameter segment, so `{team_id}` and `{teamId}` read alike.
  */
-function inferByParamsSuffix(path: string): string {
+function pathParamWords(path: string): string[] {
   return path
     .split('/')
     .filter((segment) => segment.startsWith('{'))
-    .map((segment) => 'By' + toPascalCase(segment.replace(/[{}]/g, '')))
+    .map((segment) => toPascalCase(segment.replace(/[{}]/g, '')));
+}
+
+/** The parameter words (pathParamWords) that every one of the paths carries. */
+function sharedPathParams(paths: readonly string[]): ReadonlySet<string> {
+  const words = paths.map((path) => new Set(pathParamWords(path)));
+  return new Set([...(words[0] ?? [])].filter((word) => words.every((set) => set.has(word))));
+}
+
+/**
+ * `By<Param>` for each path parameter not in `shared`, in path order, as one
+ * qualifier: `/v1/{teamId}/notes` → `ByTeamId`, `/a/{x}/b/{y}/c` → `ByXByY`,
+ * and `/api/{teamId}/notes/{noteId}` → `ByTeamId` when the colliding paths
+ * all carry `noteId`. Empty for a path with no parameter of its own.
+ */
+function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string {
+  return pathParamWords(path)
+    .filter((word) => !shared.has(word))
+    .map((word) => 'By' + word)
     .join('');
+}
+
+/**
+ * The resource noun inferResourceFromPath leaves off because it is the
+ * segment the service was named from: `Notes` for `/api/notes`,
+ * `/api/notes/{id}` and `/api/{teamId}/notes` under an `/api` root, and for a
+ * root-less `/notes`. Null when the last literal segment past the API root is
+ * a different word (`/api/notes/{id}/tags`, whose `Tags` the plain name
+ * already carries) or when nothing literal follows the root (`/api/v1/{id}`).
+ */
+function inferServiceNoun(path: string, apiRootLength: number): string | null {
+  const segments = path.split('/').filter(Boolean);
+  let last = segments.length - 1;
+  while (last >= apiRootLength && segments[last].startsWith('{')) last--;
+  if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
+  return toPascalCase(segments[last]);
 }
 
 /**
