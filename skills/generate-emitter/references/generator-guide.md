@@ -146,8 +146,10 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`string` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
   - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag
-  - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
-  - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`)
+  - `responseContentTypes?`, `responseContents?` — the media types the primary response declares, as written and in document order, with a `TypeRef` per media type (the entry `response` was read from shares its `TypeRef`); present only when it declares at least one, so an `Accept` header or a per-format decoder can be offered
+  - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`, `contentTypes?`, `contents?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
+  - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; the two lists only when they say something `type` does not)
+  - `defaultResponse?`, `rangeResponses?` — the `default` response and the `1XX`–`5XX` range responses (`type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; a range entry also carries `range`), present only when declared. Resolve a status as the explicit entry, then its range, then `defaultResponse`: an operation declaring only `2XX` or `default` keeps `response` as `string`, and its real body type lives here
   - `pagination?` — `PaginationMeta` when the operation is paginated: `strategy` (`cursor` | `offset` | `link-header`), `param`, `limitParam?`, `dataPath?`, `dataDescription?`, `itemType`, `envelopeFields?`
   - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header
   - `deprecated?`, `async?` — method markers
