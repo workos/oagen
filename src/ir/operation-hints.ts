@@ -8,6 +8,34 @@ function toSnake(s: string): string {
     .toLowerCase();
 }
 
+/**
+ * The segments of a path template, with a custom method split off the
+ * segment it is written on. An API in the Google AIP-136 style appends an
+ * action to a resource or collection after a colon, so `/pets/{petId}:adopt`
+ * and `/pets:batchGet` each end in one URL segment that names both a thing
+ * and a verb. Every name read from a path goes through this function and sees
+ * such a segment as the two it stands for — `{petId}` then `adopt`, `pets`
+ * then `batchGet` — so a custom method is named exactly like the same action
+ * written with a slash (`/pets/{petId}/adopt`, `/pets/batchGet`), and the
+ * verb never lands inside a parameter word. A colon inside a parameter's
+ * braces is part of its name and does not split it. Empty segments — a
+ * leading, trailing or doubled slash, or an empty side of a colon — are
+ * dropped. The operation's `path` itself is never rewritten: it is the URL
+ * the SDK requests.
+ */
+export function pathSegments(path: string): string[] {
+  const segments: string[] = [];
+  for (const segment of path.split('/')) {
+    // A parameter's braces are kept whole; only what follows them can carry
+    // the colon of a custom method.
+    const braces = segment.startsWith('{') ? segment.indexOf('}') + 1 : 0;
+    const parts = segment.slice(braces).split(':');
+    parts[0] = segment.slice(0, braces) + parts[0];
+    for (const part of parts) if (part) segments.push(part);
+  }
+  return segments;
+}
+
 // ---------------------------------------------------------------------------
 // Hint types — consumer-provided overrides for operation resolution
 // ---------------------------------------------------------------------------
@@ -201,7 +229,10 @@ function singularize(word: string): string {
  * Derive a snake_case method name from an operation's HTTP method and path.
  *
  * Rules:
- * 1. Strip path-param segments (`{id}`, `{slug}`, etc.)
+ * 1. Strip path-param segments (`{id}`, `{slug}`, etc.); a custom method
+ *    written after a colon (`{id}:verify`, `factors:enroll`) is read as its
+ *    segment followed by the verb (see pathSegments), so it is named like
+ *    `{id}/verify` and `factors/enroll`
  * 2. If the terminal segment is an action verb, use it as the verb
  * 3. Otherwise, use the CRUD verb for the HTTP method
  * 4. For GET on a collection (no trailing {id}), use "list"; with {id}, use "get"
@@ -209,7 +240,7 @@ function singularize(word: string): string {
  * 6. Singularize the resource noun for single-resource operations
  */
 export function deriveMethodName(op: Operation, _service: Service): string {
-  const segments = op.path.split('/').filter(Boolean);
+  const segments = pathSegments(op.path);
 
   // Separate static segments from param segments
   const staticSegments: string[] = [];

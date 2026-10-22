@@ -1,4 +1,4 @@
-import type { Enum, Model, Operation, ResponseHeader, Service, TypeRef, Webhook } from '../ir/types.js';
+import type { Enum, EnumValue, Model, Operation, ResponseHeader, Service, TypeRef, Webhook } from '../ir/types.js';
 import {
   walkTypeRef,
   collectModelTypeRefs,
@@ -7,6 +7,7 @@ import {
   collectWebhookTypeRefs,
 } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
+import { enumValuesOf, sameEnumShape } from './enum-members.js';
 import { STATUS_RANGE_LABELS } from './responses.js';
 
 /**
@@ -17,8 +18,9 @@ import { STATUS_RANGE_LABELS } from './responses.js';
  * other values; such a field is renamed to a distinct name before it is
  * promoted (`…Status2`), collision-aware like the operation pass below and the
  * way header and webhook enums are, so the field never points at the other
- * values. A taken name with the same values is shared. The distinct name is
- * also never one of `models`' (see `distinctEnumName`).
+ * values. A taken name with the same members — values and per-value
+ * deprecation (`sameEnumShape`) — is shared. The distinct name is also never
+ * one of `models`' (see `distinctEnumName`).
  */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
@@ -137,7 +139,7 @@ export function collectInlineEnumsFromOperations(
  * response-header enums are: a name already taken by a different value set
  * is not silently shared (the webhook's reference would otherwise point at
  * an unrelated enum's values) but renamed to a distinct one before it is
- * promoted (`PetAdoptedXSource2`); a taken name with the same values is
+ * promoted (`PetAdoptedXSource2`); a taken name with the same members is
  * shared, and the distinct name is never one of `models`'
  * (`distinctEnumName`). The parser's stem reservation keeps such a clash from
  * arising through `parseSpec`; this guards the IR for any caller. A payload
@@ -195,10 +197,13 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
  * `fast`/`slow` on a 200 and `retry`/`stop` on a 429 would share one name
  * and whichever was collected first would silently win; a request parameter
  * named like the header, or a webhook parameter named like a component enum,
- * collides the same way. When the name is already taken by a different value
- * set, the ref is renamed to a distinct name before it is promoted. A taken
- * name with the same values is shared, as before. `modelNames` are the names
- * the distinct name must also step around.
+ * collides the same way. When the name is already taken by a different
+ * member set — other values, or the same values with a different one
+ * deprecated (`sameEnumShape`) — the ref is renamed to a distinct name
+ * before it is promoted. A taken name with the same members is shared, as
+ * before; the first lifted copy's value descriptions and link are the
+ * enum's. `modelNames` are the names the distinct name must also step
+ * around.
  */
 function collectDistinctEnums(
   ref: TypeRef,
@@ -210,24 +215,18 @@ function collectDistinctEnums(
   walkTypeRef(ref, {
     enum: (ref) => {
       if (!ref.values) return;
+      const values = enumValuesOf(ref);
       const existing = enums.find((e) => e.name === ref.name);
-      if (existing && !sameEnumValues(existing, ref.values)) {
-        ref.name = distinctEnumName(ref.name, ref.values, qualifier, enums, modelNames);
+      if (existing && !sameEnumShape(existing.values, values)) {
+        ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
       }
       collectInlineEnumFromRef(ref, enums, enumNames);
     },
   });
 }
 
-/** Order-insensitive: a reordering of the same members is the same type. */
-function sameEnumValues(existing: Enum, values: (string | number)[]): boolean {
-  if (existing.values.length !== values.length) return false;
-  const have = new Set(existing.values.map((v) => v.value));
-  return values.every((v) => have.has(v));
-}
-
 /**
- * The first name not taken by a different value set, nor by a model: the
+ * The first name not taken by a different member set, nor by a model: the
  * base qualified by the status code (`DocumentsXPolicy429`), then numeric
  * suffixes (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...). Deterministic for
  * a given spec, since it depends only on declaration order. The collectors
@@ -241,7 +240,7 @@ function sameEnumValues(existing: Enum, values: (string | number)[]): boolean {
  */
 function distinctEnumName(
   base: string,
-  values: (string | number)[],
+  values: readonly EnumValue[],
   qualifier: string | undefined,
   enums: Enum[],
   modelNames: ReadonlySet<string>,
@@ -249,7 +248,7 @@ function distinctEnumName(
   const isUsable = (name: string): boolean => {
     if (modelNames.has(name)) return false;
     const taken = enums.find((e) => e.name === name);
-    return !taken || sameEnumValues(taken, values);
+    return !taken || sameEnumShape(taken.values, values);
   };
   if (qualifier && isUsable(`${base}${qualifier}`)) return `${base}${qualifier}`;
   let suffix = 2;

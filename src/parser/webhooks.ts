@@ -7,10 +7,11 @@ import { schemaToTypeRef } from './schemas.js';
 import { extractInlineModelsFromProperties } from './inline-models.js';
 import {
   HTTP_METHODS,
-  buildDescription,
   extractParams,
+  extractTags,
   operationIdModelBase,
   presentText,
+  resolveOperationDocs,
   resolveParameterRef,
   resolveRequestBodyRef,
   schemalessRequestBodyType,
@@ -21,7 +22,10 @@ import {
   type PathItem,
   type RequestBodyObject,
 } from './operations.js';
+import { externalDocsEntry } from './external-docs.js';
+import { classifyResponseKey, warnUnrecognizedResponseKey } from './responses.js';
 import { extractSecurityRequirements } from './security.js';
+import { warnOnIgnoredCallbacks } from './callbacks.js';
 
 /** The `components` sections webhook extraction resolves references against. */
 export interface WebhookComponents {
@@ -46,6 +50,12 @@ interface WebhookEntry {
   name: string;
   method: HttpMethod;
   op: OperationObject;
+  /**
+   * The path item the operation sits on — the entry itself, or the
+   * `components/pathItems` item its `$ref` leads to — whose `summary` and
+   * `description` apply to the operation (`resolveOperationDocs`).
+   */
+  pathItem: PathItem;
   /** The webhook's own parameters after path-item-level ones, deduplicated by (in, name). */
   params: ParameterObject[];
   body: RequestBodyObject | undefined;
@@ -226,6 +236,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
     for (const method of methods) {
       const op = pathItem[method] as OperationObject;
       const label = `webhooks.${name}.${method}`;
+      warnOnIgnoredCallbacks(op.callbacks, label);
       // Same precedence as buildOperation: an operation-level parameter replaces
       // a path-item-level one of the same (in, name) identity, in the
       // path-level position.
@@ -248,7 +259,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
       // Reported here, once per webhook: the mint below runs twice for each
       // (`resolveWebhookModelStems`, then the build), so it must not report.
       warnDroppedRequestBody(body, label);
-      entries.push({ name, method, op, params, body, label, methodCount: methods.length });
+      entries.push({ name, method, op, pathItem, params, body, label, methodCount: methods.length });
     }
   }
 
@@ -643,13 +654,12 @@ function mintSchema(
 }
 
 function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: WebhookComponents): Webhook {
-  const { name, method, op, body, label } = entry;
+  const { name, method, op, pathItem, body, label } = entry;
   const { headerParams, queryParams, cookieParams, requestBody, requestBodyEncoding } = minted;
-  const summary = presentText(op.summary);
-  const description = buildDescription(summary, op.description);
-  const tags = Array.isArray(op.tags)
-    ? op.tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '')
-    : [];
+  // Read as an operation's are: the operation's own `summary` and
+  // `description`, or the path item's for each it declares none for.
+  const { summary, description } = resolveOperationDocs(op, pathItem);
+  const tags = extractTags(op.tags);
   const security = extractSecurityRequirements(op.security, label);
 
   return {
@@ -658,8 +668,12 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     httpMethod: method,
     ...(summary !== undefined ? { summary } : {}),
     ...(description !== undefined ? { description } : {}),
+    // The operation's own link, present only when usable, as on an operation.
+    // A Path Item Object has no `externalDocs` field, so there is no path-item
+    // level to fall back to.
+    ...externalDocsEntry(op.externalDocs),
     ...(op.deprecated === true ? { deprecated: true } : {}),
-    ...(tags.length > 0 ? { tags } : {}),
+    ...(tags !== undefined ? { tags } : {}),
     headerParams,
     queryParams,
     ...(cookieParams.length > 0 ? { cookieParams } : {}),
@@ -672,13 +686,17 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
 }
 
 /**
- * The status codes the sender expects back, in document order. Only
- * three-digit keys are carried: `default` and ranges such as `2XX` name no
- * single code a handler could return. A response written as a `$ref` into
- * `components/responses` is followed for its description, chains included; a
- * description written beside the `$ref` (OpenAPI 3.1) wins over the
- * component's. A ref that leads nowhere, or anywhere else, keeps the status
- * code without a description, with a warning. A blank description is omitted.
+ * The status codes the sender expects back, in document order. Only status
+ * code keys (three digits, 100–599, as `classifyResponseKey` decides) are
+ * carried: `default` and ranges such as `2XX` name no single code a handler
+ * could return, and an `x-` key is a specification extension, so those are
+ * skipped silently; a key OpenAPI does not define (`error`, `6XX`, `600`) is
+ * warned about and ignored, as on an operation. A response written as a
+ * `$ref` into `components/responses` is followed for its description, chains
+ * included; a description written beside the `$ref` (OpenAPI 3.1) wins over
+ * the component's. A ref that leads nowhere, or anywhere else, keeps the
+ * status code without a description, with a warning. A blank description is
+ * omitted.
  */
 function extractWebhookResponses(
   responses: OperationObject['responses'],
@@ -687,9 +705,11 @@ function extractWebhookResponses(
 ): WebhookResponse[] {
   const result: WebhookResponse[] = [];
   for (const [code, raw] of Object.entries(responses ?? {})) {
-    if (!/^\d{3}$/.test(code)) continue;
+    const responseKey = classifyResponseKey(code);
+    if (responseKey.kind === 'unrecognized') warnUnrecognizedResponseKey(code, label);
+    if (responseKey.kind !== 'status') continue;
     const description = presentText(resolveResponseDescription(raw, componentResponses, code, label));
-    result.push({ statusCode: Number(code), ...(description !== undefined ? { description } : {}) });
+    result.push({ statusCode: responseKey.code, ...(description !== undefined ? { description } : {}) });
   }
   return result;
 }

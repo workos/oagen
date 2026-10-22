@@ -1,14 +1,22 @@
 import type { Parameter, Webhook } from '../ir/types.js';
 import type { Change, ParamChange } from './types.js';
-import { deprecationDetails, deprecationFlip } from './classify.js';
+import { deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
+import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
 /**
  * Report webhooks added, removed and modified between two specs. A webhook is
  * keyed by `name` + `httpMethod` (one `webhooks` key may declare several
  * methods), so a method change is a removal plus an addition.
+ * `documentSecurity` — the two documents' `security` — lets a webhook that
+ * declares none of its own be compared on what it inherits; `diffSpecs`
+ * passes it, a direct caller may leave it out.
  */
-export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Change[] {
+export function diffWebhooks(
+  oldWebhooks: Webhook[],
+  newWebhooks: Webhook[],
+  documentSecurity?: DocumentSecurity,
+): Change[] {
   const changes: Change[] = [];
   const key = (webhook: Webhook): string => `${webhook.httpMethod} ${webhook.name}`;
   const oldByKey = new Map(oldWebhooks.map((w) => [key(w), w]));
@@ -47,17 +55,34 @@ export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Ch
     // changelog has to say it, so a flipped flag alone is a change.
     const deprecation = deprecationFlip(oldWebhook, newWebhook);
     const deprecatedChanged = deprecation !== undefined;
+    // What the request carries, `webhook.security ?? document security` on
+    // each side, resolved as an operation's is; read from the receiver's
+    // side, so what the sender may now present must still carry what the
+    // handler checked for.
+    const security = securityShift(oldWebhook, newWebhook, documentSecurity);
+    const securityChanged = security !== undefined;
+    const securityBreaking =
+      security !== undefined &&
+      classifySecurityChange(security.oldSecurity, security.newSecurity, 'receiver') === 'breaking';
+    // Additive always, as on an operation.
+    const tags = tagsShift(oldWebhook, newWebhook);
+    const tagsChanged = tags !== undefined;
     if (
       paramChanges.length === 0 &&
       body.changes.length === 0 &&
       responses.changes.length === 0 &&
-      !deprecatedChanged
+      !deprecatedChanged &&
+      !securityChanged &&
+      !tagsChanged
     ) {
       continue;
     }
 
     const hasBreaking =
-      body.breaking || responses.breaking || paramChanges.some((pc) => pc.classification === 'breaking');
+      body.breaking ||
+      responses.breaking ||
+      securityBreaking ||
+      paramChanges.some((pc) => pc.classification === 'breaking');
     const details = [...body.changes, ...responses.changes];
     changes.push({
       kind: 'webhook-modified',
@@ -68,6 +93,10 @@ export function diffWebhooks(oldWebhooks: Webhook[], newWebhooks: Webhook[]): Ch
       responsesChanged: responses.changes.length > 0,
       deprecatedChanged,
       ...deprecation,
+      securityChanged,
+      ...security,
+      tagsChanged,
+      ...tags,
       ...(details.length > 0 ? { details: details.join('; ') } : {}),
       classification: hasBreaking ? 'breaking' : 'additive',
     });

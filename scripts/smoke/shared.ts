@@ -7,13 +7,14 @@
 
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
-import type { ApiSpec, Operation, Parameter, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, Parameter, StatusRange, TypeRef } from '../../src/ir/types.js';
 import { toSnakeCase, toCamelCase } from '../../src/utils/naming.js';
 
 // Re-export types and functions that external smoke runners need from oagen core.
 // External runners import from '@workos/oagen/smoke' which bundles this module.
 export { parseSpec } from '../../src/parser/parse.js';
 export { toCamelCase, toSnakeCase } from '../../src/utils/naming.js';
+export type { StatusRange } from '../../src/ir/types.js';
 
 // ---------------------------------------------------------------------------
 // Capture format
@@ -43,10 +44,25 @@ export interface CapturedExchange {
   };
   outcome: 'success' | 'api-error' | 'skipped';
   error?: string;
-  /** True when the response status code is not declared in the OpenAPI spec for this operation */
+  /**
+   * True when the operation's declared responses do not cover the response
+   * status: no explicit code, no `1XX`–`5XX` range containing it and no
+   * `default` response. See `isUnexpectedStatus`.
+   */
   unexpectedStatus?: boolean;
-  /** Status codes declared in the OpenAPI spec (success + error codes) */
+  /**
+   * The explicit status codes the operation declares (`ExpectedStatuses.codes`:
+   * the success codes and the `errors` codes). A range or `default` response
+   * is not listed here; `expectedStatuses` carries those.
+   */
   expectedStatusCodes?: number[];
+  /**
+   * Everything the operation's declared responses cover — the explicit
+   * codes, the `1XX`–`5XX` ranges and whether a `default` response exists —
+   * as `unexpectedStatus` was decided against it. `expectedStatusCodes` is
+   * its `codes` list.
+   */
+  expectedStatuses?: ExpectedStatuses;
   durationMs: number;
   /** How the SDK method was resolved and which capture was selected */
   provenance?: ExchangeProvenance;
@@ -616,33 +632,101 @@ export class IdRegistry {
 // Status code checking
 // ---------------------------------------------------------------------------
 
-/** Get the set of status codes declared in the spec for an operation (success + errors) */
-export function getExpectedStatusCodes(op: Operation): number[] {
-  const codes: number[] = [];
-  // The success response code is implied by HTTP method if not explicit in errors
-  // Common defaults: POST→201, GET→200, PUT→200, PATCH→200, DELETE→204
-  const defaultSuccess: Record<string, number> = {
-    post: 201,
-    get: 200,
-    put: 200,
-    patch: 200,
-    delete: 204,
-  };
-  codes.push(defaultSuccess[op.httpMethod] ?? 200);
-  // Add declared error codes from the spec
-  for (const err of op.errors) {
-    if (!codes.includes(err.statusCode)) {
-      codes.push(err.statusCode);
-    }
-  }
-  return codes.sort((a, b) => a - b);
+/**
+ * The statuses an operation's declared responses cover, read from every
+ * response kind the IR carries: the explicit success and error codes, the
+ * `1XX`–`5XX` range responses and the `default` response.
+ */
+export interface ExpectedStatuses {
+  /**
+   * The explicit status codes, ascending and without duplicates: the
+   * declared 2xx/3xx codes plus every `errors` code. The 2xx/3xx codes are
+   * read from `successResponses` when the operation declares more than one;
+   * the IR does not carry a lone success response's status code, so an
+   * operation without `successResponses` is credited with its method's usual
+   * success code instead (POST 201, DELETE 204, every other method 200).
+   */
+  codes: number[];
+  /**
+   * The `rangeResponses` keys, in declaration order. A range covers every
+   * status in its hundred (`4XX` covers 400–499).
+   */
+  ranges: StatusRange[];
+  /**
+   * Whether the operation declares a `default` response, which covers every
+   * status that `codes` and `ranges` do not.
+   */
+  hasDefault: boolean;
 }
 
-/** Check if a status code is unexpected (not declared in the spec) */
+/**
+ * The success code implied by an HTTP method when the IR cannot say which
+ * single 2xx/3xx response the operation declares.
+ */
+const DEFAULT_SUCCESS_CODE: Record<string, number> = {
+  post: 201,
+  get: 200,
+  put: 200,
+  patch: 200,
+  delete: 204,
+};
+
+/**
+ * Read every status an operation's declared responses cover. Both
+ * `getExpectedStatusCodes` and `isUnexpectedStatus` go through this, so the
+ * one place that decides what counts as declared is here.
+ */
+export function getExpectedStatuses(op: Operation): ExpectedStatuses {
+  const codes = new Set<number>();
+  if (op.successResponses) {
+    for (const success of op.successResponses) codes.add(success.statusCode);
+  } else {
+    codes.add(DEFAULT_SUCCESS_CODE[op.httpMethod] ?? 200);
+  }
+  for (const err of op.errors) codes.add(err.statusCode);
+  return {
+    codes: [...codes].sort((a, b) => a - b),
+    ranges: (op.rangeResponses ?? []).map((entry) => entry.range),
+    hasDefault: op.defaultResponse !== undefined,
+  };
+}
+
+/**
+ * Whether `expected` covers `status`, resolved the way OpenAPI resolves a
+ * status: an explicit code, else the range whose hundred contains it, else
+ * `default`.
+ */
+export function coversStatus(expected: ExpectedStatuses, status: number): boolean {
+  if (expected.codes.includes(status)) return true;
+  const range = `${Math.floor(status / 100)}XX`;
+  if (expected.ranges.some((entry) => entry === range)) return true;
+  return expected.hasDefault;
+}
+
+/**
+ * The explicit status codes an operation declares — `getExpectedStatuses(op).codes`
+ * alone. A range or `default` response cannot be expressed as a code and is
+ * not listed, so this does not say whether a status is covered;
+ * `isUnexpectedStatus` does.
+ */
+export function getExpectedStatusCodes(op: Operation): number[] {
+  return getExpectedStatuses(op).codes;
+}
+
+/** `expected` as one token per entry, `/`-joined: `200/404/4XX/default`. */
+export function formatExpectedStatuses(expected: ExpectedStatuses): string {
+  return [...expected.codes.map(String), ...expected.ranges, ...(expected.hasDefault ? ['default'] : [])].join('/');
+}
+
+/**
+ * Whether the operation's declared responses leave `status` uncovered: no
+ * explicit code, no range containing it and no `default` response. A status
+ * of 0 is never unexpected — it marks a skipped call or a network error, not
+ * a status mismatch.
+ */
 export function isUnexpectedStatus(status: number, op: Operation): boolean {
-  if (status === 0) return false; // skipped or network error, not a status mismatch
-  const expected = getExpectedStatusCodes(op);
-  return !expected.includes(status);
+  if (status === 0) return false;
+  return !coversStatus(getExpectedStatuses(op), status);
 }
 
 // ---------------------------------------------------------------------------
