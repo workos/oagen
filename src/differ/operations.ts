@@ -193,7 +193,8 @@ function serverIdentity(server: ServerEntry): string {
     .map(([name, variable]): [string, string, string[] | null] => [
       name,
       variable.default,
-      variable.enum ? [...variable.enum].sort() : null,
+      // As a set, the way the document-level diff reads it: a repeated value is one value.
+      variable.enum ? [...new Set(variable.enum)].sort() : null,
     ])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return JSON.stringify([server.url, variables]);

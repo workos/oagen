@@ -160,6 +160,17 @@ describe('diffOperations – servers (issue #251)', () => {
       expect(diffOperations('Pets', [withServers(regional)], [reorderedEnum])).toHaveLength(0);
     });
 
+    it('ignores a repeated enum value appearing or disappearing: the values are a set (Greptile)', () => {
+      const repeated = withServers([
+        {
+          url: 'https://{region}.pets.example.com',
+          variables: { region: { default: 'eu', enum: ['eu', 'eu', 'us'] } },
+        },
+      ]);
+      expect(diffOperations('Pets', [repeated], [withServers(regional)])).toHaveLength(0);
+      expect(diffOperations('Pets', [withServers(regional)], [repeated])).toHaveLength(0);
+    });
+
     it('ignores a reordered list that keeps the same first entry', () => {
       expect(diffOperations('Pets', [withServers([a, b, c])], [withServers([a, c, b])])).toHaveLength(0);
     });
