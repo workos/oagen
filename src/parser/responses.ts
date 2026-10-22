@@ -14,6 +14,7 @@ import {
   constraintsEntry,
   deprecatedEntry,
   foldSiblingProperties,
+  isArrayComponentRef,
   isArraySchema,
   isInlineObjectSchema,
   collapsedNullableBranch,
@@ -214,14 +215,16 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   }
 
   // Find array properties — typed, `items` with no `type`, or either under a
-  // nullable wrapper of any spelling (`arraySchemaOf`) — and non-array
-  // companion properties
+  // nullable wrapper of any spelling (`arraySchemaOf`), or a `$ref` to an
+  // array component under such a wrapper (`isArrayComponentRef`), which
+  // `schemaToTypeRef` types as the array the component declares — and
+  // non-array companion properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (arraySchemaOf(propSchema)) {
+    if (arraySchemaOf(propSchema) || isArrayComponentRef(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -272,14 +275,27 @@ function extractListResponse(
   // The property's own text, as `buildFieldFromSchema` keeps it for every
   // companion beside it; an item schema's description belongs to the item.
   const dataDescription = dataProp?.description;
-  // The array under whatever nullable wrapper the data property wears
-  // (`arraySchemaOf`); its items, whatever their shape, are typed and
-  // materialized as `<Operation>Item` (`typeInlineItems`).
-  const dataArray = dataProp ? arraySchemaOf(dataProp) : undefined;
-  if (dataArray?.items) {
-    const typed = typeInlineItems(dataArray.items, contextName.replace(/Response$/, '') + 'Item', componentSchemas);
-    itemTypeRef = typed.itemType;
-    inlineModels.push(...typed.inlineModels);
+  // The data array's type when it is a `$ref` to an array component: the
+  // array the component declares, with the component's own nullability.
+  let dataType: TypeRef | undefined;
+  if (dataProp && isArrayComponentRef(dataProp)) {
+    // A `$ref` to an array component, under any nullable wrapper, is the
+    // array the component declares, its items named under the component
+    // (`<Component>Item…`) and already materialized by the component pass —
+    // nothing is minted here, and `<Operation>Item` stays free.
+    dataType = schemaToTypeRef(dataProp, contextName);
+    const array = dataType.kind === 'nullable' ? dataType.inner : dataType;
+    if (array.kind === 'array') itemTypeRef = array.items;
+  } else {
+    // The array under whatever nullable wrapper the data property wears
+    // (`arraySchemaOf`); its items, whatever their shape, are typed and
+    // materialized as `<Operation>Item` (`typeInlineItems`).
+    const dataArray = dataProp ? arraySchemaOf(dataProp) : undefined;
+    if (dataArray?.items) {
+      const typed = typeInlineItems(dataArray.items, contextName.replace(/Response$/, '') + 'Item', componentSchemas);
+      itemTypeRef = typed.itemType;
+      inlineModels.push(...typed.inlineModels);
+    }
   }
 
   // Everything the envelope carries besides the data array: the pagination
@@ -305,10 +321,11 @@ function extractListResponse(
     // the wrapper `schemaToTypeRef` would give the field stays on `response`
     // — `envelopeFields` leaves `data` out, so nothing else records it —
     // while `itemType` is still what an iterator yields (`paginatedItemType`
-    // unwraps the same wrapper).
-    response: dataProp
-      ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef })
-      : { kind: 'array', items: itemTypeRef },
+    // unwraps the same wrapper). A `$ref` to an array component carries the
+    // component's own nullability, and its wrapper's, the same way.
+    response:
+      dataType ??
+      (dataProp ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef }) : { kind: 'array', items: itemTypeRef }),
     inlineModels,
     isPaginated: true,
     dataPath,
@@ -365,8 +382,11 @@ export function resolveDataPathFromSchema(
  * list envelope's data array, an array response body and an `allOf`-merged
  * array property are arrays here whatever wrapper they wear, as
  * `schemaToTypeRef` types them `nullable<array<…>>`. A `$ref` is a reference
- * and is not looked through; the explicit `dataPath` walk
- * (`resolveBareSchema`) is the one place a reference is followed.
+ * and is not looked through: a `$ref` to an array component is typed as the
+ * array the component declares by `schemaToTypeRef` itself, with the items
+ * the component pass built (`isArrayComponentRef` says whether a property
+ * is one), and the explicit `dataPath` walk (`resolveBareSchema`) is the one
+ * place any other reference is followed.
  */
 function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
   const bare = unwrapNullableSchema(schema);
