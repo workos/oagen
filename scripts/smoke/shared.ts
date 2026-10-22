@@ -715,6 +715,97 @@ export function isUnexpectedStatus(status: number, op: Operation): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Raw HTTP exchange capture
+// ---------------------------------------------------------------------------
+
+/** One request the raw runner sends, with the labels its exchange is recorded under. */
+export interface RawRequest {
+  operationId: string;
+  service: string;
+  /** The HTTP method as sent, upper-case. */
+  method: string;
+  /** The resolved path, recorded as `request.path`. */
+  path: string;
+  /** The full URL to request, query string included. */
+  url: string;
+  /** The query parameters, recorded as `request.queryParams`. */
+  queryParams: Record<string, string>;
+  /** The JSON body: sent on POST, PUT and PATCH, recorded as `request.body` either way. */
+  body: unknown | null;
+  headers: Record<string, string>;
+}
+
+export interface CaptureRawOptions {
+  /** The `fetch` to send with; `globalThis.fetch` by default. A test passes a stub. */
+  fetchImpl?: typeof fetch;
+  /** Milliseconds before the request is aborted; 30 000 by default. */
+  timeoutMs?: number;
+}
+
+/**
+ * Send one request and record what came back as a `CapturedExchange`.
+ *
+ * Redirects are never followed (`redirect: 'manual'`): the exchange records
+ * the operation's own response — the first hop — so a declared `302` is
+ * recorded as 302 and judged like any other status by `isUnexpectedStatus`,
+ * and a redirect the document does not declare is reported as unexpected
+ * instead of being hidden behind its target's 200. The redirect target is
+ * never requested. (Node's `fetch` returns a manual redirect with its real
+ * status and `Location` header.)
+ *
+ * A 4xx or 5xx is an `api-error` exchange with `error: 'HTTP <status>'`; a
+ * `fetch` that throws (timeout, DNS, connection refused) is an `api-error`
+ * with status 0 and the error message, which is never an unexpected status.
+ * The response body is read as JSON and recorded as null when it is not.
+ */
+export async function captureRawExchange(
+  op: Operation,
+  request: RawRequest,
+  options: CaptureRawOptions = {},
+): Promise<CapturedExchange> {
+  const { fetchImpl = fetch, timeoutMs = 30_000 } = options;
+  const { operationId, service, method, path, url, queryParams, body, headers } = request;
+  const base = { operationId, service, operationName: op.name, request: { method, path, queryParams, body } };
+  const start = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const init: RequestInit = { method, headers, signal: controller.signal, redirect: 'manual' };
+    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetchImpl(url, init);
+    clearTimeout(timeout);
+
+    const responseBody: unknown = await response.json().catch(() => null);
+    const isError = response.status >= 400;
+    const exchange: CapturedExchange = {
+      ...base,
+      response: { status: response.status, body: responseBody },
+      outcome: isError ? 'api-error' : 'success',
+      durationMs: Date.now() - start,
+    };
+    if (isError) exchange.error = `HTTP ${response.status}`;
+    if (isUnexpectedStatus(response.status, op)) {
+      const expected = getExpectedStatuses(op);
+      exchange.unexpectedStatus = true;
+      exchange.expectedStatusCodes = expected.codes;
+      exchange.expectedStatuses = expected;
+    }
+    return exchange;
+  } catch (err) {
+    clearTimeout(timeout);
+    return {
+      ...base,
+      response: { status: 0, body: null },
+      outcome: 'api-error',
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - start,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Path resolution
 // ---------------------------------------------------------------------------
 
