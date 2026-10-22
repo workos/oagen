@@ -39,22 +39,31 @@ Entry point: `parse.ts` → `parseSpec(specPath: string): Promise<ApiSpec>`
 
 If an `operationId` is present, it takes precedence. Names are inferred from HTTP method + path pattern:
 
-| Method | Path Pattern               | Inferred Name  |
-| ------ | -------------------------- | -------------- |
-| GET    | `/users`                   | `list`         |
-| GET    | `/users/{id}`              | `get`          |
-| POST   | `/users`                   | `create`       |
-| PUT    | `/users/{id}`              | `update`       |
-| DELETE | `/users/{id}`              | `delete`       |
-| GET    | `/store/pets`              | `listPets`     |
-| GET    | `/store/pets/{id}`         | `getPet`       |
-| POST   | `/store/pets/{id}/adopt`   | `adoptPet`     |
-| POST   | `/store/pets/{id}/photos`  | `createPhotos` |
-| POST   | `/accounts/users/{id}/ban` | `banUser`      |
+| Method | Path Pattern                  | Inferred Name        |
+| ------ | ----------------------------- | -------------------- |
+| GET    | `/users`                      | `list`               |
+| GET    | `/users/{id}`                 | `get`                |
+| POST   | `/users`                      | `create`             |
+| PUT    | `/users/{id}`                 | `update`             |
+| DELETE | `/users/{id}`                 | `delete`             |
+| GET    | `/store/pets`                 | `listPets`           |
+| GET    | `/store/pets/{id}`            | `getPet`             |
+| GET    | `/store/pets/{id}/status`     | `getPetStatus`       |
+| DELETE | `/store/pets/{id}/avatar`     | `deletePetAvatar`    |
+| POST   | `/store/pets/{id}/adopt`      | `adoptPet`           |
+| POST   | `/store/pets/{id}/photos`     | `createPhotos`       |
+| POST   | `/accounts/users/{id}/ban`    | `banUser`            |
+| DELETE | `/users/bulk-delete`          | `bulkDelete`         |
+| POST   | `/store/pets/bulk-delete`     | `bulkDeletePets`     |
+| PUT    | `/users/{id}/update-password` | `updatePasswordUser` |
 
-The collection vs. instance distinction is determined by whether the path ends with a `{param}` segment. The resource is the last literal segment, dropped when it is the first segment (the service already carries it), and singularised for an instance operation (`pets` → `Pet`, `api_keys` → `ApiKey`, `addresses` → `Address`; `status` and other words that do not look plural are kept). A POST whose last segment is a literal that follows a `{param}` and does not end in `s` is an action: the segment is the verb and the singular parent resource is appended (`adoptPet`), even when the parent is the first segment, so two actions with the same name on different resources do not collide — unless the verb already ends with the parent's words (`POST /companies/verification/{id}/restart-id-verification` → `restartIdVerification`). API root and version segments (`api`, `rest`, `v1`, `2.0`) are never the parent, so `POST /api/v1/{companyId}/sendDocument` is the bare `sendDocument`. A plural literal after a `{param}` (`/users/{id}/photos`) is a nested collection and stays a `create`. A singleton noun after a `{param}` (`/users/{id}/avatar`) is misread as a verb; give it an `operationId`.
+The collection vs. instance distinction is determined by whether the path ends with a `{param}` segment. The resource is the last literal segment, dropped when it is the first segment (the service already carries it), and singularised for an instance operation (`pets` → `Pet`, `api_keys` → `ApiKey`, `addresses` → `Address`; `status` and other words that do not look plural are kept).
 
-Fallback names are unique within a service. An `operationId` is never renamed; a colliding fallback is qualified by its path (resource, deeper segments, `By<Param>`) and numbered as a last resort. When a singular fallback is the name of an `operationId` in the same service and nothing in its path tells the two apart (`GET /store/pets/{id}` next to `operationId: getPet` on `/store/featured/{id}`), the fallback keeps the plural it had before singularisation, `getPets`, if that name is free, rather than `getPet2`. Two colliding actions are qualified by the path of their parent, never by repeating the verb (`adoptPet` and `adoptPetRescue`, not `adoptPetAdopt`).
+A literal after a `{param}` that does not look plural is a singleton of that item: one thing about one pet, read with the item verb (`get`, not `list`) and named after the method's verb, the singular parent and the segment — `GET /store/pets/{id}/status` → `getPetStatus`, `DELETE /users/{id}/avatar` → `deleteUserAvatar`, `PUT` → `updateUserAvatar`, `HEAD` → `checkUserAvatar`, and `POST /orders/{id}/status` → `createOrderStatus`. The parent is kept even when it is the first segment, as it is for an action: `GET /pets/{id}/status` in `Pets` is `getPetStatus`. A plural literal after a `{param}` (`/users/{id}/photos`, `/orgs/{id}/api_keys`) is a nested collection: `listPhotos`, `createApiKeys`.
+
+An action is a literal that names what the operation does; it is the whole verb phrase of the name and the method's verb is left off. Three shapes are actions. A POST on a literal that follows a `{param}` and does not end in `s`: the segment is the verb and the singular parent is appended (`adoptPet`), even when the parent is the first segment, so two actions with the same name on different resources do not collide — unless the verb already ends with the parent's words (`POST /companies/verification/{id}/restart-id-verification` → `restartIdVerification`); a POST on a singleton that does not end in `s` (`POST /users/{id}/avatar`) is therefore misread as the action `avatarUser` — give it an `operationId`. For any method, a literal whose words include the method's own verb, which the name would otherwise repeat: `DELETE /pets/bulk-delete` → `bulkDelete`, `GET /pets/list-all` → `listAll`, `PUT /users/{id}/update-password` → `updatePasswordUser`; after a `{param}`, a literal carrying another method's verb is a singleton (`GET /users/{id}/last-update` → `getUserLastUpdate`). And a literal with no `{param}` before it whose last word is any CRUD verb (`get`, `list`, `create`, `update`, `delete`, `check`): `POST /pets/bulk-delete` → `bulkDelete`, `POST /users/bulk-update` → `bulkUpdate`; the last word only, so `GET /pets/delete-candidates` stays `listDeleteCandidates`, and any other literal with no `{param}` before it is a collection (`POST /pets/search` → `createSearch`). An action after a `{param}` takes the singular parent as its resource; one with no `{param}` before it takes the collection it sits under, dropped when that is the first segment: `DELETE /pets/bulk-delete` in `Pets` is `bulkDelete`, `DELETE /store/pets/bulk-delete` is `bulkDeletePets`. API root and version segments (`api`, `rest`, `v1`, `2.0`) are never the parent, so `POST /api/v1/{companyId}/sendDocument` is the bare `sendDocument`.
+
+Fallback names are unique within a service. An `operationId` is never renamed; a colliding fallback is qualified by its path (resource, deeper segments, `By<Param>`) and numbered as a last resort. When a singular fallback is the name of an `operationId` in the same service and nothing in its path tells the two apart (`GET /store/pets/{id}` next to `operationId: getPet` on `/store/featured/{id}`), the fallback keeps the plural it had before singularisation, `getPets`, if that name is free, rather than `getPet2`; an action or a singleton has no plural to keep and is numbered (`getPetStatus2`). Two colliding actions are qualified by the path of their parent, never by repeating the verb (`adoptPet` and `adoptPetRescue`, not `adoptPetAdopt`), and two colliding singletons by the path around the parent, never by repeating it (`getPetStatus` and `getPetStatusRescue`, not `getPetStatusPet`).
 
 ## Stage 2: Emit (`src/engine/`)
 

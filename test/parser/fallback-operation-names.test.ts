@@ -178,9 +178,13 @@ describe('fallback operation names (issue #210)', () => {
       '/orders/{id}/status': { post: item('id') },
       '/items/{id}/process': { post: item('id') },
     });
+    // A plural literal is a nested collection; one that does not look plural
+    // (`status`, `process`) is a singleton of the item, so the parent is
+    // named as for every other method on it (#271): `createOrderStatus`
+    // beside `getOrderStatus`, never `createStatus`.
     expect(result).toEqual([
-      'createProcess                POST   /items/{id}/process',
-      'createStatus                 POST   /orders/{id}/status',
+      'createItemProcess            POST   /items/{id}/process',
+      'createOrderStatus            POST   /orders/{id}/status',
       'createApiKeys                POST   /orgs/{id}/api_keys',
     ]);
   });

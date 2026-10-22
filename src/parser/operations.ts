@@ -879,22 +879,39 @@ function inferOperationName(
 
   // Fallback when no operationId is available — use method + path to build
   // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor",
-  // or "adoptPet" for a POST action on one item.
+  // "getPetStatus" for a singleton of one item, or "adoptPet" for an action.
   return fallbackOperationName(method, path, apiRootLength);
 }
 
 /**
- * The `<verb><Resource>` name of an operation without an `operationId`: the
- * CRUD verb (inferVerb) plus the resource noun (inferResourceFromPath),
- * singular for an item operation — `GET /store/pets/{id}` is `getPet` — or,
- * for a POST action on one item (inferPostAction), the action verb plus the
- * singular parent: `POST /store/pets/{id}/adopt` is `adoptPet`. The verb
- * alone when the path names no resource past the service segment:
- * `GET /pets/{id}` in `Pets` is `get`.
+ * The name of an operation without an `operationId`, built from its method
+ * and path. Three shapes, tried in this order:
+ *
+ *   - an action (inferAction): the action segment is the verb phrase and
+ *     its resource follows — `POST /store/pets/{id}/adopt` is `adoptPet`,
+ *     `DELETE /store/pets/bulk-delete` is `bulkDeletePets`, and
+ *     `DELETE /pets/bulk-delete` in `Pets` is the bare `bulkDelete`;
+ *   - a singleton of one item (inferSingleton): the method's item verb
+ *     (inferVerb), the singular parent and the segment —
+ *     `GET /store/pets/{id}/status` is `getPetStatus`;
+ *   - otherwise the CRUD verb (inferVerb) plus the resource noun
+ *     (inferResourceFromPath), singular for an item operation —
+ *     `GET /store/pets/{id}` is `getPet` — or the verb alone when the path
+ *     names no resource past the service segment: `GET /pets/{id}` in `Pets`
+ *     is `get`.
+ *
+ * The parts of an action or singleton name are joined by appendQualifier,
+ * so a word is never repeated across a join:
+ * `GET /companies/verification/{id}/verification-status` is
+ * `getVerificationStatus`.
  */
 function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number): string {
-  const action = method === 'post' ? inferPostAction(path, apiRootLength) : null;
+  const action = inferAction(method, path, apiRootLength);
   if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
+  const singleton = inferSingleton(path, apiRootLength);
+  if (singleton) {
+    return appendQualifier(appendQualifier(inferVerb(method, path), singleton.parent), singleton.resource);
+  }
   const verb = inferVerb(method, path);
   const resource = inferResourceFromPath(path, apiRootLength);
   return resource ? toCamelCase(`${verb}_${resource}`) : verb;
@@ -903,47 +920,82 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
 /**
  * The name fallbackOperationName gave an item operation before its resource
  * was singularised: the resource as the path spells it, `getPets` for
- * `GET /store/pets/{id}`. `null` for a POST action, whose name is a verb with
- * no plural, and for an operation whose resource is not singularised — a
+ * `GET /store/pets/{id}`. `null` for an action (inferAction) and for a
+ * singleton (inferSingleton), whose names are not built from a singularised
+ * resource, and for an operation whose resource is not singularised — a
  * collection, a path with no resource, a segment that does not look plural —
  * so a non-null result always differs from the singular name.
  * disambiguateOperationNames falls back to it before a numeric suffix when
  * the singular name is an operationId's.
  */
 function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
-  if (method === 'post' && inferPostAction(path, apiRootLength)) return null;
+  if (inferAction(method, path, apiRootLength) || inferSingleton(path, apiRootLength)) return null;
   const resource = inferResourceFromPath(path, apiRootLength, false);
   if (resource === null || resource === inferResourceFromPath(path, apiRootLength)) return null;
   return toCamelCase(`${inferVerb(method, path)}_${resource}`);
 }
 
 /**
- * Infer the CRUD verb from HTTP method and path shape. A POST is `create`
- * unless `inferPostAction` recognised it as an action first.
+ * The CRUD verb each HTTP method takes on one item and on a collection. Only
+ * GET's differ: `get` for one item, `list` for a collection.
+ */
+const METHOD_VERBS: Record<HttpMethod, { readonly item: string; readonly collection: string }> = {
+  get: { item: 'get', collection: 'list' },
+  post: { item: 'create', collection: 'create' },
+  put: { item: 'update', collection: 'update' },
+  patch: { item: 'update', collection: 'update' },
+  delete: { item: 'delete', collection: 'delete' },
+  head: { item: 'check', collection: 'check' },
+  options: { item: 'options', collection: 'options' },
+  trace: { item: 'trace', collection: 'trace' },
+};
+
+/**
+ * The verbs a path segment with no parameter before it is read as an action
+ * phrase by (inferAction): the CRUD verbs of METHOD_VERBS. `options` and
+ * `trace` are left out, since `/settings/display-options` names a
+ * collection.
+ */
+const CRUD_VERBS: ReadonlySet<string> = new Set(['get', 'list', 'create', 'update', 'delete', 'check']);
+
+/**
+ * Infer the CRUD verb from the HTTP method and the path shape (METHOD_VERBS):
+ * the item verb when the path addresses one item — it ends in a path
+ * parameter, or in a singleton of the item before it (isSingletonSegment) —
+ * and the collection verb otherwise. `GET /pets/{id}` and
+ * `GET /pets/{id}/status` are `get`; `GET /pets` and `GET /pets/{id}/photos`
+ * are `list`. Not consulted for an action (inferAction), whose verb is the
+ * action segment itself.
  */
 function inferVerb(method: HttpMethod, path: string): string {
   const segments = path.split('/').filter(Boolean);
-  const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith('{');
+  const last = segments[segments.length - 1];
+  const item = last !== undefined && (last.startsWith('{') || isSingletonSegment(segments));
+  return item ? METHOD_VERBS[method].item : METHOD_VERBS[method].collection;
+}
 
-  switch (method) {
-    case 'get':
-      return hasTrailingParam ? 'get' : 'list';
-    case 'post':
-      return 'create';
-    case 'put':
-    case 'patch':
-      return 'update';
-    case 'delete':
-      return 'delete';
-    case 'head':
-      return 'check';
-    case 'options':
-      return 'options';
-    case 'trace':
-      return 'trace';
-    default:
-      return method;
-  }
+/** The verbs inferVerb can give a method: `get` and `list` for GET, one verb for every other. */
+function methodVerbs(method: HttpMethod): string[] {
+  const verbs = METHOD_VERBS[method];
+  return verbs.item === verbs.collection ? [verbs.item] : [verbs.item, verbs.collection];
+}
+
+/** Whether a path segment looks plural: singularizePathSegment would change it. */
+function looksPlural(segment: string): boolean {
+  return singularizePathSegment(segment) !== segment;
+}
+
+/**
+ * Whether the last segment is a singleton of the item before it: a literal
+ * that follows a path parameter and does not look plural (looksPlural), so it
+ * names one thing about that item — `status` in `/pets/{id}/status`, `avatar`
+ * in `/users/{id}/avatar` — rather than a nested collection of it
+ * (`/pets/{id}/photos`, `/orgs/{id}/api_keys`).
+ */
+function isSingletonSegment(segments: readonly string[]): boolean {
+  if (segments.length < 2) return false;
+  const last = segments[segments.length - 1];
+  return !last.startsWith('{') && segments[segments.length - 2].startsWith('{') && !looksPlural(last);
 }
 
 /**
@@ -990,42 +1042,106 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
 }
 
 /**
- * Recognise a POST action on one item: `/pets/{petId}/adopt`,
- * `/owners/{o}/pets/{p}/vaccinate`. The last segment is a literal that follows
- * a path parameter, so it names something done to that item rather than a
- * collection to create into. The verb is the segment itself and the resource
- * is the singular parent (`adopt` + `Pet`): the nearest literal before the
- * parameter that is past the document's API root (`apiRootLength`, see
- * documentApiRoot) and is not an API marker (isApiMarkerSegment) — the marker
- * check also covers a tagged operation, which has no root — so
- * `/api/v1/{companyId}/sendDocument` has no parent and is the bare verb
- * `sendDocument` rather than `sendDocumentV1`. The parent is kept even when it
- * is the service segment so that `/pets/{id}/archive` and `/users/{id}/archive`
- * under one tag do not both become `archive`; the caller leaves it off when
- * the verb already ends with it (`restart-id-verification` under
- * `verification` is `restartIdVerification`, see appendQualifier).
- *
- * Not an action, so still a `create`: a literal ending in `s` after the
- * parameter, which is read as a nested collection (`/orgs/{id}/api_keys`,
- * and conservatively `/orders/{id}/status`), and a literal with no parameter
- * before it, which is indistinguishable from a nested collection
- * (`/pets/search` looks like `/accounts/users/auth_factors`). A singleton
- * noun after the parameter (`/users/{id}/avatar`) is misread as a verb; give
- * it an `operationId`.
+ * Index of the parent of a path's last segment, when that segment follows a
+ * path parameter: the nearest literal before the parameter that is past the
+ * document's API root (`apiRootLength`, see documentApiRoot) and is not an
+ * API marker (isApiMarkerSegment) — the marker check also covers a tagged
+ * operation, which has no root. `pets` in `/pets/{petId}/adopt` and in
+ * `/owners/{o}/pets/{p}/vaccinate`; `-1` when no such literal exists, as in
+ * `/api/v1/{companyId}/sendDocument` and `/{id}/adopt`. The parent is kept
+ * even when it is the service segment: `/pets/{id}/archive` in `Pets` is
+ * `archivePet` and `/pets/{id}/status` is `getPetStatus`, the names they
+ * have under `/admin` in `Admin` too, so a name never depends on where the
+ * service boundary falls.
  */
-function inferPostAction(path: string, apiRootLength = 0): { verb: string; resource: string | null } | null {
-  const segments = path.split('/').filter(Boolean);
-  if (segments.length < 2) return null;
-  const last = segments[segments.length - 1];
-  if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
-  if (last.toLowerCase().endsWith('s')) return null;
-
+function itemParentIndex(segments: readonly string[], apiRootLength: number): number {
   for (let i = segments.length - 3; i >= apiRootLength; i--) {
-    if (!segments[i].startsWith('{') && !isApiMarkerSegment(segments[i])) {
-      return { verb: last, resource: toPascalCase(singularizePathSegment(segments[i])) };
-    }
+    if (!segments[i].startsWith('{') && !isApiMarkerSegment(segments[i])) return i;
   }
-  return { verb: last, resource: null };
+  return -1;
+}
+
+/**
+ * The parent of a path's last segment (itemParentIndex) as a noun, singular
+ * since the parameter addresses one of it: `Pet` for `/pets/{petId}/adopt`.
+ * `null` when there is none.
+ */
+function inferItemParent(segments: readonly string[], apiRootLength: number): string | null {
+  const index = itemParentIndex(segments, apiRootLength);
+  return index < 0 ? null : toPascalCase(singularizePathSegment(segments[index]));
+}
+
+/**
+ * Recognise a singleton of one item (isSingletonSegment) and the two nouns
+ * its name is built from: the singular parent (inferItemParent) and the
+ * segment itself, `Pet` and `Status` for `/pets/{id}/status`, which
+ * fallbackOperationName joins after the method's item verb: `getPetStatus`,
+ * `updatePetStatus`, `deletePetStatus`, `checkPetStatus`, and
+ * `createOrderStatus` for `POST /orders/{id}/status`. A POST on a singleton
+ * that does not end in `s` is an action instead (inferAction), so
+ * `/users/{id}/avatar` is `getUserAvatar` for a GET but `avatarUser` for a
+ * POST; give the POST an `operationId`.
+ */
+function inferSingleton(path: string, apiRootLength = 0): { parent: string | null; resource: string } | null {
+  const segments = path.split('/').filter(Boolean);
+  if (!isSingletonSegment(segments)) return null;
+  return {
+    parent: inferItemParent(segments, apiRootLength),
+    resource: toPascalCase(segments[segments.length - 1]),
+  };
+}
+
+/**
+ * Recognise an action: the last segment is a literal that names what the
+ * operation does rather than a resource, so it is the whole verb phrase of
+ * the name and the method's CRUD verb is left off. Three shapes:
+ *
+ *   - a POST on a literal that follows a path parameter and does not end in
+ *     `s`: `/pets/{petId}/adopt`, `/owners/{o}/pets/{p}/vaccinate`. A literal
+ *     ending in `s` after the parameter is a nested collection to create into
+ *     (`/orgs/{id}/api_keys`) or a singleton of the item (`/orders/{id}/status`,
+ *     see inferSingleton), and keeps `create`;
+ *   - for any method, a literal whose words include the method's own verb
+ *     (methodVerbs), which the name would otherwise repeat: `bulk-delete` on
+ *     a DELETE, `list-all` on a GET, `update-password` on a PUT after a
+ *     parameter. After a parameter, a literal that carries another method's
+ *     verb is a singleton: `GET /users/{id}/last-update` is
+ *     `getUserLastUpdate`;
+ *   - a literal with no parameter before it whose last word is any CRUD verb
+ *     (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`.
+ *     Such a literal is otherwise read as a collection (`/pets/search` is
+ *     `createSearch`), which would make it `createBulkDelete`. The last word
+ *     only, so `/pets/delete-candidates` stays a collection.
+ *
+ * The verb is the segment itself. The resource is the singular parent
+ * (inferItemParent) when the segment follows a parameter — `adopt` + `Pet` —
+ * and otherwise the collection the segment sits under, as
+ * inferResourceFromPath reads the path without the segment, so
+ * `/pets/bulk-delete` in `Pets` is the bare `bulkDelete` and
+ * `/store/pets/bulk-delete` is `bulkDeletePets`. The caller leaves the
+ * resource off when the verb already ends with it (`restart-id-verification`
+ * under `verification` is `restartIdVerification`, see appendQualifier).
+ */
+function inferAction(
+  method: HttpMethod,
+  path: string,
+  apiRootLength = 0,
+): { verb: string; resource: string | null } | null {
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length === 0) return null;
+  const last = segments[segments.length - 1];
+  if (last.startsWith('{')) return null;
+  const afterParam = segments.length >= 2 && segments[segments.length - 2].startsWith('{');
+  const words = splitWords(last).map((w) => w.toLowerCase());
+  const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
+  const ownVerb = methodVerbs(method).some((verb) => words.includes(verb));
+  const verbPhrase = !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
+  if (!postAction && !ownVerb && !verbPhrase) return null;
+
+  const resource = afterParam
+    ? inferItemParent(segments, apiRootLength)
+    : inferResourceFromPath('/' + segments.slice(0, -1).join('/'), apiRootLength);
+  return { verb: last, resource };
 }
 
 /**
@@ -1042,10 +1158,11 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
  * root or the service segment into a name: `DELETE /api/v1/notes/all` in
- * `Notes` is `deleteAll`, never `deleteAllV1Notes`. A POST action's resource
- * and deeper context are read from its path without the action segment (see
- * qualifierPath), so a second `adoptPet` is qualified by what sets its path
- * apart and never by repeating `Adopt`.
+ * `Notes` is `deleteAll`, never `deleteAllV1Notes`. An action's resource and
+ * deeper context are read from its path without the action segment, and a
+ * singleton's without its parent (see qualifierPath), so a second `adoptPet`
+ * or `getPetStatus` is qualified by what sets its path apart and never by
+ * repeating `Adopt` or `Pet`.
  *
  * Qualifiers are tried in order, each on every group still colliding after
  * the one before. A qualifier never puts the same word twice in a row into a
@@ -1085,7 +1202,7 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      SDK generated from such a document already exposes, where a number
  *      says nothing. Two path-named operations never need it: their paths
  *      differ, so a qualifier above tells them apart. A name a qualifier has
- *      already extended, and an action, go straight to the suffix;
+ *      already extended, an action and a singleton go straight to the suffix;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
  *      operation keeps the plain name over a path-named one; then the path
@@ -1299,14 +1416,31 @@ function appendQualifier(name: string, qualifier: string | null): string {
 
 /**
  * The path a colliding operation's resource and deeper context are read
- * from. For a POST action it is the path without the action segment: the
- * name already ends with the parent (`adoptPet`), so the qualifiers see that
- * parent, which appendQualifier leaves alone, rather than the verb, which
- * would come back as `adoptPetAdopt`. Every other operation is read whole.
+ * from: the path without the segments whose words the name already carries
+ * ahead of its last word, so that what remains ends with the word the name
+ * ends with, which appendQualifier leaves alone, and the rest is what sets
+ * the colliding paths apart.
+ *
+ * For an action (inferAction) it is the path without the action segment:
+ * `adoptPet` on `/shop/rescue/pets/{id}/adopt` is read as
+ * `/shop/rescue/pets/{id}`, whose resource `Pet` the name ends with and whose
+ * deeper context `Rescue` tells it from `/shop/pets/{id}/adopt`, rather than
+ * the verb coming back as `adoptPetAdopt`. For a singleton (inferSingleton)
+ * it is the path without the parent (itemParentIndex) and the parameter
+ * before the segment: `getPetStatus` on `/shop/rescue/pets/{id}/status` is
+ * read as `/shop/rescue/status`, whose resource `Status` the name ends with,
+ * so the same `Rescue` tells it from `/shop/pets/{id}/status` rather than
+ * `Pet` coming back as `getPetStatusPet`. Every other operation is read
+ * whole.
  */
 function qualifierPath(op: Operation, apiRootLength: number): string {
-  if (op.httpMethod !== 'post' || !inferPostAction(op.path, apiRootLength)) return op.path;
-  return '/' + op.path.split('/').filter(Boolean).slice(0, -1).join('/');
+  const segments = op.path.split('/').filter(Boolean);
+  if (inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
+  if (inferSingleton(op.path, apiRootLength)) {
+    const parent = itemParentIndex(segments, apiRootLength);
+    return '/' + segments.filter((_, i) => i !== parent && i !== segments.length - 2).join('/');
+  }
+  return op.path;
 }
 
 /**
