@@ -323,33 +323,34 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * `allOf`/`oneOf`/`anyOf` and the rest of `schemaShapeKey`'s structural
  * keywords — so a property named `schema` or `title` is a property, and a
  * `$ref` is a reference to a component read under the components root, not
- * descended into. Outside schemas, `example`, `examples` and `x-` extensions
- * are not walked. Decided from the document's content alone, so declaration
- * order and depth play no part, and once per document, before any union is
- * named (`extractSchemas`), so the union TypeRef and every extractor read
- * the same decision. `undefined` clears the previous document's marks.
+ * descended into. The roots are found by following the OpenAPI object model
+ * (`schemaRootsOf`), the way the operation, response and webhook readers
+ * do, so a name is never mistaken for a specification extension: a header
+ * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`
+ * or a property `x-id` is read like any other, and an `x-` key is stepped
+ * over only where the readers step over it or read nothing: a Responses
+ * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
+ * the specification; the parser reads no callbacks). Decided from the document's content
+ * alone, so declaration order and depth play no part, and once per
+ * document, before any union is named (`extractSchemas`), so the union
+ * TypeRef and every extractor read the same decision. `undefined` clears
+ * the previous document's marks.
  *
  * Each root is read with a visited set of its own, so a schema object two
  * roots share — one a `transformSpec` assigned in both places, a bundled
  * external schema inlined twice as one object — is read under each root and
  * compared with each root's other variants, and a mark from either root
  * stands: the shared variant's title is then qualified wherever it appears.
- * The generic descent over the document keeps a separate guard that never
- * holds a schema. Both guards end the walk on a document that refers back
- * to itself.
+ * The descent over the document keeps a separate guard that never holds a
+ * schema. Both guards end the walk on a document that refers back to itself.
  */
 export function markContestedTitles(document: unknown): void {
   contestedTitledVariants = new WeakSet();
   if (!isRecord(document)) return;
-  const components = (document['components'] as { schemas?: unknown } | undefined)?.['schemas'];
-  // The generic descent's own guard. The components map is read here, as
-  // one root, so the descent steps over it.
-  const descended = new WeakSet<object>();
-  if (isRecord(components)) {
-    descended.add(components);
-    markContestedTitlesUnderRoot(Object.values(components).filter(isSchemaRecord));
-  }
-  visitSchemaRoots(document, descended, (root) => markContestedTitlesUnderRoot([root]));
+  const components = isRecord(document['components']) ? document['components'] : undefined;
+  const schemas = components?.['schemas'];
+  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord));
+  for (const root of schemaRootsOf(document, components)) markContestedTitlesUnderRoot([root]);
 }
 
 /** A plain object: the only value that can be a schema or a container of them. */
@@ -362,30 +363,115 @@ function isSchemaRecord(value: unknown): value is SchemaObject {
   return isRecord(value);
 }
 
+/** The Path Item Object's operation fields, the keys the operation readers dispatch on. */
+const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
+
 /**
- * Call `onRoot` for every schema root outside `components.schemas` (see
- * `markContestedTitles`): the value of every `schema` key reached from
- * `value` without entering a schema. `descended` holds the containers
- * already entered — a guard against a document that refers back to itself
- * — and never a schema: a root is handed to `onRoot` and not entered, so a
- * schema object reached under two `schema` keys is handed over for each,
- * and read under each root (`markContestedTitlesUnderRoot`).
+ * Every schema root of the document outside `components.schemas`, found by
+ * walking the OpenAPI 3.0/3.1 object model (see `markContestedTitles`):
+ *
+ *   - the OpenAPI Object's `paths` and `webhooks` (a path or a name per
+ *     key) to Path Item Objects; the Components Object's `responses`,
+ *     `parameters`, `requestBodies`, `headers`, `pathItems` and `callbacks`
+ *     (a name per key);
+ *   - a Path Item's `parameters` list and operations; an Operation's
+ *     `parameters`, `requestBody`, `responses` (a status code, `default`, a
+ *     range or an `x-` extension per key) and `callbacks` (a name per key,
+ *     each a Callback Object: an expression or an `x-` extension per key,
+ *     each a Path Item);
+ *   - a Parameter's or Header's `schema` and `content`; a Request Body's and
+ *     a Response's `content` (a media type per key) and a Response's
+ *     `headers` (a name per key); a Media Type's `schema` and `encoding` (a
+ *     property name per key, each an Encoding Object with `headers`).
+ *
+ * A map whose keys are names is read whole, whatever the keys look like.
+ * The Paths Object is read whole too, every key as a Path Item, exactly as
+ * `extractOperations` reads it. An `x-` key is stepped over in a Responses
+ * Object, as `readFallbackResponse` steps over it, and in a Callback Object,
+ * where the specification makes it an extension (the parser reads no
+ * callbacks, so nothing named under one is ever typed). A `$ref` entry
+ * anywhere carries no schema of its own: the target is a component, read
+ * under its own map. A `schema` is yielded and not entered, so one shared by
+ * two sites is yielded for each; every other object is entered once, which
+ * ends the walk on a document that refers back to itself. `example`,
+ * `examples`, `links` and extensions are never entered.
  */
-function visitSchemaRoots(value: unknown, descended: WeakSet<object>, onRoot: (root: SchemaObject) => void): void {
-  if (!value || typeof value !== 'object' || descended.has(value)) return;
-  descended.add(value);
-  if (Array.isArray(value)) {
-    for (const item of value) visitSchemaRoots(item, descended, onRoot);
-    return;
+function schemaRootsOf(
+  document: Record<string, unknown>,
+  components: Record<string, unknown> | undefined,
+): SchemaObject[] {
+  const roots: SchemaObject[] = [];
+  const entered = new WeakSet<object>();
+  /** Enter an object once; false for a non-object or one entered before. */
+  const enter = (value: unknown): value is Record<string, unknown> => {
+    if (!isRecord(value) || entered.has(value)) return false;
+    entered.add(value);
+    return true;
+  };
+  /** Every entry of a map whose keys are names. */
+  const named = (map: unknown, visit: (entry: unknown) => void): void => {
+    if (!enter(map)) return;
+    for (const entry of Object.values(map)) visit(entry);
+  };
+  /** Every entry of a map whose keys OpenAPI defines beside `x-` extensions. */
+  const keyed = (map: unknown, visit: (entry: unknown) => void): void => {
+    if (!enter(map)) return;
+    for (const [key, entry] of Object.entries(map)) if (!key.startsWith('x-')) visit(entry);
+  };
+  const listed = (list: unknown, visit: (entry: unknown) => void): void => {
+    if (!Array.isArray(list) || entered.has(list)) return;
+    entered.add(list);
+    for (const entry of list) visit(entry);
+  };
+  const schema = (value: unknown): void => {
+    if (isSchemaRecord(value)) roots.push(value);
+  };
+  const encoding = (value: unknown): void => {
+    if (enter(value)) named(value['headers'], parameter);
+  };
+  const mediaType = (value: unknown): void => {
+    if (!enter(value)) return;
+    schema(value['schema']);
+    named(value['encoding'], encoding);
+  };
+  /** A Parameter Object or a Header Object: the same schema sites. */
+  const parameter = (value: unknown): void => {
+    if (!enter(value)) return;
+    schema(value['schema']);
+    named(value['content'], mediaType);
+  };
+  const requestBody = (value: unknown): void => {
+    if (enter(value)) named(value['content'], mediaType);
+  };
+  const response = (value: unknown): void => {
+    if (!enter(value)) return;
+    named(value['headers'], parameter);
+    named(value['content'], mediaType);
+  };
+  const pathItem = (value: unknown): void => {
+    if (!enter(value)) return;
+    listed(value['parameters'], parameter);
+    for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
+  };
+  const operation = (value: unknown): void => {
+    if (!enter(value)) return;
+    listed(value['parameters'], parameter);
+    requestBody(value['requestBody']);
+    keyed(value['responses'], response);
+    named(value['callbacks'], (callback) => keyed(callback, pathItem));
+  };
+
+  named(document['paths'], pathItem);
+  named(document['webhooks'], pathItem);
+  if (components) {
+    named(components['responses'], response);
+    named(components['parameters'], parameter);
+    named(components['requestBodies'], requestBody);
+    named(components['headers'], parameter);
+    named(components['pathItems'], pathItem);
+    named(components['callbacks'], (callback) => keyed(callback, pathItem));
   }
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === 'example' || key === 'examples' || key.startsWith('x-')) continue;
-    if (key === 'schema') {
-      if (isSchemaRecord(entry)) onRoot(entry);
-      continue;
-    }
-    visitSchemaRoots(entry, descended, onRoot);
-  }
+  return roots;
 }
 
 /**
