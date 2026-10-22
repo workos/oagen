@@ -90,7 +90,7 @@ describe('diffOperations – request body added (issue #249)', () => {
     const change = modified(createPet, withRequiredParam);
     expect(change).toMatchObject({ requestBodyChanged: true, classification: 'breaking' });
     expect(change.paramChanges).toEqual([
-      { kind: 'param-added', paramName: 'organization_id', classification: 'breaking' },
+      { kind: 'param-added', paramName: 'organization_id', classification: 'breaking', paramLocation: 'query' },
     ]);
   });
 
@@ -110,7 +110,9 @@ describe('diffOperations – request body added (issue #249)', () => {
     };
     const change = modified(createPet, withOptionalParam);
     expect(change).toMatchObject({ requestBodyChanged: true, classification: 'additive' });
-    expect(change.paramChanges).toEqual([{ kind: 'param-added', paramName: 'dry_run', classification: 'additive' }]);
+    expect(change.paramChanges).toEqual([
+      { kind: 'param-added', paramName: 'dry_run', classification: 'additive', paramLocation: 'query' },
+    ]);
   });
 
   it('leaves the required-flag flips as they were', () => {

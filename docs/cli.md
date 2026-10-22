@@ -70,6 +70,10 @@ Every entry in `changes` carries a `kind` and a `classification` (`additive` or 
 | `variable-enum-value-added`   | additive       | `value` can now be picked                                    |
 | `variable-enum-value-removed` | breaking       | `value` can no longer be picked                              |
 
+**Deprecation.** A node becoming deprecated, or no longer being deprecated, is reported and is additive in either direction (nothing a caller compiles against changes): `deprecatedChanged: true` on an `operation-modified`, `model-modified`, `enum-modified` or `webhook-modified` change, with `oldDeprecated`/`newDeprecated` beside it, and a `param-deprecated-changed`, `field-deprecated-changed` or `value-deprecated-changed` entry — carrying the same two values and `details` reading `live → deprecated` or `deprecated → live` — in that change's `paramChanges` (an operation's or a webhook's), `fieldChanges` or `valueChanges`. A change whose only content is the flag is still reported (so the command exits 1), and a breaking change on the same node keeps the change breaking. Only `true` counts as deprecated: `false` and an absent key are the same thing. Each flip is also mirrored into `behaviorChanges` as a `deprecated-changed` entry naming the node (`operation`, `parameter`, `model`, `field`, `enum`, `enum-value`, `webhook` or `webhook-parameter`) and copying `oldDeprecated`/`newDeprecated` from the change, beside the `param-default-changed` entries that were already collected there.
+
+**Parameters.** Parameters are matched by location and name — OpenAPI allows a path `id` beside a query `id` on one operation — and every `paramChanges` entry carries `paramLocation` (`path`, `query` or `header` on an operation; `header`, `query` or `cookie` on a webhook) to say which one it is about.
+
 ## `oagen extract`
 
 Extract the public API surface from an existing SDK. Produces a JSON file used as input for compat overlay and verification.

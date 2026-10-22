@@ -1,6 +1,6 @@
 import type { ErrorResponse, Operation, ResponseContent, StatusRange, TypeRef } from '../ir/types.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
-import { classifyParamChange } from './classify.js';
+import { classifyParamChange, deprecationDetails, deprecationFlip } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 
 export function diffOperations(serviceName: string, oldOps: Operation[], newOps: Operation[]): Change[] {
@@ -54,6 +54,10 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
     const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
+    // Additive either way: the operation's signature is unchanged, but a
+    // changelog has to say it, so a flipped flag alone is a change.
+    const deprecation = deprecationFlip(oldOp, newOp);
+    const deprecatedChanged = deprecation !== undefined;
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -66,7 +70,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
       injectIdempotencyKeyChanged ||
       errorsChanged ||
       responseContentTypesChanged ||
-      fallbackResponsesChanged;
+      fallbackResponsesChanged ||
+      deprecatedChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -118,6 +123,8 @@ export function diffOperations(serviceName: string, oldOps: Operation[], newOps:
         responseContentTypesChanged,
         responseContentTypeChanges,
         fallbackResponsesChanged,
+        deprecatedChanged,
+        ...deprecation,
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
@@ -426,10 +433,21 @@ function classifyKeyedResponsesChange<K>(
   return 'none';
 }
 
+type ParamLocation = 'path' | 'query' | 'header';
+
+/**
+ * The key `diffParams` matches parameters on. OpenAPI allows a path `id`
+ * beside a query `id` on one operation, and keying by name alone paired
+ * whichever came last on each side with the other's, so a change to one of
+ * them was reported against the wrong parameter or not at all.
+ */
+function paramKey(loc: ParamLocation, name: string): string {
+  return `${loc}:${name}`;
+}
+
 function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
   const changes: ParamChange[] = [];
-  const tagged = (loc: 'path' | 'query' | 'header', params: typeof oldOp.queryParams) =>
-    params.map((p) => ({ p, loc }));
+  const tagged = (loc: ParamLocation, params: typeof oldOp.queryParams) => params.map((p) => ({ p, loc }));
   const allOldParams = [
     ...tagged('path', oldOp.pathParams),
     ...tagged('query', oldOp.queryParams),
@@ -440,48 +458,64 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     ...tagged('query', newOp.queryParams),
     ...tagged('header', newOp.headerParams),
   ];
-  const oldByName = new Map(allOldParams.map((e) => [e.p.name, e]));
-  const newByName = new Map(allNewParams.map((e) => [e.p.name, e]));
+  const oldByKey = new Map(allOldParams.map((e) => [paramKey(e.loc, e.p.name), e]));
+  const newByKey = new Map(allNewParams.map((e) => [paramKey(e.loc, e.p.name), e]));
+  // Every entry says where its parameter lives, since the name alone no
+  // longer identifies it.
+  const at = (change: ParamChange, loc: ParamLocation): ParamChange => {
+    change.paramLocation = loc;
+    return change;
+  };
 
-  for (const [name, entry] of newByName) {
-    if (!oldByName.has(name)) {
-      changes.push(classifyParamChange('param-added', name, entry.p.required));
+  for (const [key, entry] of newByKey) {
+    if (!oldByKey.has(key)) {
+      changes.push(at(classifyParamChange('param-added', entry.p.name, entry.p.required), entry.loc));
     }
   }
 
-  for (const [name] of oldByName) {
-    if (!newByName.has(name)) {
-      changes.push(classifyParamChange('param-removed', name));
+  for (const [key, entry] of oldByKey) {
+    if (!newByKey.has(key)) {
+      changes.push(at(classifyParamChange('param-removed', entry.p.name), entry.loc));
     }
   }
 
-  for (const [name, newEntry] of newByName) {
-    const oldEntry = oldByName.get(name);
+  for (const [key, newEntry] of newByKey) {
+    const oldEntry = oldByKey.get(key);
     if (!oldEntry) continue;
+    const name = newEntry.p.name;
+    const loc = newEntry.loc;
 
     if (!typeRefsEqual(oldEntry.p.type, newEntry.p.type)) {
       if (primitivesDifferOnlyByFormat(oldEntry.p.type, newEntry.p.type)) {
-        const change = classifyParamChange('param-format-changed', name);
+        const change = at(classifyParamChange('param-format-changed', name), loc);
         change.details = formatChangeDetails(oldEntry.p.type, newEntry.p.type);
         changes.push(change);
       } else {
-        changes.push(classifyParamChange('param-type-changed', name));
+        changes.push(at(classifyParamChange('param-type-changed', name), loc));
       }
     }
 
     if (oldEntry.p.required !== newEntry.p.required) {
-      changes.push(classifyParamChange('param-required-changed', name, newEntry.p.required));
+      changes.push(at(classifyParamChange('param-required-changed', name, newEntry.p.required), loc));
     }
 
     const oldDefault = serializeDefault(oldEntry.p.default);
     const newDefault = serializeDefault(newEntry.p.default);
     if (oldDefault !== newDefault) {
-      const change = classifyParamChange('param-default-changed', name);
+      const change = at(classifyParamChange('param-default-changed', name), loc);
       change.oldDefault = oldDefault;
       change.newDefault = newDefault;
-      change.paramLocation = newEntry.loc;
       change.details = `default ${oldDefault ?? '<unset>'} → ${newDefault ?? '<unset>'}`;
       changes.push(change);
+    }
+
+    const deprecation = deprecationFlip(oldEntry.p, newEntry.p);
+    if (deprecation) {
+      changes.push({
+        ...at(classifyParamChange('param-deprecated-changed', name), loc),
+        ...deprecation,
+        details: deprecationDetails(deprecation.newDeprecated),
+      });
     }
   }
 

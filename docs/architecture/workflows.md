@@ -205,7 +205,8 @@ interface DiffReport {
   oldVersion: string;
   newVersion: string;
   changes: Change[]; // BaseUrlChanged, ServerAdded, ModelAdded, ModelRemoved, EnumAdded, OperationAdded, etc.
-  summary: { added; removed; modified; breaking; additive };
+  behaviorChanges: BehaviorChange[]; // param-default-changed (breaking), deprecated-changed (additive)
+  summary: { added; removed; modified; breaking; additive; behaviorChanges };
 }
 ```
 
