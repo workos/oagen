@@ -14,7 +14,7 @@ import type { Model, TypeRef } from '../ir/types.js';
 import { collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef, isComponentModelRef } from './schemas.js';
+import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
 
 // The model-shape fingerprint lives beside the schema-shape key in
@@ -171,12 +171,13 @@ const MAX_RENAME_ROUNDS = 64;
  * parent that matched a registered model before and differs from it now
  * moves to the next free stem with its children, instead of being dropped at
  * commit as already defined. That rewrite cannot tell an inline model's
- * reference from a `$ref` to a component model of the same name, so a schema
+ * reference from a `$ref` to a component MODEL of the same name, so a schema
  * that both inlines a clashing `Circle` and references component model
- * `Circle` fails loudly instead; a `$ref` to a component enum of that name is
- * typed `{ kind: 'enum' }` and left alone by the rewrite, so it does not
- * stand in the way (`componentModelRefTargets`). A rename replayed from an
- * earlier site that the same `$ref` would make unsafe is skipped, not failed
+ * `Circle` fails loudly instead (`componentModelRefTargets`). A component
+ * ENUM of the name is no such bar: a `$ref` to it is an `EnumRef`, which the
+ * rewrite never touches, so the inline `Circle` is renamed under the root
+ * and the enum reference stays. A rename replayed from an earlier site that
+ * such a `$ref` to a component model would make unsafe is skipped, not failed
  * (`runTrial`).
  *
  * The stems are tried in the order `candidateStem` gives: the caller's bare
@@ -465,6 +466,10 @@ function renameClashing(
     return name;
   };
   const rename = (from: string, to: string): void => {
+    // Only a reference to a component MODEL of this name is indistinguishable
+    // from the inline model's own references once both are plain names; a
+    // reference to a component enum of the name is an `EnumRef`, which the
+    // rewrite never touches, so the inline model is simply renamed past it.
     if (!renameModel(trial.models, type, referenced, from, to)) {
       throw new Error(
         `Inline schema "${from}" under ${rootName} has another shape than component "${from}", which the same ` +
