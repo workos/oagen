@@ -1933,9 +1933,11 @@ export function resetFoldWarnings(): void {
  * around an object — because only an inline object variant takes them
  * (`foldSiblingProperties`). A primitive, array or enum variant is no object
  * and is not reported. Called by `schemaToTypeRef` with the context it types
- * the schema under, before the fold, on the schema as written.
+ * the schema under, before the fold, on the schema as written — and by the
+ * response and request-body paths, which fold a body before anything types
+ * it, on the body as written under the body's name.
  */
-function warnOnUncarriedProperties(
+export function warnOnUncarriedProperties(
   schema: SchemaObject,
   contextName: string | undefined,
   parentModelName: string | undefined,
@@ -3266,7 +3268,11 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       const mergedProperties: Record<string, SchemaObject | undefined> = {};
       const mergedRequired: string[] = [];
       for (const sub of composed.allOf) {
-        if (sub.properties) Object.assign(mergedProperties, sub.properties);
+        // Earlier members win on a shared name, as `mergeAugmentation` merges
+        // and the fold places the schema's own properties first.
+        for (const [property, propertySchema] of Object.entries(sub.properties ?? {})) {
+          if (!(property in mergedProperties)) mergedProperties[property] = propertySchema;
+        }
         if (sub.required) mergedRequired.push(...sub.required);
       }
       if (Object.keys(mergedProperties).length > 0) {

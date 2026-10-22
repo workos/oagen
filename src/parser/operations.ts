@@ -12,6 +12,7 @@ import type {
   DefaultResponse,
   RangeResponse,
   Model,
+  Enum,
   Field,
   PaginationMeta,
   PaginationEndOfIteration,
@@ -44,10 +45,12 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
   foldSiblingProperties,
+  isInlineObjectSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
+  warnOnUncarriedProperties,
 } from './schemas.js';
-import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs } from '../ir/types.js';
+import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
   detectPagination,
@@ -74,6 +77,7 @@ import {
   type InlineModelRegistry,
   type InlineModelOwner,
   type SiblingStems,
+  registerEnumNames,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -375,6 +379,7 @@ export function extractOperations(
   documentServers?: ServerEntry[],
   openapiVersion?: string,
   operationHints?: Record<string, OperationHint>,
+  componentEnums?: readonly Enum[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
 
@@ -518,17 +523,23 @@ export function extractOperations(
     ...companionBundles(envelopeCompanions, companionModels, companionFolds, companionQualifiers),
   );
 
-  // Headers, secondary bodies, fallback bodies and error bodies are named
-  // last, in document order, against every name above — the component models,
-  // the inline models the components' own fields mint (a nested object, a
-  // map's values; not among `componentModels`, see parseSpec), every request
-  // body, primary response and companion model — so none of them takes a name
-  // one of those owns, whichever comes first in the document.
+  // Headers, secondary bodies, fallback bodies, error bodies and parameters
+  // are named last, in document order, against every name above — the
+  // component models, the inline models the components' own fields mint (a
+  // nested object, a map's values; not among `componentModels`, see
+  // parseSpec), every request body, primary response and companion model —
+  // and against every enum name: the component enums', and the name every
+  // inline enum a model field, a parameter or a body mints will be lifted
+  // under (`mintedEnumNames`). So none of them takes a name one of those
+  // owns, whichever comes first in the document, and no deferred model
+  // shares a name with an enum.
+  const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
   const deferredTypes = resolveDeferredInlineTypes(
     deferred,
-    [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+    registeredModels,
     inlineModels,
     operationOf,
+    mintedEnumNames(componentEnums ?? [], [...registeredModels, ...inlineModels], [...serviceMap.values()].flat()),
   );
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
@@ -1871,17 +1882,15 @@ function buildOperation(
     refSiblingDescriptions,
     componentResponseModelNames,
   };
-  // One location's parameters, typed by `extractParams`; a parameter whose
-  // inline schema mints a model is then deferred so the model is created
-  // under a name nothing else owns (`deferParameterModels`).
+  // One location's parameters, typed by `extractParams`. A parameter whose
+  // inline schema mints a model is deferred once the responses have been
+  // read (`deferParameterModels`, after `extractResponses` below), so the
+  // model is created under a name nothing else owns and a response header
+  // the operation types keeps the name it has.
+  const pendingParams: Array<[raw: ParameterObject[], typed: Parameter[], location: ParameterObject['in']]> = [];
   const extract = (location: ParameterObject['in'], source: ParameterObject[] = wireParams): Parameter[] => {
     const params = extractParams(source, location, opContext, componentSchemas, componentExamples, opLabel);
-    deferParameterModels(
-      source.filter((p) => p.in === location),
-      params,
-      location,
-      typing,
-    );
+    pendingParams.push([source.filter((p) => p.in === location), params, location]);
     return params;
   };
   const pathParams = extract('path');
@@ -1973,6 +1982,12 @@ function buildOperation(
     componentModels,
   });
   const inlineModels = [...responseModels, ...reqBodyModels];
+
+  // The parameters' deferred sites follow the responses' in the registry, so
+  // a response header the operation typed keeps its name (`PetsXMeta`) and a
+  // header parameter of the same name takes the location-qualified one
+  // (`PetsHeaderXMeta`), never the reverse.
+  for (const [raw, typed, location] of pendingParams) deferParameterModels(raw, typed, location, typing);
 
   // An explicit `dataPath` that does not reach an array cannot type the
   // iterator's items, so the whole override falls back to detection, as
@@ -2616,7 +2631,10 @@ function extractRequestBody(
   // into the composition, as `schemaToTypeRef` and the field extractor read
   // them (`foldSiblingProperties`), so the body is read the one way a field
   // of the same schema is: the object branch below reads `properties` first
-  // and would otherwise drop the composition.
+  // and would otherwise drop the composition. The variants that cannot take
+  // the properties are reported on the body as written, under the body's
+  // name, since the fold leaves `schemaToTypeRef` nothing to report.
+  warnOnUncarriedProperties(schema, contextName, undefined);
   schema = foldSiblingProperties(schema);
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
@@ -2657,9 +2675,23 @@ function extractRequestBody(
     return { body: { kind: 'model', name: contextName }, encoding };
   }
 
+  // A nullable body (`oneOf: [object, null]`) is one schema: the model built
+  // from its object branch takes the wrapper's `deprecated` and limits, as
+  // every other nullable unwrap gives it (`collapsedNullableBranch`). The
+  // null branch still makes the body nullable below. A multi-variant union,
+  // nullable or not, is not collapsed: every variant is built as written. A
+  // nullable wrapper around one branch that is not an inline object — an
+  // array (`oneOf: [{ items }, { type: 'null' }]`), a `$ref`, a primitive —
+  // is not a union to build: it takes the fall-through, where
+  // `schemaToTypeRef` types it as it types the same wrapper on a field or a
+  // parameter (`nullable<CreatePetsRequest[]>`, `nullable<Pet>`) and the
+  // array's inline items are named from the body (`CreatePetsRequest`), the
+  // way `type: ['array', 'null']` and `nullable: true` already are.
+  const branch = collapsedNullableBranch(schema);
+
   // If the request body is a oneOf, extract each variant as an inline model
   // and build a union type pointing to them by name.
-  if (schema.oneOf) {
+  if (schema.oneOf && (branch === undefined || isInlineObjectSchema(branch))) {
     const variants: TypeRef[] = [];
     // The inline object variants of this union and the names its const-less
     // variants have taken so far, for `deriveOneOfVariantName`.
@@ -2667,12 +2699,6 @@ function extractRequestBody(
       (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
     );
     const contentNamed: string[] = [];
-    // A nullable body (`oneOf: [object, null]`) is one schema: the model built
-    // from its object branch takes the wrapper's `deprecated` and limits, as
-    // every other nullable unwrap gives it (`collapsedNullableBranch`). The
-    // null branch still makes the body nullable below. A multi-variant union,
-    // nullable or not, is not collapsed: every variant is built as written.
-    const branch = collapsedNullableBranch(schema);
 
     // The inline object variants are named and built first, in order, so the
     // other variants' contexts can step around their names and their
@@ -2770,13 +2796,14 @@ function extractRequestBody(
   }
 
   // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
-  // array, a map, a nullable object, …). Such a TypeRef can still reach
-  // inline models — the inline object variants of an `anyOf`, an array's
-  // inline items or the variants of an `items.oneOf`, a map's inline values,
-  // and whatever is nested under any of them, a union under a variant
-  // included — so materialize them the way an inline response does: as a
-  // property of this name under no parent, which names every nested model
-  // exactly as the TypeRef references it.
+  // array, a map, a nullable object, a nullable wrapper around an array, a
+  // `$ref` or a primitive, …). Such a TypeRef can still reach inline models
+  // — the inline object variants of an `anyOf`, an array's inline items or
+  // the variants of an `items.oneOf`, a map's inline values, and whatever is
+  // nested under any of them, a union under a variant included — so
+  // materialize them the way an inline response does: as a property of this
+  // name under no parent, which names every nested model exactly as the
+  // TypeRef references it.
   extractInlineModelsFromProperties(
     { properties: { [contextName]: schema } },
     inlineModels,
@@ -3061,6 +3088,7 @@ function resolveDeferredInlineTypes(
   componentModels: readonly Model[],
   inlineModels: readonly Model[],
   operationOf: ReadonlyMap<Model, string>,
+  enumNames: ReadonlySet<string> = new Set(),
 ): { models: Model[]; bundles: InlineModelBundle[] } {
   const registry: ModelShapeRegistry = new Map();
   for (const model of componentModels) {
@@ -3070,6 +3098,9 @@ function resolveDeferredInlineTypes(
     if (registry.has(model.name)) continue;
     registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
   }
+  // Every enum name, so no deferred model of any kind takes one; a name a
+  // model above already owns stays that model's.
+  registerEnumNames(registry, enumNames);
   const models: Model[] = [];
   const bundles: InlineModelBundle[] = [];
   const siblingsByBareName = new Map<string, SiblingStems>();
@@ -3086,6 +3117,43 @@ function resolveDeferredInlineTypes(
     bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
   }
   return { models, bundles };
+}
+
+/**
+ * Every enum name decided before the deferred schemas are typed, for
+ * `resolveDeferredInlineTypes` to reserve: the component enums' names and,
+ * from every model and operation read so far, the name of every `EnumRef` —
+ * an inline enum's (`values` set), which the collectors lift under that very
+ * name (`collectInlineEnumsFromModels`, `collectInlineEnumsFromOperations`;
+ * a clash there renames the later copy, never the first), or a reference to
+ * a component enum. So a deferred model — a parameter's, a header's, a
+ * body's — never takes a name an enum has or will have: `PetsFilter` the
+ * component enum beside `filter` the object parameter, or `PetsKind` the
+ * enum one operation's parameter lifts beside the object another's mints.
+ */
+function mintedEnumNames(
+  componentEnums: readonly Enum[],
+  models: readonly Model[],
+  operations: readonly Operation[],
+): Set<string> {
+  const names = new Set(componentEnums.map((e) => e.name));
+  const collect = (ref: TypeRef): void => walkTypeRef(ref, { enum: (r) => names.add(r.name) });
+  for (const model of models) for (const ref of collectModelTypeRefs(model)) collect(ref);
+  for (const op of operations) {
+    for (const param of [
+      ...op.pathParams,
+      ...op.queryParams,
+      ...(op.bodyOwnedQueryParams ?? []),
+      ...op.headerParams,
+      ...(op.cookieParams ?? []),
+    ]) {
+      collect(param.type);
+    }
+    if (op.requestBody) collect(op.requestBody);
+    for (const ref of responseTypeRefs(op)) collect(ref);
+    for (const error of op.errors) if (error.type) collect(error.type);
+  }
+  return names;
 }
 
 /**
@@ -3133,10 +3201,13 @@ function attachSharedDeferredRefs(
  * body from the operation's response stem and media type,
  * `RenderPetCardTextHtmlResponse`; a fallback body from the stem and the
  * response's label, `ListPetsDefaultResponse`; an error body from the stem
- * and its status code, `GetPetError404` (`deriveErrorModelName`). Any of them
+ * and its status code, `GetPetError404` (`deriveErrorModelName`); a
+ * parameter from the service and parameter name, `PetsFilter`. Any of them
  * is a name a component schema, a model nested in one (`GetPet.error404` owns
  * `GetPetError404`), a primary body, the same header on a 429 or another
- * operation may already own with a different shape. Left alone, the later
+ * operation may already own with a different shape, or an enum — a
+ * component's, or one a parameter or field lifts — may own outright
+ * (`registerEnumNames`). Left alone, the later
  * merge keeps one definition for the name and every other reference silently
  * gets the wrong fields (a request body using the component would even change
  * type without any emitter reading headers).
@@ -3263,14 +3334,22 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
  * once every primary model is known (`resolveDeferredInlineTypes`), under a
  * name nothing else owns: `<Service><Param>` (`PetsFilter`), else the
  * location-, operation- or number-qualified candidates `deferredNamingStem`
- * lists. `extractParams` typed the parameter as the property of its name
- * under the service, and the trial extraction here reads the same synthetic
- * property, so the deferred site's first candidate is the name the
- * parameter already references and a parameter that mints no model — a
- * primitive, a `$ref`, an inline enum, an array of either — keeps the type
- * it has and is not deferred. `raw` and `typed` are the location's
- * parameters in document order, `typed[i]` built from `raw[i]`
- * (`extractParams` maps the filtered list one to one).
+ * lists; a name an enum has or will have — a component enum's, or the name
+ * another parameter's or a field's inline enum is lifted under (`PetsKind`)
+ * — is reserved in the registry, so the model steps to the
+ * operation-qualified name (`PetsSearchPetsKind`). Called after the
+ * operation's responses have been read, so a parameter's site follows the
+ * response headers' in the registry: a response header the operation
+ * already typed keeps its name (`PetsXMeta`), and a header parameter of the
+ * same name takes the location-qualified one (`PetsHeaderXMeta`).
+ * `extractParams` typed the parameter as the property of its name under the
+ * service, and the trial extraction here reads the same synthetic property,
+ * so the deferred site's first candidate is the name the parameter already
+ * references and a parameter that mints no model — a primitive, a `$ref`,
+ * an inline enum, an array of either — keeps the type it has and is not
+ * deferred. `raw` and `typed` are the location's parameters in document
+ * order, `typed[i]` built from `raw[i]` (`extractParams` maps the filtered
+ * list one to one).
  */
 function deferParameterModels(
   raw: readonly ParameterObject[],

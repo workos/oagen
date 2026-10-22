@@ -25,11 +25,12 @@ export { modelFingerprint };
 /**
  * Spec-wide record of every model name an inline model must not silently
  * reuse: the component models (seeded up front), each operation's primary
- * response and request body models, and each header and fallback model
- * materialized so far. The value carries the model's shape fingerprint, so a
- * model whose shape matches can share the name, and — for operation-owned
- * models — which operation produced it, so a collision inside one operation
- * can be told apart from one across operations.
+ * response and request body models, and each header, body and parameter
+ * model materialized so far — and every enum name (`registerEnumNames`),
+ * which no model may take. The value carries the model's shape fingerprint,
+ * so a model whose shape matches can share the name, and — for
+ * operation-owned models — which operation produced it, so a collision
+ * inside one operation can be told apart from one across operations.
  */
 export type InlineModelRegistry = Map<string, InlineModelOwner>;
 
@@ -43,6 +44,29 @@ export function registerInlineModels(registry: InlineModelRegistry, models: Mode
   for (const model of models) {
     if (registry.has(model.name)) continue;
     registry.set(model.name, { fingerprint: modelFingerprint(model), operation });
+  }
+}
+
+/**
+ * The owner entry that reserves an enum's name: no model may take it, so the
+ * entry never matches a model's fingerprint — every `modelFingerprint`
+ * contains `#` and this one does not — and a trial that mints the name
+ * clashes and steps exactly as beside a model of another shape. It records
+ * no operation, so the clash reads as one with a component
+ * (`deferredNamingStem`).
+ */
+const ENUM_OWNER: InlineModelOwner = Object.freeze({ fingerprint: 'enum' });
+
+/**
+ * Reserve every enum name the registry does not already hold — a component
+ * enum's, or the name an inline enum of a parameter, field, body or header
+ * will be lifted under — so no deferred model of any kind (a parameter's, a
+ * header's, a secondary, fallback or error body's) takes an enum's name. A
+ * name a model already owns is left to that model: the first owner keeps it.
+ */
+export function registerEnumNames(registry: InlineModelRegistry, names: Iterable<string>): void {
+  for (const name of names) {
+    if (!registry.has(name)) registry.set(name, ENUM_OWNER);
   }
 }
 
