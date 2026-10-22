@@ -286,7 +286,11 @@ describe('request bodies keep every media type (issue #278)', () => {
   });
 
   describe('naming through the shape registry', () => {
-    it('derives one name from two spellings of a media type; a third shape steps to the next free name', async () => {
+    it('tells two spellings of one media type apart by their parameters; a case-only third shape steps to the next free name', async () => {
+      // Issue #279: beside another key of its essence, a parameterized key carries
+      // its parameters in its name, so the names do not depend on key order; a
+      // case-only spelling has none and goes through the registry.
+
       const spec = await parseDocument(
         document(
           replaceWidget({
@@ -300,11 +304,11 @@ describe('request bodies keep every media type (issue #278)', () => {
       expect(op.requestBody).toEqual({ kind: 'model', name: 'ReplaceWidgetRequest' });
       expect(op.requestBodyContents?.map((c) => c.type)).toEqual([
         { kind: 'model', name: 'ReplaceWidgetRequest' },
+        { kind: 'model', name: 'ReplaceWidgetApplicationJsonCharsetUtf8Request' },
         { kind: 'model', name: 'ReplaceWidgetApplicationJsonRequest' },
-        { kind: 'model', name: 'ReplaceWidgetApplicationJsonRequest2' },
       ]);
-      expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonRequest')).toEqual(['title']);
-      expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonRequest2')).toEqual(['age']);
+      expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonCharsetUtf8Request')).toEqual(['title']);
+      expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonRequest')).toEqual(['age']);
       expectClosed(op, spec.models);
     });
 

@@ -14,16 +14,29 @@ export function mediaTypeEssence(contentType: string): string {
 
 /**
  * The PascalCase fragment that qualifies a model minted for a non-primary
- * media type (`<Op><MediaType>Response`, `<Op><MediaType>Request`), taken
- * from the media type's essence so two spellings of one media type name the
- * same model: `text/html` → `TextHtml`, `application/vnd.api+json` →
- * `ApplicationVndApiJson`, and `application/json; charset=utf-8`,
- * `APPLICATION/JSON` and `application/json` all → `ApplicationJson`. A
- * wildcard segment reads as `Any` (`application/*` → `ApplicationAny`), since
- * the caser would drop the `*`; a media type nothing is left of reads as
- * `Content`.
+ * media type among the `content` keys it is declared beside (`siblings`,
+ * the key itself included or not): the essence's token (`text/html` →
+ * `TextHtml`, `application/json; charset=utf-8` → `ApplicationJson`), so a
+ * key keeps its model name however it is spelled — plus the key's own
+ * parameters (`application/yaml; charset=utf-8` → `ApplicationYamlCharsetUtf8`)
+ * only when another key of the same essence sits beside it, so two spellings
+ * of one essence declared side by side take names that do not depend on
+ * their order. Parameters are lower-cased before casing, so `Charset=UTF-8`
+ * and `charset=utf-8` agree; their order is kept. A wildcard segment reads
+ * as `Any` (`application/*` → `ApplicationAny`); nothing left reads as `Content`.
  */
-export function mediaTypeNameFragment(contentType: string): string {
-  const token = toPascalCase(mediaTypeEssence(contentType).split('*').join('Any'));
-  return token.length > 0 ? token : 'Content';
+export function mediaTypeNameFragment(contentType: string, siblings: Iterable<string> = []): string {
+  const essence = mediaTypeEssence(contentType);
+  const token = toPascalCase(essence.split('*').join('Any'));
+  const parameters = toPascalCase(
+    contentType
+      .slice(contentType.indexOf(';') + 1)
+      .trim()
+      .toLowerCase(),
+  );
+  const shared =
+    contentType.includes(';') &&
+    [...siblings].some((sibling) => sibling !== contentType && mediaTypeEssence(sibling) === essence);
+  const fragment = shared ? `${token}${parameters}` : token;
+  return fragment.length > 0 ? fragment : 'Content';
 }
