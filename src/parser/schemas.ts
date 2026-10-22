@@ -58,6 +58,32 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
  */
 let activeNullableUnionSchemaNames: Set<string> = new Set();
 
+/**
+ * What one extraction remembers about its named unions, so each is planned
+ * once although the model (`namedUnionEntry`) and the extractor
+ * (`extractNamedUnionVariantModels`) both read the plan, and so the
+ * whole-document reads every plan makes — each component's shape and each
+ * other union's variant names — are made once per document, not once per
+ * union per read. Every entry is derived from the document being extracted
+ * under `activeComponentSchemaKeys` and the active name transform, so the
+ * memo is created where those are set (`extractSchemas`) and dropped with
+ * them; outside an extraction nothing is memoized.
+ */
+interface NamedUnionMemo {
+  /** Each named union's plan, keyed by its schema; `name` and `schemas` are checked so a different read is never served a stale plan. */
+  plans: WeakMap<
+    SchemaObject,
+    { name: string; schemas: Record<string, SchemaObject> | undefined; plan: NamedUnionPlan | null }
+  >;
+  /** `schemaShapeKey` of every component schema and variant a plan compares, hashed once. */
+  shapes: WeakMap<SchemaObject, string>;
+  /** Each named union's inline variants named in isolation (`otherNamedUnionVariantEntries`), read by every other union's plan. */
+  variantEntries: WeakMap<SchemaObject, Map<SchemaObject, InlineVariantName>>;
+  /** `componentModelNames()`, resolved once. */
+  componentNames?: ReadonlySet<string>;
+}
+let activeNamedUnionMemo: NamedUnionMemo | null = null;
+
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
 function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
   return (values ?? []).filter((v): v is string | number => v !== null);
@@ -591,6 +617,7 @@ export function extractSchemas(
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
   activeNullableUnionSchemaNames = new Set();
+  activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   for (const [name, schema] of Object.entries(schemas)) {
     const resolved = resolveSchemaName(name);
     if (schema.enum) {
@@ -658,6 +685,7 @@ export function extractSchemas(
   // extractOperations() calls schemaToTypeRef() for $ref resolution and
   // needs the same transform active. parseSpec() calls clearSchemaNameTransform()
   // after all extraction is complete.
+  activeNamedUnionMemo = null;
   return { models, enums };
 }
 
@@ -668,6 +696,7 @@ export function clearSchemaNameTransform(): void {
   activeNullableEnumSchemaNames = new Set();
   activeNullableUnionSchemaNames = new Set();
   activeComponentSchemaKeys = new Set();
+  activeNamedUnionMemo = null;
 }
 
 /**
@@ -1934,9 +1963,23 @@ function isPlainObjectSchema(schema: SchemaObject | undefined): boolean {
 
 /**
  * The plan for a named union component, or null for any other schema (see
- * `NamedUnionPlan`).
+ * `NamedUnionPlan`). Planned once per extraction (`activeNamedUnionMemo`):
+ * the model and the extractor both read it, and building it reads every
+ * component and every other union (`namedUnionClaimedShapes`).
  */
 function planNamedUnion(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): NamedUnionPlan | null {
+  const memo = activeNamedUnionMemo?.plans.get(schema);
+  if (memo && memo.name === name && memo.schemas === schemas) return memo.plan;
+  const plan = buildNamedUnionPlan(name, schema, schemas);
+  activeNamedUnionMemo?.plans.set(schema, { name, schemas, plan });
+  return plan;
+}
+
+function buildNamedUnionPlan(
   name: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
@@ -2045,11 +2088,22 @@ function nameNamedUnionVariants(
   return nameInlineVariants(schema, name, namedUnionReservedNames(name, schema, schemas), true);
 }
 
-/** The IR name of every component schema being extracted. */
-function componentModelNames(): Set<string> {
+/** The IR name of every component schema being extracted, resolved once per extraction. */
+function componentModelNames(): ReadonlySet<string> {
+  if (activeNamedUnionMemo?.componentNames) return activeNamedUnionMemo.componentNames;
   const names = new Set<string>();
   for (const key of activeComponentSchemaKeys) names.add(resolveSchemaName(key));
+  if (activeNamedUnionMemo) activeNamedUnionMemo.componentNames = names;
   return names;
+}
+
+/** `schemaShapeKey`, hashed once per extraction for the schemas the named-union plans compare. */
+function namedUnionShapeKey(schema: SchemaObject): string {
+  const cached = activeNamedUnionMemo?.shapes.get(schema);
+  if (cached !== undefined) return cached;
+  const key = schemaShapeKey(schema);
+  activeNamedUnionMemo?.shapes.set(schema, key);
+  return key;
 }
 
 /**
@@ -2077,10 +2131,10 @@ function namedUnionReservedNames(
 
   const ownShapes = new Map<string, string>();
   for (const [variant, entry] of nameInlineVariantEntries(schema, name, componentNames, true)) {
-    if (entry.contextFree) ownShapes.set(entry.name, schemaShapeKey(variant));
+    if (entry.contextFree) ownShapes.set(entry.name, namedUnionShapeKey(variant));
   }
   for (const { variant, entry } of otherNamedUnionVariantEntries(name, schema, schemas, componentNames)) {
-    if (entry.contextFree && ownShapes.get(entry.name) !== schemaShapeKey(variant)) reserved.add(entry.name);
+    if (entry.contextFree && ownShapes.get(entry.name) !== namedUnionShapeKey(variant)) reserved.add(entry.name);
   }
   return reserved;
 }
@@ -2089,7 +2143,9 @@ function namedUnionReservedNames(
  * The inline object variants of every other named union component, each
  * with the name it would keep, read in isolation against the component names
  * alone (no cross-union reservations), so every union sees the others the
- * same way and no two can chase each other's names.
+ * same way and no two can chase each other's names. Each union's entries are
+ * named once per extraction (`activeNamedUnionMemo`): every other union's
+ * plan reads them, twice.
  */
 function otherNamedUnionVariantEntries(
   name: string,
@@ -2102,9 +2158,12 @@ function otherNamedUnionVariantEntries(
     if (other === schema || !isNamedUnionSchema(other)) continue;
     const otherName = resolveSchemaName(key);
     if (otherName === name) continue;
-    for (const [variant, entry] of nameInlineVariantEntries(other, otherName, componentNames, true)) {
-      entries.push({ variant, entry });
+    let otherEntries = activeNamedUnionMemo?.variantEntries.get(other);
+    if (!otherEntries) {
+      otherEntries = nameInlineVariantEntries(other, otherName, componentNames, true);
+      activeNamedUnionMemo?.variantEntries.set(other, otherEntries);
     }
+    for (const [variant, entry] of otherEntries) entries.push({ variant, entry });
   }
   return entries;
 }
@@ -2131,9 +2190,9 @@ function namedUnionClaimedShapes(
     for (const claimant of componentModelNames()) claim(claimant, null);
     return claimed;
   }
-  for (const [key, other] of Object.entries(schemas)) claim(resolveSchemaName(key), schemaShapeKey(other));
+  for (const [key, other] of Object.entries(schemas)) claim(resolveSchemaName(key), namedUnionShapeKey(other));
   for (const { variant, entry } of otherNamedUnionVariantEntries(name, schema, schemas, componentModelNames())) {
-    claim(entry.name, schemaShapeKey(variant));
+    claim(entry.name, namedUnionShapeKey(variant));
   }
   return claimed;
 }
@@ -2168,7 +2227,7 @@ function memberContext(
   if (own.length === 0) return base;
   const rivals = own.flatMap((minted) => claimed.get(minted) ?? []);
   if (rivals.length === 0) return base;
-  const shape = schemaShapeKey(mintingSchema(variant));
+  const shape = namedUnionShapeKey(mintingSchema(variant));
   if (rivals.every((rival) => rival === shape)) return base;
   const kind = variant.type === 'array' ? 'item' : 'value';
   return firstFreeElementContext(base, kind, new Set(claimed.keys()), mint, own).context;
