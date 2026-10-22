@@ -4269,6 +4269,54 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(other).map(isContestedTitle)).toEqual([true, false]);
     });
 
+    it("reads one claim set across a union's nested unions, array items and map values, which its own reservations order", () => {
+      // Two nested unions under one outer union give `Circle` two shapes:
+      // `nonObjectVariantContexts` reserves the earlier kept title for the
+      // later variant, so the later one claims nothing here and the earlier
+      // keeps `Circle` (the base's `(A | B) | (AHolderShape | C)` rule). The
+      // same through an array variant's items, a map variant's values and a
+      // lone `allOf` member; a nested union under an object variant's
+      // property is a group of its own.
+      const first = byRadius();
+      const later = byDiameter();
+      const inItems = byDiameter();
+      const inValues = byDiameter();
+      const inAllOf = byDiameter();
+      const underProperty = byDiameter();
+      markContestedTitles({
+        components: {
+          schemas: {
+            Holder: obj({
+              shape: {
+                oneOf: [
+                  obj({ message: n }),
+                  first,
+                  later,
+                  { type: 'array', items: inItems },
+                  { type: 'object', additionalProperties: inValues },
+                  { allOf: [inAllOf] },
+                  obj({ nested: underProperty }),
+                ],
+              },
+            }),
+          },
+        },
+      });
+      expect(variantsOf(first).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(underProperty).map(isContestedTitle)).toEqual([true, true]);
+      for (const union of [later, inItems, inValues, inAllOf]) {
+        expect(variantsOf(union).map(isContestedTitle)).toEqual([false, false]);
+      }
+      // Without the property's union, nothing contests the group's claim.
+      const alone = byRadius();
+      const alongside = byDiameter();
+      markContestedTitles({
+        components: { schemas: { Holder: obj({ shape: { oneOf: [obj({ message: n }), alone, alongside] } }) } },
+      });
+      expect(variantsOf(alone).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(alongside).map(isContestedTitle)).toEqual([false, false]);
+    });
+
     it('ends on a schema that refers back to itself, within a root and across the document', () => {
       // A root whose property is the root itself, with a conflict further
       // down; a component that contains itself; a path item whose

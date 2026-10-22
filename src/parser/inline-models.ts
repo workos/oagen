@@ -323,7 +323,14 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * (`reservedInlineNames`), and a title used once is kept. Within one union
  * only the first variant to carry a title is read: a later one with the
  * same title never keeps it, whatever the document holds (`emitted` in
- * `nameInlineVariantEntries`), so it is no claim on the title.
+ * `nameInlineVariantEntries`), so it is no claim on the title. The same
+ * holds across everything one union reaches without entering an object —
+ * its nested unions, its array variants' items, its map variants' values,
+ * a lone `allOf` member — the names `mintedInlineNameEntries` reads for the
+ * union, which `nonObjectVariantContexts` decides in variant order: an
+ * earlier variant's kept title is reserved for a later variant of another
+ * shape and shared for the identical one. So one claim set spans that
+ * group, and only its first variant per title is read here.
  *
  * A root is a schema whose inline models are collected together: every
  * `components.schemas` entry is read as one root, because one pass collects
@@ -504,31 +511,43 @@ function schemaRootsOf(
 function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
   const visited = new WeakSet<SchemaObject>();
-  const walk = (schema: SchemaObject): void => {
+  // `claims` is the group's claim set (see `markContestedTitles`): the titles
+  // already read for the union this schema is reached from without entering
+  // an object. Only the first variant of a group to carry a title can keep
+  // it — a later one with the same title is stepped off it by its own union
+  // (`emitted` in `nameInlineVariantEntries` within one union; the kept
+  // titles `nonObjectVariantContexts` reserves across a union's non-object
+  // variants) whatever else is in the document — so a later one competes
+  // for nothing and is not read here. A schema reached any other way starts
+  // a group of its own.
+  const walk = (schema: SchemaObject, claims: Set<string> = new Set()): void => {
     if (visited.has(schema)) return;
     visited.add(schema);
     if (schema.$ref) return;
-    // Only the first variant of a union to carry a title can keep it: a
-    // later variant of the same union with the same title falls back to a
-    // context-qualified name whatever else is in the document
-    // (`nameInlineVariantEntries`, `emitted`), so it competes for nothing
-    // and is not read here.
-    const titlesOfUnion = new Set<string>();
     for (const [variant, title] of titleMappedVariantNames(schema)) {
-      if (titlesOfUnion.has(title)) continue;
-      titlesOfUnion.add(title);
+      if (claims.has(title)) continue;
+      claims.add(title);
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
       entry.shapes.add(schemaShapeKey(variant));
       entry.variants.push(variant);
       byTitle.set(title, entry);
     }
+    // The group continues through what `mintedInlineNameEntries` reads for a
+    // union: its variants, an array's items, a map's values (whether under
+    // `additionalProperties` or `patternProperties`), and the one member of a
+    // lone `allOf`. `properties` and every other keyword begin a new group.
     for (const [keyword, value] of Object.entries(schema)) {
       if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(value)) {
-        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub);
+        const inherited = keyword === 'patternProperties' ? claims : undefined;
+        for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub, inherited);
       } else if (SCHEMA_KEYWORDS.has(keyword) && isSchemaRecord(value)) {
-        walk(value);
+        walk(value, keyword === 'items' || keyword === 'additionalProperties' ? claims : undefined);
       } else if (SCHEMA_LIST_KEYWORDS.has(keyword) && Array.isArray(value)) {
-        for (const sub of value) if (isSchemaRecord(sub)) walk(sub);
+        const inherited =
+          keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && value.length === 1)
+            ? claims
+            : undefined;
+        for (const sub of value) if (isSchemaRecord(sub)) walk(sub, inherited);
       }
     }
   };
