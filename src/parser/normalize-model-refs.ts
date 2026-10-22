@@ -35,6 +35,9 @@ export function validateModelRefs(spec: ApiSpec): void {
       for (const field of op.pagination?.envelopeFields ?? []) {
         walkRef(field.type, `${service.name}.${op.name}.pagination.${field.name}`);
       }
+      for (const error of op.errors) {
+        if (error.type) walkRef(error.type, `${service.name}.${op.name}.errors.${error.statusCode}`);
+      }
       for (const header of collectResponseHeaders(op)) {
         walkRef(header.type, `${service.name}.${op.name}.headers.${header.name}`);
       }

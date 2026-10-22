@@ -1,0 +1,16 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "repro", "version": "1" },
+  "paths": {
+    "/pets/{id}": {
+      "get": {
+        "operationId": "getPet",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "string" } } } } }
+      }
+    }
+  }
+}

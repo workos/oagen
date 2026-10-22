@@ -30,9 +30,19 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 
 /**
  * Collect inline enum definitions from operation parameters (query, path, header)
- * list-envelope companion fields, response headers and secondary response
- * bodies, and promote them to top-level enums so emitters can generate typed
- * enum files.
+ * list-envelope companion fields, response headers, error bodies and secondary
+ * response bodies, and promote them to top-level enums so emitters can
+ * generate typed enum files.
+ *
+ * Every kind is collected collision-aware (`collectDistinctEnums`): a
+ * parameter enum is named from the service and parameter name alone, so a
+ * query parameter `error404` of a later operation derives the very name an
+ * earlier operation's inline 404 enum body or `Error404` response header was
+ * promoted under (`GetPetError404`), and whichever was collected first would
+ * otherwise hand its values to the other's reference. A different value set
+ * is renamed to a distinct name before it is promoted (`GetPetError4042`);
+ * identical members are shared, as a parameter repeated across the
+ * operations of a service always was.
  *
  * `models` lets the walk continue into the models a header or secondary body
  * references — the ones the parser materialized for them, never a component
@@ -70,16 +80,27 @@ export function collectInlineEnumsFromOperations(
         ...op.headerParams,
         ...(op.cookieParams ?? []),
       ]) {
-        collectInlineEnumFromRef(param.type, enums, enumNames);
+        collectDistinctEnums(param.type, undefined, enums, enumNames);
       }
       for (const field of op.pagination?.envelopeFields ?? []) {
-        collectInlineEnumFromRef(field.type, enums, enumNames);
+        collectDistinctEnums(field.type, undefined, enums, enumNames);
       }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at
       // an enum no emitter ever generates.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
         for (const header of headers) collectThroughModels(header.type, qualifier);
+      }
+      // An error body that is itself an inline enum, or an array of one, is
+      // typed by `schemaToTypeRef` and reaches no model, so it is promoted
+      // here — after the headers, so a header enum of the same name keeps it
+      // as a header model would. The name is already operation-qualified
+      // (`GetPetError404`); one a component, header or earlier error enum
+      // owns with other members steps to `GetPetError404Body`. An enum
+      // nested in an error body's model is collected with every other
+      // model's (`collectInlineEnumsFromModels`).
+      for (const error of op.errors) {
+        if (error.type) collectDistinctEnums(error.type, 'Body', enums, enumNames);
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`), or for a `default` or range response, is typed
@@ -119,8 +140,9 @@ export function collectInlineEnumsFromWebhooks(webhooks: Webhook[], enums: Enum[
  * Header lists to walk, each with the status-code qualifier that keeps a
  * colliding enum name apart. When `successResponses` exists the primary list
  * is the same array as its entry there, so the entries are walked with their
- * own codes instead of `responseHeaders`; a lone 2xx carries no status code
- * in the IR, so its headers get no qualifier.
+ * own codes instead of `responseHeaders`; a lone 2xx or 3xx response carries
+ * no status code in the IR (`successResponses` is set only for more than one),
+ * so its headers get no qualifier.
  */
 function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[]; qualifier?: string }> {
   const groups: Array<{ headers: ResponseHeader[]; qualifier?: string }> = [];

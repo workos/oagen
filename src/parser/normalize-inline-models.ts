@@ -104,6 +104,9 @@ function rewriteModelRefs(
       for (const field of op.pagination?.envelopeFields ?? []) {
         rewriteModelRef(field.type, oldName, newName);
       }
+      for (const error of op.errors) {
+        if (error.type) rewriteModelRef(error.type, oldName, newName);
+      }
       for (const header of collectResponseHeaders(op)) {
         rewriteModelRef(header.type, oldName, newName);
       }

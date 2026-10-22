@@ -31,6 +31,7 @@ describe('diffModels — named unions', () => {
     expect(changes).toEqual([
       {
         kind: 'model-modified',
+        deprecatedChanged: false,
         name: 'Pet',
         fieldChanges: [],
         variantChanges: [{ kind: 'variant-added', variant: 'Bird', classification: 'additive' }],
@@ -121,6 +122,7 @@ describe('diffModels — named unions', () => {
     expect(diffModels([anyOf], [oneOf])).toEqual([
       {
         kind: 'model-modified',
+        deprecatedChanged: false,
         name: 'Pet',
         fieldChanges: [],
         variantChanges: [

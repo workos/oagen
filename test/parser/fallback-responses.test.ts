@@ -1469,27 +1469,38 @@ describe('a fallback written as a $ref into components/responses', () => {
     expect(op.rangeResponses?.[0].type).toEqual(model('Error'));
   });
 
-  it('fails loudly on a ref no component response answers, naming the response', () => {
-    expect(() =>
-      extractOperations(
-        {
-          '/pets': {
-            get: {
-              operationId: 'listPets',
-              responses: { '200': ok, default: { $ref: '#/components/responses/Missing' } },
-            },
+  it('warns on a ref no component response answers, naming the response, and reads it as written', () => {
+    // As for an explicit status code (#241): a document that parsed before
+    // response refs were resolved still parses; the entry has no body or headers.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { services } = extractOperations(
+      {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: { '200': ok, default: { $ref: '#/components/responses/Missing' } },
           },
-        } as never,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {},
+        },
+      } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {},
+    );
+    const op = services[0].operations[0];
+    expect(op.defaultResponse).toBeDefined();
+    expect(op.defaultResponse?.type).toBeUndefined();
+    expect(op.defaultResponse?.headers).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Unresolved response $ref "#/components/responses/Missing" in default response of listPets',
       ),
-    ).toThrow('Unresolved response $ref "#/components/responses/Missing" in default response of listPets');
+    );
+    warn.mockRestore();
   });
 });

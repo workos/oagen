@@ -23,6 +23,9 @@ export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<strin
       for (const field of op.pagination?.envelopeFields ?? []) {
         collectTypeRefNames(field.type, names, hints, topLevelEnumNames);
       }
+      for (const error of op.errors) {
+        if (error.type) collectTypeRefNames(error.type, names, hints, topLevelEnumNames);
+      }
       for (const header of collectResponseHeaders(op)) {
         collectTypeRefNames(header.type, names, hints, topLevelEnumNames);
       }
