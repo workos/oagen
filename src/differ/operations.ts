@@ -14,6 +14,8 @@ import {
   diffRequestBodyContentTypes,
   mediaTypeBodies,
   pairMediaTypeBodies,
+  reparameterizedBodies,
+  respelling,
   retypedBodies,
   type MediaTypeBody,
 } from './media-types.js';
@@ -184,7 +186,8 @@ export function diffOperations(
       const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
-      // that changed shape, breaks them; one they can newly ask for does not.
+      // that changed shape, breaks them; one they can newly ask for, or one
+      // that only changed a parameter, does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
       // A media type callers could send that is gone, or a secondary body
       // that changed shape, breaks them; one they can newly send does not.
@@ -391,21 +394,23 @@ function contentEntries(op: Operation): ContentEntry[] {
 
 /**
  * Per response entry both specs have, the media types the new spec added,
- * removed, or retyped. Media types are compared by essence
+ * removed, retyped or reparameterized. Media types are compared by essence
  * (`pairMediaTypeBodies`), as the parser types them, so a key that only
- * changed case, whitespace or parameters is the same media type, and each is
- * reported as written in the spec that declares it. A retype is left out
- * only when another comparison reports that very body: the entry's own body
- * on both sides, for two primaries (`responseChanged`) or two errors of one
- * code (`errorsChanged`) — never for a primary paired with an alternate 2xx.
- * Entries pair by status code (`pairContentEntries`); a primary whose code the IR does not
- * carry (a lone 2xx) pairs with the entry of the other spec that offers its
- * media types, else with that spec's primary. An error only one spec has is
- * not a media-type change — a code that came or went is the errors diff's
- * business — and neither is a 2xx the new spec adds, but a 2xx the old spec
- * declared and the new does not has no other diff to report it, so its
- * media types are reported as removed: the formats callers could ask for
- * under that code are gone.
+ * changed case, whitespace or `charset` is the same media type, and each is
+ * reported as written in the spec that declares it; a pair whose other
+ * parameters differ is reparameterized, which is additive. A retype is a
+ * body whose shape changed (`retypedBodies`), left out only when another
+ * comparison reports that very body: the entry's own body on both sides,
+ * for two primaries (`responseChanged`) or two errors of one code
+ * (`errorsChanged`) — never for a primary paired with an alternate 2xx.
+ * Entries pair by status code (`pairContentEntries`); a primary whose code
+ * the IR does not carry (a lone 2xx) pairs with the entry of the other spec
+ * that offers its media types, else with that spec's primary. An error only
+ * one spec has is not a media-type change — a code that came or went is the
+ * errors diff's business — and neither is a 2xx the new spec adds, but a
+ * 2xx the old spec declared and the new does not has no other diff to
+ * report it, so its media types are reported as removed: the formats
+ * callers could ask for under that code are gone.
  */
 function diffResponseContentTypes(
   oldOp: Operation,
@@ -423,13 +428,15 @@ function diffResponseContentTypes(
     paired.add(old);
     const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies);
     const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
-    if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
+    const reparameterized = reparameterizedBodies(bodies);
+    if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) continue;
     changes.push({
       ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
       ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
       added: added.map((body) => body.mediaType),
       removed: removed.map((body) => body.mediaType),
       retyped: retyped.map(([, after]) => after.mediaType),
+      reparameterized: reparameterized.map(respelling),
       classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
     });
   }
@@ -442,6 +449,7 @@ function diffResponseContentTypes(
       added: [],
       removed: old.bodies.map((body) => body.mediaType),
       retyped: [],
+      reparameterized: [],
       classification: 'breaking',
     });
   }
