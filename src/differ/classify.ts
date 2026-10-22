@@ -1,5 +1,5 @@
 import type { ModelDirection } from './direction.js';
-import type { FieldChange, ParamChange, RequestBodyEncoding } from './types.js';
+import type { FieldChange, ParamChange, RequestBodyEncoding, ResponseHeaderChange } from './types.js';
 
 /**
  * Whether an IR node is deprecated. The parser only ever writes `true` and
@@ -34,6 +34,31 @@ export function deprecationFlip(
   const oldDeprecated = isDeprecated(oldNode);
   const newDeprecated = isDeprecated(newNode);
   return oldDeprecated === newDeprecated ? undefined : { oldDeprecated, newDeprecated };
+}
+
+/** The two spellings of a name that only changed case, carried on the change that reports it. */
+export interface ParameterNameShift {
+  /** The name as written in the old spec. */
+  oldName: string;
+  /** The name as written in the new spec. */
+  newName: string;
+  /** `name <old> → <new>`. */
+  details: string;
+}
+
+/**
+ * `{ oldName, newName, details }` when two nodes that pair up by a folded
+ * name are spelled differently, `undefined` when they are spelled the same.
+ * The pairing is the caller's (`foldHeaderName` for a header); this only
+ * reads the two written names, so a header parameter and a response header
+ * report a respelling alike.
+ */
+export function parameterNameShift(
+  oldNode: { name: string },
+  newNode: { name: string },
+): ParameterNameShift | undefined {
+  if (oldNode.name === newNode.name) return undefined;
+  return { oldName: oldNode.name, newName: newNode.name, details: `name ${oldNode.name} → ${newNode.name}` };
 }
 
 /** The two sides of a `tags` change, carried on the change that reports it. */
@@ -150,6 +175,53 @@ export function classifyFieldChange(
       // same type and requiredness, whichever way the flag went. The caller
       // attaches `details` saying which way (see `deprecationDetails`).
       return { kind, fieldName, classification: 'additive' };
+  }
+}
+
+/**
+ * Classify a change to a header a response declares, from the reader's side:
+ * the SDK reads the header off the response and never sends it, so the rules
+ * are the ones `diffWebhookParams` applies to a webhook's parameters, not
+ * `classifyParamChange`'s request-side ones.
+ *
+ * - added: additive, required or not — the server simply starts sending it.
+ * - removed: breaking — an accessor the SDK exposed has nothing to read.
+ * - type changed: breaking; format-only changes are additive, as elsewhere.
+ * - optional → required: additive (now always present);
+ *   required → optional: breaking (code that assumed presence breaks).
+ * - name respelled (case only, since that is all a pair can differ by):
+ *   additive — an emitter may derive an identifier from the name as written.
+ * - deprecated flipped: additive either way — the header is still sent with
+ *   the same type and requiredness.
+ *
+ * `isRequired` is read for `header-required-changed` only: the new side's
+ * flag. The caller attaches the `details` and sides the kind carries.
+ */
+export function classifyResponseHeaderChange(
+  kind: ResponseHeaderChange['kind'],
+  headerName: string,
+  isRequired?: boolean,
+): ResponseHeaderChange {
+  switch (kind) {
+    case 'header-added':
+      return { kind, headerName, classification: 'additive' };
+    case 'header-removed':
+      return { kind, headerName, classification: 'breaking' };
+    case 'header-type-changed':
+      return { kind, headerName, classification: 'breaking' };
+    case 'header-format-changed':
+      return { kind, headerName, classification: 'additive' };
+    case 'header-required-changed':
+      return {
+        kind,
+        headerName,
+        classification: isRequired ? 'additive' : 'breaking',
+        details: isRequired ? 'optional → required' : 'required → optional',
+      };
+    case 'header-name-changed':
+      return { kind, headerName, classification: 'additive' };
+    case 'header-deprecated-changed':
+      return { kind, headerName, classification: 'additive' };
   }
 }
 

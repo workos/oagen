@@ -98,6 +98,9 @@ export type {
 
 export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 
+// Header names, as HTTP compares them (RFC 9110 §5.1)
+export { foldHeaderName } from './ir/parameter-key.js';
+
 // Server URL templates, their RFC 3986 comparison form and server-list equality
 export type { ResolvedServerUrl } from './ir/server-url.js';
 export {
@@ -154,6 +157,8 @@ export type {
   WebhookModified,
   ParamChange,
   ParamLocation,
+  ResponseContentTypesChange,
+  ResponseHeaderChange,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,
