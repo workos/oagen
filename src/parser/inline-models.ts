@@ -82,11 +82,19 @@ export interface MintedInlineName {
   schema?: SchemaObject;
 }
 
-/** `mintedInlineNames`, also telling for each name whether it is context-free. */
+/**
+ * `mintedInlineNames`, also telling for each name whether it is context-free.
+ * `reserved` are the names the schema's unions must step around
+ * (`nameInlineVariantEntries`), as `schemaToTypeRef` receives them for the
+ * same schema (`reservedNames`); the sibling-reservation readers leave it
+ * unset and read the names in isolation, while `nonObjectVariantContexts`
+ * passes a variant's own set so the names it records are the ones taken.
+ */
 export function mintedInlineNameEntries(
   contextName: string,
   schema: SchemaObject,
   parentModelName: string | undefined,
+  reserved?: ReadonlySet<string>,
 ): MintedInlineName[] {
   const s = unwrapNullableSchema(schema);
   // Dispatch on the one classification `schemaToTypeRef` uses, so the names
@@ -105,33 +113,36 @@ export function mintedInlineNameEntries(
   };
   if (kind === 'allOf' && s.allOf) {
     const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
-    if (only) return mintedInlineNameEntries(contextName, only, parentModelName);
+    if (only) return mintedInlineNameEntries(contextName, only, parentModelName, reserved);
     return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : [];
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name);
+    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name, reserved);
     // Every other variant mints under the context `nonObjectVariantContexts`
     // gives it (read here without siblings but with the object variants'
     // names): `<context>_item` / `<context>_value` for an array or map, the
     // context itself or `<context>_variant_<n>` for a nested union, a nullable
-    // object, an `allOf` or an inline enum — so a sibling that would take one
-    // of those names steps around it.
+    // object, an `allOf` or an inline enum — stepping around the names the
+    // entry reserves — so a sibling that would take one of those names steps
+    // around it.
     const objectVariantNames = new Map([...variantEntries].map(([variant, entry]) => [variant, entry.name]));
     const others = [
-      ...nonObjectVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames),
-    ].flatMap(([variant, context]) => mintedInlineNameEntries(context, unwrapNullableSchema(variant), parentModelName));
+      ...nonObjectVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames, reserved),
+    ].flatMap(([variant, entry]) =>
+      mintedInlineNameEntries(entry.context, unwrapNullableSchema(variant), parentModelName, entry.reserved),
+    );
     return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...others];
   }
   if (kind === 'const') return [];
   if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
-  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName);
+  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName, reserved);
   if (kind === 'object') return modelName();
   if (kind === 'map') {
     const value = mapValueSchema(s);
-    return value ? mintedInlineNameEntries(contextName, value, parentModelName) : [];
+    return value ? mintedInlineNameEntries(contextName, value, parentModelName, reserved) : [];
   }
   return [];
 }
@@ -1089,7 +1100,7 @@ export function extractInlineModelsFromProperties(
       // variants of a union nested under the second variant). The context
       // already stepped around the siblings; the re-entry sees none, exactly
       // as `schemaToTypeRef` types the variant.
-      for (const [variant, context] of nonObjectVariantContexts(
+      for (const [variant, { context, reserved }] of nonObjectVariantContexts(
         fieldName,
         unionVariants,
         siblings,
@@ -1098,7 +1109,14 @@ export function extractInlineModelsFromProperties(
         reservedNames,
       )) {
         const member = unwrapNullableField(variant);
-        extractInlineModelsFromProperties({ properties: { [context]: member } }, results, parentName, componentSchemas);
+        extractInlineModelsFromProperties(
+          { properties: { [context]: member } },
+          results,
+          parentName,
+          componentSchemas,
+          undefined,
+          reserved,
+        );
       }
     }
   }

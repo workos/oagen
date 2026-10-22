@@ -2364,12 +2364,14 @@ function extractRequestBody(
       undefined,
       objectVariantNames,
     );
-    for (const [variant, context] of variantContexts) {
+    for (const [variant, { context, reserved }] of variantContexts) {
       extractInlineModelsFromProperties(
         { properties: { [context]: unwrapNullableField(variant) } },
         inlineModels,
         undefined,
         componentSchemas,
+        undefined,
+        reserved,
       );
     }
 
@@ -2381,10 +2383,13 @@ function extractRequestBody(
         // skip null variant in union, handle separately
       } else {
         const variantName = objectVariantNames.get(variant);
+        const entry = variantContexts.get(variant);
         variants.push(
           variantName !== undefined
             ? { kind: 'model', name: variantName }
-            : schemaToTypeRef(variant, variantContexts.get(variant) ?? contextName),
+            : entry
+              ? schemaToTypeRef(variant, entry.context, undefined, undefined, entry.reserved)
+              : schemaToTypeRef(variant, contextName),
         );
       }
     }
