@@ -13,6 +13,8 @@ export type {
   ResponseHeader,
   ResponseContent,
   ResponseBodyType,
+  RequestBodyContent,
+  RequestBodyType,
   DefaultResponse,
   RangeResponse,
   StatusRange,
@@ -57,6 +59,8 @@ export {
   collectRequestBodyModels,
   collectResponseHeaders,
   collectResponseBodyTypes,
+  collectAlternateRequestBodyContents,
+  collectRequestBodyTypes,
   collectFallbackResponseTypes,
   collectWebhookTypeRefs,
 } from './ir/types.js';
@@ -102,6 +106,7 @@ export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 export type { ResolvedServerUrl } from './ir/server-url.js';
 export {
   isDefaultServerList,
+  isDefaultServerSet,
   normalizeServerUrl,
   resolveServerUrl,
   serverListsEqual,
@@ -154,15 +159,20 @@ export type {
   WebhookModified,
   ParamChange,
   ParamLocation,
+  RequestBodyContentTypesChange,
+  ResponseContentTypesChange,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,
   DeprecatedNode,
+  SecurityChanged,
+  SecurityNode,
   BaseUrlChanged,
   ServerAdded,
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  DocumentSecurityChanged,
 } from './differ/types.js';
 
 // Core parse + generate

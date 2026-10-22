@@ -1,5 +1,5 @@
 import type { Webhook } from '../ir/types.js';
-import type { Change, ParamChange } from './types.js';
+import type { Change, ParamChange, RequestBodyContentTypesChange } from './types.js';
 import { locatedParams, paramKey } from './params.js';
 import {
   deprecationDetails,
@@ -11,6 +11,7 @@ import {
 } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
+import { diffRequestBodyContentTypes } from './media-types.js';
 
 /**
  * Report webhooks added, removed and modified between two specs. A webhook is
@@ -99,6 +100,7 @@ export function diffWebhooks(
       paramChanges,
       requestBodyChanged: body.changes.length > 0,
       ...body.encoding,
+      ...(body.mediaTypes ? { requestBodyContentTypeChange: body.mediaTypes } : {}),
       responsesChanged: responses.changes.length > 0,
       deprecatedChanged,
       ...deprecation,
@@ -124,11 +126,21 @@ export function diffWebhooks(
  *   beside the `details` string so the change can report both sides.
  * - required → optional: breaking — a handler that assumed a body may get none.
  * - optional → required: additive — the body is now always there.
+ * - media types changed, both sides declaring a payload: one the sender can
+ *   newly use, or whose body changed type, is breaking — the handler must
+ *   decode it; one it can no longer use is additive. Compared by essence as
+ *   an operation's are (`diffRequestBodyContentTypes`), and carried
+ *   structured as `mediaTypes` beside the `details` strings.
  */
 function diffWebhookBody(
   oldWebhook: Webhook,
   newWebhook: Webhook,
-): { changes: string[]; breaking: boolean; encoding?: RequestBodyEncodingShift } {
+): {
+  changes: string[];
+  breaking: boolean;
+  encoding?: RequestBodyEncodingShift;
+  mediaTypes?: RequestBodyContentTypesChange;
+} {
   const changes: string[] = [];
   let breaking = false;
 
@@ -153,7 +165,16 @@ function diffWebhookBody(
     if (!isRequired) breaking = true;
   }
 
-  return { changes, breaking, ...(encoding ? { encoding } : {}) };
+  const mediaTypes = diffRequestBodyContentTypes(oldWebhook, newWebhook, 'receiver');
+  if (mediaTypes) {
+    const said = (what: string, list: string[]): string[] =>
+      list.length > 0 ? [`payload media type${list.length > 1 ? 's' : ''} ${list.join(', ')} ${what}`] : [];
+    changes.push(...said('added', mediaTypes.added), ...said('removed', mediaTypes.removed));
+    changes.push(...said('retyped', mediaTypes.retyped));
+    if (mediaTypes.classification === 'breaking') breaking = true;
+  }
+
+  return { changes, breaking, ...(encoding ? { encoding } : {}), ...(mediaTypes ? { mediaTypes } : {}) };
 }
 
 /**

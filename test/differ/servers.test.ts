@@ -629,6 +629,23 @@ describe('diffServers', () => {
       ).toEqual(['8443', '9443']);
     });
 
+    it('still reports a `/` added after a placeholder that supplies the path, on a non-first server too (Greptile)', () => {
+      const basePath = { basePath: { default: '/v1' } };
+      const templated = server('https://api.example.com{basePath}', basePath);
+      const slashed = server('https://api.example.com{basePath}/', basePath);
+      // Resolved: `/v1` vs `/v1/`. As servers[0] the move is reported on baseUrl
+      // too; after the first it is still a removal plus an addition.
+      expect(diffServers(spec([templated]), spec([slashed])).map((c) => c.kind)).toEqual([
+        'base-url-changed',
+        'server-added',
+        'server-removed',
+      ]);
+      expect(diffServers(spec([staging, templated]), spec([staging, slashed]))).toEqual([
+        { kind: 'server-added', url: 'https://api.example.com{basePath}/', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://api.example.com{basePath}', classification: 'breaking' },
+      ]);
+    });
+
     it('reports nothing for a baseUrl that only changed spelling while the template did not', () => {
       // The variable default moved from `EU` to `eu`: the resolved URL's host only
       // changed case, which is no move, while the default is reported as written.
@@ -826,6 +843,57 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
       { kind: 'base-url-changed', oldBaseUrl: '', newBaseUrl: '/', classification: 'additive' },
       { kind: 'server-added', url: '{root}', classification: 'additive' },
     ]);
+  });
+
+  describe('a host set in `baseUrl` with no `servers` beside it (an IR built by hand; Greptile)', () => {
+    const byHand = (baseUrl: string): ApiSpec => ({ ...spec(), baseUrl });
+
+    it('is compared as written by diffServers, so a moved host is still breaking', () => {
+      expect(diffServers(byHand('https://old.example.com'), byHand('https://new.example.com'))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://old.example.com',
+          newBaseUrl: 'https://new.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('is compared as written by diffSpecs, the public call', () => {
+      const old = byHand('https://old.example.com');
+      expect(diffSpecs(old, { ...old, baseUrl: 'https://new.example.com' }).changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://old.example.com',
+          newBaseUrl: 'https://new.example.com',
+          classification: 'breaking',
+        },
+      ]);
+      expect(diffSpecs(old, old).changes).toEqual([]);
+    });
+
+    it('is a host that disappears (breaking) or appears (additive) against a document at the default', () => {
+      expect(diffSpecs(byHand('https://old.example.com'), spec()).changes).toEqual([
+        { kind: 'base-url-changed', oldBaseUrl: 'https://old.example.com', newBaseUrl: '', classification: 'breaking' },
+      ]);
+      expect(diffSpecs(byHand('https://old.example.com'), spec([server('/')])).changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://old.example.com',
+          newBaseUrl: '/',
+          classification: 'breaking',
+        },
+      ]);
+      expect(diffSpecs(spec(), byHand('https://new.example.com')).changes).toEqual([
+        { kind: 'base-url-changed', oldBaseUrl: '', newBaseUrl: 'https://new.example.com', classification: 'additive' },
+      ]);
+    });
+
+    it('is still the default when the hand-built baseUrl is `/`', () => {
+      expect(diffSpecs(byHand('/'), spec()).changes).toEqual([]);
+      expect(diffSpecs(spec(), byHand('/')).changes).toEqual([]);
+      expect(diffSpecs(byHand('/'), spec([server('/')])).changes).toEqual([]);
+    });
   });
 
   it('still reports `/` moving to another path-only server as breaking', () => {

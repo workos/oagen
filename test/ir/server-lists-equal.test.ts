@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { serverListsEqual } from '../../src/ir/server-url.js';
+import { normalizeServerUrl, serverListsEqual } from '../../src/ir/server-url.js';
 import type { ServerEntry } from '../../src/ir/types.js';
 
 /** Structural equality of server lists, as the parser and the differ use it (issue #251). */
@@ -49,6 +49,28 @@ describe('serverListsEqual', () => {
       false,
     );
     expect(serverListsEqual([regional], [{ ...regional, url: 'https://{Region}.api.example.com' }])).toBe(false);
+    // An authority ending in a placeholder may supply the path itself, so a
+    // trailing `/` after it is a difference (Greptile): `/v1` vs `/v1/`.
+    const basePath = { basePath: { default: '/v1' } };
+    expect(
+      serverListsEqual(
+        [{ url: 'https://api.example.com{basePath}', variables: basePath }],
+        [{ url: 'https://api.example.com{basePath}/', variables: basePath }],
+      ),
+    ).toBe(false);
+    // A bare authority, and one under a placeholder scheme, with and without `/`.
+    expect(serverListsEqual([api], [{ url: 'https://api.example.com/' }])).toBe(true);
+    expect(serverListsEqual([{ url: '{s}://api.example.com' }], [{ url: '{s}://api.example.com/' }])).toBe(true);
+    // The resolved forms must agree too: equal templates whose placeholder
+    // value changes the URL's structure are two servers.
+    const host = { host: { default: 'api.example.com/v1' } };
+    expect(normalizeServerUrl('https://{host}:443')).toBe(normalizeServerUrl('https://{host}:443/'));
+    expect(
+      serverListsEqual(
+        [{ url: 'https://{host}:443', variables: host }],
+        [{ url: 'https://{host}:443/', variables: host }],
+      ),
+    ).toBe(false);
     expect(serverListsEqual([regional], [{ ...regional, url: 'https://eu.api.example.com' }])).toBe(false);
     // Variable values stay as written.
     expect(
