@@ -79,6 +79,47 @@ interface NamedUnionMemo {
 }
 let activeNamedUnionMemo: NamedUnionMemo | null = null;
 
+/**
+ * What the parser decides about an array component (`isArrayComponentSchema`),
+ * decided once per extraction and read by both sides: the reference
+ * (`arrayComponentTypeRef`) and the extractor (`extractArrayComponentModels`),
+ * so the items' TypeRef and the models and enums minted for them agree by
+ * construction — the way a named union's plan serves `namedUnionEntry` and
+ * `extractNamedUnionVariantModels`.
+ */
+interface ArrayComponentPlan {
+  /** The component schema as written. */
+  schema: SchemaObject;
+  /**
+   * The synthetic property the schema is typed and extracted as, under the
+   * component's name: `item`, so the items mint `<Component>Item…`, or the
+   * context `memberContext` stepped to when a name they would mint is
+   * already a component's, or another named union's inline variant's, of a
+   * different shape (`item_item`, `item_array_item`, numbered).
+   */
+  context: string;
+  /** `{ [context]: schema }`: the one-property object both sides read, as a named union's `memberProperties`. */
+  properties: ReadonlyMap<string, SchemaObject>;
+  /** Set once the self-reference warning has been printed, so it is printed once per component. */
+  warnedSelfReference: boolean;
+}
+
+/**
+ * Every array component of the document being extracted, by resolved name:
+ * a `components/schemas` entry that `isArrayComponentSchema` accepts. Such a
+ * component becomes no `Model`; a `$ref` to it resolves to the array itself,
+ * and what its items reference is extracted under its name. Planned in
+ * `extractSchemas` before any TypeRef is built, because the component loop,
+ * the field pass, the operations and the webhooks all resolve references to
+ * it, and dropped with the other per-document state
+ * (`clearSchemaNameTransform`): outside an extraction a `$ref` to such a
+ * name is a plain model reference, as a `$ref` to an enum component is.
+ */
+let activeArrayComponentPlans: Map<string, ArrayComponentPlan> = new Map();
+
+/** The array components whose reference is being built right now, so a cycle through their items is cut (`arrayComponentTypeRef`). */
+const resolvingArrayComponents = new Set<string>();
+
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
 function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
   return (values ?? []).filter((v): v is string | number => v !== null);
@@ -805,37 +846,44 @@ export function extractSchemas(
     }
   }
 
+  // The array components, planned once the sets above are complete: a plan
+  // reads every component's shape and every named union's variant names, and
+  // a `$ref` to an array component — from a component field, a named union's
+  // variant, an operation or a webhook — is typed from its plan. As for an
+  // enum, the first raw key resolving to a name decides for that name.
+  activeArrayComponentPlans = new Map();
+  for (const [name, schema] of Object.entries(schemas)) {
+    const resolved = resolveSchemaName(name);
+    if (!isArrayComponentSchema(schema) || activeArrayComponentPlans.has(resolved)) continue;
+    activeArrayComponentPlans.set(resolved, planArrayComponent(resolved, schema, schemas));
+  }
+
   const modelsByCleanName = new Map<string, Model>();
+  // Keep the model with more fields when names collide after cleaning
+  // (two raw keys cleaning to one name), or when two inline models — a
+  // discriminated-allOf variant's, a named union's, an array component's
+  // items' — take one name.
+  const keepLarger = (model: Model): void => {
+    const existing = modelsByCleanName.get(model.name);
+    if (!existing || model.fields.length > existing.fields.length) modelsByCleanName.set(model.name, model);
+  };
 
   for (const [name, schema] of Object.entries(schemas)) {
     const pascalName = resolveSchemaName(name);
 
     if (isEnumComponentSchema(schema)) {
       enums.push(extractEnum(pascalName, schema));
+    } else if (isArrayComponentSchema(schema)) {
+      // No model of its own: a `$ref` to it is the array (`arrayComponentTypeRef`).
+      for (const inlineModel of extractArrayComponentModels(pascalName, schema, schemas)) keepLarger(inlineModel);
     } else {
-      const model = extractModel(pascalName, schema, schemas);
-      const existing = modelsByCleanName.get(pascalName);
-      if (existing) {
-        // Keep the model with more fields when names collide after cleaning
-        if (model.fields.length > existing.fields.length) {
-          modelsByCleanName.set(pascalName, model);
-        }
-      } else {
-        modelsByCleanName.set(pascalName, model);
-      }
+      keepLarger(extractModel(pascalName, schema, schemas));
 
       for (const inlineModel of [
         ...extractDiscriminatedAllOfVariantModels(schema, pascalName, schemas),
         ...extractNamedUnionVariantModels(schema, pascalName, schemas),
       ]) {
-        const existingInline = modelsByCleanName.get(inlineModel.name);
-        if (existingInline) {
-          if (inlineModel.fields.length > existingInline.fields.length) {
-            modelsByCleanName.set(inlineModel.name, inlineModel);
-          }
-        } else {
-          modelsByCleanName.set(inlineModel.name, inlineModel);
-        }
+        keepLarger(inlineModel);
       }
     }
   }
@@ -857,6 +905,14 @@ export function extractSchemas(
   for (const model of models) {
     collectInlineEnums(model, enums);
   }
+  // ...and from every array component's items, which no model holds: the
+  // reference side types them, so an array of an inline enum lifts its enum
+  // whether or not anything refers to the component, as a named union's
+  // variant enum lifts through `variants`.
+  for (const name of activeArrayComponentPlans.keys()) {
+    const ref = arrayComponentTypeRef(name);
+    if (ref) collectInlineEnumFromRef(ref, enums, new Set(enums.map((e) => e.name)));
+  }
 
   // NOTE: activeSchemaNameTransform is intentionally NOT cleared here.
   // extractOperations() calls schemaToTypeRef() for $ref resolution and
@@ -874,6 +930,7 @@ export function clearSchemaNameTransform(): void {
   activeNullableUnionSchemaNames = new Set();
   activeComponentSchemaKeys = new Set();
   activeNamedUnionMemo = null;
+  activeArrayComponentPlans = new Map();
   markContestedTitles(undefined);
 }
 
@@ -1540,7 +1597,7 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * a reference whatever else it carries; a type list naming another type
  * beside `array` is a union; and a schema that also composes — a `oneOf` /
  * `anyOf` with a typing variant, or an `allOf` with a `$ref` member, a
- * member with `properties` or a lone typing member — is that composition,
+ * member declaring properties inline or a lone typing member — is that composition,
  * `type: 'array'` or not, since it is read before `items` and the item
  * extractor must not claim a variant's name first. An `allOf` or `oneOf` of
  * bare limits (`[{ minItems: 1 }, { maxItems: 10 }]`) types nothing there and
@@ -1784,15 +1841,18 @@ const TYPING_KEYWORDS: readonly string[] = [
 /**
  * Whether an `allOf` is what types the schema, i.e. the cases its branch in
  * `schemaToTypeRef` acts on: a `$ref` member (a reference, or an augmentation
- * model), a member declaring `properties` (a merged model), or a lone member
- * that types on its own (unwrapped). An `allOf` whose members only conjoin
- * limits or documentation — `allOf: [{ minProperties: 1 }, { maxProperties:
- * 3 }]` beside the schema's own `properties` — does not: the schema is then
- * typed from its own keywords, and `extractConstraints` still conjoins the
+ * model), a member declaring properties inline (a merged model —
+ * `declaresInlineProperties`: its own `properties`, or those of a nested
+ * `allOf` member or of a `oneOf`/`anyOf` variant, which `mergeAllOfMembers`
+ * reads into the model), or a lone member that types on its own
+ * (unwrapped). An `allOf` whose members only conjoin limits or
+ * documentation — `allOf: [{ minProperties: 1 }, { maxProperties: 3 }]`
+ * beside the schema's own `properties` — does not: the schema is then typed
+ * from its own keywords, and `extractConstraints` still conjoins the
  * members' limits onto the field and the model it builds.
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
-  if (members.some((member) => member.$ref !== undefined || member.properties !== undefined)) return true;
+  if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
   const only = members.length === 1 ? members[0] : undefined;
   return only !== undefined && TYPING_KEYWORDS.some((key) => (only as Record<string, unknown>)[key] !== undefined);
 }
@@ -2682,18 +2742,135 @@ function memberContext(
   if (rivals.length === 0) return base;
   const shape = namedUnionShapeKey(mintingSchema(variant));
   if (rivals.every((rival) => rival === shape)) return base;
-  const kind = variant.type === 'array' ? 'item' : 'value';
+  // An array in any spelling (`isArraySchema`: a bare `items`, a nullable
+  // type list) steps with `_item`, as the doc says it does; a map with `_value`.
+  const kind = isArraySchema(variant) ? 'item' : 'value';
   return firstFreeElementContext(base, kind, new Set(claimed.keys()), mint, own).context;
 }
 
-/** The schema whose shape a non-object variant's minted name stands for: an array's items, a map's values, else the variant itself. */
+/**
+ * The schema whose shape a non-object variant's minted name stands for: an
+ * array's items, a map's values, else the variant itself — read with its
+ * nullable wrapper removed, as `elementContextDecision` reads an array's
+ * items against a claiming sibling, so a nullable array of the claimant's
+ * shape shares the claimant's model instead of stepping around it.
+ */
 function mintingSchema(variant: SchemaObject): SchemaObject {
-  if (variant.items && (variant.type === 'array' || !variant.type)) return mintingSchema(variant.items);
-  if (variant.type === 'object' && !variant.properties) {
-    const value = mapValueSchema(variant);
+  const bare = unwrapNullableSchema(variant);
+  if (bare.items && isArraySchema(bare)) return mintingSchema(bare.items);
+  if (bare.type === 'object' && !bare.properties) {
+    const value = mapValueSchema(bare);
     if (value) return mintingSchema(value);
   }
-  return variant;
+  return bare;
+}
+
+/**
+ * True for a `components/schemas` entry the parser reads as an array
+ * component: a schema `isArraySchema` accepts — `type: 'array'`, an OAS 3.1
+ * type list `['array', 'null']`, OAS 3.0 `nullable: true` beside `type:
+ * 'array'`, or `items` with no `type` — that declares `items`. An `enum:`
+ * list or a `oneOf`/`anyOf` beside the array is read first by
+ * `classifyInlineSchema`, so such a schema is an enum or a named union here
+ * as it is everywhere else. A `type: 'array'` with no `items` is not an array
+ * component: `schemaToTypeRef` types it as unknown, with a warning, so it
+ * keeps the fieldless model it always became rather than warning at every
+ * reference.
+ */
+export function isArrayComponentSchema(schema: SchemaObject): boolean {
+  return isArraySchema(schema) && schema.items !== undefined;
+}
+
+/**
+ * The plan for an array component (`ArrayComponentPlan`): the synthetic
+ * property its schema is typed and extracted as, under the component's name.
+ * The base is `item`, so inline object items are `<Component>Item`, an
+ * inline enum `<Component>Item`, the objects of a nested array or map
+ * `<Component>Item` as well, and whatever those hold `<Component>Item…`, by
+ * the one rule a field's inline models follow. When a name the items would
+ * mint is already a component's, or another named union's inline variant's,
+ * of a different shape (`namedUnionClaimedShapes`), the context steps
+ * exactly as a named union's `variant_<n>` does (`memberContext`): `item_item`
+ * (`<Component>ItemItem`), then `item_array_item`, then numbered; a claimant
+ * of the identical shape is shared instead, and the items then reference it.
+ */
+function planArrayComponent(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+): ArrayComponentPlan {
+  const context = memberContext('item', schema, name, namedUnionClaimedShapes(name, schema, schemas));
+  return { schema, context, properties: new Map([[context, schema]]), warnedSelfReference: false };
+}
+
+/**
+ * The models an array component's items reference that nothing else
+ * materializes — an inline object item, the object variants of an
+ * `items.oneOf`, the objects of a nested array or map, an `allOf`, and
+ * everything nested under them — extracted by the field extractor from the
+ * plan's synthetic property under the component's name, exactly as
+ * `arrayComponentTypeRef` types it. Nothing when `schema` is not the one the
+ * plan for `name` was built from (another raw key cleaning to the same name).
+ */
+function extractArrayComponentModels(
+  name: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+): Model[] {
+  const plan = activeArrayComponentPlans.get(name);
+  if (!plan || plan.schema !== schema) return [];
+  const models: Model[] = [];
+  extractInlineModelsFromProperties({ properties: Object.fromEntries(plan.properties) }, models, name, schemas);
+  return models;
+}
+
+/**
+ * The TypeRef a `$ref` to an array component resolves to: the array the
+ * component declares, built by `schemaToTypeRef` from the plan's synthetic
+ * property under the component's name — so a nullable type list or OAS 3.0
+ * flag on the component wraps it in `nullable`, `$ref` items stay the
+ * references they are (to a model, an enum, or another array component,
+ * which resolves in turn), and inline items are named `<Component>Item…` as
+ * `extractArrayComponentModels` builds them. A fresh TypeRef per reference,
+ * since later passes rename references in place. A component reached again
+ * while its own reference is being built — `Tree: { type: 'array', items:
+ * { $ref: Tree } }`, directly or through another array component — has no
+ * finite type in the IR: that inner reference is typed as unknown, with one
+ * warning per component. `undefined` for any other name.
+ */
+function arrayComponentTypeRef(name: string): TypeRef | undefined {
+  const plan = activeArrayComponentPlans.get(name);
+  if (!plan) return undefined;
+  if (resolvingArrayComponents.has(name)) {
+    if (!plan.warnedSelfReference) {
+      plan.warnedSelfReference = true;
+      console.warn(
+        `[oagen] Warning: Array component "${name}" refers to itself through its items — the inner reference is typed as unknown`,
+      );
+    }
+    return { kind: 'primitive', type: 'unknown' };
+  }
+  resolvingArrayComponents.add(name);
+  try {
+    return schemaToTypeRef(plan.schema, plan.context, name, plan.properties);
+  } finally {
+    resolvingArrayComponents.delete(name);
+  }
+}
+
+/**
+ * Whether `schema` is a `$ref` to an array component, under any nullable
+ * wrapper `unwrapNullableSchema` strips, so a reader that asks whether a
+ * property is an array from the document (`detectListEnvelope`) answers for
+ * a reference as `schemaToTypeRef` types it. False outside an extraction, as
+ * a `$ref` to an enum component is a model reference there.
+ */
+export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
+  if (!schema) return false;
+  const { $ref } = unwrapNullableSchema(schema);
+  if (!$ref) return false;
+  const segments = $ref.split('/');
+  return activeArrayComponentPlans.has(resolveSchemaName(segments[segments.length - 1]));
 }
 
 /**
@@ -3252,29 +3429,15 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
+    // An `allOf` field is merged by `mergeAllOfMembers`, as everywhere else
+    // (`$ref` members resolved, nested `allOf` members and the inline object
+    // variants of a `oneOf`/`anyOf` member read in), and the merged shape is
+    // extracted under the field's nested name, every property typed under it.
     if (kind === 'allOf' && composed.allOf) {
-      const mergedProperties: Record<string, SchemaObject | undefined> = {};
-      const mergedRequired: string[] = [];
-      for (const sub of composed.allOf) {
-        if (sub.properties) Object.assign(mergedProperties, sub.properties);
-        if (sub.required) mergedRequired.push(...sub.required);
-      }
-      if (Object.keys(mergedProperties).length > 0) {
+      const merged = mergeAllOfMembers(composed, schemas);
+      if (merged.properties.length > 0) {
         nestedModels.push(
-          ...extractInlineModelDeep(
-            qualifyNestedInlineName(name, fieldName),
-            {
-              type: 'object',
-              properties: mergedProperties,
-              required: mergedRequired,
-              ...deprecatedEntry(fieldSchema),
-              ...extractConstraints(fieldSchema),
-              // The wrapper's own link, as for every `allOf` merge; a member's
-              // stays on that member.
-              ...externalDocsEntry(fieldSchema.externalDocs),
-            },
-            schemas,
-          ),
+          ...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), mergedObjectSchema(merged), schemas),
         );
       }
     }
@@ -3420,6 +3583,11 @@ export function schemaToTypeRef(
       // `oneOf: [{ $ref }, { type: 'null' }]` form.
       return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
+    // An array component is no model either: the reference is the array it
+    // declares, its items typed under the component's name exactly as the
+    // component pass materializes them (`arrayComponentTypeRef`).
+    const arrayAlias = arrayComponentTypeRef(resolved);
+    if (arrayAlias) return arrayAlias;
     // Likewise a named union with a `null` variant: the variant is not a
     // member of the model, so the reference carries the nullability. The
     // model reference itself is recorded as a component's (`componentModelRefs`)
@@ -3482,14 +3650,17 @@ export function schemaToTypeRef(
 
   // Handle allOf — merge properties from all sub-schemas.
   // This handles patterns like: allOf: [{ type: object, properties: {...} }, { oneOf: [...] }]
-  // which are valid OAS 3.1 but weren't handled for field-level schemas.
+  // which are valid OAS 3.1 but weren't handled for field-level schemas. The
+  // model named here is built by `mergeAllOfMembers`, which reads every
+  // member the two tests below count — a `oneOf`/`anyOf` member's inline
+  // object variants included — so the reference always has its fields.
   if (inlineKind === 'allOf' && schema.allOf) {
     // If allOf contains a $ref, prefer the ref (it's a named type)
     const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
     if (refItem) {
-      // If allOf has $ref AND siblings with properties, return a merged model ref
-      // to avoid losing the augmentation properties
-      const hasAugmentation = schema.allOf.some((s: SchemaObject) => !s.$ref && (s.properties || s.type === 'object'));
+      // If allOf has $ref AND an inline object member (`isInlineAllOfMember`),
+      // return a merged model ref to avoid losing the augmentation properties
+      const hasAugmentation = schema.allOf.some(isInlineAllOfMember);
       if (hasAugmentation) {
         const baseName = toPascalCase(contextName ?? 'UnknownModel');
         return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
@@ -3509,8 +3680,9 @@ export function schemaToTypeRef(
         reservedNames,
       );
     }
-    // If allOf items all have properties, treat as a merged model
-    const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
+    // If a member declares properties inline (`declaresInlineProperties`),
+    // treat as a merged model
+    const hasProperties = schema.allOf.some(declaresInlineProperties);
     if (hasProperties) {
       const baseName = toPascalCase(contextName ?? 'UnknownModel');
       return {
@@ -3850,12 +4022,16 @@ export function schemaToTypeRef(
 import {
   buildInlineModel,
   collectProperties,
+  declaresInlineProperties,
   elementContextName,
   extractInlineModelsFromProperties,
   firstFreeElementContext,
   isContestedTitle,
+  isInlineAllOfMember,
   mapValueSchema,
   markContestedTitles,
+  mergeAllOfMembers,
+  mergedObjectSchema,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
