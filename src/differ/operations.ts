@@ -1,5 +1,14 @@
-import type { ErrorResponse, Operation, ResponseContent, ServerEntry, StatusRange, TypeRef } from '../ir/types.js';
+import type {
+  ApiSpec,
+  ErrorResponse,
+  Operation,
+  ResponseContent,
+  ServerEntry,
+  StatusRange,
+  TypeRef,
+} from '../ir/types.js';
 import { resolveServerUrl } from '../ir/server-url.js';
+import { diffServers } from './servers.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
 import { classifyParamChange, deprecationDetails, deprecationFlip } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
@@ -165,52 +174,23 @@ export function diffOperations(
 
 /**
  * Whether an operation's effective server list changed in a way a caller
- * notices, by the rule the document-level diff applies to `ApiSpec.servers`:
- * the lists are compared as multisets keyed by `url` template plus variables
- * (names, defaults, and enum values as a set), so position, `description` on
- * a server or a variable, and enum order do not count; a reorder counts only
- * when it moves the first entry's resolved URL — the operation's default host,
- * the counterpart of the document's `base-url-changed`.
- *
- * Any variable difference flips the flag, including one the document-level
- * diff would call additive (a new enum value, a new variable, a lifted enum):
- * one boolean cannot carry that distinction. Written locally so this module
- * does not depend on the document-level diff (#255); once that lands, this
- * can delegate to `diffServers` and read the answer off its result.
+ * notices: the document-level diff's own answer (`diffServers`, #255), read
+ * off the two lists as if each were a document — `baseUrl` is the first
+ * entry resolved, as the parser sets it. Anything it reports flips the flag:
+ * a moved default host (`base-url-changed`, so a reorder counts exactly when
+ * it moves the first entry's resolved URL), a server added or removed by
+ * `url` template, and any variable change — the additive ones included (a
+ * new enum value, a new variable, a lifted enum), since one boolean cannot
+ * carry that distinction. Descriptions on a server or a variable, enum order,
+ * a repeated enum value and position do not count there, so they do not here.
  */
 function effectiveServersChanged(oldServers: ServerEntry[], newServers: ServerEntry[]): boolean {
-  if (resolvedFirstUrl(oldServers) !== resolvedFirstUrl(newServers)) return true;
-  const unmatched = newServers.map(serverIdentity);
-  for (const server of oldServers) {
-    const twin = unmatched.indexOf(serverIdentity(server));
-    if (twin === -1) return true;
-    unmatched.splice(twin, 1);
-  }
-  return unmatched.length > 0;
+  return diffServers(asDocument(oldServers), asDocument(newServers)).length > 0;
 }
 
-/** The URL a client defaults to: the first server resolved, or `''` without one. */
-function resolvedFirstUrl(servers: ServerEntry[]): string {
-  return servers.length > 0 ? resolveServerUrl(servers[0]).url : '';
-}
-
-/**
- * What makes two servers the same for the multiset comparison: the template
- * and its variables by name, each with its default and its enum values in
- * sorted order (or none). Descriptions are left out. Own enumerable keys
- * only, so a variable named `__proto__` is part of the identity like any
- * other and nothing is read from Object.prototype.
- */
-function serverIdentity(server: ServerEntry): string {
-  const variables = Object.entries(server.variables ?? {})
-    .map(([name, variable]): [string, string, string[] | null] => [
-      name,
-      variable.default,
-      // As a set, the way the document-level diff reads it: a repeated value is one value.
-      variable.enum ? [...new Set(variable.enum)].sort() : null,
-    ])
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return JSON.stringify([server.url, variables]);
+/** A server list as the document-level diff reads a document: `baseUrl` is its first entry resolved, `''` without one. */
+function asDocument(servers: ServerEntry[]): Pick<ApiSpec, 'baseUrl' | 'servers'> {
+  return { baseUrl: servers.length > 0 ? resolveServerUrl(servers[0]).url : '', servers };
 }
 
 /**
