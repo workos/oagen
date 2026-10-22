@@ -421,6 +421,11 @@ export function extractOperations(
   const operationOf = new Map<Model, string>();
 
   for (const [path, pathItem] of Object.entries(paths)) {
+    // Everything read at path-item level — `parameters`, `servers`, and the
+    // `summary`/`description` an operation falls back to — comes from this one
+    // object. The bundler keeps internal refs (`dereference: false`), so a Path
+    // Item written as a `$ref` is not resolved here yet (issue #300); when it
+    // is, the resolved item must replace `pathItem` for all of these to apply.
     const pathLevelParams = pathItem.parameters ?? [];
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,
@@ -2011,9 +2016,10 @@ export interface OperationDocs {
  * Item's `summary` and `description` as applying to every operation on it.
  * The two fields fall back one by one, so an operation with a `summary` of
  * its own and no `description` shows its own `summary` over the Path Item's
- * `description`. Text with content wins at either level and blank text
- * counts as absent at either level (`presentText`), so `summary: ""` on the
- * operation still takes the Path Item's. Either field is `undefined` when
+ * `description`. Text with content wins at either level; a value that is not
+ * a string, or is blank, counts as absent at either level (`presentText`), so
+ * `summary: ""` on the operation still takes the Path Item's. Either field is
+ * `undefined` when
  * neither level gives it; the caller decides whether the key is then omitted
  * (`Webhook`) or present (`Operation.description`).
  */
