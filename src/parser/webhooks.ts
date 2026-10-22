@@ -402,8 +402,9 @@ function resolveComponentRef(
  *
  * A name that does not embed the stem — a title-mapped union variant, which
  * is context-free by design — cannot be moved by the hash; such a clash is
- * left to the model merge, which shares an identical shape and warns about
- * a different one, as it does for operations.
+ * left to the model merge, which shares a component's name when the component
+ * admits the shape and renames the variant otherwise, as it does for
+ * operations.
  */
 function resolveWebhookModelStems(
   groups: WebhookGroup[],
