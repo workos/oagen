@@ -605,6 +605,55 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         expect(warn).not.toHaveBeenCalled();
       });
 
+      it('steps past a name a nested model would take too (Greptile)', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
+        const specPath = join(dir, 'spec.json');
+        writeFileSync(
+          specPath,
+          JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'clash', version: '1' },
+            paths: {
+              '/owners/{ownerId}': {
+                get: { operationId: 'getOwner', responses: { '200': { $ref: '#/components/responses/OwnerCard' } } },
+              },
+            },
+            components: {
+              schemas: {
+                OwnerCardResponse: { type: 'object', properties: { id: { type: 'string' } } },
+                OwnerCardResponse2Detail: { type: 'object', properties: { value: { type: 'string' } } },
+              },
+              responses: {
+                OwnerCard: {
+                  description: 'An owner',
+                  content: {
+                    'application/json': {
+                      schema: {
+                        type: 'object',
+                        properties: { detail: { type: 'object', properties: { value: { type: 'integer' } } } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+        );
+        const spec = await parseSpec(specPath);
+        const op = spec.services.flatMap((s) => s.operations)[0];
+        expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse3' });
+        const fieldsOf = (name: string) =>
+          spec.models.find((m) => m.name === name)?.fields.map((f) => [f.name, f.type]);
+        expect(fieldsOf('OwnerCardResponse3')).toEqual([
+          ['detail', { kind: 'model', name: 'OwnerCardResponse3Detail' }],
+        ]);
+        expect(fieldsOf('OwnerCardResponse3Detail')).toEqual([['value', { kind: 'primitive', type: 'integer' }]]);
+        expect(fieldsOf('OwnerCardResponse2Detail')).toEqual([['value', { kind: 'primitive', type: 'string' }]]);
+        expect(fieldsOf('OwnerCardResponse')).toEqual([['id', { kind: 'primitive', type: 'string' }]]);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
       it('keeps two stepped bodies of one operation apart (200 and 201)', async () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         dir = mkdtempSync(join(tmpdir(), 'oagen-234-'));
