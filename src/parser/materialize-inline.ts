@@ -16,6 +16,7 @@ import { toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { schemaToTypeRef, resolveSchemaName } from './schemas.js';
 import { extractInlineModelsFromProperties, qualifyInlineModelName } from './inline-models.js';
+import { shapeWithEnumFlags } from './enum-members.js';
 
 /**
  * Spec-wide record of every model name an inline model must not silently
@@ -41,17 +42,24 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description',
 /**
  * Shape of a model, independent of field order, name and documentation:
  * every field's name, type, requiredness, limits, default and access flags,
- * plus the model's own limits, type parameters and discriminator. Two
- * schemas share a model only when this agrees, so a body that repeats
- * another's fields with a different `minLength` or `minProperties` keeps its
- * own model and its own limits.
+ * plus the model's own limits, type parameters, variants and discriminator.
+ * Types are read through `shapeWithEnumFlags`, so an inline enum's per-value
+ * deprecation counts as its values do. Two schemas share a model only when
+ * this agrees, so a body that repeats another's fields with a different
+ * `minLength` or `minProperties`, or an enum member deprecated on one side
+ * only, keeps its own model and its own limits.
  */
 export function modelFingerprint(model: Model): string {
   const fields = model.fields
-    .map((field) => `${field.name}:${stableStringify(omitKeys(field, FIELD_DOC_KEYS))}`)
+    .map(
+      (field) =>
+        `${field.name}:${stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) })}`,
+    )
     .sort()
     .join('|');
-  return `${fields}#${stableStringify(omitKeys(model, MODEL_IDENTITY_KEYS))}`;
+  const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
+  if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
+  return `${fields}#${stableStringify(rest)}`;
 }
 
 /** The entries of `value` whose key is not in `keys` and whose value is set. */
