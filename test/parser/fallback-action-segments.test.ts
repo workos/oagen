@@ -24,9 +24,35 @@ const item = (name: string) => ({ ...ok, ...idParam(name) });
 type Method = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head';
 type Paths = Record<string, Partial<Record<Method, unknown>>>;
 
+type Services = ReturnType<typeof extractOperations>['services'];
+
+/**
+ * The invariant every case below holds: within a service, two operations
+ * share a name only when they sit on one path and are its PUT and PATCH,
+ * the one deliberate sharing (both take the verb `update`). The differ keys
+ * a service's operations by name, so any other sharing would hide one.
+ */
+function expectUniqueNames(services: Services): void {
+  for (const service of services) {
+    const byName = new Map<string, Services[number]['operations']>();
+    for (const op of service.operations) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, ops] of byName) {
+      if (ops.length < 2) continue;
+      const shape = { paths: [...new Set(ops.map((op) => op.path))], methods: ops.map((op) => op.httpMethod).sort() };
+      expect({ service: service.name, name, ...shape }).toEqual({
+        service: service.name,
+        name,
+        paths: [ops[0].path],
+        methods: ['patch', 'put'],
+      });
+    }
+  }
+}
+
 /** `Service.name METHOD path` for every operation, sorted by path (code units) then method. */
 function names(paths: Paths) {
   const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
+  expectUniqueNames(services);
   const key = (op: { path: string; httpMethod: string }) => `${op.path}\0${op.httpMethod}`;
   return services
     .flatMap((s) => s.operations.map((op) => ({ op, service: s.name })))
@@ -346,5 +372,153 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
       'Pets.purge                     DELETE /pets/bulk-delete',
       'Pets.fetchStatus               GET    /pets/{id}/status',
     ]);
+  });
+});
+
+describe('one name on one path: two methods never share it unless they are PUT and PATCH', () => {
+  it('keeps the action with the method whose verb the segment carries; the other method takes its CRUD name', () => {
+    expect(names({ '/pets/bulk-delete': { post: ok, delete: ok } })).toEqual([
+      'Pets.bulkDelete                DELETE /pets/bulk-delete',
+      'Pets.createBulkDelete          POST   /pets/bulk-delete',
+    ]);
+    expect(names({ '/users/{id}/update-password': { post: item('id'), put: item('id') } })).toEqual([
+      'Users.createUserUpdatePassword POST   /users/{id}/update-password',
+      'Users.updatePasswordUser       PUT    /users/{id}/update-password',
+    ]);
+  });
+
+  it('keeps the action with POST when no method carries the verb, and shares it between PUT and PATCH', () => {
+    expect(names({ '/pets/bulk-delete': { get: ok, post: ok, put: ok } })).toEqual([
+      'Pets.listBulkDelete            GET    /pets/bulk-delete',
+      'Pets.bulkDelete                POST   /pets/bulk-delete',
+      'Pets.updateBulkDelete          PUT    /pets/bulk-delete',
+    ]);
+    expect(names({ '/pets/bulk-update': { post: ok, put: ok, patch: ok } })).toEqual([
+      'Pets.bulkUpdate                PATCH  /pets/bulk-update',
+      'Pets.createBulkUpdate          POST   /pets/bulk-update',
+      'Pets.bulkUpdate                PUT    /pets/bulk-update',
+    ]);
+  });
+
+  it('reads a custom method the same way', () => {
+    expect(names({ '/v1/pets:bulkDelete': { post: ok, delete: ok } })).toEqual([
+      'Pets.bulkDelete                DELETE /v1/pets:bulkDelete',
+      'Pets.createBulkDelete          POST   /v1/pets:bulkDelete',
+    ]);
+  });
+
+  it('keeps every method on a singleton or an item action distinct', () => {
+    expect(
+      names({
+        '/pets/{id}/adopt': { get: item('id'), post: item('id'), put: item('id'), delete: item('id') },
+        '/pets/{id}/status': {
+          get: item('id'),
+          post: item('id'),
+          put: item('id'),
+          patch: item('id'),
+          delete: item('id'),
+          head: item('id'),
+        },
+      }),
+    ).toEqual([
+      'Pets.deletePetAdopt            DELETE /pets/{id}/adopt',
+      'Pets.getPetAdopt               GET    /pets/{id}/adopt',
+      'Pets.adoptPet                  POST   /pets/{id}/adopt',
+      'Pets.updatePetAdopt            PUT    /pets/{id}/adopt',
+      'Pets.deletePetStatus           DELETE /pets/{id}/status',
+      'Pets.getPetStatus              GET    /pets/{id}/status',
+      'Pets.checkPetStatus            HEAD   /pets/{id}/status',
+      'Pets.updatePetStatus           PATCH  /pets/{id}/status',
+      'Pets.createPetStatus           POST   /pets/{id}/status',
+      'Pets.updatePetStatus           PUT    /pets/{id}/status',
+    ]);
+  });
+
+  it('steps aside for an operationId on the same path, whatever its verb, numbering when the CRUD name is held too', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(names({ '/pets/bulk-delete': { post: ok, delete: { ...ok, operationId: 'bulkDelete' } } })).toEqual([
+        'Pets.bulkDelete                DELETE /pets/bulk-delete',
+        'Pets.createBulkDelete          POST   /pets/bulk-delete',
+      ]);
+      expect(names({ '/pets/bulk-delete': { post: ok, put: { ...ok, operationId: 'bulkDelete' } } })).toEqual([
+        'Pets.createBulkDelete          POST   /pets/bulk-delete',
+        'Pets.bulkDelete                PUT    /pets/bulk-delete',
+      ]);
+      expect(
+        names({ '/pets/bulk-delete': { get: { ...ok, operationId: 'createBulkDelete' }, post: ok, delete: ok } }),
+      ).toEqual([
+        'Pets.bulkDelete                DELETE /pets/bulk-delete',
+        'Pets.createBulkDelete          GET    /pets/bulk-delete',
+        'Pets.createBulkDelete2         POST   /pets/bulk-delete',
+      ]);
+      // A path-named PATCH beside `operationId: updatePet` on the PUT has no
+      // action to drop, so it is numbered, silently.
+      expect(
+        names({ '/store/pets/{id}': { put: { ...item('id'), operationId: 'updatePet' }, patch: item('id') } }),
+      ).toEqual([
+        'Store.updatePet2               PATCH  /store/pets/{id}',
+        'Store.updatePet                PUT    /store/pets/{id}',
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('numbers an operationId the document reuses on one path, with the warning the numeric pass gives', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        names({
+          '/store/pets/{id}': {
+            put: { ...item('id'), operationId: 'updatePet' },
+            patch: { ...item('id'), operationId: 'updatePet' },
+          },
+        }),
+      ).toEqual([
+        'Store.updatePet2               PATCH  /store/pets/{id}',
+        'Store.updatePet                PUT    /store/pets/{id}',
+      ]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(/both take the name "updatePet" from their operationId/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps path-named PUT and PATCH sharing a name on one path, and the plural they share', () => {
+    expect(names({ '/store/pets/{id}': { put: item('id'), patch: item('id') } })).toEqual([
+      'Store.updatePet                PATCH  /store/pets/{id}',
+      'Store.updatePet                PUT    /store/pets/{id}',
+    ]);
+    expect(
+      names({
+        '/store/featured/{id}': { put: { ...item('id'), operationId: 'updatePet' } },
+        '/store/pets/{id}': { put: item('id'), patch: item('id') },
+      }),
+    ).toEqual([
+      'Store.updatePet                PUT    /store/featured/{id}',
+      'Store.updatePets               PATCH  /store/pets/{id}',
+      'Store.updatePets               PUT    /store/pets/{id}',
+    ]);
+  });
+
+  it('holds across every method on every action and singleton shape', () => {
+    const every = { get: ok, post: ok, put: ok, patch: ok, delete: ok, head: ok };
+    const everyItem = Object.fromEntries(Object.keys(every).map((m) => [m, item('id')]));
+    const { services } = extractOperations({
+      '/pets/bulk-delete': every,
+      '/pets/list-all': every,
+      '/pets/search': every,
+      '/pets/{id}/adopt': everyItem,
+      '/pets/{id}/status': everyItem,
+      '/pets/{id}/update-password': everyItem,
+      '/pets/{id}/photos': everyItem,
+      '/v1/pets:batchGet': every,
+      '/v1/pets/{id}:status': everyItem,
+    } as Parameters<typeof extractOperations>[0]);
+    expectUniqueNames(services);
+    expect(services.flatMap((s) => s.operations).length).toBe(54);
   });
 });
