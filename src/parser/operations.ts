@@ -10,10 +10,10 @@ import type {
   ResponseHeader,
   ResponseContent,
   RequestBodyContent,
+  Enum,
   DefaultResponse,
   RangeResponse,
   Model,
-  Enum,
   Field,
   PaginationMeta,
   PaginationEndOfIteration,
@@ -31,7 +31,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
+import { isJsonMediaType, isPlainJsonMediaType, mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -77,10 +77,10 @@ import {
   materializeInlineSchema,
   modelFingerprint,
   registerInlineModels,
+  reserveEnumNames,
   type InlineModelRegistry,
   type InlineModelOwner,
   type SiblingSites,
-  registerEnumNames,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -382,6 +382,7 @@ export function extractOperations(
   documentServers?: ServerEntry[],
   openapiVersion?: string,
   operationHints?: Record<string, OperationHint>,
+  /** The component enums, whose names no deferred or item model may take (see `reserveEnumNames`). */
   componentEnums?: readonly Enum[],
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
@@ -450,7 +451,21 @@ export function extractOperations(
   const registry: ModelShapeRegistry = new Map();
   const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
   registerInlineModels(registry, registeredModels);
-  registerEnumNames(registry, mintedEnumNames(componentEnums ?? [], registeredModels, []));
+  // Every enum name decided so far, held as names no model may take
+  // (`reserveEnumNames`): the component enums', and every inline enum the
+  // component models and the components' field models mint (an `EnumRef`
+  // carrying `values`, named before the enum collector may rename it). The
+  // operations' own join once they are read, below.
+  const reservedEnumNames = new Set<string>((componentEnums ?? []).map((e) => e.name));
+  const reserveEnumRefs = (ref: TypeRef): void => {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (r.values) reservedEnumNames.add(r.name);
+      },
+    });
+  };
+  for (const model of registeredModels) for (const ref of collectModelTypeRefs(model)) reserveEnumRefs(ref);
+  reserveEnumNames(registry, reservedEnumNames);
 
   for (const [path, pathItem] of Object.entries(paths)) {
     const pathLevelParams = pathItem.parameters ?? [];
@@ -546,13 +561,31 @@ export function extractOperations(
   // are named last, in document order, against every name in the registry —
   // the component models and enums, the components' field models, every
   // request body, primary response, item and companion model — and against
-  // every enum name the operations minted: the name every inline enum a
-  // model field, a parameter or a body mints will be lifted under
-  // (`mintedEnumNames`). So none of them takes a name one of those owns,
-  // whichever comes first in the document, and no deferred model shares a
-  // name with an enum.
+  // every enum name decided so far: the component enums, and every inline
+  // enum those models' fields or the operations' parameters, bodies (the
+  // primary and every alternate success body), pagination (item type and
+  // envelope fields) and headers minted (an `EnumRef` carrying `values`,
+  // named before the enum collector may rename it). So none of them takes a
+  // name one of those owns, whichever comes first in the document, and no
+  // model is ever named like an enum.
   registerInlineModels(registry, companionModels);
-  registerEnumNames(registry, mintedEnumNames(componentEnums ?? [], inlineModels, [...serviceMap.values()].flat()));
+  for (const model of inlineModels) for (const ref of collectModelTypeRefs(model)) reserveEnumRefs(ref);
+  for (const operations of serviceMap.values()) {
+    for (const op of operations) {
+      for (const param of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
+        reserveEnumRefs(param.type);
+      }
+      if (op.requestBody) reserveEnumRefs(op.requestBody);
+      for (const ref of responseTypeRefs(op)) reserveEnumRefs(ref);
+    }
+  }
+  reserveEnumNames(registry, reservedEnumNames);
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
@@ -2605,8 +2638,15 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
   encoding: RequestBodyEncoding;
   schemaRequired: boolean;
 }> = [
-  { matches: (essence) => essence === 'application/json', encoding: 'json', schemaRequired: true },
-  { matches: (essence) => essence.endsWith('+json'), encoding: 'json', schemaRequired: true },
+  // The one JSON rule requests and responses share (`isJsonMediaType`), in
+  // the order `jsonResponseSchema` applies it: `application/json` itself
+  // first, then any `+json` type.
+  { matches: isPlainJsonMediaType, encoding: 'json', schemaRequired: true },
+  {
+    matches: (essence) => isJsonMediaType(essence) && !isPlainJsonMediaType(essence),
+    encoding: 'json',
+    schemaRequired: true,
+  },
   { matches: (essence) => essence === 'multipart/form-data', encoding: 'form-data', schemaRequired: true },
   {
     matches: (essence) => essence === 'application/x-www-form-urlencoded',
@@ -2881,7 +2921,11 @@ function extractRequestBodyContents(
  * (`ReplaceWidgetTextCsvRequest`), named once every primary model is known
  * (`resolveDeferredInlineTypes`), so the schema is deferred and the
  * placeholder returned here is filled in then — else as
- * `schemalessRequestContentType` types it.
+ * `schemalessRequestContentType` types it. The media type's fragment is
+ * decided among its `siblings`, the body's content keys
+ * (`mediaTypeNameFragment`): two spellings of one media type declared side
+ * by side take separate names by their parameters, and case-only spellings
+ * that derive one name are told apart by the registry.
  */
 function typeSecondaryRequestContent(
   contentType: string,
@@ -2895,10 +2939,6 @@ function typeSecondaryRequestContent(
   ctx.deferred.push({
     kind: 'request',
     schema,
-    // Named from the media type's essence among the body's content keys
-    // (`mediaTypeNameFragment`), so a key keeps its name however it is
-    // spelled and two spellings of one essence side by side are told apart
-    // by their parameters, whatever their order.
     name: `${stem}${mediaTypeNameFragment(contentType, siblings)}Request`,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
@@ -3391,23 +3431,27 @@ interface ResponseTypingContext {
  * Name and materialize every deferred header, secondary request-body,
  * secondary response-body, fallback-body, error-body and parameter schema,
  * now that every primary model is known. The registry comes filled from
- * `extractOperations`: the component models and enums first (with the models
- * and enums their fields mint), then every inline model the operations minted
- * — request bodies, primary response bodies with their nested objects, union
- * variants and settled array items, envelope companions — and every enum
- * name they mint, so no deferred schema can take one of their names for a
- * different shape, or an enum's name at all, whichever
+ * `extractOperations`: the component models first (with the inline models
+ * their fields mint), then every inline model the operations minted —
+ * request bodies, primary response bodies with their nested objects, union
+ * variants and settled array items, envelope companions — so no deferred
+ * schema can take one of their names for a different shape, whichever
  * operation minted it; each resolved schema's own models join it in turn, in
  * document order (path order, then an operation's secondary request bodies
  * in content order, then the response keys as written; a response's headers
  * before its error body and its secondary bodies, a fallback's body before
- * its headers), so the first owner of a name keeps it. The sites that derive
- * from one bare name — one kind, parent and name: the same header on several
- * status codes or operations, one media type's body on several status codes
- * — share a record of the stems they settled on and the renames made under
- * them, so a later one shares an identical shape under whichever name the
- * earlier took (`materializeInlineSchema`). Returns the models materialized,
- * having set each target's `type`.
+ * its headers), so the first owner of a name keeps it. Every enum name
+ * decided before this pass, component or minted, is held too, as a name no
+ * model may take (`reserveEnumNames`): a deferred schema that derives one
+ * steps to its next candidate, so a component enum
+ * `ReplaceWidgetTextCsvRequest` sends the `text/csv` body's model to
+ * `ReplaceWidgetTextCsvRequest2`. The sites that derive from one bare name
+ * — one kind, parent and name: the same header on several status codes or
+ * operations, one media type's body on several status codes — share a
+ * record of the stems they settled on and the renames made under them, so a
+ * later one shares an identical shape under whichever name the earlier took
+ * (`materializeInlineSchema`). Returns the models materialized, having set
+ * each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -3429,43 +3473,6 @@ function resolveDeferredInlineTypes(
     bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
   }
   return { models, bundles };
-}
-
-/**
- * Every enum name decided before the deferred schemas are typed, for
- * `resolveDeferredInlineTypes` to reserve: the component enums' names and,
- * from every model and operation read so far, the name of every `EnumRef` —
- * an inline enum's (`values` set), which the collectors lift under that very
- * name (`collectInlineEnumsFromModels`, `collectInlineEnumsFromOperations`;
- * a clash there renames the later copy, never the first), or a reference to
- * a component enum. So a deferred model — a parameter's, a header's, a
- * body's — never takes a name an enum has or will have: `PetsFilter` the
- * component enum beside `filter` the object parameter, or `PetsKind` the
- * enum one operation's parameter lifts beside the object another's mints.
- */
-function mintedEnumNames(
-  componentEnums: readonly Enum[],
-  models: readonly Model[],
-  operations: readonly Operation[],
-): Set<string> {
-  const names = new Set(componentEnums.map((e) => e.name));
-  const collect = (ref: TypeRef): void => walkTypeRef(ref, { enum: (r) => names.add(r.name) });
-  for (const model of models) for (const ref of collectModelTypeRefs(model)) collect(ref);
-  for (const op of operations) {
-    for (const param of [
-      ...op.pathParams,
-      ...op.queryParams,
-      ...(op.bodyOwnedQueryParams ?? []),
-      ...op.headerParams,
-      ...(op.cookieParams ?? []),
-    ]) {
-      collect(param.type);
-    }
-    if (op.requestBody) collect(op.requestBody);
-    for (const ref of responseTypeRefs(op)) collect(ref);
-    for (const error of op.errors) if (error.type) collect(error.type);
-  }
-  return names;
 }
 
 /**
@@ -3519,7 +3526,7 @@ function attachSharedDeferredRefs(
  * `GetPetError404`), a primary body, the same header on a 429 or another
  * operation may already own with a different shape, or an enum — a
  * component's, or one a parameter or field lifts — may own outright
- * (`registerEnumNames`). Left alone, the later
+ * (`reserveEnumNames`). Left alone, the later
  * merge keeps one definition for the name and every other reference silently
  * gets the wrong fields (a request body using the component would even change
  * type without any emitter reading headers).
@@ -4630,9 +4637,11 @@ function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema
  */
 function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
   const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  // The one JSON rule requests and responses share (`isJsonMediaType`):
+  // `application/json` itself first, then any `+json` type.
   const match =
-    entries.find(([mediaType]) => mediaTypeEssence(mediaType) === 'application/json') ??
-    entries.find(([mediaType]) => mediaTypeEssence(mediaType).endsWith('+json'));
+    entries.find(([mediaType]) => isPlainJsonMediaType(mediaType)) ??
+    entries.find(([mediaType]) => isJsonMediaType(mediaType));
   return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 
