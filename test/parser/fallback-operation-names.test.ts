@@ -471,3 +471,63 @@ describe('fallback operation names (issue #210)', () => {
     expect(transformed.sort()).toEqual(['createAdoption_v2', 'fetchPets_v2']);
   });
 });
+
+/**
+ * Custom-method paths (issue #269): an action written after a colon on the
+ * segment it acts on, `/pets/{petId}:adopt`, is named exactly like the same
+ * action written with a slash. Every reading of the path splits the segment
+ * the same way, so the verb never lands inside a `By<Param>` qualifier.
+ */
+describe('custom-method paths (issue #269)', () => {
+  const json = {
+    responses: { '200': { description: 'ok', content: { 'application/json': { schema: { type: 'string' } } } } },
+  };
+  const jsonItem = (name: string) => ({ ...json, ...idParam(name) });
+
+  it('names the issue repro: a custom method on an item is the verb plus its singular parent', () => {
+    const result = names({
+      '/v1/pets/{petId}:adopt': { post: jsonItem('petId') },
+      '/v1/pets/{petId}:archive': { post: jsonItem('petId') },
+      '/v1/pets/{petId}/feed': { post: jsonItem('petId') },
+    });
+    expect(result).toMatchInlineSnapshot(`
+      [
+        "feedPet                      POST   /v1/pets/{petId}/feed",
+        "adoptPet                     POST   /v1/pets/{petId}:adopt",
+        "archivePet                   POST   /v1/pets/{petId}:archive",
+      ]
+    `);
+  });
+
+  it('names a tagged custom method on an item the same way, keeping the service segment as the parent', () => {
+    expect(names({ '/pets/{petId}:adopt': { post: { ...jsonItem('petId'), tags: ['pets'] } } })).toEqual([
+      'adoptPet                     POST   /pets/{petId}:adopt',
+    ]);
+  });
+
+  it('names the service from the collection a custom method is written on, and reads it like the slash form', () => {
+    const paths = { '/v1/pets:batchGet': { post: json }, '/v1/pets': { get: json } };
+    const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
+    expect(services.map((s) => s.name)).toEqual(['Pets']);
+    expect(names(paths)).toEqual([
+      'list                         GET    /v1/pets',
+      'createBatchGet               POST   /v1/pets:batchGet',
+    ]);
+  });
+
+  it('qualifies by the parameter alone, never by the verb written after it', () => {
+    expect(names({ '/pets/{petId}:history': { get: jsonItem('petId') }, '/pets/history': { get: json } })).toEqual([
+      'listHistory                  GET    /pets/history',
+      'listHistoryByPetId           GET    /pets/{petId}:history',
+    ]);
+  });
+
+  it('reads a custom method and its slash form as the same words', () => {
+    expect(
+      names({ '/pets/{petId}:adopt': { post: jsonItem('petId') }, '/pets/{petId}/adopt': { post: jsonItem('petId') } }),
+    ).toEqual([
+      'adoptPet                     POST   /pets/{petId}/adopt',
+      'adoptPet2                    POST   /pets/{petId}:adopt',
+    ]);
+  });
+});

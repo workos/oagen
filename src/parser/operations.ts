@@ -19,7 +19,7 @@ import type {
   ExternalDocs,
   ServerEntry,
 } from '../ir/types.js';
-import type { OperationHint } from '../ir/operation-hints.js';
+import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
 import { serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
@@ -537,7 +537,7 @@ export function extractOperations(
   for (const [serviceName, operations] of serviceMap) {
     const pathGroups = new Map<string, Operation[]>();
     for (const op of operations) {
-      const segments = op.path.split('/').filter(Boolean);
+      const segments = pathSegments(op.path);
       const firstSeg = segments[serviceSegmentIndex(segments, rootLengthOf(op))] ?? '';
       const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
       const group = pathGroups.get(groupKey) ?? [];
@@ -738,7 +738,7 @@ function documentApiRoot(paths: Record<string, PathItem>): string[] {
       return Boolean(op) && !op?.tags?.[0];
     });
     if (!hasUntaggedOperation) continue;
-    const segments = path.split('/').filter(Boolean);
+    const segments = pathSegments(path);
     const own = segments.slice(0, pathRootLength(segments));
     if (own.length > 0) contributions.push(own);
   }
@@ -779,7 +779,7 @@ function sharedPrefixLength(a: readonly string[], b: readonly string[]): number 
  * untagged, so what they share always ends on a marker.
  */
 function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   return sharedPrefixLength(apiRoot, segments.slice(0, pathRootLength(segments)));
 }
 
@@ -820,7 +820,7 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   if (tag) {
     return toPascalCase(tag);
   }
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const first = segments[serviceSegmentIndex(segments, apiRootLength)] ?? 'Default';
   // Skip path params
   if (first.startsWith('{')) return 'Default';
@@ -922,7 +922,7 @@ function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: num
  * unless `inferPostAction` recognised it as an action first.
  */
 function inferVerb(method: HttpMethod, path: string): string {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith('{');
 
   switch (method) {
@@ -966,7 +966,7 @@ function inferVerb(method: HttpMethod, path: string): string {
  * for `/accounts/users/{id}`), for pluralFallbackName.
  */
 function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = true): string | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   if (segments.length <= 1) return null;
 
   // Find the last meaningful (non-param) segment past the API root, so a
@@ -1012,9 +1012,15 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
  * (`/pets/search` looks like `/accounts/users/auth_factors`). A singleton
  * noun after the parameter (`/users/{id}/avatar`) is misread as a verb; give
  * it an `operationId`.
+ *
+ * A custom method written after a colon is read as the segment it is written
+ * on followed by the verb (see pathSegments): `/pets/{petId}:adopt` is
+ * `{petId}` then `adopt`, so it is the action `adoptPet` exactly as
+ * `/pets/{petId}/adopt` is; `/pets:search` is read as `/pets/search` and
+ * stays a `create`.
  */
 function inferPostAction(path: string, apiRootLength = 0): { verb: string; resource: string | null } | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   if (segments.length < 2) return null;
   const last = segments[segments.length - 1];
   if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
@@ -1149,7 +1155,7 @@ function disambiguateOperationNames(
       // the one place a root word belongs in a name. A root-less path — outside
       // the root, or tagged — is named as if the document had none and takes
       // no part; it keeps the plain name in the numeric pass instead.
-      const roots = group.map((op) => op.path.split('/').filter(Boolean).slice(0, apiRootLengthOf(op)));
+      const roots = group.map((op) => pathSegments(op.path).slice(0, apiRootLengthOf(op)));
       const rooted = roots.filter((root) => root.length > 0);
       if (rooted.length === 0) return;
       let shared = rooted[0];
@@ -1306,17 +1312,18 @@ function appendQualifier(name: string, qualifier: string | null): string {
  */
 function qualifierPath(op: Operation, apiRootLength: number): string {
   if (op.httpMethod !== 'post' || !inferPostAction(op.path, apiRootLength)) return op.path;
-  return '/' + op.path.split('/').filter(Boolean).slice(0, -1).join('/');
+  return '/' + pathSegments(op.path).slice(0, -1).join('/');
 }
 
 /**
  * The path parameters in path order, each as the PascalCase word that
  * `By<Param>` spells it with. Mirrors derivePathModelBaseName's spelling of a
- * parameter segment, so `{team_id}` and `{teamId}` read alike.
+ * parameter segment, so `{team_id}` and `{teamId}` read alike. A parameter
+ * that carries a custom method (`{petId}:adopt`) is the parameter alone,
+ * `PetId`, since pathSegments has split the verb off.
  */
 function pathParamWords(path: string): string[] {
-  return path
-    .split('/')
+  return pathSegments(path)
     .filter((segment) => segment.startsWith('{'))
     .map((segment) => toPascalCase(segment.replace(/[{}]/g, '')));
 }
@@ -1349,7 +1356,7 @@ function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string 
  * already carries) or when nothing literal follows the root (`/api/v1/{id}`).
  */
 function inferServiceNoun(path: string, apiRootLength: number): string | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   let last = segments.length - 1;
   while (last >= apiRootLength && segments[last].startsWith('{')) last--;
   if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
@@ -1368,7 +1375,7 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
  * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
  */
 function inferDeeperContext(path: string, apiRootLength = 0): string | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const nonParams = segments.slice(apiRootLength).filter((s) => !s.startsWith('{'));
   // Skip first (service) and last (already used) — use the middle ones
   if (nonParams.length >= 3) {
@@ -2877,7 +2884,9 @@ function extractResponseHeaders(
  *
  * This tells the common path shapes apart (list vs. item, sibling and nested
  * sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`,
- * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/` all flatten to the
+ * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/`, and a custom
+ * method beside its slash form, `/pets/{id}:adopt` and `/pets/{id}/adopt`
+ * (pathSegments reads the first as `{id}` then `adopt`), all flatten to the
  * same words. `resolvePathModelBaseNames` detects such collisions: the path
  * spelled most plainly keeps the plain name and every other one gets a
  * `disambiguator` derived from its raw path.
@@ -2888,7 +2897,7 @@ function extractResponseHeaders(
  * spells them.
  */
 export function derivePathModelBaseName(path: string, method: HttpMethod, disambiguator = ''): string {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const parts = segments.map((segment) =>
     segment.startsWith('{') ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
   );
@@ -3057,16 +3066,21 @@ function canonicalPath(rawPaths: Iterable<string>): string | undefined {
 
 /**
  * How far a raw path's spelling is from the plain prefix it flattens to:
- * `[trailing slash, literal segments with any character outside a-z0-9]`,
- * compared lexicographically. `/notes` scores [0, 0] and `/notes/` [1, 0];
- * `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
+ * `[trailing slash, segments other than a bare parameter with any character
+ * outside a-z0-9]`, compared lexicographically. `/notes` scores [0, 0] and
+ * `/notes/` [1, 0]; `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
+ * The raw URL segments are read here, not pathSegments: a custom method is
+ * spelled with a colon the plain form does without, so `/pets/{id}:adopt`
+ * scores [0, 1] and `/pets/{id}/adopt`, which flattens to the same prefix,
+ * keeps the plain name.
  */
 function pathDeviation(rawPath: string): [number, number] {
   const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
+  const isBareParam = (segment: string) => segment.startsWith('{') && segment.endsWith('}');
   const irregularSegments = rawPath
     .split('/')
     .filter(Boolean)
-    .filter((segment) => !segment.startsWith('{') && /[^a-z0-9]/.test(segment)).length;
+    .filter((segment) => !isBareParam(segment) && /[^a-z0-9]/.test(segment)).length;
   return [trailingSlash, irregularSegments];
 }
 

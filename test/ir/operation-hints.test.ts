@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   deriveMethodName,
   findResolvedMethodCollisions,
+  pathSegments,
   resolveMountTarget,
   resolveOperations,
 } from '../../src/ir/operation-hints.js';
@@ -45,6 +46,24 @@ function spec(services: Service[]): ApiSpec {
     sdk: defaultSdkBehavior(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// pathSegments — the one reading of a path template every name is built from
+// ---------------------------------------------------------------------------
+
+describe('pathSegments (issue #269)', () => {
+  it('reads a custom method as the segment it is written on followed by the verb', () => {
+    expect(pathSegments('/pets/{petId}:adopt')).toEqual(['pets', '{petId}', 'adopt']);
+    expect(pathSegments('/pets:batchGet')).toEqual(['pets', 'batchGet']);
+    expect(pathSegments('/v1/pets/{petId}/feed')).toEqual(['v1', 'pets', '{petId}', 'feed']);
+  });
+
+  it('keeps a colon inside a parameter, and drops empty segments', () => {
+    expect(pathSegments('/{a:b}')).toEqual(['{a:b}']);
+    expect(pathSegments('//pets/:x/')).toEqual(['pets', 'x']);
+    expect(pathSegments('/')).toEqual([]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // deriveMethodName — algorithm unit tests
@@ -120,6 +139,22 @@ describe('deriveMethodName', () => {
 
     it('terminal complete → complete_<resource>', () => {
       expect(deriveMethodName(op('post', '/authkit/oauth2/complete'), service)).toBe('complete_oauth2');
+    });
+
+    it('reads a custom method written after a colon as the terminal verb (issue #269)', () => {
+      expect(deriveMethodName(op('post', '/auth/challenges/{id}:verify'), service)).toBe('verify_challenge');
+      expect(deriveMethodName(op('post', '/auth/factors:enroll'), service)).toBe('enroll_factor');
+      expect(deriveMethodName(op('put', '/feature-flags/{slug}:disable'), service)).toBe('disable_feature_flag');
+    });
+
+    it('names a custom method with no recognised verb exactly like its slash form (issue #269)', () => {
+      expect(deriveMethodName(op('post', '/pets/{petId}:adopt'), service)).toBe('create_pet_adopt');
+      expect(deriveMethodName(op('post', '/pets/{petId}:adopt'), service)).toBe(
+        deriveMethodName(op('post', '/pets/{petId}/adopt'), service),
+      );
+      expect(deriveMethodName(op('post', '/pets:batchGet'), service)).toBe(
+        deriveMethodName(op('post', '/pets/batchGet'), service),
+      );
     });
 
     it('terminal authorize → authorize_<resource>', () => {
