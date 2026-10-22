@@ -20,6 +20,7 @@ import {
   type RequestBodyObject,
 } from './operations.js';
 import { extractSecurityRequirements } from './security.js';
+import { warnOnIgnoredCallbacks } from './callbacks.js';
 
 /** The `components` sections webhook extraction resolves references against. */
 export interface WebhookComponents {
@@ -224,6 +225,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
     for (const method of methods) {
       const op = pathItem[method] as OperationObject;
       const label = `webhooks.${name}.${method}`;
+      warnOnIgnoredCallbacks(op.callbacks, label);
       // Same precedence as buildOperation: an operation-level parameter replaces
       // a path-item-level one of the same (in, name) identity, in the
       // path-level position.

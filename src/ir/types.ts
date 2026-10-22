@@ -100,6 +100,10 @@ export interface ApiSpec {
  * this to generate a payload type or a typed handler per event. A webhook is
  * never an SDK method: it has no path, belongs to no `Service`, and gets no
  * resolved operation name.
+ *
+ * An operation's `callbacks` (OpenAPI 3.x), whose path items have this
+ * shape, are not read into `Webhook` or anywhere else; the parser warns at
+ * every site that declares any (see `warnOnIgnoredCallbacks`).
  */
 export interface Webhook {
   /** The key under `webhooks`, verbatim (`petAdopted`, `user.created`). */
