@@ -70,6 +70,13 @@ import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 
 export interface PathItem {
+  /**
+   * The Path Item's own `summary`, which OpenAPI applies to every operation
+   * on it; read for an operation that declares none (`resolveOperationDocs`).
+   */
+  summary?: string;
+  /** The Path Item's own `description`, applied to its operations the same way. */
+  description?: string;
   get?: OperationObject;
   post?: OperationObject;
   put?: OperationObject;
@@ -443,6 +450,7 @@ export function extractOperations(
         path,
         op,
         pathLevelParams,
+        pathItem,
         pathModelBaseName,
         operationIdTransform,
         serviceName,
@@ -1548,6 +1556,7 @@ function buildOperation(
   path: string,
   op: OperationObject,
   pathLevelParams: RawParameterObject[],
+  pathItemDocs: PathItemDocs,
   pathModelBaseName: string,
   operationIdTransform?: (id: string) => string,
   serviceName?: string,
@@ -1797,16 +1806,18 @@ function buildOperation(
   const parameterGroups =
     queryParamGroups || bodyParamGroups ? [...(queryParamGroups ?? []), ...(bodyParamGroups ?? [])] : undefined;
 
-  // An empty or whitespace-only summary counts as absent, so it neither gets
+  // The operation's own `summary` and `description`, or its Path Item's for
+  // each it declares none for (`resolveOperationDocs`). An empty or
+  // whitespace-only text counts as absent at either level, so it neither gets
   // its own field nor leaks into the description as a blank first paragraph.
-  const summary = presentText(op.summary);
+  const { summary, description } = resolveOperationDocs(op, pathItemDocs);
 
   const operation: Operation = {
     name: operationName,
     // Keep the summary on its own so emitters can tell it apart from the
     // description; the key is omitted (not set to undefined) when absent.
     ...(summary !== undefined ? { summary } : {}),
-    description: buildDescription(summary, op.description),
+    description,
     // Same conditional shape as `summary`: present only when the document
     // declares a usable link, absent (not undefined) otherwise.
     ...externalDocsEntry(op.externalDocs),
@@ -1903,6 +1914,36 @@ function headerOperationQualifier(
   const parent = serviceName ? toPascalCase(serviceName) : '';
   const rest = pathModelBaseName.slice(parent.length);
   return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
+}
+
+/** The Path Item fields an operation's doc text is read against (see `resolveOperationDocs`). */
+export type PathItemDocs = Pick<PathItem, 'summary' | 'description'>;
+
+/** An operation's doc text as the IR carries it, under the names `Operation` and `Webhook` share. */
+export interface OperationDocs {
+  /** The resolved `summary` alone; `undefined` when neither level has one with content. */
+  summary: string | undefined;
+  /** The combined form `buildDescription` makes of the two resolved texts; `undefined` when neither has content. */
+  description: string | undefined;
+}
+
+/**
+ * The `summary` and `description` of an operation — an SDK operation's or a
+ * webhook's — read from the Operation Object and, for each field it declares
+ * no content for, from the Path Item it sits on: OpenAPI defines a Path
+ * Item's `summary` and `description` as applying to every operation on it.
+ * The two fields fall back one by one, so an operation with a `summary` of
+ * its own and no `description` shows its own `summary` over the Path Item's
+ * `description`. Text with content wins at either level and blank text
+ * counts as absent at either level (`presentText`), so `summary: ""` on the
+ * operation still takes the Path Item's. Either field is `undefined` when
+ * neither level gives it; the caller decides whether the key is then omitted
+ * (`Webhook`) or present (`Operation.description`).
+ */
+export function resolveOperationDocs(op: OperationObject, pathItem: PathItemDocs): OperationDocs {
+  const summary = presentText(op.summary) ?? presentText(pathItem.summary);
+  const description = presentText(op.description) ?? presentText(pathItem.description);
+  return { summary, description: buildDescription(summary, description) };
 }
 
 /**

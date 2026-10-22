@@ -107,10 +107,22 @@ export interface Webhook {
   /** The operation's `operationId`, when the document declares one. */
   operationId?: string;
   httpMethod: HttpMethod;
-  /** The document's `summary` alone, as on `Operation.summary`. */
+  /**
+   * The `summary` alone, read as `Operation.summary` is: the operation's own,
+   * else the path item's. Absent when neither has content.
+   */
   summary?: string;
-  /** Combined doc text, built exactly as `Operation.description` is. */
+  /**
+   * Combined doc text, built as `Operation.description` is from the same
+   * two-level read. Absent when neither level gives any text.
+   */
   description?: string;
+  /**
+   * The operation's own `externalDocs`, when it declares a usable one, as on
+   * `Operation.externalDocs`. A Path Item Object has no `externalDocs`, so
+   * there is nothing to fall back to.
+   */
+  externalDocs?: ExternalDocs;
   /** Present, and `true`, only when the document marks the webhook deprecated. */
   deprecated?: boolean;
   /** The operation's `tags`, in document order; present only when non-empty. */
@@ -191,20 +203,23 @@ export type SecurityRequirementSet = SecurityRequirement[];
 export interface Operation {
   name: string;
   /**
-   * The document's `summary` alone. Present only when the OpenAPI operation
-   * declares one with non-whitespace content; an empty or whitespace-only
-   * summary is treated as absent. Read this to use the summary as a one-line
-   * label; `description` below still carries the combined form, so emitters
-   * that only print `description` are unchanged.
+   * The `summary` alone: the OpenAPI operation's own, or — when the operation
+   * declares none with non-whitespace content — the `summary` of the Path
+   * Item it sits on, which OpenAPI applies to every operation on that path.
+   * Present only when one of the two has content; an empty or whitespace-only
+   * summary is treated as absent at either level. Read this to use the
+   * summary as a one-line label; `description` below still carries the
+   * combined form, so emitters that only print `description` are unchanged.
    */
   summary?: string;
   /**
-   * Doc text for the operation. When the document declares both a `summary`
-   * and a `description` with content, this is `summary + "\n\n" + description`;
-   * when only one has content (or both are identical), this is that one. An
-   * empty or whitespace-only value is treated as absent, and text with content
-   * is kept verbatim. The parts are not separable from this field alone — use
-   * `summary` for that.
+   * Doc text for the operation, combined from a `summary` and a `description`
+   * each read as `summary` above is: the operation's own, else the Path
+   * Item's, field by field. When both have content, this is
+   * `summary + "\n\n" + description`; when only one has content (or both are
+   * identical), this is that one. An empty or whitespace-only value is
+   * treated as absent, and text with content is kept verbatim. The parts are
+   * not separable from this field alone — use `summary` for that.
    */
   description?: string;
   /** The operation's own `externalDocs`, when it declares a usable one. */
