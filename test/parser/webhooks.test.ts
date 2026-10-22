@@ -1019,6 +1019,35 @@ describe('webhooks', () => {
           { statusCode: 400, description: 'bad' },
         ]);
       });
+
+      it('reads a status code only from a three-digit 100–599 key, and warns about any key OpenAPI does not define (issue #275)', () => {
+        const { webhooks } = extractWebhooks({
+          petAdopted: {
+            post: {
+              responses: {
+                '200': { description: 'ok' },
+                '600': { description: 'not a status code' },
+                '6XX': { description: 'not a range' },
+                '4XXX': { description: 'neither' },
+                '20X': { description: 'neither' },
+                '099': { description: 'below 100' },
+                '200 ': { description: 'a trailing space' },
+                error: { description: 'not a key OpenAPI knows' },
+                'x-internal': true,
+                '2XX': { description: 'any success' },
+                default: { description: 'retried' },
+              },
+            },
+          },
+        });
+
+        expect(webhooks[0].responses).toEqual([{ statusCode: 200, description: 'ok' }]);
+        const ignored = (key: string): string =>
+          `[oagen] Warning: Ignoring response key "${key}" on webhooks.petAdopted.post: not a status code (three digits, 100–599), a 1XX–5XX range, or "default"`;
+        expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).toEqual(
+          ['600', '6XX', '4XXX', '20X', '099', '200 ', 'error'].map(ignored),
+        );
+      });
     });
   });
 

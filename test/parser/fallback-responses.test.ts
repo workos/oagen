@@ -450,6 +450,77 @@ describe('response keys OpenAPI does not define', () => {
     expect(Object.keys(op)).not.toContain('defaultResponse');
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring response key "error" on listPets'));
   });
+
+  /** The warning `classifyResponseKey` leaves for a key OpenAPI does not define, on `listPets`. */
+  const ignored = (key: string): string =>
+    `[oagen] Warning: Ignoring response key "${key}" on listPets: not a status code (three digits, 100–599), a 1XX–5XX range, or "default"`;
+
+  describe('a key that starts with digits but is no status code (issue #275)', () => {
+    const inlineBody = (description: string) => ({
+      description,
+      content: json({ type: 'object', properties: { code: { type: 'string' } } }),
+    });
+
+    it("the issue's repro: warns about, then ignores, `6XX`, `4XXX` and `20X`, each with a JSON body", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const ir = await parseTempSpec(
+        petsSpec({ '200': ok, '6XX': inlineBody('6XX'), '4XXX': inlineBody('4XXX'), '20X': inlineBody('20X') }),
+      );
+      const op = only(ir);
+
+      expect(op.response).toEqual(model('Pet'));
+      expect(op.defaultResponse).toBeUndefined();
+      expect(op.errors).toEqual([]);
+      expect(op.rangeResponses).toBeUndefined();
+      // Nothing was read from a numeric prefix: no `6`, `4` or `20` entry
+      // anywhere, and no model minted for an ignored body.
+      expect(op.successResponses).toBeUndefined();
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'Pet']);
+      expectConsistent(ir);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([ignored('6XX'), ignored('4XXX'), ignored('20X')]);
+    });
+
+    it("the comment's repro: warns about, then ignores, `600` instead of filing it under errors", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const ir = await parseTempSpec(petsSpec({ '200': ok, '600': inlineBody('600') }));
+      const op = only(ir);
+
+      expect(op.response).toEqual(model('Pet'));
+      expect(op.errors).toEqual([]);
+      // No `Error600`-like model is minted for the ignored body.
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['Error', 'Pet']);
+      expectConsistent(ir);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([ignored('600')]);
+    });
+
+    it('decides by the whole key: every key that is not three digits in 100–599 is warned about and ignored', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // Each of these parses to a number under `parseInt`, or starts with a digit.
+      const keys = ['000', '099', '0200', '200 ', ' 200', '2e2', '0XX', '6xx', '5XXX', '20X', '4X'];
+      const { op, inlineModels } = extractPets({
+        '200': ok,
+        ...Object.fromEntries(keys.map((key) => [key, inlineBody(key)])),
+      });
+
+      expect(op.response).toEqual(model('Pet'));
+      expect(op.successResponses).toBeUndefined();
+      expect(op.errors).toEqual([]);
+      expect(Object.keys(op)).not.toContain('defaultResponse');
+      expect(Object.keys(op)).not.toContain('rangeResponses');
+      expect(inlineModels).toEqual([]);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual(keys.map(ignored));
+    });
+
+    it('still reads an explicit 1xx code as a status code: not carried, and not warned about', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { op } = extractPets({ '101': { description: 'switching protocols' }, '200': ok });
+
+      expect(op.response).toEqual(model('Pet'));
+      expect(op.successResponses).toBeUndefined();
+      expect(op.errors).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('headers on fallback responses', () => {
