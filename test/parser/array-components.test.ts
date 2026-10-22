@@ -1473,7 +1473,21 @@ describe('two keys that resolve to one name with different shapes', () => {
     );
     expect(spec.models.find((m) => m.name === 'Note')?.fields.map((f) => f.name)).toEqual(['a']);
     expect(warnings()).toEqual([
-      '[oagen] Warning: Model "Note" has more than one definition under components/schemas with different fields or field types (1 vs 1) — keeping the first definition',
+      '[oagen] Warning: Component schemas "Note" and "note" both resolve to "Note" with different fields or field types (1 vs 1) — keeping the first definition',
+    ]);
+  });
+
+  it('keeps the larger definition and says which, whichever key comes first', async () => {
+    const spec = await parse(
+      specDoc({
+        note: { type: 'object', properties: { b: { type: 'integer' } } },
+        Note: { type: 'object', properties: { a: { type: 'string' }, c: { type: 'string' } } },
+        Holder: { type: 'object', properties: { n: ref('Note') } },
+      }),
+    );
+    expect(spec.models.find((m) => m.name === 'Note')?.fields.map((f) => f.name)).toEqual(['a', 'c']);
+    expect(warnings()).toEqual([
+      '[oagen] Warning: Component schemas "note" and "Note" both resolve to "Note" with different fields or field types (1 vs 2) — keeping the one with more fields',
     ]);
   });
 

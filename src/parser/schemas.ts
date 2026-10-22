@@ -922,22 +922,32 @@ export function extractSchemas(
   // Keep the model with more fields when names collide after cleaning
   // (two raw keys cleaning to one name), or when two inline models — a
   // discriminated-allOf variant's, a named union's, an array component's
-  // items' — take one name. Two definitions of one name are one model only
-  // when their shapes agree (`modelFingerprint`: fields, types, limits);
-  // equal field counts say nothing, so a definition that differs is
-  // reported before it is dropped, as `keepLargestByName` reports one.
+  // items' — take one name.
   const keepLarger = (model: Model): void => {
     const existing = modelsByCleanName.get(model.name);
-    if (existing && modelFingerprint(existing) !== modelFingerprint(model)) {
+    if (!existing || model.fields.length > existing.fields.length) modelsByCleanName.set(model.name, model);
+  };
+  // The key whose own model holds each name, so two keys that resolve to
+  // one name are told apart from a component and a variant of its own. Two
+  // such keys are one model only when their shapes agree
+  // (`modelFingerprint`: fields, types, limits); equal field counts say
+  // nothing, so a definition that differs is reported before it is dropped,
+  // as `keepLargestByName` reports one.
+  const componentKeysByName = new Map<string, string>();
+  const keepComponent = (key: string, model: Model): void => {
+    const other = componentKeysByName.get(model.name);
+    const existing = modelsByCleanName.get(model.name);
+    if (other !== undefined && existing && modelFingerprint(existing) !== modelFingerprint(model)) {
       const kept =
         model.fields.length > existing.fields.length
           ? 'keeping the one with more fields'
           : 'keeping the first definition';
       console.warn(
-        `[oagen] Warning: Model "${model.name}" has more than one definition under components/schemas with different fields or field types (${existing.fields.length} vs ${model.fields.length}) — ${kept}`,
+        `[oagen] Warning: Component schemas "${other}" and "${key}" both resolve to "${model.name}" with different fields or field types (${existing.fields.length} vs ${model.fields.length}) — ${kept}`,
       );
     }
-    if (!existing || model.fields.length > existing.fields.length) modelsByCleanName.set(model.name, model);
+    if (other === undefined) componentKeysByName.set(model.name, key);
+    keepLarger(model);
   };
 
   for (const [name, schema] of Object.entries(schemas)) {
@@ -949,7 +959,7 @@ export function extractSchemas(
       // No model of its own: a `$ref` to it is the array (`arrayComponentTypeRef`).
       for (const inlineModel of extractArrayComponentModels(name, schemas)) keepLarger(inlineModel);
     } else {
-      keepLarger(extractModel(pascalName, schema, schemas));
+      keepComponent(name, extractModel(pascalName, schema, schemas));
 
       for (const inlineModel of [
         ...extractDiscriminatedAllOfVariantModels(schema, pascalName, schemas),
@@ -4292,6 +4302,7 @@ import {
   mapValueSchema,
   markContestedTitles,
   readInlineAllOf,
+  unwrappedAllOfMember,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
