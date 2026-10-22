@@ -315,9 +315,18 @@ export interface OperationModified {
  * the new spec's lone entry. The `default` and range responses pair by key
  * and are reported with `fallback` set. A 2xx the old spec declared and the
  * new does not is reported with its media types `removed`; one the new spec
- * adds is no media-type change. Media types are compared as written and as
- * sets: reordering them is no change, while a key that only gained a
- * parameter is one removed and one added.
+ * adds is no media-type change. Media types are compared by essence —
+ * `type/subtype`, case folded, parameters stripped (`mediaTypeEssence`, the
+ * rule the parser types a body by) — and order aside: reordering them is no
+ * change, and neither is a key that only changed case (`Text/HTML`) or
+ * gained, lost or respelled a parameter (`application/problem+json;
+ * charset=utf-8`). Each media type is reported as written in the spec that
+ * declares it (`retyped` lists the new spec's spelling). Two keys of one
+ * essence declared side by side (`application/json` beside
+ * `application/json; charset=utf-8`) stay two media types: each pairs with
+ * the key spelled the same way on the other side, else with the other
+ * side's next unpaired key of its essence, and one left over is `added` or
+ * `removed`.
  */
 export interface ResponseContentTypesChange {
   statusCode?: number;

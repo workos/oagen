@@ -76,6 +76,8 @@ Every entry in `changes` carries a `kind` and a `classification` (`additive` or 
 
 **Parameters.** Parameters are matched by location and name — OpenAPI allows a path `id` beside a query `id` on one operation — and every `paramChanges` entry carries `paramLocation` (`path`, `query` or `header` on an operation; `header`, `query` or `cookie` on a webhook) to say which one it is about.
 
+**Response media types.** An `operation-modified` change lists, per response entry both specs declare, the media types the new spec `added` (additive), `removed` (breaking) or `retyped` (breaking) under `responseContentTypeChanges`, keyed by `statusCode` or, for the `default` and range responses, by `fallback`. Media types are matched by essence — `type/subtype`, case folded, parameters stripped — the rule the parser types a body by, so `Text/HTML` is `text/html` and `application/problem+json; charset=utf-8` is `application/problem+json`: a key that only changed case, whitespace or parameters is no change, and reordering the keys is none either. Each media type is reported as written in the spec that declares it. Two keys of one essence declared side by side (`application/json` beside `application/json; charset=utf-8`) stay two media types: each pairs with the key spelled the same way on the other side, else with the other side's next unpaired key of its essence, and one left over is added or removed.
+
 ## `oagen extract`
 
 Extract the public API surface from an existing SDK. Produces a JSON file used as input for compat overlay and verification.

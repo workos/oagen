@@ -30,6 +30,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
+import { mediaTypeEssence } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -3468,15 +3469,6 @@ function typeSecondaryContent(
 function mediaTypeToken(contentType: string): string {
   const token = toPascalCase(contentType.split('*').join('Any'));
   return token.length > 0 ? token : 'Content';
-}
-
-/**
- * A media type's essence — `type/subtype` without parameters, trimmed and
- * lower-cased — which is what decides how its body is typed (RFC 9110
- * §8.3.1). The content keys themselves stay as written.
- */
-function mediaTypeEssence(contentType: string): string {
-  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
 }
 
 /**
