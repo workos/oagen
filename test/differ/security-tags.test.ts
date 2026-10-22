@@ -501,6 +501,52 @@ describe('diffSpecs – the document’s default security', () => {
     ]);
   });
 
+  it('reads the default only from the sides that inherit it (MichaelDeBoey)', () => {
+    // Only a webhook inherits: the receiver's side alone. An alternative
+    // withdrawn is additive there — the sender still presents one the
+    // handler checked for — though a caller would call it breaking.
+    const hookOnly = (security?: SecurityRequirementSet[]) => spec({ security, services: [], webhooks: [hook()] });
+    const narrowed = diffSpecs(hookOnly(either), hookOnly(apiKey));
+    expect(narrowed.changes).toEqual([
+      { kind: 'security-changed', oldSecurity: either, newSecurity: apiKey, classification: 'additive' },
+    ]);
+    expect(narrowed.behaviorChanges).toEqual([
+      {
+        kind: 'security-changed',
+        node: 'document',
+        oldSecurity: either,
+        newSecurity: apiKey,
+        classification: 'additive',
+      },
+    ]);
+    expect(diffSpecs(hookOnly(undefined), hookOnly(apiKey)).changes[0]).toMatchObject({ classification: 'additive' });
+    expect(diffSpecs(hookOnly(apiKey), hookOnly(undefined)).changes[0]).toMatchObject({ classification: 'breaking' });
+
+    // Every operation declares its own list (`security: []` included) and
+    // there is no webhook: nothing reads the default.
+    const pinnedOps = (security?: SecurityRequirementSet[]) =>
+      spec({ security, services: [{ name: 'Pets', operations: [op({ security: none })] }] });
+    expect(diffSpecs(pinnedOps(undefined), pinnedOps(apiKey)).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
+    ]);
+
+    // Nothing inherits anywhere.
+    const empty = (security?: SecurityRequirementSet[]) => spec({ security, services: [], models: [] });
+    expect(diffSpecs(empty(undefined), empty(apiKey)).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
+    ]);
+
+    // An operation inheriting in either document brings the caller's side back.
+    expect(diffSpecs(pinnedOps(undefined), spec({ security: apiKey })).changes[0]).toMatchObject({
+      kind: 'security-changed',
+      classification: 'breaking',
+    });
+    expect(diffSpecs(spec({ security: undefined }), pinnedOps(apiKey)).changes[0]).toMatchObject({
+      kind: 'security-changed',
+      classification: 'breaking',
+    });
+  });
+
   it('is listed after the server changes and before the models', () => {
     const before = spec({ baseUrl: 'https://old.example.com', servers: [{ url: 'https://old.example.com' }] });
     const after = spec({
@@ -662,6 +708,17 @@ describe('a first-tag change that renames the service is a service move, not a t
     openapi: '3.1.0',
     info: { title: 'repro', version: '1' },
     paths,
+  });
+
+  it('folds a repeated tag onto its first occurrence, so `[Pets]` → `[Pets, Pets]` is no change (MichaelDeBoey)', async () => {
+    const doc = JSON.parse(await fs.readFile(path.join(fixtures, 'security-tags-before.json'), 'utf8'));
+    doc.paths['/pets'].get.tags = ['Pets', 'Pets'];
+    doc.webhooks.petAdopted.post.tags = ['Pets', 'Pets'];
+    const before = await parseSpec(path.join(fixtures, 'security-tags-before.json'));
+    const after = await parseSpec(await writeSpec('repeated.json', doc));
+    expect(after.services[0].operations[0].tags).toEqual(['Pets']);
+    expect(after.webhooks?.[0].tags).toEqual(['Pets']);
+    expect(diffSpecs(before, after).changes).toEqual([]);
   });
 
   it('reports swapping the first two tags on a document’s only operation as service-removed and service-added, exit 2', async () => {

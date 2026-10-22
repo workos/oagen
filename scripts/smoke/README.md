@@ -181,7 +181,7 @@ Both `smoke-results-raw.json` and `smoke-results-sdk-{lang}.json` contain a `Smo
 
 - **`outcome`**: `"success"` (2xx), `"api-error"` (4xx/5xx or network failure), or `"skipped"` (missing path params or no SDK mapping)
 - **`unexpectedStatus`**: `true` when the operation's declared responses do not cover the response status code: no explicit code, no `1XX`–`5XX` range response containing it, and no `default` response. Only present when `true`.
-- **`expectedStatusCodes`**: The explicit status codes declared in the spec (success + error codes). A range or `default` response is not listed here. Only present when `unexpectedStatus` is `true`.
+- **`expectedStatusCodes`**: The explicit status codes declared in the spec: every declared 2xx/3xx code (`Operation.responseStatusCode` plus every `successResponses` entry) and every error code; nothing is implied from the HTTP method, so an operation declaring no 2xx/3xx response lists no success code. A range or `default` response is not listed here. Only present when `unexpectedStatus` is `true`.
 - **`expectedStatuses`**: Everything the declared responses cover — `codes` (the same list as `expectedStatusCodes`), `ranges` (the `1XX`–`5XX` range keys, in declaration order) and `hasDefault` (whether a `default` response exists). Only present when `unexpectedStatus` is `true`.
 - **`provenance`**: (SDK results only) Records how the SDK method was resolved — includes `resolutionTier` (`exact`, `crud-prefix`, `fuzzy`, or `manifest`), `resolutionConfidence`, and the `sdkMethodName` used.
 
