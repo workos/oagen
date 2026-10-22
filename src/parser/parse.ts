@@ -10,6 +10,7 @@ import {
 } from './schemas.js';
 import { extractOperations } from './operations.js';
 import type { FieldInlineModelGroup } from './inline-models.js';
+import { collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
@@ -18,7 +19,11 @@ import {
   reservedTypeNames,
   type InlineModelNaming,
 } from './normalize-inline-models.js';
-import { collectInlineEnumsFromModels, collectInlineEnumsFromOperations } from './collect-inline-enums.js';
+import {
+  collectInlineEnumsFromModels,
+  collectInlineEnumsFromOperations,
+  collectInlineEnumsFromWebhooks,
+} from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
@@ -81,12 +86,16 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     tags?: Array<{ name?: string; description?: string; externalDocs?: RawExternalDocs }>;
     externalDocs?: RawExternalDocs;
     paths?: Record<string, unknown>;
+    webhooks?: unknown;
+    'x-webhooks'?: unknown;
     components?: {
       schemas?: Record<string, unknown>;
       parameters?: Record<string, unknown>;
       requestBodies?: Record<string, unknown>;
+      responses?: Record<string, unknown>;
       examples?: Record<string, unknown>;
       headers?: Record<string, unknown>;
+      pathItems?: Record<string, unknown>;
       securitySchemes?: Record<string, SecuritySchemeObject>;
     };
   };
@@ -105,6 +114,23 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     { schemaNameTransform: options?.schemaNameTransform },
   );
 
+  // Extract inline models from model field definitions (objects/arrays with properties).
+  // schemaNameTransform is kept active so inline child names use the
+  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
+  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget). Read before the
+  // operations and the webhooks so the names those mint — header and
+  // fallback models, webhook payloads — are reserved against these too: a
+  // map's values or a nested object a component field mints (`ReportDetail`)
+  // is not among `models`, and a titled fallback variant would otherwise take
+  // its name and the field merge below drop the component's definition.
+  // Each field's site is recorded too, so a merge pass that must rename one
+  // of these models can repoint exactly the references that mint it.
+  const fieldInlineModelGroups: FieldInlineModelGroup[] = [];
+  const fieldInlineModels = extractInlineModelsFromSchemas(
+    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    fieldInlineModelGroups,
+  );
+
   const { services, inlineModels, inlineModelBundles } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
@@ -115,18 +141,29 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.tags,
     spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
     spec.components?.headers as Record<string, Record<string, unknown>> | undefined,
+    spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+    fieldInlineModels,
   );
 
-  // Extract inline models from model field definitions (objects/arrays with properties).
-  // schemaNameTransform is kept active so inline child names use the
-  // transformed parent name (e.g. AuditLogSchemaJson→AuditLogSchema yields
-  // AuditLogSchemaTarget, not AuditLogSchemaJsonTarget). Extracted before the
-  // response merge so their names are reserved by the time it mints any.
-  const fieldInlineModelGroups: FieldInlineModelGroup[] = [];
-  const fieldInlineModels = extractInlineModelsFromSchemas(
-    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-    fieldInlineModelGroups,
+  // Webhooks are read while the schema-name transform is still active, like
+  // operations, so a payload's `$ref`s resolve to the same names as a field's.
+  // Their models are named last, against every model and enum decided so far —
+  // components, operations, and the components' own inline field models — so
+  // a webhook never takes a name another pass has already minted.
+  const { webhooks, inlineModels: webhookInlineModels } = extractWebhooks(
+    spec.webhooks,
+    {
+      schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+      parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
+      requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+      responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+      examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
+      pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
+    },
+    collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
   );
+  warnOnLegacyWebhooks(spec['x-webhooks']);
+
   // Resolved while the transform is still active so the names match the
   // models'; lets the merge tell a clash with a component schema from one
   // between two inline models.
@@ -141,17 +178,18 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // one) takes a name nothing else has or will have, in either pass.
   const naming: InlineModelNaming = {
     bundles: [...inlineModelBundles],
-    reserved: reservedTypeNames(models, enums, inlineModels, fieldInlineModels, services),
+    reserved: reservedTypeNames(models, enums, [...inlineModels, ...webhookInlineModels], fieldInlineModels, services, webhooks),
   };
-  const responseNormalizedModels = mergeInlineResponseModels(models, inlineModels, naming);
+  const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
   // The field models' sites, resolved now that the response merge may have
   // replaced a component's fields.
   naming.bundles.push(...fieldInlineModelBundles(fieldInlineModelGroups, responseNormalizedModels));
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
-  const finalModels = collapseJsonSuffixModels(fieldMergedModels, services);
+  const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);
   collectInlineEnumsFromModels(finalModels, enums);
-  collectInlineEnumsFromOperations(services, enums);
+  collectInlineEnumsFromOperations(services, enums, finalModels, componentNames);
+  collectInlineEnumsFromWebhooks(webhooks, enums);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
@@ -166,6 +204,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     baseUrl,
     servers,
     services,
+    // Omitted, not an empty list, for a document without webhooks so its IR
+    // keeps the shape it had before the key existed.
+    ...(webhooks.length > 0 ? { webhooks } : {}),
     models: finalModels,
     enums,
     auth,
@@ -199,6 +240,21 @@ function applyFieldHints(
       if (domainName) field.domainName = domainName;
     }
   }
+}
+
+/**
+ * `x-webhooks` is the extension some OpenAPI 3.0 documents use for what 3.1
+ * standardized as the top-level `webhooks` map. The parser deliberately reads
+ * the standard key only: an extension has no agreed shape to parse, and
+ * reading it silently would make the IR depend on a convention the document
+ * never declared. A document that carries one is told so, once, so the
+ * omission is a visible choice rather than a quiet loss.
+ */
+function warnOnLegacyWebhooks(legacy: unknown): void {
+  if (typeof legacy !== 'object' || legacy === null) return;
+  console.warn(
+    '[oagen] Warning: `x-webhooks` is not read. Declare the webhooks under the top-level `webhooks` map (OpenAPI 3.1) to have them parsed.',
+  );
 }
 
 /** A `components.securitySchemes` entry as it appears in the OpenAPI document. */

@@ -679,7 +679,7 @@ describe('inline header models', () => {
     expect(inlineModels).toEqual([]);
   });
 
-  it('creates no model for a header on a response no branch keeps (default)', () => {
+  it('materializes a header model on the default response, which is kept apart from the primary (#214)', () => {
     const { op, inlineModels } = extract({
       '200': { description: 'ok' },
       default: {
@@ -689,8 +689,243 @@ describe('inline header models', () => {
     });
 
     expect('responseHeaders' in op).toBe(false);
-    expect(inlineModels).toEqual([]);
+    expect(op.defaultResponse?.headers?.[0].type).toEqual({ kind: 'model', name: 'DocumentsXMeta' });
+    expect(inlineModels.map((m) => m.name)).toEqual(['DocumentsXMeta']);
+    expectHeaderModelsMaterialized(op, inlineModels);
   });
+
+  it('a titled oneOf variant clashing with a differently shaped component terminates and takes its qualified name', () => {
+    // Used to loop forever: the variant is named from its `title`, which no
+    // retry of the header's property name could move off the component.
+    const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+      type: 'object',
+      title,
+      properties: { kind: { type: 'string', const: kind }, ...properties },
+    });
+    const circle: Model = {
+      name: 'Circle',
+      fields: [{ name: 'radius', type: { kind: 'primitive', type: 'number' }, required: false }],
+    };
+    const { services, inlineModels } = extractOperations(
+      getWithResponses({
+        '200': {
+          description: 'ok',
+          headers: {
+            'X-Shape': {
+              schema: {
+                oneOf: [
+                  titled('Circle', 'circle', { diameter: { type: 'number' } }),
+                  titled('Square', 'square', { side: { type: 'number' } }),
+                ],
+              },
+            },
+          },
+        },
+      }) as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [circle],
+    );
+    const op = services[0].operations[0];
+
+    expect(op.responseHeaders?.[0].type).toEqual({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'CircleDocumentsXShape' },
+        { kind: 'model', name: 'Square' },
+      ],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { circle: 'CircleDocumentsXShape', square: 'Square' } },
+    });
+    expect(inlineModels.map((m) => m.name).sort()).toEqual(['CircleDocumentsXShape', 'Square']);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  }, 5_000);
+
+  it('moves a header model whose nested titled child differs from a same-named component, child following', () => {
+    // The header's parent matches component `DocumentsXShape` until its
+    // nested `Circle` is renamed off component `Circle{radius}`; it must then
+    // move too (to the header's next candidate) instead of being dropped at
+    // commit, which would leave the header typed as the component.
+    const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+      type: 'object',
+      title,
+      properties: { kind: { type: 'string', const: kind }, ...properties },
+    });
+    const union = (circle: string) => ({
+      kind: 'union' as const,
+      variants: [
+        { kind: 'model' as const, name: circle },
+        { kind: 'model' as const, name: 'Square' },
+      ],
+      compositionKind: 'oneOf' as const,
+      discriminator: { property: 'kind', mapping: { circle, square: 'Square' } },
+    });
+    const num = { kind: 'primitive' as const, type: 'number' as const };
+    const componentModels: Model[] = [
+      { name: 'DocumentsXShape', fields: [{ name: 'shape', type: union('Circle'), required: false }] },
+      {
+        name: 'Circle',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'circle' }, required: false },
+          { name: 'radius', type: num, required: false },
+        ],
+      },
+      {
+        name: 'Square',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'square' }, required: false },
+          { name: 'side', type: num, required: false },
+        ],
+      },
+    ];
+    const shapes = {
+      oneOf: [
+        titled('Circle', 'circle', { diameter: { type: 'number' } }),
+        titled('Square', 'square', { side: { type: 'number' } }),
+      ],
+    };
+    const { services, inlineModels } = extractOperations(
+      getWithResponses({
+        '200': {
+          description: 'ok',
+          headers: { 'X-Shape': { schema: { type: 'object', properties: { shape: shapes } } } },
+        },
+      }) as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      componentModels,
+    );
+    const op = services[0].operations[0];
+    const fields = (name: string) =>
+      Object.fromEntries(inlineModels.find((m) => m.name === name)!.fields.map((f) => [f.name, f.type]));
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'DocumentsListDocumentsXShape' });
+    expect(fields('DocumentsListDocumentsXShape')).toEqual({ shape: union('DocumentsListDocumentsXShapeCircle') });
+    expect(fields('DocumentsListDocumentsXShapeCircle')).toEqual({
+      kind: { kind: 'literal', value: 'circle' },
+      diameter: num,
+    });
+    expect(inlineModels.map((m) => m.name).sort()).toEqual([
+      'DocumentsListDocumentsXShape',
+      'DocumentsListDocumentsXShapeCircle',
+    ]);
+    // The component models were handed in, not materialized, and are untouched.
+    expect(componentModels[0].fields[0].type).toEqual(union('Circle'));
+    expectHeaderModelsMaterialized(op, inlineModels);
+  }, 5_000);
+
+  it('moving a header model keeps a child matching a component shared, even one the header also $refs', () => {
+    // Mirror of the fallback case: the header's `detail` is identical to
+    // component `CatalogXShapeDetail`, which `original` references. Only the
+    // parent and its clashing `Circle` move; `detail` stays the component's.
+    // (A singular service name, since `cleanSchemaName` singularizes the
+    // leading word of a `$ref` target: `Documents…` would become `Document…`.)
+    const titled = (title: string, kind: string, properties: Record<string, unknown>) => ({
+      type: 'object',
+      title,
+      properties: { kind: { type: 'string', const: kind }, ...properties },
+    });
+    const union = (circle: string) => ({
+      kind: 'union' as const,
+      variants: [
+        { kind: 'model' as const, name: circle },
+        { kind: 'model' as const, name: 'Square' },
+      ],
+      compositionKind: 'oneOf' as const,
+      discriminator: { property: 'kind', mapping: { circle, square: 'Square' } },
+    });
+    const num = { kind: 'primitive' as const, type: 'number' as const };
+    const str = { kind: 'primitive' as const, type: 'string' as const };
+    const detailRef = { kind: 'model' as const, name: 'CatalogXShapeDetail' };
+    const detail = { type: 'object', properties: { field: { type: 'string' } } };
+    const componentModels: Model[] = [
+      {
+        name: 'CatalogXShape',
+        fields: [
+          { name: 'shape', type: union('Circle'), required: false },
+          { name: 'detail', type: detailRef, required: false },
+          { name: 'original', type: detailRef, required: false },
+        ],
+      },
+      { name: 'CatalogXShapeDetail', fields: [{ name: 'field', type: str, required: false }] },
+      {
+        name: 'Circle',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'circle' }, required: false },
+          { name: 'radius', type: num, required: false },
+        ],
+      },
+      {
+        name: 'Square',
+        fields: [
+          { name: 'kind', type: { kind: 'literal', value: 'square' }, required: false },
+          { name: 'side', type: num, required: false },
+        ],
+      },
+    ];
+    const shapes = {
+      oneOf: [
+        titled('Circle', 'circle', { diameter: { type: 'number' } }),
+        titled('Square', 'square', { side: { type: 'number' } }),
+      ],
+    };
+    const { services, inlineModels } = extractOperations(
+      {
+        '/catalog': {
+          get: {
+            operationId: 'listCatalog',
+            responses: {
+              '200': {
+                description: 'ok',
+                headers: {
+                  'X-Shape': {
+                    schema: {
+                      type: 'object',
+                      properties: {
+                        shape: shapes,
+                        detail,
+                        original: { $ref: '#/components/schemas/CatalogXShapeDetail' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      undefined,
+      { CatalogXShapeDetail: detail },
+      undefined,
+      undefined,
+      componentModels,
+    );
+    const op = services[0].operations[0];
+    const fields = (name: string) =>
+      Object.fromEntries(inlineModels.find((m) => m.name === name)!.fields.map((f) => [f.name, f.type]));
+
+    expect(op.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'CatalogListCatalogXShape' });
+    expect(fields('CatalogListCatalogXShape')).toEqual({
+      shape: union('CatalogListCatalogXShapeCircle'),
+      detail: detailRef,
+      original: detailRef,
+    });
+    expect(fields('CatalogListCatalogXShapeCircle')).toEqual({
+      kind: { kind: 'literal', value: 'circle' },
+      diameter: num,
+    });
+    // `detail` was not materialized again: it is the component's.
+    expect(inlineModels.map((m) => m.name).sort()).toEqual([
+      'CatalogListCatalogXShape',
+      'CatalogListCatalogXShapeCircle',
+    ]);
+    expect(componentModels[0].fields.map((f) => f.type)).toEqual([union('Circle'), detailRef, detailRef]);
+    expectHeaderModelsMaterialized(op, inlineModels);
+  }, 5_000);
 
   describe('same header name, different shapes', () => {
     const object = (properties: Record<string, unknown>) => ({ schema: { type: 'object', properties } });
@@ -819,6 +1054,93 @@ describe('header models across the spec', () => {
     );
     return { ops: services.flatMap((s) => s.operations), inlineModels };
   }
+
+  it("qualifies a path-named operation's header model by its path stem, not by its derived name", () => {
+    const ok = (meta: Record<string, unknown>) => ({
+      '200': { description: 'ok', headers: { 'X-Meta': object(meta) } },
+    });
+    const { ops, inlineModels } = extractAll({
+      '/notes': { get: { responses: ok({ etag: { type: 'string' } }) } },
+      '/notes/{id}/pin': {
+        post: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: ok({ pinned_at: { type: 'integer' } }),
+        },
+      },
+    });
+    const [list, pin] = ops;
+    expect(list.name).toBe('list');
+    expect(pin.name).toBe('pinNote');
+
+    // The second shape needs a qualifier. It is the same path-derived stem the
+    // operation's body and response models use, so the model name depends only
+    // on the method and path: a verb or singular change in the operation name
+    // must never rename a generated type.
+    expect(modelNameOf(list.responseHeaders?.[0].type)).toBe('NotesXMeta');
+    expect(modelNameOf(pin.responseHeaders?.[0].type)).toBe('NotesByIdPinPostXMeta');
+    expect(fieldsOf(inlineModels, 'NotesXMeta')).toEqual(['etag']);
+    expect(fieldsOf(inlineModels, 'NotesByIdPinPostXMeta')).toEqual(['pinned_at']);
+  });
+
+  const jsonBody = (properties: Record<string, unknown>) => ({
+    content: { 'application/json': { schema: { type: 'object', properties } } },
+  });
+  const uniqueNames = (models: Model[]) => {
+    const names = models.map((m) => m.name);
+    expect(new Set(names).size, `duplicate model names in ${names.join(', ')}`).toBe(names.length);
+  };
+
+  it('never gives a header model the name of a response body model', () => {
+    // A header named `Response` on a path-named POST: the operation-qualified
+    // candidate spells the operation's own response body name.
+    const ok = (header: Record<string, unknown>, body: Record<string, unknown>) => ({
+      '200': { description: 'ok', headers: { Response: object(header) }, ...jsonBody(body) },
+    });
+    const { ops, inlineModels } = extractAll({
+      '/notes': { get: { responses: ok({ etag: { type: 'string' } }, { a: { type: 'string' } }) } },
+      '/notes/{id}/pin': {
+        post: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: ok({ pinned_at: { type: 'integer' } }, { b: { type: 'string' } }),
+        },
+      },
+    });
+    const [list, pin] = ops;
+
+    expect(modelNameOf(pin.response)).toBe('NotesByIdPinPostResponse');
+    expect(modelNameOf(list.responseHeaders?.[0].type)).toBe('NotesResponse');
+    // The body owns `NotesByIdPinPostResponse`, so the header falls through to
+    // the status-qualified candidate.
+    expect(modelNameOf(pin.responseHeaders?.[0].type)).toBe('NotesResponse200');
+    expect(fieldsOf(inlineModels, 'NotesByIdPinPostResponse')).toEqual(['b']);
+    expect(fieldsOf(inlineModels, 'NotesResponse200')).toEqual(['pinned_at']);
+    uniqueNames(inlineModels);
+  });
+
+  it('never gives a header model the name of a response body model named from an operationId', () => {
+    // With the service from a tag, service + header spells operationId + Response.
+    const { ops, inlineModels } = extractAll({
+      '/notes': {
+        get: {
+          operationId: 'getNotes',
+          tags: ['get'],
+          responses: {
+            '200': {
+              description: 'ok',
+              headers: { 'Notes-Response': object({ etag: { type: 'string' } }) },
+              ...jsonBody({ a: { type: 'string' } }),
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelNameOf(ops[0].response)).toBe('GetNotesResponse');
+    expect(modelNameOf(ops[0].responseHeaders?.[0].type)).not.toBe('GetNotesResponse');
+    expect(fieldsOf(inlineModels, 'GetNotesResponse')).toEqual(['a']);
+    expect(fieldsOf(inlineModels, modelNameOf(ops[0].responseHeaders?.[0].type))).toEqual(['etag']);
+    uniqueNames(inlineModels);
+  });
 
   // A singular service: `cleanSchemaName` singularizes a component's leading
   // word, so a component can only share a header model's name when the

@@ -4,6 +4,8 @@ import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
+  classifyInlineSchema,
+  collectionVariantContexts,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
@@ -86,7 +88,10 @@ export function mintedInlineNameEntries(
   parentModelName: string | undefined,
 ): MintedInlineName[] {
   const s = unwrapNullableSchema(schema);
-  if (s.$ref) return [];
+  // Dispatch on the one classification `schemaToTypeRef` uses, so the names
+  // predicted here are the names it mints.
+  const kind = classifyInlineSchema(s);
+  if (kind === 'ref') return [];
   const base = toPascalCase(contextName);
   const modelName = (): MintedInlineName[] => [
     { name: qualifyInlineModelName(base, parentModelName), contextFree: false },
@@ -97,27 +102,31 @@ export function mintedInlineNameEntries(
       { name: cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base, contextFree: false },
     ];
   };
-  if (s.allOf) {
+  if (kind === 'allOf' && s.allOf) {
     const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
     if (only) return mintedInlineNameEntries(contextName, only, parentModelName);
     return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : [];
   }
-  const variants = s.oneOf ?? s.anyOf;
+  const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    return [...nameInlineVariantEntries(s, modelName()[0]!.name)].map(([variant, entry]) => ({
-      ...entry,
-      schema: variant,
-    }));
+    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name);
+    // An array or map variant mints under `<context>_item` / `<context>_value`
+    // (`collectionVariantContexts`, read here without siblings but with the
+    // object variants' names), so a sibling that would take one of those
+    // names steps around it.
+    const objectVariantNames = new Map([...variantEntries].map(([variant, entry]) => [variant, entry.name]));
+    const collections = [
+      ...collectionVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames),
+    ].flatMap(([variant, context]) => mintedInlineNameEntries(context, unwrapNullableSchema(variant), parentModelName));
+    return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...collections];
   }
-  if (s.const !== undefined) return [];
-  if ((s.enum ?? []).filter((v) => v !== null).length >= 2) return enumName();
-  // A plain boolean: the type guard would otherwise narrow `s` to `never` below.
-  const inlineObject: boolean = isInlineObjectSchema(s);
-  if (inlineObject) return modelName();
-  if (s.items && (s.type === 'array' || !s.type)) return mintedInlineNameEntries(contextName, s.items, parentModelName);
-  if (s.type === 'object' && !s.properties) {
+  if (kind === 'const') return [];
+  if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
+  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName);
+  if (kind === 'object') return modelName();
+  if (kind === 'map') {
     const value = mapValueSchema(s);
     return value ? mintedInlineNameEntries(contextName, value, parentModelName) : [];
   }
@@ -635,9 +644,15 @@ export function extractInlineModelsFromProperties(
     // so a nullable field must be unwrapped here the same way or its inline
     // object / array items / map values are referenced but never extracted.
     const fieldSchema = unwrapNullableField(rawFieldSchema);
+    // One keyword types the field (`classifyInlineSchema`, the order
+    // `schemaToTypeRef` follows), so exactly one branch below runs and the
+    // models it builds are the ones the field's type references: a schema
+    // carrying both `items` and `oneOf` yields the union's variants, never an
+    // item model under a variant's name.
+    const kind = classifyInlineSchema(fieldSchema);
     // Direct inline object with properties (with or without explicit type: 'object',
     // including the nullable `type: ['object', 'null']` form)
-    if (isInlineObjectSchema(fieldSchema)) {
+    if (kind === 'object') {
       const baseName = toPascalCase(fieldName);
       const modelName = qualifyInlineModelName(baseName, parentName);
       results.push(buildInlineModel(modelName, fieldSchema, componentSchemas));
@@ -653,10 +668,11 @@ export function extractInlineModelsFromProperties(
     // field itself, or `<field>_item` when a sibling would take the singular
     // name — so the branches in this function do the extraction with
     // byte-for-byte identical naming.
-    if (fieldSchema.type === 'array' && fieldSchema.items) {
-      const itemContext = elementContextName(fieldName, 'item', siblings, parentName, fieldSchema.items);
+    const arrayItems = kind === 'array' ? fieldSchema.items : undefined;
+    if (arrayItems) {
+      const itemContext = elementContextName(fieldName, 'item', siblings, parentName, arrayItems);
       extractInlineModelsFromProperties(
-        { properties: { [itemContext]: fieldSchema.items } },
+        { properties: { [itemContext]: arrayItems } },
         results,
         parentName,
         componentSchemas,
@@ -671,7 +687,7 @@ export function extractInlineModelsFromProperties(
     // (`layers` on `CreateDrawingRequest` → `CreateDrawingRequestLayer`), or
     // `<Parent><Field>Value` when a sibling takes the singular name. Re-enter
     // with the value schema as a synthetic property of that name.
-    if (fieldSchema.type === 'object' && !fieldSchema.properties) {
+    if (kind === 'map') {
       const valueSchema = mapValueSchema(fieldSchema);
       if (valueSchema) {
         const valueContext = elementContextName(fieldName, 'value', siblings, parentName, valueSchema);
@@ -705,7 +721,7 @@ export function extractInlineModelsFromProperties(
     //  - a single non-`$ref` member: unwrapped and typed as the field itself,
     //    so re-enter with it as the field (same siblings);
     //  - several inline members with properties: one merged model.
-    if (fieldSchema.allOf) {
+    if (kind === 'allOf' && fieldSchema.allOf) {
       const members = fieldSchema.allOf;
       const emitMerged = (): void => {
         const merged = mergeAugmentation(fieldSchema, componentSchemas);
@@ -756,14 +772,21 @@ export function extractInlineModelsFromProperties(
     // property sets, the position counter — never a name a sibling property
     // mints (`reservedInlineNames`), so no variant overwrites another
     // field's model.
-    const unionVariants = fieldSchema.oneOf ?? fieldSchema.anyOf;
+    const unionVariants = kind === 'union' ? (fieldSchema.oneOf ?? fieldSchema.anyOf) : undefined;
     if (unionVariants) {
       const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
+      // Decided once, for the object variants' models and for the collection
+      // contexts, which step around those models' children.
+      const variantNames: ReadonlyMap<SchemaObject, string> =
+        inlineObjectVariants.length > 0
+          ? nameInlineVariants(
+              fieldSchema,
+              qualifyInlineModelName(toPascalCase(fieldName), parentName),
+              reservedFor(fieldName),
+            )
+          : new Map();
       if (inlineObjectVariants.length > 0) {
-        const baseName = toPascalCase(fieldName);
-        const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
-        const variantNames = nameInlineVariants(fieldSchema, modelName, reservedFor(fieldName));
         for (const variant of inlineObjectVariants) {
           const variantName = variantNames.get(variant);
           if (variantName === undefined) continue;
@@ -783,6 +806,24 @@ export function extractInlineModelsFromProperties(
             );
           }
         }
+      }
+      // An array or map variant is typed under a context of its own
+      // (`collectionVariantContexts`: `<field>_item`, `<field>_value`, …),
+      // apart from the object variants' and each other's names, so its
+      // inline items or values are extracted the same way: re-entered as a
+      // property of that name, the array and map branches above name them
+      // exactly as the reference does (`ReqShapesItem` for a `shapes`
+      // variant's items). The context already stepped around the siblings;
+      // the re-entry sees none, exactly as `schemaToTypeRef` types the variant.
+      for (const [variant, context] of collectionVariantContexts(
+        fieldName,
+        unionVariants,
+        siblings,
+        parentName,
+        variantNames,
+      )) {
+        const member = unwrapNullableField(variant);
+        extractInlineModelsFromProperties({ properties: { [context]: member } }, results, parentName, componentSchemas);
       }
     }
   }

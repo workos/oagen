@@ -1,5 +1,5 @@
-import type { Enum, Model, Service, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders } from '../ir/types.js';
+import type { Enum, Model, Service, TypeRef, Webhook } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes, collectWebhookTypeRefs } from '../ir/types.js';
 import { modelFingerprint } from './operations.js';
 import { isComponentModelRef } from './schemas.js';
 import {
@@ -61,6 +61,7 @@ export function reservedTypeNames(
   inlineModels: Model[],
   fieldInlineModels: Model[],
   services: Service[],
+  webhooks: Webhook[] = [],
 ): Set<string> {
   const reserved = new Set<string>();
   const visit = (ref: TypeRef): void => {
@@ -89,8 +90,10 @@ export function reservedTypeNames(
       for (const field of op.pagination?.envelopeFields ?? []) visit(field.type);
       if (op.pagination) visit(op.pagination.itemType);
       for (const header of collectResponseHeaders(op)) visit(header.type);
+      for (const { type } of collectResponseBodyTypes(op)) visit(type);
     }
   }
+  for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) visit(ref);
   return reserved;
 }
 
@@ -352,7 +355,13 @@ function rewriteModelRef(ref: TypeRef, oldName: string, newName: string): void {
   });
 }
 
-function rewriteModelRefs(models: Model[], services: Service[], oldName: string, newName: string): void {
+function rewriteModelRefs(
+  models: Model[],
+  services: Service[],
+  oldName: string,
+  newName: string,
+  webhooks: Webhook[] = [],
+): void {
   for (const model of models) {
     for (const field of model.fields) {
       rewriteModelRef(field.type, oldName, newName);
@@ -370,7 +379,13 @@ function rewriteModelRefs(models: Model[], services: Service[], oldName: string,
       for (const header of collectResponseHeaders(op)) {
         rewriteModelRef(header.type, oldName, newName);
       }
+      for (const { type } of collectResponseBodyTypes(op)) {
+        rewriteModelRef(type, oldName, newName);
+      }
     }
+  }
+  for (const webhook of webhooks) {
+    for (const ref of collectWebhookTypeRefs(webhook)) rewriteModelRef(ref, oldName, newName);
   }
 }
 
@@ -545,7 +560,7 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
   return false;
 }
 
-export function collapseJsonSuffixModels(models: Model[], services: Service[]): Model[] {
+export function collapseJsonSuffixModels(models: Model[], services: Service[], webhooks: Webhook[] = []): Model[] {
   const normalizedModels = [...models];
   const byName = new Map(normalizedModels.map((m) => [m.name, m]));
 
@@ -598,7 +613,7 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
     // exposes, and that is `baseModel.name`, which keeps its own flag. A
     // deprecated `<Name>Json` folded into a live `<Name>` leaves `<Name>` live.
     toRemove.add(jsonModel.name);
-    rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name);
+    rewriteModelRefs(normalizedModels, services, jsonModel.name, baseModel.name, webhooks);
     console.warn(
       `[oagen] Merged "${jsonModel.name}" into "${baseModel.name}" (${jsonModel.fields.length} fields, superset)`,
     );
@@ -621,10 +636,10 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[]): 
 
       if (existing && !toRemove.has(existing.name)) {
         toRemove.add(model.name);
-        rewriteModelRefs(normalizedModels, services, model.name, newName);
+        rewriteModelRefs(normalizedModels, services, model.name, newName, webhooks);
         console.warn(`[oagen] Collapsed child "${model.name}" into existing "${newName}"`);
       } else {
-        rewriteModelRefs(normalizedModels, services, model.name, newName);
+        rewriteModelRefs(normalizedModels, services, model.name, newName, webhooks);
         model.name = newName;
         byName.set(newName, model);
         console.warn(`[oagen] Renamed child "${jsonPrefix}…" → "${newName}"`);

@@ -26,6 +26,38 @@ const spec = (models: Model[], operations: Operation[]): ApiSpec => ({
   sdk: defaultSdkBehavior(),
 });
 
+describe('buildDirectionIndex — response content types', () => {
+  it('marks a model reached only through a secondary media type as response-facing', () => {
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'ThingDocument', fields: [] },
+          { name: 'Problem', fields: [] },
+        ],
+        [
+          op({
+            response: { kind: 'primitive', type: 'string' },
+            responseContentTypes: ['text/html', 'application/vnd.api+json'],
+            responseContents: [
+              { contentType: 'text/html', type: { kind: 'primitive', type: 'string' } },
+              { contentType: 'application/vnd.api+json', type: { kind: 'model', name: 'ThingDocument' } },
+            ],
+            errors: [
+              {
+                statusCode: 500,
+                contentTypes: ['application/problem+json'],
+                contents: [{ contentType: 'application/problem+json', type: { kind: 'model', name: 'Problem' } }],
+              },
+            ],
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'ThingDocument')).toBe('response');
+    expect(directionOf(index, 'Problem')).toBe('response');
+  });
+});
+
 describe('buildDirectionIndex', () => {
   it('marks a model reached only from a response as response-facing', () => {
     const index = buildDirectionIndex(
@@ -201,5 +233,32 @@ describe('buildDirectionIndex — response headers', () => {
     );
     expect(directionOf(index, 'DownloadMeta')).toBe('response');
     expect(directionOf(index, 'ThrottleInfo')).toBe('response');
+  });
+
+  it('marks a model reached only through a default or range response as response-facing', () => {
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'ApiError', fields: [] },
+          { name: 'Outage', fields: [] },
+          { name: 'RejectionMeta', fields: [] },
+        ],
+        [
+          op({
+            defaultResponse: { type: { kind: 'model', name: 'ApiError' } },
+            rangeResponses: [
+              { range: '5XX', type: { kind: 'model', name: 'Outage' } },
+              {
+                range: '4XX',
+                headers: [{ name: 'X-Meta', type: { kind: 'model', name: 'RejectionMeta' }, required: false }],
+              },
+            ],
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'ApiError')).toBe('response');
+    expect(directionOf(index, 'Outage')).toBe('response');
+    expect(directionOf(index, 'RejectionMeta')).toBe('response');
   });
 });
