@@ -88,6 +88,16 @@ export function collectInlineEnumsFromOperations(
   models: readonly Model[] = [],
   componentNames: ReadonlySet<string> = new Set(),
 ): void {
+  // The record moved from the last argument to the third (workos/oagen#356),
+  // so a caller still on the old order hands the models list here and the
+  // record where `componentNames` is read; fail on the mismatch, by name,
+  // rather than inside `models.map` or, worse, silently.
+  if (!(shared instanceof Set)) {
+    throw new TypeError(
+      'collectInlineEnumsFromOperations(services, enums, shared, models?, componentNames?): `shared` must be the Set of ' +
+        `component-site references (\`OperationExtractionResult.componentSites\`), got ${describeArgument(shared)}`,
+    );
+  }
   const enumNames = new Set(enums.map((e) => e.name));
   const modelsByName = new Map(models.map((model) => [model.name, model]));
   const modelNames = new Set(modelsByName.keys());
@@ -224,6 +234,14 @@ export function collectInlineEnumsFromWebhooks(
       collectDistinctEnums(ref, undefined, enums, enumNames, modelNames);
     }
   }
+}
+
+/** What a misplaced argument is, for the signature error: `an array`, `undefined`, `an object`, … */
+function describeArgument(value: unknown): string {
+  if (Array.isArray(value)) return 'an array';
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  return `${/^[aeiou]/i.test(typeof value) ? 'an' : 'a'} ${typeof value}`;
 }
 
 /**
