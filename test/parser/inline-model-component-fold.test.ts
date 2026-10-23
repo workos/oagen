@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
-import { modelAdmits } from '../../src/parser/inline-models.js';
+import { fieldAdmits, modelAdmits, typeShapeKey } from '../../src/parser/inline-models.js';
 import { renameModelRefs, renameTypeRefModels } from '../../src/ir/types.js';
 import {
   collectModelRefs,
@@ -898,5 +898,83 @@ describe('modelAdmits', () => {
     expect(modelAdmits(base, model([field('a', false)], { constraints: { minProperties: 1 } }))).toBe(false);
     // Documentation is not shape.
     expect(modelAdmits(base, model([{ ...field('a', false), description: 'doc' }], { description: 'doc' }))).toBe(true);
+  });
+
+  it('reads every model and inline enum reference under `readName` when given — fields, variants and mapping targets, both sides', () => {
+    const ref = (name: string): TypeRef => ({ kind: 'model', name });
+    // The `…Json` fold's reading: `PetJson…` as `Pet…`.
+    const fold = { readName: (name: string) => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name) };
+    const owner = model([field('inner', false, ref('PetInner'))]);
+    const candidate = model([field('inner', false, ref('PetJsonInner'))]);
+    expect(modelAdmits(owner, candidate)).toBe(false);
+    expect(modelAdmits(owner, candidate, fold)).toBe(true);
+    expect(modelAdmits(candidate, owner, fold)).toBe(true);
+    expect(modelAdmits(owner, model([field('inner', false, ref('PetOther'))]), fold)).toBe(false);
+    // A reference deeper down is read the same way; the model itself is never touched.
+    const items = (inner: TypeRef): TypeRef => ({ kind: 'array', items: inner });
+    expect(
+      modelAdmits(
+        model([field('a', false, items(ref('PetInner')))]),
+        model([field('a', false, items(ref('PetJsonInner')))]),
+        fold,
+      ),
+    ).toBe(true);
+    expect(candidate.fields[0]?.type).toEqual(ref('PetJsonInner'));
+
+    const union = (name: string): Model =>
+      model([], {
+        variants: [ref(name)],
+        compositionKind: 'oneOf',
+        discriminator: { property: 'kind', mapping: { a: name } },
+      });
+    expect(modelAdmits(union('PetA'), union('PetJsonA'))).toBe(false);
+    expect(modelAdmits(union('PetA'), union('PetJsonA'), fold)).toBe(true);
+    expect(union('PetJsonA').discriminator).toEqual({ property: 'kind', mapping: { a: 'PetJsonA' } });
+
+    // An inline enum reference — one carrying its values — is read under the name too, with its
+    // members; a component enum reference carries no values and is read as it is.
+    const enumRef = (name: string, values?: string[]): TypeRef => ({
+      kind: 'enum',
+      name,
+      ...(values ? { values } : {}),
+    });
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState'))]),
+        model([field('s', false, enumRef('PetJsonState'))]),
+        fold,
+      ),
+    ).toBe(false);
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState', ['a']))]),
+        model([field('s', false, enumRef('PetJsonState', ['a']))]),
+        fold,
+      ),
+    ).toBe(true);
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState', ['a']))]),
+        model([field('s', false, enumRef('PetJsonState', ['a', 'b']))]),
+        fold,
+      ),
+    ).toBe(false);
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState', ['a']))]),
+        model([field('s', false, enumRef('PetJsonState', ['a']))]),
+      ),
+    ).toBe(false);
+
+    // The per-field rule and the type key read the same way.
+    expect(fieldAdmits(field('inner', false, ref('PetInner')), field('inner', true, ref('PetJsonInner')), fold)).toBe(
+      true,
+    );
+    expect(fieldAdmits(field('inner', true, ref('PetInner')), field('inner', false, ref('PetJsonInner')), fold)).toBe(
+      false,
+    );
+    expect(fieldAdmits(field('inner', false, ref('PetInner')), field('inner', false, ref('PetJsonInner')))).toBe(false);
+    expect(typeShapeKey(items(ref('PetJsonInner')), fold)).toBe(typeShapeKey(items(ref('PetInner'))));
+    expect(typeShapeKey(items(ref('PetJsonInner')))).not.toBe(typeShapeKey(items(ref('PetInner'))));
   });
 });
