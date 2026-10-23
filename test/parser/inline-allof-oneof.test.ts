@@ -1368,3 +1368,81 @@ describe('round 4: every shape under a discriminated variant is built as the fie
     expectSound(ir, ['Base', 'Event']);
   });
 });
+
+describe('merge round 1: a schema read through a $ref and again as an inline member', () => {
+  /** One object, declared as a component and reused as an inline member, as a `transformSpec` hook can. */
+  const shared = (): SchemaObject => ({
+    type: 'object',
+    properties: { id: { type: 'string' } },
+    required: ['id'],
+    oneOf: [{ properties: { ownerId: { type: 'string' } } }, { properties: { shelterId: { type: 'string' } } }],
+  });
+
+  it.each(['ref first', 'inline first'] as const)(
+    'reads the inline member in full after the $ref reading (%s)',
+    (order) => {
+      const Shared = shared();
+      const ref: SchemaObject = { $ref: '#/components/schemas/Shared' };
+      const merged = mergeAllOfMembers({ allOf: order === 'ref first' ? [ref, Shared] : [Shared, ref] }, { Shared });
+      // The `$ref` reading leaves the union to the component; the inline
+      // reading of the very same object still contributes it.
+      expect(merged.properties.map((p) => `${p.name}${p.origin ? ` (${p.origin.name})` : ''}`)).toEqual(
+        order === 'ref first' ? ['id (Shared)', 'ownerId', 'shelterId'] : ['id', 'ownerId', 'shelterId'],
+      );
+      expect(merged.required).toEqual(['id']);
+      expect(merged.resolvedRefs).toEqual(['#/components/schemas/Shared']);
+    },
+  );
+
+  it('keeps the variants through the parser when the component object is the inline member', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(
+        {
+          openapi: '3.1.0',
+          info,
+          paths: {
+            '/pets': {
+              post: {
+                operationId: 'createPet',
+                requestBody: jsonBody({ type: 'object' }),
+                responses: { '204': { description: 'done' } },
+              },
+            },
+          },
+          components: { schemas: { Shared: shared() } },
+        },
+        (doc) => {
+          const components = doc['components'] as { schemas: Record<string, SchemaObject> };
+          const paths = doc['paths'] as Record<string, Record<string, Record<string, unknown>>>;
+          paths['/pets']!['post']!['requestBody'] = jsonBody({
+            allOf: [{ $ref: '#/components/schemas/Shared' }, components.schemas['Shared']!],
+          });
+          return doc;
+        },
+      );
+      expect(fieldsOf(modelsByName(ir)['CreatePetRequest'])).toEqual([
+        'id: string',
+        'ownerId?: string',
+        'shelterId?: string',
+      ]);
+      expectSound(ir, ['Shared']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('still stops a component that extends itself, read through a $ref', () => {
+    const components: Record<string, SchemaObject> = {};
+    components['Node'] = {
+      type: 'object',
+      properties: { depth: { type: 'integer' } },
+      allOf: [{ $ref: '#/components/schemas/Node' }],
+    };
+    const merged = mergeAllOfMembers(
+      { allOf: [{ $ref: '#/components/schemas/Node' }, { properties: { note: { type: 'string' } } }] },
+      components,
+    );
+    expect(merged.properties.map((p) => p.name)).toEqual(['depth', 'note']);
+  });
+});
