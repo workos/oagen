@@ -139,12 +139,18 @@ export type ExtensionsChanged = {
   classification: 'additive';
 } & ExtensionsNode;
 
-/** Which IR node an `extensions-changed` entry is about, named the way the owning change names it. */
+/**
+ * Which IR node an `extensions-changed` entry is about, named the way the
+ * owning change names it. One entry kind per carrier of `extensions`: an
+ * operation, a model, a model's field, an enum, and a list envelope's field
+ * (`Operation.pagination.envelopeFields`, which sits on no model).
+ */
 export type ExtensionsNode =
   | { node: 'operation'; serviceName: string; operationName: string }
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
-  | { node: 'enum'; enumName: string };
+  | { node: 'enum'; enumName: string }
+  | { node: 'envelope-field'; serviceName: string; operationName: string; fieldName: string };
 
 export type Change =
   | ModelAdded
@@ -518,6 +524,17 @@ export interface OperationModified {
   /** Present exactly when `extensionsChanged`, each when the operation had extensions on that side: old → new. */
   oldExtensions?: Extensions;
   newExtensions?: Extensions;
+  /**
+   * The fields of the list envelope (`Operation.pagination.envelopeFields`)
+   * whose `extensions` differ, one `field-extensions-changed` entry each
+   * with the two sides beside it, matched by field name while both specs
+   * paginate. Present only when there is at least one. A scalar companion
+   * (`has_more`) sits on no model `diffModels` reads, so this is where its
+   * change is reported; a companion object's model is compared in the
+   * models diff like any model. No other property of an envelope field is
+   * compared by the differ.
+   */
+  envelopeFieldChanges?: FieldChange[];
   /**
    * True when a response entry gained or lost a media type, or a secondary
    * media type's body type changed; `responseContentTypeChanges` says which.
