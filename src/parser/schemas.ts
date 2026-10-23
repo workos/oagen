@@ -3404,128 +3404,148 @@ function extractNamedUnionVariantModels(
   return models;
 }
 
+/** A dispatcher's discriminator: the property every variant pins, and the model each value selects. */
+type AllOfDiscriminator = { property: string; mapping: Record<string, string> };
+
 /**
- * The model of a component schema composed with `allOf` (`extractModel`),
- * and of a `$ref` member that resolves to one. The members are read in
- * document order, the component's own `properties` and `required` first as
- * one more member (`componentAllOfMembers`); a `$ref` member's component is
- * read the same way, its own properties and then its members, so a chain
- * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
- * typed under the component's own name with one sibling set
- * (`collectProperties`). A property keeps the first declaration an
- * always-applying member gives it, the component's own first, whatever a
- * `oneOf`/`anyOf` variant says — the precedence `mergeAllOfMembers` applies
- * to an inline `allOf` — and `required` is the union of every
- * always-applying member's list and the component's own; a variant's
- * `required` is not read. A `oneOf`/`anyOf` member whose variants pin one
- * property to distinct consts makes the model a dispatcher
- * (`detectAllOfVariantDiscriminator`; its variants are built by
- * `extractDiscriminatedAllOfVariantModels`); otherwise the variants' inline
- * properties are flattened in as optional fields, the first declaration of
- * a name kept.
+ * Read one member of a component's `allOf` into `ledger` and `required`,
+ * each declaration with its provenance (`declareProperty`). A `$ref` member
+ * is resolved to its component. An `allOf` member — a component composed
+ * with `allOf`, or an inline wrapper — is read by `readComponentAllOf`, so a
+ * declaration it makes under a `oneOf`/`anyOf` variant stays branch-only
+ * however deep it sits; its own discriminator, if any, is its own model's
+ * and is not returned (the model reading it carries the base fields only).
+ * A `oneOf`/`anyOf` member whose variants pin one property to distinct
+ * consts is a dispatcher (`detectAllOfVariantDiscriminator`): its variants'
+ * properties are not read, and the discriminator is returned; otherwise
+ * every variant's properties are read as branch-only, and its `required`
+ * is not read, since its properties are present only on that branch. Any
+ * other member contributes its `properties` as always-applying and its
+ * `required`. Shared by `extractAllOfModel` and the dispatcher base of
+ * `extractDiscriminatedAllOfVariantModels`, so the two read a member alike.
  */
-function extractAllOfModel(
+function readComponentAllOfMember(
+  name: string,
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+  ledger: Map<string, PropertyDeclarations>,
+  required: Set<string>,
+  seen: Set<SchemaObject>,
+): AllOfDiscriminator | undefined {
+  // Resolve $ref sub-schemas by looking up the referenced component schema
+  let resolved = member;
+  if (member.$ref && schemas) {
+    const segments = member.$ref.split('/');
+    const refName = segments[segments.length - 1];
+    if (refName && Object.hasOwn(schemas, refName)) resolved = schemas[refName]!;
+  }
+  if (resolved.allOf) {
+    readComponentAllOf(name, resolved, schemas, ledger, required, seen);
+    return undefined;
+  }
+  if (resolved.oneOf || resolved.anyOf) {
+    const variants = resolved.oneOf ?? resolved.anyOf ?? [];
+    // Detect discriminated union: every variant pins the same property to a
+    // distinct const value (e.g. EventSchema where each variant has event: const).
+    // When detected, store the discriminator instead of flattening variant fields —
+    // the base allOf schema already captures the common fields.
+    const discriminator = detectAllOfVariantDiscriminator(variants, name);
+    if (discriminator) return discriminator;
+    // Flatten oneOf/anyOf variant fields into the parent model as optional
+    // fields. This handles the common allOf + oneOf pattern where the spec
+    // uses mutually exclusive variant groups (e.g. password vs password_hash).
+    for (const variant of variants) {
+      for (const [key, value] of Object.entries(variant.properties ?? {})) {
+        if (value) declareProperty(ledger, key, value, null, true);
+      }
+    }
+    return undefined;
+  }
+  for (const r of resolved.required ?? []) required.add(r);
+  for (const [key, value] of Object.entries(resolved.properties ?? {})) {
+    if (value) declareProperty(ledger, key, value, null, false);
+  }
+  return undefined;
+}
+
+/**
+ * Read a component schema's `allOf` — its own `properties` and `required`
+ * first (`componentAllOfMembers`), then each member through
+ * `readComponentAllOfMember` — into `ledger` and `required`, and return the
+ * discriminator a direct `oneOf`/`anyOf` member declares, if any. A schema
+ * reached again on the chain declares nothing more (`seen`), so a component
+ * that names itself, or two members naming one component, terminate.
+ */
+function readComponentAllOf(
   name: string,
   schema: SchemaObject,
-  schemas?: Record<string, SchemaObject>,
-  siblingProperties?: ReadonlyMap<string, SchemaObject>,
-): Model {
-  /** One field per property name, in the order first declared. */
-  const declared = new Map<string, { field: Field; onBranch: boolean }>();
-  const requiredSet = new Set<string>();
-  // One sibling set for every field of the composed model, nested `allOf`
-  // levels included, matching what the field extractor derives for it.
-  const siblings = siblingProperties ?? collectProperties(schema, schemas);
-  let resultDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
-  // A name declared twice keeps its first declaration, except that an
-  // always-applying member's replaces a variant's (`onBranch`), in place:
-  // a variant can only narrow what every instance carries.
-  const declare = (field: Field, onBranch: boolean): void => {
-    const existing = declared.get(field.name);
-    if (!existing) declared.set(field.name, { field, onBranch });
-    else if (existing.onBranch && !onBranch) existing.field = field;
-  };
-
-  for (const subSchema of componentAllOfMembers(schema)) {
-    // Resolve $ref sub-schemas by looking up the referenced component schema
-    let resolved = subSchema;
-    if (subSchema.$ref && schemas) {
-      const segments = subSchema.$ref.split('/');
-      const refName = segments[segments.length - 1];
-      if (refName && schemas[refName]) {
-        resolved = schemas[refName];
-      }
-    }
-
-    // If the resolved schema is itself an allOf, recursively extract its fields
-    if (resolved.allOf) {
-      const nested = extractAllOfModel(name, resolved, schemas, siblings);
-      for (const f of nested.fields) {
-        declare({ ...f, required: false }, false); // required is re-set below
-        if (f.required) requiredSet.add(f.name);
-      }
-    } else if (resolved.oneOf || resolved.anyOf) {
-      const variants = resolved.oneOf ?? resolved.anyOf ?? [];
-      // Detect discriminated union: every variant pins the same property to a
-      // distinct const value (e.g. EventSchema where each variant has event: const).
-      // When detected, store the discriminator instead of flattening variant fields —
-      // the base allOf schema already captures the common fields.
-      const discriminatorInfo = detectAllOfVariantDiscriminator(variants, name);
-      if (discriminatorInfo) {
-        resultDiscriminator = discriminatorInfo;
-      } else {
-        // Flatten oneOf/anyOf variant fields into the parent model as optional
-        // fields. This handles the common allOf + oneOf pattern where the spec
-        // uses mutually exclusive variant groups (e.g. password vs password_hash).
-        const emptyRequired = new Set<string>();
-        for (const variant of variants) {
-          if (!variant.properties) continue;
-          for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
-            if (!fieldSchema) continue;
-            declare(
-              buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired, schemas, siblings),
-              true,
-            );
-          }
-        }
-        // Do NOT add variant-level required to the requiredSet — these fields
-        // are optional at the parent level because they come from mutually
-        // exclusive branches.
-      }
-    } else {
-      if (resolved.required) {
-        for (const r of resolved.required) requiredSet.add(r);
-      }
-      if (resolved.properties) {
-        // Use an empty requiredSet — required flags are set in the final pass below
-        const emptyRequired = new Set<string>();
-        for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
-          if (!fieldSchema) continue;
-          declare(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired, schemas, siblings), false);
-        }
-      }
-    }
+  schemas: Record<string, SchemaObject> | undefined,
+  ledger: Map<string, PropertyDeclarations>,
+  required: Set<string>,
+  seen: Set<SchemaObject> = new Set(),
+): AllOfDiscriminator | undefined {
+  if (seen.has(schema)) return undefined;
+  seen.add(schema);
+  let discriminator: AllOfDiscriminator | undefined;
+  for (const member of componentAllOfMembers(schema)) {
+    discriminator = readComponentAllOfMember(name, member, schemas, ledger, required, seen) ?? discriminator;
   }
-
   // The component's own `required`: carried by its own member when it
   // declares properties, and read here when it only names inherited ones
   // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`).
-  if (schema.required) {
-    for (const r of schema.required) requiredSet.add(r);
-  }
+  for (const r of schema.required ?? []) required.add(r);
+  return discriminator;
+}
 
-  // Set required flags
-  const fields = [...declared.values()].map(({ field }) => field);
-  for (const f of fields) {
-    f.required = requiredSet.has(f.name);
-  }
+/**
+ * The schema that types a property a component's `allOf` declares: the first
+ * always-applying declaration (`declareProperty`), else the first branch's.
+ * A component flattens a union's branches as written; the union of distinct
+ * branch declarations `mergeAllOfMembers` builds for an inline `allOf` is not
+ * built here, since no pass would materialize its inline variants under a
+ * component.
+ */
+function declaredComponentProperty(entry: PropertyDeclarations): SchemaObject {
+  return entry.unconditional?.schema ?? entry.conditional[0]!;
+}
+
+/**
+ * The model of a component schema composed with `allOf` (`extractModel`).
+ * The members are read in document order (`readComponentAllOf`), the
+ * component's own `properties` and `required` first as one more member
+ * (`componentAllOfMembers`); a `$ref` member's component is read the same
+ * way, its own properties and then its members, so a chain
+ * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
+ * typed under the component's own name with one sibling set
+ * (`collectProperties`), from the one declaration
+ * `declaredComponentProperty` picks: the first always-applying declaration,
+ * the component's own first, whatever a `oneOf`/`anyOf` variant declares
+ * before or after it and at whatever depth — the precedence
+ * `declareProperty` gives `mergeAllOfMembers` too — and `required` is the
+ * union of every always-applying member's list and the component's own; a
+ * variant's `required` is not read. A `oneOf`/`anyOf` member whose variants
+ * pin one property to distinct consts makes the model a dispatcher
+ * (`detectAllOfVariantDiscriminator`; its variants are built by
+ * `extractDiscriminatedAllOfVariantModels`); otherwise the variants' inline
+ * properties are flattened in as optional fields.
+ */
+function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
+  // One sibling set for every field of the composed model, nested `allOf`
+  // levels included, matching what the field extractor derives for it.
+  const siblings = collectProperties(schema, schemas);
+  const ledger = new Map<string, PropertyDeclarations>();
+  const requiredSet = new Set<string>();
+  const discriminator = readComponentAllOf(name, schema, schemas, ledger, requiredSet);
+  const fields = [...ledger.values()].map((entry) =>
+    buildFieldFromSchema(entry.name, declaredComponentProperty(entry), name, requiredSet, schemas, siblings),
+  );
 
   return {
     name,
     description: schema.description,
     ...externalDocsEntry(schema.externalDocs),
     fields,
-    ...(resultDiscriminator ? { discriminator: resultDiscriminator } : {}),
+    ...(discriminator ? { discriminator } : {}),
     // Deprecation is the wrapper's own: a member's flag is not read — a `$ref`
     // member's stays on the referenced model — as `Field.deprecated` ignores
     // it on an allOf field.
@@ -3547,21 +3567,19 @@ function extractAllOfModel(
  * `const`) instead of being treated as having none.
  */
 function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObject> {
-  const props: Record<string, SchemaObject> = {};
+  // Collected in a `Map` and returned through `Object.fromEntries`, so a
+  // property named `__proto__` is an own entry rather than the prototype.
+  const props = new Map<string, SchemaObject>();
   const visit = (s: SchemaObject): void => {
-    if (s.properties) {
-      for (const [k, v] of Object.entries(s.properties)) {
-        if (!Object.hasOwn(props, k) && v) props[k] = v;
-      }
+    for (const [k, v] of Object.entries(s.properties ?? {})) {
+      if (!props.has(k) && v) props.set(k, v);
     }
-    if (s.allOf) {
-      for (const sub of s.allOf) visit(sub);
-    }
+    for (const sub of s.allOf ?? []) visit(sub);
     // Do NOT walk into oneOf / anyOf — those are alternatives, not
     // simultaneously-present properties.
   };
   visit(schema);
-  return props;
+  return Object.fromEntries(props);
 }
 
 function getEffectiveConstPropertyValue(schema: SchemaObject, property: string): string | null {
@@ -3637,8 +3655,19 @@ function extractDiscriminatedAllOfVariantModels(
   // (so this merge is a no-op there), but `ConnectApplication`'s OAuth /
   // M2M variants don't — without this, dispatcher consumers would get a
   // variant that's missing the shared `id` / `name` / `object` etc.
-  const baseProperties: Record<string, SchemaObject> = {};
+  // The base: every declaration the members other than the variant axis
+  // make, read exactly as `extractAllOfModel` reads them
+  // (`readComponentAllOfMember`, with the component's own `properties` and
+  // `required` first — `componentAllOfMembers` — so what the component
+  // declares beside its `allOf` is a base field every variant carries, as a
+  // member's is) and resolved by the same precedence: the first
+  // always-applying declaration; a declaration a nested union's branch makes
+  // is a fallback the base carries as optional. Names are matched by own
+  // name (`Map`, `Object.fromEntries`), so a base property named
+  // `constructor`, `toString` or `__proto__` reaches every variant.
+  const ledger = new Map<string, PropertyDeclarations>();
   const baseRequired = new Set<string>();
+  const seen = new Set<SchemaObject>([schema]);
   // Shared limits every variant instance must satisfy under allOf semantics:
   // the outer wrapper's own keywords, each base member's (through its allOf
   // wrappers), and any written beside the `oneOf` itself — everything except
@@ -3646,9 +3675,6 @@ function extractDiscriminatedAllOfVariantModels(
   // with each variant's own below, so on a shared keyword the stricter bound
   // wins.
   let baseConstraints = ownConstraints(schema);
-  // The members with the component's own `properties` and `required` first
-  // (`componentAllOfMembers`), so what the component declares beside its
-  // `allOf` is a base field every variant carries, as a member's is.
   const members = componentAllOfMembers(schema);
   for (const subSchema of members) {
     if (subSchema.oneOf) {
@@ -3657,15 +3683,15 @@ function extractDiscriminatedAllOfVariantModels(
       baseConstraints = combineConstraints(baseConstraints, ownConstraints(subSchema));
       continue;
     }
-    const flat = subSchema.allOf ? flattenVariantForExtraction(subSchema) : subSchema;
-    if (flat.properties) {
-      for (const [k, v] of Object.entries(flat.properties)) {
-        if (!(k in baseProperties) && v) baseProperties[k] = v;
-      }
-    }
-    if (flat.required) for (const r of flat.required) baseRequired.add(r);
+    readComponentAllOfMember(fallbackName, subSchema, schemas, ledger, baseRequired, seen);
     baseConstraints = combineConstraints(baseConstraints, extractConstraints(subSchema));
   }
+  // The component's own `required` naming an inherited property only, as
+  // `readComponentAllOf` reads it for the dispatcher model.
+  for (const r of schema.required ?? []) baseRequired.add(r);
+  const baseProperties: Record<string, SchemaObject> = Object.fromEntries(
+    [...ledger.values()].map((entry) => [entry.name, declaredComponentProperty(entry)]),
+  );
 
   for (const subSchema of members) {
     for (const variant of subSchema.oneOf ?? []) {
@@ -3679,10 +3705,11 @@ function extractDiscriminatedAllOfVariantModels(
 
       // Merge base fields into the variant. Variant-specific properties win
       // on name collisions because the spec may pin a base field to a more
-      // specific shape inside a variant.
-      const mergedProperties: Record<string, SchemaObject> = { ...baseProperties };
+      // specific shape inside a variant. Built through a `Map`, so a property
+      // named `__proto__` is set rather than taken for the prototype.
+      const mergedProperties = new Map<string, SchemaObject>(Object.entries(baseProperties));
       for (const [k, v] of Object.entries(flat.properties)) {
-        if (v) mergedProperties[k] = v;
+        if (v) mergedProperties.set(k, v);
       }
       const mergedRequired = new Set<string>([...baseRequired, ...(flat.required ?? [])]);
       // The variant's own keywords (read through its allOf wrappers, like its
@@ -3691,7 +3718,7 @@ function extractDiscriminatedAllOfVariantModels(
       // extractInlineModelDeep's constraintsEntry read them back unchanged.
       const merged: SchemaObject = {
         type: 'object',
-        properties: mergedProperties,
+        properties: Object.fromEntries(mergedProperties),
         required: [...mergedRequired],
         // The variant's own flag only: the union's wrapper deprecates the
         // dispatcher model, not the variants it dispatches to.
@@ -3724,14 +3751,16 @@ function extractDiscriminatedAllOfVariantModels(
 function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
   if (!variant.allOf) return variant;
 
-  const mergedProperties: Record<string, SchemaObject> = {};
+  // A `Map`, returned through `Object.fromEntries`, so a property named
+  // `__proto__` is kept as an own entry.
+  const mergedProperties = new Map<string, SchemaObject>();
   const mergedRequired = new Set<string>();
   const nestedOneOfs: SchemaObject[][] = [];
 
   const collect = (s: SchemaObject): void => {
     if (s.properties) {
       for (const [k, v] of Object.entries(s.properties)) {
-        if (!Object.hasOwn(mergedProperties, k) && v) mergedProperties[k] = v;
+        if (!mergedProperties.has(k) && v) mergedProperties.set(k, v);
       }
     }
     if (s.required) {
@@ -3762,7 +3791,7 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
         if (s) schemas.push(s);
       }
       const merged = mergeBranchPropertySchemas(schemas);
-      if (!Object.hasOwn(mergedProperties, key)) mergedProperties[key] = merged;
+      if (!mergedProperties.has(key)) mergedProperties.set(key, merged);
       const inAllBranches = flatBranches.every((b) => b.properties !== undefined && Object.hasOwn(b.properties, key));
       const requiredInAll = inAllBranches && flatBranches.every((b) => (b.required ?? []).includes(key));
       if (requiredInAll) mergedRequired.add(key);
@@ -3771,7 +3800,7 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
 
   return {
     type: 'object',
-    properties: mergedProperties,
+    properties: Object.fromEntries(mergedProperties),
     required: [...mergedRequired],
   };
 }
@@ -4371,6 +4400,7 @@ export function schemaToTypeRef(
 import {
   buildInlineModel,
   collectProperties,
+  declareProperty,
   declaresInlineProperties,
   elementContextName,
   extractInlineModelsFromProperties,
@@ -4385,6 +4415,7 @@ import {
   mintedInlineNameEntries,
   mintedInlineNames,
   modelFingerprint,
+  type PropertyDeclarations,
   qualifyInlineModelName,
   reservedInlineNames,
   resetInheritedModelRefs,
