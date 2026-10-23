@@ -3,6 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
+import { extractOperations } from '../../src/parser/operations.js';
+import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import {
   collectEnumRefs,
   collectModelRefs,
@@ -11,7 +13,7 @@ import {
   collectResponseHeaders,
   collectWebhookTypeRefs,
 } from '../../src/ir/types.js';
-import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Operation, TypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 
 // workos/oagen#281: an inline enum that is an operation's primary response
@@ -700,5 +702,45 @@ describe('identical members on another status code share the stepped name, heade
     expect(enumNames(ir)).toEqual(['PetsXPolicy', 'PetsXPolicy429', 'PetsXPolicy503']);
     expect(enumValues(ir, 'PetsXPolicy503')).toEqual(['wait', 'queue']);
     expectSound(ir);
+  });
+});
+
+describe('the record of component sites is the third argument of collectInlineEnumsFromOperations (#356)', () => {
+  const signature =
+    'collectInlineEnumsFromOperations(services, enums, shared, models?, componentNames?): `shared` must be the Set of ' +
+    'component-site references (`OperationExtractionResult.componentSites`), got ';
+
+  it('fails by name, before any enum is read, when a caller still passes the models list third', () => {
+    const { services, inlineModels, componentSites } = extractOperations(
+      getPetKind({ '200': { description: 'ok', ...json(kind) } }) as never,
+    );
+    const enums: Enum[] = [];
+
+    // The order every caller used before the record moved: models, then the
+    // component names, then the record last — `models.map` would have thrown
+    // on the Set, or a hand-built list would have been read as the record.
+    expect(() =>
+      collectInlineEnumsFromOperations(
+        services,
+        enums,
+        inlineModels as never,
+        new Set() as never,
+        componentSites as never,
+      ),
+    ).toThrow(new TypeError(`${signature}an array`));
+    expect(() => collectInlineEnumsFromOperations(services, enums, undefined as never)).toThrow(
+      new TypeError(`${signature}undefined`),
+    );
+    expect(enums).toEqual([]);
+  });
+
+  it('promotes the body enum once the record is passed third, as every caller passes it', () => {
+    const { services, inlineModels, componentSites } = extractOperations(
+      getPetKind({ '200': { description: 'ok', ...json(kind) } }) as never,
+    );
+    const enums: Enum[] = [];
+
+    collectInlineEnumsFromOperations(services, enums, componentSites, inlineModels);
+    expect(enums.map((e) => e.name)).toEqual(['GetPetKindResponse']);
   });
 });

@@ -1753,6 +1753,50 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    it('keeps a stop field’s type against a typeless declaration of it, in the model and in the read alike (Greptile)', async () => {
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const boolean = { type: 'boolean' };
+      const doc = { description: 'More pages' };
+      const member = (has_more: unknown) => ({ type: 'object', properties: { has_more } });
+      // Greptile's case: the component's own boolean beside its `allOf`, folded
+      // in first, against a member's description; then the reverse order; then
+      // a typeless override written in the wrapper beside the data array.
+      const cases: Record<string, { Base: unknown; beside: Record<string, unknown> }> = {
+        ownTyped: { Base: { properties: { has_more: boolean }, allOf: [member(doc)] }, beside: {} },
+        ownTypeless: { Base: { properties: { has_more: doc }, allOf: [member(boolean)] }, beside: {} },
+        siblingOverride: { Base: member(boolean), beside: { has_more: doc } },
+      };
+      const expectedField = {
+        name: 'has_more',
+        type: { kind: 'primitive', type: 'boolean' },
+        description: 'More pages',
+      };
+      for (const [label, { Base, beside }] of Object.entries(cases)) {
+        const PetPage = { allOf: [ref('Base'), { type: 'object', properties: { data: petArray, ...beside } }] };
+        const schemas = { Base, PetPage };
+        const fieldOf = (ir: ApiSpec, model: string) =>
+          ir.models.find((m) => m.name === model)?.fields.find((f) => f.name === 'has_more');
+        for (const [kind, body, model] of [
+          ['$ref wrapper', ref('PetPage'), 'PetPage'],
+          ['inline wrapper', PetPage, 'ListPetsResponse'],
+        ] as const) {
+          const ir = await parseJson(listOp(body, { dataPath: 'data' }, schemas));
+          const op = onlyOperation(ir);
+          expect(op.pagination?.endOfIteration, `${label} (${kind})`).toEqual({ kind: 'hasMore', path: 'has_more' });
+          // The field as the wrapper model declares it — or, when the typeless
+          // declaration written beside `data` makes the inline body a recognized
+          // envelope, as the unwrapped envelope's companion.
+          const field = op.pagination?.envelopeFields?.find((f) => f.name === 'has_more') ?? fieldOf(ir, model);
+          expect(field, `${label} (${kind} model)`).toMatchObject(expectedField);
+          expect(fieldOf(ir, 'Base'), `${label} (${kind}, Base)`).toMatchObject({
+            ...expectedField,
+            ...(label === 'siblingOverride' && { description: undefined }),
+          });
+        }
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it('reads the stop field beside a nested array under a parent of any name, before the top level (MichaelDeBoey)', async () => {
       const boolean = { type: 'boolean' };
       const nested = (fields: Record<string, unknown>) => ({
