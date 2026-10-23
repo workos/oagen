@@ -6,6 +6,8 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import {
+  fieldAdmits,
+  fieldFlagAgrees,
   flagAdmits,
   modelAdmits,
   modelFingerprint,
@@ -21,7 +23,7 @@ import {
   collectWebhookTypeRefs,
   walkTypeRef,
 } from '../../src/ir/types.js';
-import type { ApiSpec, Model, Operation, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Field, Model, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #312: a deprecated inline schema identical to a live component it is
@@ -602,6 +604,147 @@ describe('every site a deprecated inline schema identical to a live component ca
     expect(after.warnings).toEqual([folded('ListMetadata')]);
     expectSound(after.spec, ['User', 'ListMetadata']);
     expect(modelChanges(before.spec, after.spec)).toEqual({ breaking: 0, models: [] });
+  });
+
+  it('a list envelope’s companion whose own field is deprecated keeps its name beside a live component (Greptile, #364 round 1)', async () => {
+    // The component's fields are what every site reads after a fold, and
+    // nothing but the field carries a field's notice: a deprecated
+    // `list_metadata` whose `before` is deprecated too never shares a live
+    // `ListMetadata` whose `before` is live — nor does a live companion
+    // beside a component whose `before` is deprecated — while both
+    // deprecating `before` share it.
+    const listMetadata = (before: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      obj({ before: { type: ['string', 'null'], ...before }, after: { type: ['string', 'null'] } }, extra);
+    const doc = (component: Record<string, unknown>, companion: Record<string, unknown>) =>
+      specDoc(
+        { User: obj({ id: str }), ListMetadata: component },
+        {
+          '/legacy-users': {
+            get: {
+              operationId: 'listLegacyUsers',
+              parameters: [{ name: 'after', in: 'query', schema: str }],
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: {
+                    'application/json': {
+                      schema: {
+                        allOf: [
+                          obj({ object: { type: 'string', const: 'list' }, list_metadata: companion }),
+                          obj({ data: { type: 'array', items: { $ref: '#/components/schemas/User' } } }),
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      );
+    const metaOf = (spec: ApiSpec) =>
+      opsOf(spec).listLegacyUsers?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+    const beforeOf = (spec: ApiSpec, name: string) =>
+      spec.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'before');
+
+    for (const [label, root] of [
+      ['deprecated companion', { deprecated: true }],
+      ['live companion', {}],
+    ] as const) {
+      const kept = await parse(
+        `companion-field-${label.replace(/\W+/g, '-')}`,
+        doc(listMetadata({}), listMetadata({ deprecated: true }, root)),
+      );
+      expect(metaOf(kept.spec)?.type, label).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+      expect(metaOf(kept.spec)?.deprecated, label).toBe(root.deprecated);
+      expect(beforeOf(kept.spec, 'ListLegacyUsersListMetadata')?.deprecated, label).toBe(true);
+      expect(beforeOf(kept.spec, 'ListMetadata')?.deprecated, label).toBeUndefined();
+      expect(kept.warnings, label).toEqual([]);
+      expectSound(kept.spec, ['User', 'ListMetadata']);
+    }
+    // The component's `before` deprecated, the companion's live.
+    const reverse = await parse('companion-field-reverse', doc(listMetadata({ deprecated: true }), listMetadata({})));
+    expect(metaOf(reverse.spec)?.type).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+    expect(beforeOf(reverse.spec, 'ListLegacyUsersListMetadata')?.deprecated).toBeUndefined();
+    expect(beforeOf(reverse.spec, 'ListMetadata')?.deprecated).toBe(true);
+    expect(reverse.warnings).toEqual([]);
+    expectSound(reverse.spec, ['User', 'ListMetadata']);
+    // Both deprecate `before`: the deprecated companion folds.
+    const both = await parse(
+      'companion-field-both',
+      doc(listMetadata({ deprecated: true }), listMetadata({ deprecated: true }, { deprecated: true })),
+    );
+    expect(metaOf(both.spec)?.type).toEqual({ kind: 'model', name: 'ListMetadata' });
+    expect(metaOf(both.spec)?.deprecated).toBe(true);
+    expect(both.spec.models.map((m) => m.name).sort()).toEqual(['ListMetadata', 'User']);
+    expect(both.warnings).toEqual([folded('ListMetadata')]);
+    expectSound(both.spec, ['User', 'ListMetadata']);
+  });
+
+  it('a field’s own flag must agree in either direction at every site `modelAdmits` decides (`fieldFlagAgrees`)', async () => {
+    const string = { kind: 'primitive', type: 'string' } as const;
+    const field = (deprecated: boolean): Field => ({
+      name: 'a',
+      type: string,
+      required: false,
+      ...(deprecated ? { deprecated: true } : {}),
+    });
+    expect(fieldFlagAgrees(field(false), field(false))).toBe(true);
+    expect(fieldFlagAgrees(field(true), field(true))).toBe(true);
+    expect(fieldFlagAgrees(field(false), field(true))).toBe(false);
+    expect(fieldFlagAgrees(field(true), field(false))).toBe(false);
+    expect(fieldAdmits(field(false), field(true))).toBe(false);
+    expect(fieldAdmits(field(true), field(false))).toBe(false);
+    expect(fieldAdmits(field(true), field(true))).toBe(true);
+    const model = (deprecated: boolean, extra: Partial<Model> = {}): Model => ({
+      name: 'M',
+      fields: [field(deprecated)],
+      ...extra,
+    });
+    // A live owner whose field is live never admits a candidate whose field is deprecated, whatever the roots.
+    expect(modelAdmits(model(false), model(true))).toBe(false);
+    expect(modelAdmits(model(false), model(true, { deprecated: true }))).toBe(false);
+    expect(modelAdmits(model(true), model(false))).toBe(false);
+    expect(modelAdmits(model(true), model(true, { deprecated: true }))).toBe(true);
+    for (const sent of [false, true]) {
+      expect(modelShares(model(false), model(true, { deprecated: true }), sent), `sent: ${sent}`).toBe(false);
+      expect(modelShares(model(true), model(true, { deprecated: true }), sent), `sent: ${sent}`).toBe(true);
+    }
+
+    // Through the parser: a deprecated `Pet.owner` whose `name` is deprecated
+    // too keeps `PetOwner2` beside a live `PetOwner` whose `name` is live;
+    // with `PetOwner.name` deprecated as well it folds.
+    const owner = (nameDeprecated: boolean, extra: Record<string, unknown> = {}) =>
+      obj({ name: { type: 'string', ...(nameDeprecated ? { deprecated: true } : {}) } }, extra);
+    const kept = await parse(
+      'field-flag-kept',
+      specDoc(
+        { Pet: obj({ owner: owner(true, { deprecated: true }) }), PetOwner: owner(false) },
+        { '/pets/{id}': getOp('getPet', { $ref: '#/components/schemas/Pet' }) },
+      ),
+    );
+    expect(describeModels(kept.spec)).toEqual([
+      'Pet {owner (deprecated): PetOwner2}',
+      'PetOwner {name: string}',
+      'PetOwner2 (deprecated) {name (deprecated): string}',
+    ]);
+    expect(kept.warnings).toEqual([
+      '[oagen] Renamed inline model "PetOwner" → "PetOwner2": it is deprecated while "PetOwner" is live',
+    ]);
+    expectSound(kept.spec, ['Pet', 'PetOwner']);
+    const folds = await parse(
+      'field-flag-folds',
+      specDoc(
+        { Pet: obj({ owner: owner(true, { deprecated: true }) }), PetOwner: owner(true) },
+        { '/pets/{id}': getOp('getPet', { $ref: '#/components/schemas/Pet' }) },
+      ),
+    );
+    expect(describeModels(folds.spec)).toEqual([
+      'Pet {owner (deprecated): PetOwner}',
+      'PetOwner {name (deprecated): string}',
+    ]);
+    expect(folds.warnings).toEqual([folded('PetOwner')]);
+    expectSound(folds.spec, ['Pet', 'PetOwner']);
   });
 
   it('a nested object under an inline response, decided before its parent: the parent keeps the field’s flag', async () => {
