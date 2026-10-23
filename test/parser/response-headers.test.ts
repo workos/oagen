@@ -1090,6 +1090,45 @@ describe('inline header models', () => {
         expectHeaderModelsMaterialized(op, inlineModels);
       });
     });
+
+    it('shares one model across two operations of the service under the name the first settled on (issue #280)', () => {
+      // A component owns `PetXMeta` with another shape, so the first
+      // operation's header steps to its operation-qualified name; the second
+      // operation's identical header tries that stem and shares it.
+      const componentModels: Model[] = [
+        { name: 'PetXMeta', fields: [{ name: 'other', type: { kind: 'primitive', type: 'string' }, required: false }] },
+      ];
+      const header = { 'X-Meta': object({ etag: { type: 'string' } }) };
+      const { services, inlineModels } = extractOperations(
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              tags: ['Pet'],
+              responses: { '200': { description: 'ok', headers: header } },
+            },
+            post: {
+              operationId: 'createPet',
+              tags: ['Pet'],
+              responses: { '201': { description: 'created', headers: header } },
+            },
+          },
+        } as never,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        componentModels,
+      );
+      const [listPets, createPet] = services[0].operations;
+
+      expect(listPets.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'PetListPetsXMeta' });
+      expect(createPet.responseHeaders?.[0].type).toEqual({ kind: 'model', name: 'PetListPetsXMeta' });
+      expect(inlineModels.map((m) => m.name)).toEqual(['PetListPetsXMeta']);
+      expect(fieldsOf(inlineModels, 'PetListPetsXMeta')).toEqual(['etag']);
+      expectHeaderModelsMaterialized(listPets, inlineModels);
+      expectHeaderModelsMaterialized(createPet, inlineModels);
+    });
   });
 });
 

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { modelAdmits } from '../../src/parser/inline-models.js';
+import { renameTypeRefModels } from '../../src/ir/types.js';
 import {
   collectModelRefs,
   collectRequestBodyTypes,
@@ -688,6 +689,72 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
     ]);
     expect(warnings).toEqual([renamed('Comp', 'SharedComp')]);
     expectSound(spec, { Comp: ['id'] });
+  });
+});
+
+describe('a union holding a `$ref` and an inline variant of one name (Greptile)', () => {
+  // The component pins `kind: legacy`; the inline variant, titled like it,
+  // pins `kind: new`. The derived mapping names `Comp` twice; only the
+  // inline variant moves, and only its entry follows.
+  const legacy = obj({ kind: { type: 'string', const: 'legacy' }, id: str });
+  const fresh = obj({ kind: { type: 'string', const: 'new' }, c: str }, { title: 'Comp' });
+  const mixed = { oneOf: [{ $ref: '#/components/schemas/Comp' }, fresh] };
+  it('is what the parser builds: the `$ref` keeps the component, the inline variant its context-qualified name, with no mapping, on a field, a response and a webhook payload', async () => {
+    // Beside a `$ref` sibling the title is not kept, so the two never share a
+    // name and no entry can be misassigned; the positional rule below guards a
+    // union built any other way.
+    const built = (inline: string) => ({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'Comp' },
+        { kind: 'model', name: inline },
+      ],
+      compositionKind: 'oneOf',
+    });
+    const field = await parse('mixed-field', specDoc({ Comp: legacy, Thing: obj({ shape: mixed }) }));
+    expect(field.spec.models.find((m) => m.name === 'Thing')?.fields[0]?.type).toEqual(built('ThingShape'));
+    expect(field.warnings).toEqual([]);
+    expectSound(field.spec, { Comp: ['kind', 'id'], Thing: ['shape'] });
+
+    const response = await parse(
+      'mixed-response',
+      specDoc({ Comp: legacy }, { '/things/{id}': getOp('getThing', mixed) }),
+    );
+    expect(opsOf(response.spec).getThing?.response).toEqual(built('GetThingResponse'));
+    expect(response.warnings).toEqual([]);
+    expectSound(response.spec, { Comp: ['kind', 'id'] });
+
+    const webhook = await parse('mixed-webhook', webhookDoc({ Comp: legacy }, mixed));
+    expect(webhook.spec.webhooks?.[0]?.requestBody).toEqual(built('PetAdoptedPayload'));
+    expect(webhook.warnings).toEqual([]);
+    expectSound(webhook.spec, { Comp: ['kind', 'id'] });
+  });
+
+  it('assigns mapping entries to variants by position in the rewriter itself', () => {
+    const ref: TypeRef = {
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'Comp' },
+        { kind: 'model', name: 'Comp' },
+        { kind: 'model', name: 'Other' },
+      ],
+      discriminator: { property: 'kind', mapping: { legacy: 'Comp', new: 'Comp', o: 'Other', o2: 'Other' } },
+    };
+    const second = ref.variants[1]!;
+    // Only the second `Comp` is admitted: its entry (`new`) follows; `Other`, one variant, owns both of its entries.
+    expect(
+      renameTypeRefModels(
+        ref,
+        new Map([
+          ['Comp', 'ThingComp'],
+          ['Other', 'Moved'],
+        ]),
+        (r) => r !== ref.variants[0],
+      ),
+    ).toBe(true);
+    expect(ref.variants.map((v) => (v as { name: string }).name)).toEqual(['Comp', 'ThingComp', 'Moved']);
+    expect(ref.discriminator?.mapping).toEqual({ legacy: 'Comp', new: 'ThingComp', o: 'Moved', o2: 'Moved' });
+    expect(second).toEqual({ kind: 'model', name: 'ThingComp' });
   });
 });
 

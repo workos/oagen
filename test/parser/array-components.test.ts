@@ -1148,6 +1148,23 @@ describe('an alias of an array component (MichaelDeBoey)', () => {
     expectSound(spec, ['Holder'], ['Pets', 'PetsAlias', 'PetsLimited', 'PetsRef', 'Chain']);
   });
 
+  it('reads an `allOf` of one member as that member, an array or an alias of one', async () => {
+    const spec = await parse(
+      specDoc({
+        Pets: { type: 'array', items },
+        Wrapped: { allOf: [{ type: 'array', items }] },
+        WrappedRef: { allOf: [ref('Pets')], description: 'Also pets' },
+        Holder: { type: 'object', properties: { w: ref('Wrapped'), r: ref('WrappedRef') } },
+      }),
+    );
+    // The wrapped inline array names its own items; the wrapped `$ref` resolves to `Pets`'s.
+    expect(fieldType(spec, 'Holder', 'w')).toEqual(array(model('WrappedItem')));
+    expect(fieldType(spec, 'Holder', 'r')).toEqual(array(model('PetsItem')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'PetsItem', 'WrappedItem']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder'], ['Pets', 'Wrapped', 'WrappedRef']);
+  });
+
   it('leaves an alias of an object component, and an `allOf` that adds properties, the models they were', async () => {
     const spec = await parse(
       specDoc({
@@ -1185,32 +1202,177 @@ describe('an alias of an array component (MichaelDeBoey)', () => {
   });
 });
 
-describe('a name an operation mints too (MichaelDeBoey, #285)', () => {
+describe('a name another component’s extraction mints (Greptile round 3)', () => {
+  // Claims come from a rehearsal of every pass that extracts a component:
+  // the discriminated allOf+oneOf variants, the named-union variants, the
+  // field pass, their nested objects and lifted enums.
+  const petsOf = (items: unknown) => ({ type: 'array', items });
+  const nameItems = { type: 'object', properties: { name: { type: 'string' } } };
+  const event = {
+    allOf: [
+      { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      {
+        oneOf: [
+          { type: 'object', properties: { type: { const: 'pets_item' }, value: { type: 'integer' } } },
+          { type: 'object', properties: { type: { const: 'other_thing' }, flag: { type: 'boolean' } } },
+        ],
+      },
+    ],
+  };
+  const holder = (refs: Record<string, string>) => ({
+    type: 'object',
+    properties: Object.fromEntries(Object.entries(refs).map(([field, target]) => [field, ref(target)])),
+  });
+  const both = (entries: Array<[string, unknown]>): Array<[string, Array<[string, unknown]>]> => [
+    ['as written', entries],
+    ['reversed', [...entries].reverse()],
+  ];
+
+  it.each(
+    both([
+      ['Pets', petsOf(nameItems)],
+      ['Event', event],
+    ]),
+  )(
+    "steps the items past a discriminated variant named from its const (Greptile's shape), with the document %s",
+    async (_order, entries) => {
+      const spec = await parse(
+        specDoc({ Holder: holder({ pets: 'Pets', event: 'Event' }), ...Object.fromEntries(entries) }),
+      );
+      expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+      expect(spec.models.find((m) => m.name === 'PetsItemItem')?.fields.map((f) => f.name)).toEqual(['name']);
+      // The event's variant keeps its name and its three fields, and dispatches to it.
+      expect(spec.models.find((m) => m.name === 'PetsItem')?.fields.map((f) => f.name)).toEqual([
+        'id',
+        'type',
+        'value',
+      ]);
+      expect(spec.models.find((m) => m.name === 'Event')?.discriminator).toEqual({
+        property: 'type',
+        mapping: { pets_item: 'PetsItem', other_thing: 'OtherThing' },
+      });
+      expect(warnings()).toEqual([]);
+      expectSound(spec, ['Holder', 'Event', 'PetsItem', 'OtherThing'], ['Pets']);
+    },
+  );
+
+  it('steps past an object nested under a discriminated variant', async () => {
+    // The base member's `owner` is merged into every variant, so the variant
+    // `PetsItem` mints `PetsItemOwner` (and the dispatcher `EventOwner`).
+    const nestedEvent = {
+      allOf: [
+        {
+          type: 'object',
+          properties: { id: { type: 'string' }, owner: { type: 'object', properties: { id: { type: 'integer' } } } },
+        },
+        { oneOf: [{ type: 'object', properties: { type: { const: 'pets_item' }, value: { type: 'integer' } } }] },
+      ],
+    };
+    const spec = await parse(
+      specDoc({
+        Holder: holder({ pets: 'Pets', event: 'Event' }),
+        Pets: petsOf({ type: 'object', properties: { owner: nameItems } }),
+        Event: nestedEvent,
+      }),
+    );
+    // `Pets`'s tree would mint `PetsItem` and `PetsItemOwner`; both are the variant's.
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+    expect(fieldType(spec, 'PetsItemItem', 'owner')).toEqual(model('PetsItemItemOwner'));
+    expect(fieldType(spec, 'PetsItem', 'owner')).toEqual(model('PetsItemOwner'));
+    expect(spec.models.find((m) => m.name === 'PetsItemOwner')?.fields.map((f) => f.name)).toEqual(['id']);
+    expect(spec.models.find((m) => m.name === 'PetsItemItemOwner')?.fields.map((f) => f.name)).toEqual(['name']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Event', 'PetsItem'], ['Pets']);
+  });
+
+  it.each(
+    both([
+      ['Pets', petsOf(nameItems)],
+      [
+        'Pet',
+        { type: 'object', properties: { pets_item: { type: 'object', properties: { id: { type: 'integer' } } } } },
+      ],
+    ]),
+  )('steps past an object a component’s field mints, with the document %s', async (_order, entries) => {
+    // `Pet.pets_item` is `PetsItem`: the field name already starts with the parent.
+    const spec = await parse(specDoc({ Holder: holder({ pets: 'Pets', pet: 'Pet' }), ...Object.fromEntries(entries) }));
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+    expect(fieldType(spec, 'Pet', 'pets_item')).toEqual(model('PetsItem'));
+    expect(spec.models.find((m) => m.name === 'PetsItem')?.fields.map((f) => f.name)).toEqual(['id']);
+    expect(spec.models.find((m) => m.name === 'PetsItemItem')?.fields.map((f) => f.name)).toEqual(['name']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Pet'], ['Pets']);
+  });
+
+  it.each([
+    ['other members', ['x', 'y'], 'PetsItemItem'],
+    ['the same members', ['on', 'off'], 'PetsItem'],
+  ] as const)('reads an enum a component’s field lifts, of %s', async (_members, members, enumName) => {
+    const spec = await parse(
+      specDoc({
+        Holder: holder({ pets: 'Pets', pet: 'Pet' }),
+        Pets: petsOf({ type: 'string', enum: ['on', 'off'] }),
+        Pet: { type: 'object', properties: { pets_item: { type: 'string', enum: members } } },
+      }),
+    );
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array({ kind: 'enum', name: enumName, values: ['on', 'off'] }));
+    expect(fieldType(spec, 'Pet', 'pets_item')).toEqual({ kind: 'enum', name: 'PetsItem', values: members });
+    expect(spec.enums.find((e) => e.name === 'PetsItem')?.values.map((v) => v.value)).toEqual(members);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Pet'], ['Pets']);
+  });
+
+  it('steps past what a named union’s `variant_<n>` member mints', async () => {
+    // The union's first variant, an array of inline objects, would mint
+    // `PetVariant1`; that is the array component's key, so the member steps
+    // to `variant_1_item` and mints `PetVariant1Item` — the very name the
+    // array component's items would take. The array tree steps in turn.
+    const spec = await parse(
+      specDoc({
+        Holder: holder({ pets: 'PetVariant1', pet: 'Pet' }),
+        PetVariant1: petsOf(nameItems),
+        Pet: {
+          oneOf: [{ type: 'array', items: { type: 'object', properties: { id: { type: 'integer' } } } }, ref('Cat')],
+        },
+        Cat: { type: 'object', properties: { meow: { type: 'boolean' } } },
+      }),
+    );
+    expect(spec.models.find((m) => m.name === 'Pet')?.variants).toEqual([
+      array(model('PetVariant1Item')),
+      model('Cat'),
+    ]);
+    expect(spec.models.find((m) => m.name === 'PetVariant1Item')?.fields.map((f) => f.name)).toEqual(['id']);
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetVariant1ItemItem')));
+    expect(spec.models.find((m) => m.name === 'PetVariant1ItemItem')?.fields.map((f) => f.name)).toEqual(['name']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Pet', 'Cat'], ['PetVariant1']);
+  });
+});
+
+describe('a name an operation mints too (MichaelDeBoey)', () => {
   // A component `ListPets` names its items `ListPetsItem`, exactly as
-  // `operationId: listPets` names an inline array response's items. Names
-  // derived from an explicit identifier — a component key, an operationId —
-  // are used verbatim on both sides, and the clash between an
-  // operation-minted name and a component-owned one is #285's: the
-  // component's definition stands, and the operation's items take a name of
-  // their own when the component does not admit them.
+  // `operationId: listPets` names an inline array response's items. The
+  // component's name is settled first, and the operation's items are
+  // settled against the spec-wide registry of model shapes (#333): a name a
+  // component-pass model owns with another shape sends them to
+  // `<Op>ResponseItem`; an identical shape shares the model.
   const component = {
     ListPets: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } } } },
     Holder: { type: 'object', properties: { l: ref('ListPets') } },
   };
   const listPets = (items: unknown) => ({ '/pets': getOp('listPets', { type: 'array', items }) });
 
-  it('keeps the component’s items under the shared name and renames the operation’s when the shapes differ', async () => {
+  it('steps the operation’s items past the component’s when the shapes differ', async () => {
     const spec = await parse(specDoc(component, listPets({ type: 'object', properties: { id: { type: 'string' } } })));
-    expect(opsOf(spec).listPets.response).toEqual(array(model('ListPetsItem2')));
+    expect(opsOf(spec).listPets.response).toEqual(array(model('ListPetsResponseItem')));
     expect(fieldType(spec, 'Holder', 'l')).toEqual(array(model('ListPetsItem')));
     expect(spec.models.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name)).toEqual(['name']);
-    expect(spec.models.find((m) => m.name === 'ListPetsItem2')?.fields.map((f) => f.name)).toEqual(['id']);
-    expect(warnings()).toEqual([
-      '[oagen] Renamed inline model "ListPetsItem" → "ListPetsItem2": its shape differs from component schema "ListPetsItem"',
-    ]);
+    expect(spec.models.find((m) => m.name === 'ListPetsResponseItem')?.fields.map((f) => f.name)).toEqual(['id']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder'], ['ListPets']);
   });
 
-  it('shares one model silently when the shapes agree', async () => {
+  it('shares one model when the shapes agree', async () => {
     const spec = await parse(
       specDoc(component, listPets({ type: 'object', properties: { name: { type: 'string' } } })),
     );

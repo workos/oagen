@@ -237,8 +237,9 @@ export interface Operation {
    * The `summary` alone: the OpenAPI operation's own, or — when the operation
    * declares none with non-whitespace content — the `summary` of the Path
    * Item it sits on, which OpenAPI applies to every operation on that path.
-   * Present only when one of the two has content; an empty or whitespace-only
-   * summary is treated as absent at either level. Read this to use the
+   * Present only when one of the two has content; a summary that is not a
+   * string, or is empty or whitespace-only, is treated as absent at either
+   * level. Read this to use the
    * summary as a one-line label; `description` below still carries the
    * combined form, so emitters that only print `description` are unchanged.
    */
@@ -248,8 +249,9 @@ export interface Operation {
    * each read as `summary` above is: the operation's own, else the Path
    * Item's, field by field. When both have content, this is
    * `summary + "\n\n" + description`; when only one has content (or both are
-   * identical), this is that one. An empty or whitespace-only value is
-   * treated as absent, and text with content is kept verbatim. The parts are
+   * identical), this is that one. A value that is not a string, or is empty
+   * or whitespace-only, is treated as absent, and text with content is kept
+   * verbatim. The parts are
    * not separable from this field alone — use `summary` for that.
    */
   description?: string;
@@ -479,10 +481,11 @@ export interface Operation {
   async?: boolean;
   /**
    * The operation's `tags`, in document order, with every entry that is not
-   * a non-empty string dropped. Present only when at least one remains. The
-   * parser has already named the service from the document's first tag
-   * entry; this list is kept so an emitter can group or document the method
-   * by every tag.
+   * a non-empty string dropped and a repeated entry folded onto its first
+   * occurrence. Present only when at least one remains. The parser names the
+   * service from `tags[0]` — the first usable entry — so the two never
+   * disagree; the list is kept so an emitter can group or document the
+   * method by every tag.
    */
   tags?: string[];
   /**
@@ -1162,14 +1165,14 @@ export function collectModelTypeRefs(model: Model): TypeRef[] {
 /**
  * Rename the models a type refers to, in place: every `model` ref under
  * `ref` — at any depth of array, map, nullable and union wrapper — that
- * `renames` maps and `admit` accepts is pointed at the new name, and the
- * `discriminator.mapping` of a union one of whose variants moved is pointed
- * with it, so a mapping follows the variant it names and never keeps naming
- * a model that was renamed away. A mapping target has no identity of its
- * own, so it is rewritten only beside a variant that moved: a `$ref` to a
- * same-named component that `admit` kept in place keeps its mapping entry
- * too. Each reference is looked up once, so `{ A → B, B → C }` moves `A` to
- * `B`, never on to `C`. `admit` defaults to every reference; the parser's
+ * `renames` maps and `admit` accepts is pointed at the new name, and each
+ * `discriminator.mapping` entry of a union follows the variant it belongs
+ * to (`mappingEntriesByVariant`), so a mapping never keeps naming a model
+ * that was renamed away and never moves off a variant that stayed: beside a
+ * `$ref` to `Comp` (`kind: legacy`) an inline variant titled `Comp`
+ * (`kind: new`) renamed to `ThingComp` leaves `{ legacy: 'Comp', new:
+ * 'ThingComp' }`. Each reference is looked up once, so `{ A → B, B → C }`
+ * moves `A` to `B`, never on to `C`. `admit` defaults to every reference; the parser's
  * merge passes pass one that tells a reference minted for an inline model
  * from an explicit `$ref` to a same-named component. Returns whether any
  * reference moved. Every rename site — the merge passes, the shape registry,
@@ -1200,12 +1203,8 @@ export function renameTypeRefModels(
       const value = renameTypeRefModels(ref.valueType, renames, admit);
       return key || value;
     }
-    case 'union': {
-      let moved = false;
-      for (const variant of ref.variants) if (renameTypeRefModels(variant, renames, admit)) moved = true;
-      if (moved && ref.discriminator) renameMappingTargets(ref.discriminator.mapping, renames);
-      return moved;
-    }
+    case 'union':
+      return renameVariants(ref.variants, ref.discriminator?.mapping, renames, admit);
     case 'enum':
     case 'literal':
     case 'primitive':
@@ -1215,7 +1214,67 @@ export function renameTypeRefModels(
   }
 }
 
-/** Point every target of `mapping` that `renames` maps at the new name. */
+/**
+ * Rename the models `variants` refer to, each `mapping` entry following the
+ * variant it belongs to. Returns whether any variant moved.
+ */
+function renameVariants(
+  variants: TypeRef[],
+  mapping: Record<string, string> | undefined,
+  renames: ReadonlyMap<string, string>,
+  admit: (ref: ModelRef) => boolean,
+): boolean {
+  const owned = mapping ? mappingEntriesByVariant(variants, mapping) : undefined;
+  let moved = false;
+  variants.forEach((variant, index) => {
+    if (!renameTypeRefModels(variant, renames, admit)) return;
+    moved = true;
+    const model = variantModel(variant);
+    if (mapping && model) for (const value of owned?.get(index) ?? []) mapping[value] = model.name;
+  });
+  return moved;
+}
+
+/** The model a variant names — directly, or under its nullable wrapper — which its mapping entry targets; none for any other variant. */
+function variantModel(variant: TypeRef): ModelRef | undefined {
+  if (variant.kind === 'nullable') return variantModel(variant.inner);
+  return variant.kind === 'model' ? variant : undefined;
+}
+
+/**
+ * Which variant each `mapping` entry belongs to, by the variants' positions:
+ * a name one variant carries owns every entry naming it (a document's own
+ * mapping may send several values to one schema); a name several variants
+ * carry — a `$ref` to a component beside an inline variant titled like it —
+ * hands the j-th entry naming it to the j-th such variant, since the parser
+ * derives one entry per discriminated variant in variant order. A variant's
+ * model is read through its nullable wrapper. An entry naming no variant
+ * belongs to none and stays as written.
+ */
+function mappingEntriesByVariant(variants: readonly TypeRef[], mapping: Record<string, string>): Map<number, string[]> {
+  const indexesByName = new Map<string, number[]>();
+  variants.forEach((variant, index) => {
+    const model = variantModel(variant);
+    if (model) indexesByName.set(model.name, [...(indexesByName.get(model.name) ?? []), index]);
+  });
+  const owned = new Map<number, string[]>();
+  const handed = new Map<string, number>();
+  for (const [value, target] of Object.entries(mapping)) {
+    const indexes = indexesByName.get(target);
+    if (!indexes) continue;
+    let index = indexes[0]!;
+    if (indexes.length > 1) {
+      const j = handed.get(target) ?? 0;
+      handed.set(target, j + 1);
+      if (j >= indexes.length) continue;
+      index = indexes[j]!;
+    }
+    owned.set(index, [...(owned.get(index) ?? []), value]);
+  }
+  return owned;
+}
+
+/** Point every target of `mapping` that `renames` maps at the new name: for a mapping whose members are not among any variants. */
 function renameMappingTargets(mapping: Record<string, string>, renames: ReadonlyMap<string, string>): void {
   for (const [value, target] of Object.entries(mapping)) {
     const renamed = renames.get(target);
@@ -1227,11 +1286,12 @@ function renameMappingTargets(mapping: Record<string, string>, renames: Readonly
  * Rename the models a model refers to: every `model` ref in its fields' types
  * and its union variants that `renames` maps and `admit` accepts is pointed
  * at the new name (`renameTypeRefModels`, so a union's mapping inside a field
- * follows its variant), and so is every `discriminator.mapping` target of
- * the model's own — by name, every target `renames` maps, since an
- * allOf+oneOf dispatcher holds its members in the mapping alone; under an
- * `admit`, only beside a variant that moved, since a target has no identity
- * to admit. Each reference is looked up once, so a map `{ A → B, B → C }`
+ * follows its variant), and the model's own `discriminator.mapping` follows
+ * its variants entry by entry (`mappingEntriesByVariant`); a mapping whose
+ * members are not among any variants — an allOf+oneOf dispatcher holds its
+ * members in the mapping alone — is rewritten by name, every target
+ * `renames` maps, and only when no `admit` is given, since a target has no
+ * identity to admit. Each reference is looked up once, so a map `{ A → B, B → C }`
  * moves `A` to `B`, never on to `C`. The model's own `name` is left to the
  * caller. Every rename and fold site goes through this, so a dispatcher's
  * mapping can never keep naming a model that was renamed away while its
@@ -1245,11 +1305,13 @@ export function renameModelRefs(
   const accept = admit ?? (() => true);
   let moved = false;
   for (const field of model.fields) if (renameTypeRefModels(field.type, renames, accept)) moved = true;
-  let variantMoved = false;
-  for (const variant of model.variants ?? []) if (renameTypeRefModels(variant, renames, accept)) variantMoved = true;
   const mapping = model.discriminator?.mapping;
-  if (mapping && (admit === undefined || variantMoved)) renameMappingTargets(mapping, renames);
-  return moved || variantMoved;
+  if (model.variants) {
+    if (renameVariants(model.variants, mapping, renames, accept)) moved = true;
+  } else if (mapping && admit === undefined) {
+    renameMappingTargets(mapping, renames);
+  }
+  return moved;
 }
 
 /**
@@ -1585,7 +1647,7 @@ export interface ErrorResponse {
  * A 3xx entry's `type` is always `unknown`. A 2xx body that is itself an
  * inline enum, or an array of one, is promoted to `spec.enums` as
  * `<Op>Response`; every entry derives that same name, so a second body with
- * other members is qualified with its status code (`CreatePetResponse202`),
+ * other members is qualified with its status code (`CheckPetKindResponse202`),
  * while identical members share one enum.
  */
 export interface SuccessResponse {

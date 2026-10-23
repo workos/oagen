@@ -249,13 +249,16 @@ function requestAndSuccessBodies(op: Operation): Array<{ type: TypeRef; qualifie
  * named like the header, or a webhook parameter named like a component enum,
  * collides the same way. When the name is already taken by a different
  * member set — other values, or the same values with a different one
- * deprecated (`sameEnumShape`) — or, with no enum of that name, by a model,
- * the ref is renamed to a distinct name before it is promoted, so no enum
- * promoted here shares a model's name. A taken name with the same members
- * is shared, as before; the first lifted copy's value descriptions and link
- * are the enum's. `modelNames` are every model of the finished IR — the
- * collectors run after the last model pass — and the names the distinct
- * name must also step around.
+ * deprecated (`sameEnumShape`) — or by a model, the ref is renamed to a
+ * distinct name before it is promoted: an enum and a model under one name
+ * reach an emitter as one public symbol, so the name is checked against the
+ * union of every model name (`modelNames`, every model of the document) and
+ * every enum name (`enums`) before any minted enum keeps it, on every path
+ * that promotes one — a field, a parameter, a response header, an error or
+ * secondary body, a webhook parameter or payload. A taken name with the same
+ * members is shared, as before; the first lifted copy's value descriptions
+ * and link are the enum's. A component enum declared under a component
+ * model's name is the document's own clash and is left as declared.
  */
 function collectDistinctEnums(
   ref: TypeRef,
@@ -269,13 +272,11 @@ function collectDistinctEnums(
       if (!ref.values) return;
       const values = enumValuesOf(ref);
       const existing = enums.find((e) => e.name === ref.name);
-      // Taken by an enum of other members, or — with no enum of that name at
-      // all — by a model (workos/oagen#332 review: an object component
-      // `GetPetKindResponse` beside an enum `200` body of `getPetKind` gave a
-      // model and an enum one name). An enum of the same members is shared
-      // whatever else carries the name.
-      const taken = existing ? !sameEnumShape(existing.values, values) : modelNames.has(ref.name);
-      if (taken) ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
+      const ownedByOtherMembers = existing !== undefined && !sameEnumShape(existing.values, values);
+      const ownedByModel = existing === undefined && modelNames.has(ref.name);
+      if (ownedByOtherMembers || ownedByModel) {
+        ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
+      }
       collectInlineEnumFromRef(ref, enums, enumNames);
     },
   });
