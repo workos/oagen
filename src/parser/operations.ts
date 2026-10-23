@@ -2240,6 +2240,7 @@ function buildOperation(
     responseContentTypes,
     responseContents,
     responseDescription,
+    responseStatusCode,
     successResponses,
     errors,
     defaultResponse,
@@ -2378,6 +2379,9 @@ function buildOperation(
     ...(responseContentTypes && { responseContentTypes, responseContents }),
     // Likewise only when the primary response declares a description.
     ...(responseDescription && { responseDescription }),
+    // And only when a 2xx or 3xx response is declared at all, so the status
+    // code is present exactly when `response` was read from one.
+    ...(responseStatusCode !== undefined && { responseStatusCode }),
     successResponses,
     errors,
     // Added only when the document declares them so operations without
@@ -4446,6 +4450,8 @@ function extractResponses(
   responseContentTypes?: string[];
   responseContents?: ResponseContent[];
   responseDescription?: string;
+  /** The status code of the entry `response` was read from; undefined when no 2xx/3xx is declared. */
+  responseStatusCode?: number;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   /** The `default` response, when the operation declares one. */
@@ -4754,6 +4760,7 @@ function extractResponses(
     responseContentTypes,
     responseContents,
     responseDescription,
+    responseStatusCode: primaryStatus,
     successResponses,
     errors,
     defaultResponse: fallback.defaultResponse,

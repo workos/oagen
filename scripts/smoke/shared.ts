@@ -7,13 +7,14 @@
 
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
-import type { ApiSpec, Operation, Parameter, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, Parameter, StatusRange, TypeRef } from '../../src/ir/types.js';
 import { toSnakeCase, toCamelCase } from '../../src/utils/naming.js';
 
 // Re-export types and functions that external smoke runners need from oagen core.
 // External runners import from '@workos/oagen/smoke' which bundles this module.
 export { parseSpec } from '../../src/parser/parse.js';
 export { toCamelCase, toSnakeCase } from '../../src/utils/naming.js';
+export type { StatusRange } from '../../src/ir/types.js';
 
 // ---------------------------------------------------------------------------
 // Capture format
@@ -43,10 +44,26 @@ export interface CapturedExchange {
   };
   outcome: 'success' | 'api-error' | 'skipped';
   error?: string;
-  /** True when the response status code is not declared in the OpenAPI spec for this operation */
+  /**
+   * True when the operation's declared responses do not cover the response
+   * status: no explicit code, no `1XX`–`5XX` range containing it and no
+   * `default` response. See `isUnexpectedStatus`.
+   */
   unexpectedStatus?: boolean;
-  /** Status codes declared in the OpenAPI spec (success + error codes) */
+  /**
+   * The explicit status codes the operation declares (`ExpectedStatuses.codes`:
+   * every declared 2xx/3xx code and every `errors` code; nothing is implied
+   * from the HTTP method). A range or `default` response is not listed here;
+   * `expectedStatuses` carries those.
+   */
   expectedStatusCodes?: number[];
+  /**
+   * Everything the operation's declared responses cover — the explicit
+   * codes, the `1XX`–`5XX` ranges and whether a `default` response exists —
+   * as `unexpectedStatus` was decided against it. `expectedStatusCodes` is
+   * its `codes` list.
+   */
+  expectedStatuses?: ExpectedStatuses;
   durationMs: number;
   /** How the SDK method was resolved and which capture was selected */
   provenance?: ExchangeProvenance;
@@ -616,33 +633,176 @@ export class IdRegistry {
 // Status code checking
 // ---------------------------------------------------------------------------
 
-/** Get the set of status codes declared in the spec for an operation (success + errors) */
-export function getExpectedStatusCodes(op: Operation): number[] {
-  const codes: number[] = [];
-  // The success response code is implied by HTTP method if not explicit in errors
-  // Common defaults: POST→201, GET→200, PUT→200, PATCH→200, DELETE→204
-  const defaultSuccess: Record<string, number> = {
-    post: 201,
-    get: 200,
-    put: 200,
-    patch: 200,
-    delete: 204,
-  };
-  codes.push(defaultSuccess[op.httpMethod] ?? 200);
-  // Add declared error codes from the spec
-  for (const err of op.errors) {
-    if (!codes.includes(err.statusCode)) {
-      codes.push(err.statusCode);
-    }
-  }
-  return codes.sort((a, b) => a - b);
+/**
+ * The statuses an operation's declared responses cover, read from every
+ * response kind the IR carries: the explicit success and error codes, the
+ * `1XX`–`5XX` range responses and the `default` response.
+ */
+export interface ExpectedStatuses {
+  /**
+   * The explicit status codes, ascending and without duplicates: every
+   * declared 2xx/3xx code (`responseStatusCode`, the primary success
+   * response's, plus every `successResponses` entry) and every `errors`
+   * code. An operation that declares no 2xx or 3xx response contributes no
+   * success code: nothing is implied from the HTTP method.
+   */
+  codes: number[];
+  /**
+   * The `rangeResponses` keys, in declaration order. A range covers every
+   * status in its hundred (`4XX` covers 400–499).
+   */
+  ranges: StatusRange[];
+  /**
+   * Whether the operation declares a `default` response, which covers every
+   * status that `codes` and `ranges` do not.
+   */
+  hasDefault: boolean;
 }
 
-/** Check if a status code is unexpected (not declared in the spec) */
+/**
+ * Read every status an operation's declared responses cover. Both
+ * `getExpectedStatusCodes` and `isUnexpectedStatus` go through this, so the
+ * one place that decides what counts as declared is here.
+ */
+export function getExpectedStatuses(op: Operation): ExpectedStatuses {
+  const codes = new Set<number>();
+  if (op.responseStatusCode !== undefined) codes.add(op.responseStatusCode);
+  for (const success of op.successResponses ?? []) codes.add(success.statusCode);
+  for (const err of op.errors) codes.add(err.statusCode);
+  return {
+    codes: [...codes].sort((a, b) => a - b),
+    ranges: (op.rangeResponses ?? []).map((entry) => entry.range),
+    hasDefault: op.defaultResponse !== undefined,
+  };
+}
+
+/**
+ * Whether `expected` covers `status`, resolved the way OpenAPI resolves a
+ * status: an explicit code, else the range whose hundred contains it, else
+ * `default`.
+ */
+export function coversStatus(expected: ExpectedStatuses, status: number): boolean {
+  if (expected.codes.includes(status)) return true;
+  const range = `${Math.floor(status / 100)}XX`;
+  if (expected.ranges.some((entry) => entry === range)) return true;
+  return expected.hasDefault;
+}
+
+/**
+ * The explicit status codes an operation declares — `getExpectedStatuses(op).codes`
+ * alone. A range or `default` response cannot be expressed as a code and is
+ * not listed, so this does not say whether a status is covered;
+ * `isUnexpectedStatus` does.
+ */
+export function getExpectedStatusCodes(op: Operation): number[] {
+  return getExpectedStatuses(op).codes;
+}
+
+/** `expected` as one token per entry, `/`-joined: `200/404/4XX/default`. */
+export function formatExpectedStatuses(expected: ExpectedStatuses): string {
+  return [...expected.codes.map(String), ...expected.ranges, ...(expected.hasDefault ? ['default'] : [])].join('/');
+}
+
+/**
+ * Whether the operation's declared responses leave `status` uncovered: no
+ * explicit code, no range containing it and no `default` response. A status
+ * of 0 is never unexpected — it marks a skipped call or a network error, not
+ * a status mismatch.
+ */
 export function isUnexpectedStatus(status: number, op: Operation): boolean {
-  if (status === 0) return false; // skipped or network error, not a status mismatch
-  const expected = getExpectedStatusCodes(op);
-  return !expected.includes(status);
+  if (status === 0) return false;
+  return !coversStatus(getExpectedStatuses(op), status);
+}
+
+// ---------------------------------------------------------------------------
+// Raw HTTP exchange capture
+// ---------------------------------------------------------------------------
+
+/** One request the raw runner sends, with the labels its exchange is recorded under. */
+export interface RawRequest {
+  operationId: string;
+  service: string;
+  /** The HTTP method as sent, upper-case. */
+  method: string;
+  /** The resolved path, recorded as `request.path`. */
+  path: string;
+  /** The full URL to request, query string included. */
+  url: string;
+  /** The query parameters, recorded as `request.queryParams`. */
+  queryParams: Record<string, string>;
+  /** The JSON body: sent on POST, PUT and PATCH, recorded as `request.body` either way. */
+  body: unknown | null;
+  headers: Record<string, string>;
+}
+
+export interface CaptureRawOptions {
+  /** The `fetch` to send with; `globalThis.fetch` by default. A test passes a stub. */
+  fetchImpl?: typeof fetch;
+  /** Milliseconds before the request is aborted; 30 000 by default. */
+  timeoutMs?: number;
+}
+
+/**
+ * Send one request and record what came back as a `CapturedExchange`.
+ *
+ * Redirects are never followed (`redirect: 'manual'`): the exchange records
+ * the operation's own response — the first hop — so a declared `302` is
+ * recorded as 302 and judged like any other status by `isUnexpectedStatus`,
+ * and a redirect the document does not declare is reported as unexpected
+ * instead of being hidden behind its target's 200. The redirect target is
+ * never requested. (Node's `fetch` returns a manual redirect with its real
+ * status and `Location` header.)
+ *
+ * A 4xx or 5xx is an `api-error` exchange with `error: 'HTTP <status>'`; a
+ * `fetch` that throws (timeout, DNS, connection refused) is an `api-error`
+ * with status 0 and the error message, which is never an unexpected status.
+ * The response body is read as JSON and recorded as null when it is not.
+ */
+export async function captureRawExchange(
+  op: Operation,
+  request: RawRequest,
+  options: CaptureRawOptions = {},
+): Promise<CapturedExchange> {
+  const { fetchImpl = fetch, timeoutMs = 30_000 } = options;
+  const { operationId, service, method, path, url, queryParams, body, headers } = request;
+  const base = { operationId, service, operationName: op.name, request: { method, path, queryParams, body } };
+  const start = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const init: RequestInit = { method, headers, signal: controller.signal, redirect: 'manual' };
+    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetchImpl(url, init);
+    clearTimeout(timeout);
+
+    const responseBody: unknown = await response.json().catch(() => null);
+    const isError = response.status >= 400;
+    const exchange: CapturedExchange = {
+      ...base,
+      response: { status: response.status, body: responseBody },
+      outcome: isError ? 'api-error' : 'success',
+      durationMs: Date.now() - start,
+    };
+    if (isError) exchange.error = `HTTP ${response.status}`;
+    if (isUnexpectedStatus(response.status, op)) {
+      const expected = getExpectedStatuses(op);
+      exchange.unexpectedStatus = true;
+      exchange.expectedStatusCodes = expected.codes;
+      exchange.expectedStatuses = expected;
+    }
+    return exchange;
+  } catch (err) {
+    clearTimeout(timeout);
+    return {
+      ...base,
+      response: { status: 0, body: null },
+      outcome: 'api-error',
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - start,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

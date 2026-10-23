@@ -18,8 +18,8 @@ import {
   parseCliArgs,
   loadSmokeConfig,
   IdRegistry,
-  getExpectedStatusCodes,
-  isUnexpectedStatus,
+  captureRawExchange,
+  formatExpectedStatuses,
   type CapturedExchange,
   type SmokeResults,
 } from './shared.js';
@@ -103,55 +103,30 @@ async function main() {
         'Content-Type': 'application/json',
       };
 
-      const start = Date.now();
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-        const fetchInit: RequestInit = {
-          method,
-          headers,
-          signal: controller.signal,
-        };
-        if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
-          fetchInit.body = JSON.stringify(body);
-        }
-
-        const response = await fetch(url.toString(), fetchInit);
-        clearTimeout(timeout);
-
-        const responseBody = await response.json().catch(() => null);
-        const durationMs = Date.now() - start;
-        const isError = response.status >= 400;
-
-        // Capture the exchange
-        const unexpected = isUnexpectedStatus(response.status, op);
-        const exchange: CapturedExchange = {
+      // Sends without following redirects: the exchange is the operation's
+      // own response (the first hop), judged against the declared statuses.
+      const exchange = await captureRawExchange(
+        op,
+        {
           operationId,
           service: group.service,
-          operationName: op.name,
-          request: {
-            method,
-            path,
-            queryParams: Object.fromEntries(Array.from(url.searchParams.entries()).sort()),
-            body,
-          },
-          response: {
-            status: response.status,
-            body: responseBody,
-          },
-          outcome: isError ? 'api-error' : 'success',
-          durationMs,
-        };
-        if (isError) {
-          exchange.error = `HTTP ${response.status}`;
-        }
-        if (unexpected) {
-          exchange.unexpectedStatus = true;
-          exchange.expectedStatusCodes = getExpectedStatusCodes(op);
-        }
+          method,
+          path,
+          url: url.toString(),
+          queryParams: Object.fromEntries(Array.from(url.searchParams.entries()).sort()),
+          body,
+          headers,
+        },
+        { timeoutMs: TIMEOUT_MS },
+      );
+      exchanges.push(exchange);
 
-        exchanges.push(exchange);
+      const { status, body: responseBody } = exchange.response;
+      if (status === 0) {
+        // `fetch` threw: timeout, DNS, connection refused. No response to read.
+        console.log(`  FAIL ${op.name}: ${exchange.error} (${exchange.durationMs}ms)`);
+      } else {
+        const isError = exchange.outcome === 'api-error';
 
         // Extract IDs for chaining (only top-level ops store service ID)
         if (!isError && responseBody) {
@@ -167,25 +142,9 @@ async function main() {
           }
         }
 
-        const unexpectedTag = unexpected ? ' UNEXPECTED' : '';
-        const status = isError ? `ERR ${response.status}` : `OK ${response.status}`;
-        console.log(`  ${status} ${op.name} (${durationMs}ms)${unexpectedTag}`);
-      } catch (err) {
-        const durationMs = Date.now() - start;
-        const errorMsg = err instanceof Error ? err.message : String(err);
-
-        exchanges.push({
-          operationId,
-          service: group.service,
-          operationName: op.name,
-          request: { method, path, queryParams, body },
-          response: { status: 0, body: null },
-          outcome: 'api-error',
-          error: errorMsg,
-          durationMs,
-        });
-
-        console.log(`  FAIL ${op.name}: ${errorMsg} (${durationMs}ms)`);
+        const unexpectedTag = exchange.unexpectedStatus ? ' UNEXPECTED' : '';
+        const label = isError ? `ERR ${status}` : `OK ${status}`;
+        console.log(`  ${label} ${op.name} (${exchange.durationMs}ms)${unexpectedTag}`);
       }
 
       await delay(DELAY_MS);
@@ -230,7 +189,10 @@ async function main() {
   if (unexpectedCount > 0) {
     console.log('\nUnexpected status codes:');
     for (const e of exchanges.filter((e) => e.unexpectedStatus)) {
-      console.log(`  ${e.operationId}: got ${e.response.status}, expected ${e.expectedStatusCodes?.join('/')}`);
+      const expected = e.expectedStatuses
+        ? formatExpectedStatuses(e.expectedStatuses)
+        : e.expectedStatusCodes?.join('/');
+      console.log(`  ${e.operationId}: got ${e.response.status}, expected ${expected}`);
     }
   }
   console.log('Written to smoke-results-raw.json');

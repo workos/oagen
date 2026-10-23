@@ -369,8 +369,10 @@ export interface OperationModified {
  * How one response entry's media types changed between two specs. Entries
  * pair up by status code — 2xx entries from `successResponses`, the primary
  * among them, errors from `errors` — so a primary that changes status still
- * pairs with the entry of its code; a lone 2xx carries no code in the IR and
- * is paired with the entry of the other spec that offers its media types,
+ * pairs with the entry of its code; a lone 2xx is not listed in
+ * `successResponses` (its code is `Operation.responseStatusCode`, which takes
+ * no part in pairing) and is paired with the entry of the other spec that
+ * offers its media types,
  * else with that spec's primary — reported with `statusCode` unset when it is
  * the new spec's lone entry. The `default` and range responses pair by key
  * and are reported with `fallback` set. A 2xx the old spec declared and the

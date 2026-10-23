@@ -23,7 +23,7 @@ It imports shared infrastructure from `@workos/oagen/smoke` and implements langu
 
 Read and understand these files before writing any code:
 
-1. **`@workos/oagen/smoke`** (exported from `{oagen}/scripts/smoke/shared.ts`) — `parseSpec()`, `planOperations()`, `generatePayload()` / `generateCamelPayload()`, `generateQueryParams()` / `generateCamelQueryParams()`, `IdRegistry`, `getExpectedStatusCodes()` / `isUnexpectedStatus()`, `resolvePath()`, `CapturedExchange`, `SmokeResults`
+1. **`@workos/oagen/smoke`** (exported from `{oagen}/scripts/smoke/shared.ts`) — `parseSpec()`, `planOperations()`, `generatePayload()` / `generateCamelPayload()`, `generateQueryParams()` / `generateCamelQueryParams()`, `IdRegistry`, `isUnexpectedStatus()` / `getExpectedStatuses()` / `coversStatus()` / `formatExpectedStatuses()` / `getExpectedStatusCodes()` (the first three read every response kind the IR carries: explicit codes, `1XX`–`5XX` ranges and `default`; the last lists explicit codes only), `captureRawExchange()` (what the raw runner sends one request with: never follows redirects, records the first hop), `resolvePath()`, `CapturedExchange`, `SmokeResults`
 
 2. **Existing smoke scripts (read via subagent)** — Use the `Agent` tool with `subagent_type: Explore` to study the closest existing smoke script. This keeps ~630+ lines of reference source out of the main context:
 
@@ -59,6 +59,8 @@ Choose the interception mechanism for the target language. It must capture the r
 | Python      | `responses`, `respx` (httpx), or `unittest.mock.patch` |
 | Go          | Custom `http.RoundTripper`                             |
 | Java/Kotlin | OkHttp `Interceptor`                                   |
+
+**Capture the first hop.** The raw runner never follows redirects (`captureRawExchange` sends with `redirect: 'manual'`), so a raw exchange records the status the operation itself returned: a declared `302` is recorded as 302 and judged against the declared statuses like any other. The SDK runner's capture must record that same hop. Intercept at the transport the SDK calls (the patched `fetch`, the `RoundTripper`, the interceptor) and, when the SDK's HTTP client follows redirects before the hook sees the response, disable following for the smoke run; otherwise a declared `302` is captured as its target's `200`, and `smoke:diff` reports a status mismatch and `isUnexpectedStatus` an unexpected status.
 
 ## Step 2: Build the SERVICE_MAP
 
