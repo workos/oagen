@@ -3815,7 +3815,7 @@ describe('a title two unions give different shapes at different depths of one ro
           },
         }),
       ),
-      root: 'GetDrawingClientErrorResponse',
+      root: 'GetDrawingError4Xx',
     },
     {
       label: 'a response header',

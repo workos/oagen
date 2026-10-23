@@ -36,7 +36,8 @@ paths:
         # An error body declared as +json: `type` is read from it (#235), named
         # like an inline application/json body, and the media type is kept
         # beside it since it is not application/json. The secondary YAML body is
-        # materialized under its own media-type name, for its role.
+        # materialized under the error's name and its media type
+        # (`RenderPetCardError500ApplicationYaml`, #304).
         '500':
           description: A problem document.
           content:

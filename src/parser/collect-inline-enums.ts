@@ -8,7 +8,7 @@ import {
 } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { enumValuesOf, sameEnumShape } from './enum-members.js';
-import { STATUS_RANGE_LABELS } from './responses.js';
+import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
 
 /**
  * Promote the inline enums a model's fields and named-union variants
@@ -141,9 +141,12 @@ export function collectInlineEnumsFromOperations(
       // model and is walked here; enums nested in its inline models are
       // reached through them. Its name is already operation-qualified
       // (`ListPetsDefaultResponse`); a clash with a different value set falls
-      // back to a numeric suffix.
+      // back to a numeric suffix — except for an error body (`errorBodies`),
+      // named `<Op>Error<code>…` like `errors[].type`, which steps to
+      // `…Body` as that does.
+      const errorBodies = errorBodyTypes(op);
       for (const { type } of collectResponseBodyTypes(op)) {
-        collectThroughModels(type, undefined);
+        collectThroughModels(type, errorBodies.has(type) ? 'Body' : undefined);
       }
     }
   }
@@ -177,6 +180,27 @@ export function collectInlineEnumsFromWebhooks(
 }
 
 /**
+ * Every body `collectResponseBodyTypes` yields that is an error body, by
+ * identity: the secondary bodies of each `errors` entry, and the body and
+ * secondary bodies of each `4XX`/`5XX` range (`isErrorStatusRange`). Each
+ * is named `<Op>Error<code>…` the way `errors[].type` is
+ * (`GetPetError404ApplicationYaml`, `GetPetError4Xx`), so an enum among them
+ * steps by the same `Body` qualifier (`GetPetError4XxBody`) rather than by a
+ * number as a `default` or `1XX`–`3XX` body does. `errors[].type` itself is
+ * not yielded there and is walked by the caller.
+ */
+function errorBodyTypes(op: Operation): ReadonlySet<TypeRef> {
+  const types = new Set<TypeRef>();
+  for (const error of op.errors) for (const content of error.contents ?? []) types.add(content.type);
+  for (const range of op.rangeResponses ?? []) {
+    if (!isErrorStatusRange(range.range)) continue;
+    if (range.type) types.add(range.type);
+    for (const content of range.contents ?? []) types.add(content.type);
+  }
+  return types;
+}
+
+/**
  * Header lists to walk, each with the status-code qualifier that keeps a
  * colliding enum name apart. When `successResponses` exists the primary list
  * is the same array as its entry there, so the entries are walked with their
@@ -197,7 +221,9 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
     if (error.headers) groups.push({ headers: error.headers, qualifier: String(error.statusCode) });
   }
   // A fallback response has no status code to qualify by; its label
-  // (`Default`, `ClientError`) is what names its inline models too.
+  // (`Default`, `ClientError`) qualifies its header models and enums, and
+  // names the inline body of a `default` or `1XX`–`3XX` response (a `4XX`
+  // or `5XX` body is named by its range key, `<Op>Error4Xx`).
   if (op.defaultResponse?.headers) groups.push({ headers: op.defaultResponse.headers, qualifier: 'Default' });
   for (const range of op.rangeResponses ?? []) {
     if (range.headers) groups.push({ headers: range.headers, qualifier: STATUS_RANGE_LABELS[range.range] });

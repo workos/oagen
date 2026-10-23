@@ -209,8 +209,8 @@ describe('response content types', () => {
       // type's; only a secondary body is named after its media type.
       expect(findOp(spec, 'renderPetCard').errors[1].type).toEqual({ kind: 'model', name: 'RenderPetCardError500' });
       expect(fieldsOf(spec, 'RenderPetCardError500')).toEqual(['title', 'detail']);
-      expect(fieldsOf(spec, 'RenderPetCardApplicationProblemJsonError')).toBeUndefined();
-      expect(fieldsOf(spec, 'RenderPetCardApplicationYamlError')).toEqual(['message']);
+      expect(fieldsOf(spec, 'RenderPetCardError500ApplicationProblemJson')).toBeUndefined();
+      expect(fieldsOf(spec, 'RenderPetCardError500ApplicationYaml')).toEqual(['message']);
       // Without an operationId the path names it, as it names the primary body.
       expect(findOp(spec, 'getPetAvatar').responseContents?.[3].type).toEqual({
         kind: 'model',
@@ -337,7 +337,7 @@ describe('response content types', () => {
       expect(problem.contentTypes).toEqual(['application/problem+json', 'application/yaml']);
       expect(problem.contents).toEqual([
         { contentType: 'application/problem+json', type: problem.type },
-        { contentType: 'application/yaml', type: { kind: 'model', name: 'RenderPetCardApplicationYamlError' } },
+        { contentType: 'application/yaml', type: { kind: 'model', name: 'RenderPetCardError500ApplicationYaml' } },
       ]);
       expect(problem.contents?.[0].type).toBe(problem.type);
     });
@@ -355,7 +355,7 @@ describe('response content types', () => {
       expect(invalid.contents?.[0].type).toBe(invalid.type);
       expect(invalid.contents?.[1]).toEqual({ contentType: 'text/plain', type: { kind: 'primitive', type: 'string' } });
       expect(spec.models.map((m) => m.name)).not.toContain('Error422');
-      // The media type's own name (`GetReportApplicationJsonError`) is for a secondary body, never the JSON body `type` is read from.
+      // The media type's own name (`GetReportError422ApplicationJson`) is for a secondary body, never the JSON body `type` is read from.
       expect(spec.models.some((m) => m.name.startsWith('GetReport') && m.name.endsWith('Error'))).toBe(false);
       // The shared entry is reached through `errors[].type`, never through the
       // content walk, so it raises no unresolved-reference warning either.
@@ -1839,18 +1839,18 @@ describe('beside default and range responses', () => {
     // A lone `+json` body, parameters and all, is `type` and the entry it shares.
     expect(op.rangeResponses?.[0]).toEqual({
       range: '5XX',
-      type: { kind: 'model', name: 'ListThingsServerErrorResponse' },
+      type: { kind: 'model', name: 'ListThingsError5Xx' },
       contentTypes: ['application/problem+json; charset=utf-8'],
       contents: [
         {
           contentType: 'application/problem+json; charset=utf-8',
-          type: { kind: 'model', name: 'ListThingsServerErrorResponse' },
+          type: { kind: 'model', name: 'ListThingsError5Xx' },
         },
       ],
       description: 'down',
     });
     expect(op.rangeResponses?.[0].contents?.[0].type).toBe(op.rangeResponses?.[0].type);
-    expect(fieldsOf(spec, 'ListThingsServerErrorResponse')).toEqual(['title']);
+    expect(fieldsOf(spec, 'ListThingsError5Xx')).toEqual(['title']);
     // Reached by every walker through `collectResponseBodyTypes`, under its own source.
     expect(collectResponseBodyTypes(op)).toEqual([
       {
@@ -1859,7 +1859,7 @@ describe('beside default and range responses', () => {
       },
       { type: { kind: 'primitive', type: 'string' }, source: 'defaultResponse.contents.text/plain' },
       { type: { kind: 'model', name: 'Problem' }, source: 'defaultResponse' },
-      { type: { kind: 'model', name: 'ListThingsServerErrorResponse' }, source: 'rangeResponses.5XX' },
+      { type: { kind: 'model', name: 'ListThingsError5Xx' }, source: 'rangeResponses.5XX' },
     ]);
     expect(assignModelsToServices(spec.models, spec.services).get('ListThingsDefaultApplicationYamlResponse')).toBe(
       'Things',
@@ -1897,12 +1897,12 @@ describe('beside default and range responses', () => {
         source: 'contents.application/vnd.thing+json',
       },
       { type: { kind: 'model', name: 'ListThingsDefaultResponse' }, source: 'defaultResponse' },
-      { type: { kind: 'model', name: 'ListThingsClientErrorResponse' }, source: 'rangeResponses.4XX' },
+      { type: { kind: 'model', name: 'ListThingsError4Xx' }, source: 'rangeResponses.4XX' },
     ]);
     for (const name of [
       'ListThingsApplicationVndThingJsonResponse',
       'ListThingsDefaultResponse',
-      'ListThingsClientErrorResponse',
+      'ListThingsError4Xx',
     ]) {
       expect(fieldNames(spec, name)).toBeDefined();
       expect(assignModelsToServices(spec.models, spec.services).get(name)).toBe('Things');
