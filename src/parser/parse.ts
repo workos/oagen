@@ -161,10 +161,23 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // enums the component pass lifted) takes its qualified name here too, so
   // the IR never declares a model and an enum under one name.
   const enumNames: ReadonlySet<string> = new Set(enums.map((e) => e.name));
+  // Resolved while the transform is still active so the names match the
+  // models'; lets a merge pass tell a clash with a component schema from one
+  // between two inline models, and a component field's site tell the model
+  // the schema pass lifted from its own schema (`fieldInlineModelBundles`)
+  // from a component of that name.
+  const componentNames = new Set(
+    Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
+  );
+  // The names every merge pass mints, shared across the passes so a later
+  // one can tell a parent whose child an earlier pass renamed
+  // (`InlineModelNaming.minted`).
+  const mintedNames = new Set<string>();
   const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
-    bundles: fieldInlineModelBundles(fieldInlineModelGroups, models),
+    bundles: fieldInlineModelBundles(fieldInlineModelGroups, models, componentNames),
     reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
     enums: enumNames,
+    minted: mintedNames,
   });
 
   const { services, inlineModels, inlineModelBundles, ownedErrorBodies } = extractOperations(
@@ -215,12 +228,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
-  // Resolved while the transform is still active so the names match the
-  // models'; lets the merge tell a clash with a component schema from one
-  // between two inline models.
-  const componentNames = new Set(
-    Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
-  );
   clearSchemaNameTransform();
 
   // Every name in play — component models and enums, every inline model of
@@ -241,7 +248,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     bundles: [
       ...inlineModelBundles,
       ...webhookInlineModelBundles,
-      ...fieldInlineModelBundles(fieldInlineModelGroups, models),
+      ...fieldInlineModelBundles(fieldInlineModelGroups, models, componentNames),
     ],
     reserved: reservedTypeNames(
       models,
@@ -252,6 +259,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       webhooks,
     ),
     enums: enumNames,
+    minted: mintedNames,
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
