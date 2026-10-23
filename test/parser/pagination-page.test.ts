@@ -362,6 +362,32 @@ describe('detectEndOfIteration', () => {
       path: 'result.has_more',
     });
   });
+  it('settles a name two allOf members of the nested parent declare as the model does: the typing declaration first (Greptile)', () => {
+    const typed: SchemaObject = { type: 'object', properties: { items: data, has_more: boolean } };
+    const described: SchemaObject = { type: 'object', properties: { has_more: { description: 'More pages' } } };
+    for (const members of [
+      [typed, described],
+      [described, typed],
+    ]) {
+      expect(detectEndOfIteration({ result: { allOf: members } }, 'result.items')).toEqual({
+        kind: 'hasMore',
+        path: 'result.has_more',
+      });
+    }
+    // The same rule settles a metadata companion's members, and the segments
+    // the path itself walks through.
+    const metaTyped: SchemaObject = { type: 'object', properties: { total_pages: integer } };
+    const metaDoc: SchemaObject = { type: 'object', properties: { total_pages: { description: 'Pages' } } };
+    expect(detectEndOfIteration({ data, meta: { allOf: [metaDoc, metaTyped] } }, 'data')).toEqual({
+      kind: 'totalPages',
+      path: 'meta.total_pages',
+    });
+    const itemsDoc: SchemaObject = { type: 'object', properties: { items: { description: 'The pets' } } };
+    expect(resolveSchemaPath({ properties: { result: { allOf: [itemsDoc, typed] } } }, 'result.items')).toEqual({
+      ...data,
+      description: 'The pets',
+    });
+  });
 });
 
 describe('resolveSchemaPath', () => {
