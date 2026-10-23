@@ -1315,6 +1315,74 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       const selecting = { dataPath: 'result.items', endOfIteration: { kind: 'hasMore', path: 'more' } };
       const unwrapped = { kind: 'array', items: { kind: 'primitive', type: 'string' } };
 
+      const unknown = { kind: 'primitive', type: 'unknown' };
+      const hasMore = { endOfIteration: { kind: 'hasMore', path: 'more' } };
+
+      it('is decided against the primary Operation.response describes: a 200 whose schema describes nothing yields to the typed 201 (Greptile)', async () => {
+        const ir = await parseJson(issueSpec(hasMore, undefined, { '200': ok({}), '201': ok(nested(more)) }));
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.responseStatusCode).toBe(201);
+        expect(op.response).toEqual(unwrapped);
+        expect(op.pagination).toMatchObject({ dataPath: 'data', endOfIteration: { kind: 'hasMore', path: 'more' } });
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unknown],
+          [201, unwrapped],
+        ]);
+        expectSound(ir, []);
+      });
+
+      it('keeps the 200 as primary when the 201 is the one whose schema describes nothing', async () => {
+        const ir = await parseJson(issueSpec(hasMore, undefined, { '200': ok(nested(more)), '201': ok({}) }));
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.responseStatusCode).toBe(200);
+        expect(op.response).toEqual(unwrapped);
+        expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'more' });
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unwrapped],
+          [201, unknown],
+        ]);
+      });
+
+      it.each([
+        [
+          'no responses at all',
+          undefined,
+          { dataPath: 'data' },
+          'dataPath "data" does not resolve to an array in the response',
+        ],
+        [
+          'no 2xx',
+          { '404': { description: 'missing' } },
+          { endOfIteration: { kind: 'hasMore', path: 'more' } },
+          'endOfIteration path "more" does not resolve to a field in the response',
+        ],
+        [
+          'a 204 primary',
+          { '204': { description: 'no content' } },
+          { dataPath: 'data' },
+          'dataPath "data" does not resolve to an array in the response',
+        ],
+      ])(
+        'rejects an override that asks of the response when there is %s',
+        async (_label, responses, fields, problem) => {
+          // `p` alone: the override is the only possible source of an iterator.
+          const op = onlyOperation(
+            await parseJson(
+              petsSpec({
+                parameters: [query('p')],
+                responses,
+                'x-pagination': { strategy: 'page', param: 'p', ...fields },
+              }),
+            ),
+          );
+          rejected(problem);
+          expect(op.pagination).toBeUndefined();
+          expect(op.response).toEqual(unknown);
+        },
+      );
+
       it("a rejection on the primary reaches every 2xx: the 201 unwraps on data as detection does, not on the override's wrapper", async () => {
         // Only the 201 declares `more`; the 200 is primary and rejects the
         // override, so the 201 is read exactly as detection reads it.
