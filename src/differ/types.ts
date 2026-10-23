@@ -36,7 +36,7 @@ export interface ParamDefaultChanged {
   /** Parameter name (e.g. 'order', 'limit'). */
   paramName: string;
   /** Where the parameter lives; kept in step with `ParamChange.paramLocation`. */
-  paramLocation: 'path' | 'query' | 'header' | 'cookie';
+  paramLocation: ParamLocation;
   /** Old default value as a string, or null if previously unset. */
   oldDefault: string | null;
   /** New default value as a string, or null if now unset. */
@@ -70,7 +70,7 @@ export type DeprecatedNode =
       serviceName: string;
       operationName: string;
       paramName: string;
-      paramLocation: 'path' | 'query' | 'header' | 'cookie';
+      paramLocation: ParamLocation;
     }
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
@@ -82,7 +82,7 @@ export type DeprecatedNode =
       name: string;
       httpMethod: string;
       paramName: string;
-      paramLocation: 'path' | 'query' | 'header' | 'cookie';
+      paramLocation: ParamLocation;
     };
 
 /**
@@ -624,9 +624,19 @@ export interface WebhookModified {
 }
 
 /**
- * A change to one parameter of an operation. Parameters are matched by
- * location and name — OpenAPI allows a path `id` beside a query `id` on one
- * operation — so every entry carries `paramLocation` to say which one it is.
+ * Where a parameter lives. An operation carries parameters in all four
+ * locations (`Operation.pathParams`, `queryParams`, `headerParams` and
+ * `cookieParams`); a webhook carries `header`, `query` and `cookie` ones.
+ * `locatedParams` in `params.ts` tags every parameter a node carries with
+ * its location, and `paramKey` there joins it to the name to identify one.
+ */
+export type ParamLocation = 'path' | 'query' | 'header' | 'cookie';
+
+/**
+ * A change to one parameter of an operation or a webhook, in any location it
+ * carries one. Parameters are matched by location and name — OpenAPI allows
+ * a path `id` beside a query `id` on one operation — so every entry carries
+ * `paramLocation` to say which one it is.
  */
 export interface ParamChange {
   kind:
@@ -648,10 +658,11 @@ export interface ParamChange {
   newDeprecated?: boolean;
   /**
    * Where the parameter lives. Set on every entry `diffOperations` produces
-   * and on every entry `diffWebhooks` produces (a webhook's header, query and
-   * cookie parameters may share a name).
+   * (an operation's path, query, header and cookie parameters) and on every
+   * entry `diffWebhooks` produces (a webhook's header, query and cookie
+   * parameters may share a name).
    */
-  paramLocation?: 'path' | 'query' | 'header' | 'cookie';
+  paramLocation?: ParamLocation;
   /** For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
   details?: string;
 }

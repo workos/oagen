@@ -159,6 +159,7 @@ export type {
   WebhookRemoved,
   WebhookModified,
   ParamChange,
+  ParamLocation,
   RequestBodyContentTypesChange,
   ResponseContentTypesChange,
   BehaviorChange,

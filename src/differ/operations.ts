@@ -21,7 +21,8 @@ import {
   type MediaTypeBody,
 } from './media-types.js';
 import type { DocumentShapes } from './shapes.js';
-import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
+import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange } from './types.js';
+import { locatedParams, paramKey } from './params.js';
 import {
   classifyParamChange,
   deprecationDetails,
@@ -616,33 +617,17 @@ function classifyKeyedResponsesChange<K>(
   return 'none';
 }
 
-type ParamLocation = 'path' | 'query' | 'header';
-
 /**
- * The key `diffParams` matches parameters on. OpenAPI allows a path `id`
- * beside a query `id` on one operation, and keying by name alone paired
- * whichever came last on each side with the other's, so a change to one of
- * them was reported against the wrong parameter or not at all.
+ * Diff an operation's parameters in every location it carries them — path,
+ * query, header and cookie, through `locatedParams` — matched by location
+ * and name (`paramKey`) and classified from the caller's side by
+ * `classifyParamChange`. Cookie parameters were left out of this walk until
+ * #294, so a change to one came out as no change.
  */
-function paramKey(loc: ParamLocation, name: string): string {
-  return `${loc}:${name}`;
-}
-
 function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
   const changes: ParamChange[] = [];
-  const tagged = (loc: ParamLocation, params: typeof oldOp.queryParams) => params.map((p) => ({ p, loc }));
-  const allOldParams = [
-    ...tagged('path', oldOp.pathParams),
-    ...tagged('query', oldOp.queryParams),
-    ...tagged('header', oldOp.headerParams),
-  ];
-  const allNewParams = [
-    ...tagged('path', newOp.pathParams),
-    ...tagged('query', newOp.queryParams),
-    ...tagged('header', newOp.headerParams),
-  ];
-  const oldByKey = new Map(allOldParams.map((e) => [paramKey(e.loc, e.p.name), e]));
-  const newByKey = new Map(allNewParams.map((e) => [paramKey(e.loc, e.p.name), e]));
+  const oldByKey = new Map(locatedParams(oldOp).map((e) => [paramKey(e.loc, e.p.name), e]));
+  const newByKey = new Map(locatedParams(newOp).map((e) => [paramKey(e.loc, e.p.name), e]));
   // Every entry says where its parameter lives, since the name alone no
   // longer identifies it.
   const at = (change: ParamChange, loc: ParamLocation): ParamChange => {
