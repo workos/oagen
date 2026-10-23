@@ -610,16 +610,18 @@ describe('one name on one path: two methods never share it unless they are PUT a
     ]);
   });
 
-  it('numbers a name any later pass lands on an operationId of the same path', () => {
+  it('skips a name a later pass would land on an operationId of the same path, and numbers the plain name', () => {
     // The service noun restored to `GET /api/notes` beside `operationId: list`
-    // is the POST's operationId on its own path.
+    // would be the POST's operationId on its own path, so it is not taken
+    // (#288): the GET keeps `list` and, with no qualifier left, is `list2`,
+    // never `listNotes2`, which reads as a variant of the POST.
     expect(
       names({
         '/api/notes': { get: ok, post: { ...ok, operationId: 'listNotes' } },
         '/api/{teamId}/notes': { get: { ...item('teamId'), operationId: 'list' } },
       }),
     ).toEqual([
-      'Notes.listNotes2               GET    /api/notes',
+      'Notes.list2                    GET    /api/notes',
       'Notes.listNotes                POST   /api/notes',
       'Notes.list                     GET    /api/{teamId}/notes',
     ]);

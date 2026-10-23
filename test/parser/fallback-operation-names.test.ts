@@ -732,28 +732,31 @@ describe('plural path names (issue #268)', () => {
       'getToyDog                    GET    /store/dogs/{id}/toys/{toyId}',
       'getToyCat                    GET    /store/featured/{toyId}',
     ]);
-    // An item segment beside the same segment as a collection: the singular
-    // and the plural tell them apart, with no parameter needed.
+    // An item segment beside the same segment as a collection is one word
+    // written once, `cats`, singular only because `{id}` follows it: one
+    // spelling for both, which tells nothing apart (#288), so the parameter
+    // does, as for `/org/teams/members` beside `/org/teams/{teamId}/members`.
     expect(
       names({
         '/store/cats/{id}/toys/{toyId}': { get: item('id') },
         '/store/cats/toys/{toyId}': { get: item('toyId') },
       }),
     ).toEqual([
-      'getToyCats                   GET    /store/cats/toys/{toyId}',
-      'getToyCat                    GET    /store/cats/{id}/toys/{toyId}',
+      'getToy                       GET    /store/cats/toys/{toyId}',
+      'getToyById                   GET    /store/cats/{id}/toys/{toyId}',
     ]);
   });
 
-  it('stays singular when two paths agree in both spellings, and goes on to the parameters', () => {
+  it('leaves off a context two paths agree on in both spellings, and goes on to the parameters', () => {
+    // `Team` for both says nothing about which is which (#288); `orgId` does.
     expect(
       names({
         '/orgs/teams/{id}/members': { get: item('id') },
         '/orgs/{orgId}/teams/{id}/members': { get: item('orgId') },
       }),
     ).toEqual([
-      'listMembersTeam              GET    /orgs/teams/{id}/members',
-      'listMembersTeamByOrgId       GET    /orgs/{orgId}/teams/{id}/members',
+      'listMembers                  GET    /orgs/teams/{id}/members',
+      'listMembersByOrgId           GET    /orgs/{orgId}/teams/{id}/members',
     ]);
   });
 
