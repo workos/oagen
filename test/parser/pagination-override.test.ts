@@ -633,18 +633,14 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         expect(itemType?.kind).toBe('model');
         const itemModel = itemType?.kind === 'model' ? ir.models.find((m) => m.name === itemType.name) : undefined;
         expect(itemModel?.fields.map((f) => f.name)).toEqual(['id']);
-        // The 202's own model is kept as well, so `successResponses` never dangles.
+        // The 202's own model is kept as well, so `successResponses` never dangles:
+        // its `{ job_id }` is another shape than the 200's kept wrapper, so it
+        // steps to its status code instead of resolving to the 200's model (#309).
         const job = op.successResponses?.find((r) => r.statusCode === 202)?.type;
-        expect(job?.kind).toBe('model');
-        if (job?.kind === 'model') expect(ir.models.some((m) => m.name === job.name)).toBe(true);
+        expect(job).toEqual({ kind: 'model', name: 'ListPetsResponse202' });
+        expect(ir.models.find((m) => m.name === 'ListPetsResponse202')?.fields.map((f) => f.name)).toEqual(['job_id']);
         // validateModelRefs would have warned about any dangling reference.
-        // The one warning is #240's: the 202's inline body takes the 200's
-        // `<Op>Response` name with another shape, and the primary's is kept.
-        expect(warn.mock.calls.map((call) => call[0])).toEqual([
-          expect.stringContaining(
-            'Inline model "ListPetsResponse" from the 202 response has different fields than the 200 response\'s',
-          ),
-        ]);
+        expect(warn).not.toHaveBeenCalled();
       });
     });
 
@@ -719,12 +715,13 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         );
         const op = expectWrapperKept(ir);
         expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
-        // The one warning is #240's: the 202's inline body takes the 200's name with another shape.
-        expect(warn.mock.calls.map((call) => call[0])).toEqual([
-          expect.stringContaining(
-            'Inline model "ListPetsResponse" from the 202 response has different fields than the 200 response\'s',
-          ),
-        ]);
+        // The 202's `{ job_id }` is another shape than the 200's kept wrapper,
+        // so it steps to its status code and keeps its fields (#309).
+        expect(op.successResponses?.find((r) => r.statusCode === 202)?.type).toEqual({
+          kind: 'model',
+          name: 'ListPetsResponse202',
+        });
+        expect(warn).not.toHaveBeenCalled();
       });
     });
 

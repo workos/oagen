@@ -54,6 +54,14 @@ export interface ResponseExtractionResult {
   inlineModels: Model[];
   /** Whether this response indicates a paginated list */
   isPaginated: boolean;
+  /**
+   * Set when the body is a list envelope detection recognized but did not
+   * unwrap because nothing pages it (`paginationDisabled`): it was read as
+   * any other body, a plain response model carrying every field. The caller
+   * warns about an envelope kept for want of a paging parameter; one kept by
+   * `strategy: 'none'` was asked for.
+   */
+  unpagedEnvelope?: boolean;
   /** Path to the data array within the response envelope (e.g., 'data') */
   dataPath?: string;
   /**
@@ -89,10 +97,13 @@ export interface ResponseExtractionResult {
 
 export interface ResponseClassificationOptions {
   /**
-   * The operation's pagination was switched off explicitly (`strategy:
-   * 'none'`). A list envelope is then not unwrapped: the body becomes a plain
-   * response model carrying every field, exactly as a non-list body does, so
-   * the wire shape survives without a `pagination` entry to describe it.
+   * Nothing will page the operation: its pagination was switched off
+   * explicitly (`strategy: 'none'`), or no query parameter it declares
+   * drives an iterator and no override names one. A list envelope is then
+   * not unwrapped: the body becomes a plain response model carrying every
+   * field, exactly as a non-list body does, so the wire shape survives
+   * without a `pagination` entry to describe it (`unpagedEnvelope` says it
+   * was an envelope).
    */
   paginationDisabled?: boolean;
   /**
@@ -118,6 +129,20 @@ export interface ResponseClassificationOptions {
    */
   settle?: ItemSettlement;
 }
+
+/**
+ * The readings an inline body can take, one per way `buildOperation` decides
+ * it (`iteratorSource`): unwrapped on its data array for an iterator a
+ * declared query parameter or a usable override drives, or kept as the wire
+ * shape — `strategy: 'none'`, nothing to page with, an explicit `dataPath`
+ * naming another array (the same reading as `paginationDisabled`, so the
+ * same names). A body that is no list envelope reads the same under both.
+ * Which reading an operation takes is known only when it is read, so a dry
+ * run that reserves a body's names (`bodyModelNames`) classifies it under
+ * every reading here: whichever the operation then picks, the names it mints
+ * are the reserved ones.
+ */
+export const BODY_READINGS: readonly ResponseClassificationOptions[] = [{}, { paginationDisabled: true }];
 
 /**
  * The word that stands in for a range key wherever a status code would
@@ -263,20 +288,27 @@ function classifyBody(
   schema = foldSiblingProperties(schema);
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
-  if (!options.paginationDisabled) {
-    const envelope = detectListEnvelope(schema);
-    if (envelope.isEnvelope) {
-      const override = options.dataPathOverride;
-      if (override === undefined || override === envelope.dataPath) {
-        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
-      }
-      // The override names another array than the one the envelope would be
-      // unwrapped on: detection was wrong for this operation, so the envelope
-      // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
-      // field is read by the caller (`bodyEndOfIteration`), as every kept
-      // wrapper's is.
-      return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  const envelope = detectListEnvelope(schema);
+  if (envelope.isEnvelope) {
+    const override = options.dataPathOverride;
+    if (!options.paginationDisabled && (override === undefined || override === envelope.dataPath)) {
+      return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
     }
+    // A recognized envelope that is not unwrapped is kept as the wire shape,
+    // one model carrying every field, whichever reason keeps it: nothing
+    // pages the operation (`paginationDisabled` — `strategy: 'none'`, or no
+    // declared query parameter and no usable override), or an explicit
+    // `dataPath` names another array than the one it would be unwrapped on
+    // (detection was wrong for this operation; its stop field is read by the
+    // caller, `bodyEndOfIteration`). It never takes the single-resource
+    // reading below: an envelope with one required companion carrying a
+    // constant `type`/`object` (`{ data, pagination: { type: 'pagination',
+    // total } }` with `required: ['pagination']`) fits that shape, and
+    // unwrapping it would make the companion the whole response and drop
+    // `data`. `unpagedEnvelope` tells the caller which reason kept it, so an
+    // envelope kept for want of a paging parameter is warned about.
+    const kept = extractDirectResource(schema, contextName, componentSchemas, options.settle);
+    return options.paginationDisabled ? { ...kept, unpagedEnvelope: true } : kept;
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })

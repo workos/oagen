@@ -603,7 +603,16 @@ export interface PaginationEndOfIteration {
   path: string;
 }
 
-/** Structured pagination metadata for auto-paging iterator generation */
+/**
+ * Structured pagination metadata for auto-paging iterator generation.
+ *
+ * Present only when a query parameter the operation declares drives the
+ * iterator — the one detection recognized, or the one an override names —
+ * so `param` is always a query parameter of the operation. A list envelope
+ * returned by an operation that declares no such parameter (a `page`
+ * without a page size, no paging parameter at all) is kept as a plain
+ * response model and has no entry here.
+ */
 export interface PaginationMeta {
   strategy: PaginationStrategy;
   /** Query parameter that selects the page: the cursor, the offset, or the page number. */
