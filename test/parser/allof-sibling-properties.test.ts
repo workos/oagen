@@ -112,6 +112,14 @@ const fieldsOf = (spec: ApiSpec, name: string): string[] =>
 
 const modelNames = (spec: ApiSpec): string[] => spec.models.map((m) => m.name);
 
+/** Every ordering of `items`. */
+const permutations = <T>(items: T[]): T[][] =>
+  items.length <= 1
+    ? [items]
+    : items.flatMap((item, i) =>
+        permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
+      );
+
 /** Every type reference an operation holds, labelled by where it sits. */
 function operationRefs(op: Operation): Array<[string, TypeRef]> {
   const refs: Array<[string, TypeRef]> = [[`${op.name}.response`, op.response]];
@@ -479,7 +487,7 @@ describe('workos/oagen#307: properties written beside allOf', () => {
   });
 
   describe('a primary response body reads its allOf as a field of the same schema is read', () => {
-    it('$ref members with nothing inline beside them are the reference; a lone member is the body itself', async () => {
+    it('a lone $ref with nothing added is the reference, two $refs merge; a lone member is the body itself', async () => {
       const { spec, warnings } = await parse(
         'response-readings',
         specDoc(
@@ -487,8 +495,7 @@ describe('workos/oagen#307: properties written beside allOf', () => {
             '/a': getOp('loneRef', { allOf: [ref('Pet')] }),
             '/b': getOp('refPlusDoc', { allOf: [ref('Pet'), { description: 'doc' }] }),
             '/c': getOp('refPlusLimits', { allOf: [ref('Pet'), { minProperties: 1 }] }),
-            // Two `$ref`s with nothing inline beside them: the first component,
-            // as `Holder.two` is typed.
+            // A second `$ref` adds to the first: the merge, as `Holder.two` is typed.
             '/d': getOp('twoRefs', { allOf: [ref('Pet'), ref('Owner')] }),
             '/e': getOp('loneObject', { allOf: [obj({ a: str }, { required: ['a'] })] }),
             '/f': getOp('loneArray', { allOf: [{ type: 'array', items: obj({ x: str }) }] }),
@@ -508,7 +515,7 @@ describe('workos/oagen#307: properties written beside allOf', () => {
         loneRef: 'Pet',
         refPlusDoc: 'Pet',
         refPlusLimits: 'Pet',
-        twoRefs: 'Pet',
+        twoRefs: 'TwoRefsResponse',
         loneObject: 'LoneObjectResponse',
         loneArray: 'LoneArrayItem[]',
         loneEnum: 'LoneEnumResponse',
@@ -519,11 +526,14 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       expect(fieldsOf(spec, 'MergedResponse')).toEqual(['name: string', 'extra?: string']);
       expect(spec.enums.find((e) => e.name === 'LoneEnumResponse')?.values.map((v) => v.value)).toEqual(['a', 'b']);
       // Before, each reference reading minted a copy of `Pet` under the operation's name.
-      expect(modelNames(spec).filter((name) => name.endsWith('Response'))).toEqual([
-        'LoneObjectResponse',
-        'MergedResponse',
-      ]);
-      expect(fieldsOf(spec, 'Holder')).toEqual(['two?: Pet', 'lone?: Pet']);
+      expect(
+        modelNames(spec)
+          .filter((name) => name.endsWith('Response'))
+          .sort(),
+      ).toEqual(['LoneObjectResponse', 'MergedResponse', 'TwoRefsResponse']);
+      expect(fieldsOf(spec, 'TwoRefsResponse')).toEqual(['name: string', 'id: string']);
+      expect(fieldsOf(spec, 'Holder')).toEqual(['two?: HolderTwo', 'lone?: Pet']);
+      expect(fieldsOf(spec, 'HolderTwo')).toEqual(['name: string', 'id: string']);
       expect(warnings).toEqual([]);
       expectSound(spec, ['Pet', 'Owner', 'Holder']);
     });
@@ -539,6 +549,15 @@ describe('workos/oagen#307: properties written beside allOf', () => {
         expect(result.response).toEqual({ kind: 'model', name: 'Pet' });
         expect(result.inlineModels).toEqual([]);
       }
+      // A second `$ref` adds to the first: the merge, under the body's name.
+      const two = classifyAndExtractResponse({ allOf: [ref('Pet'), ref('Owner')] }, 'GetPetResponse', {
+        Pet: pet,
+        Owner: obj({ id: str }, { required: ['id'] }),
+      });
+      expect(two.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
+      expect(two.inlineModels.map((m) => `${m.name} { ${m.fields.map((f) => f.name).join(', ')} }`)).toEqual([
+        'GetPetResponse { name, id }',
+      ]);
       // A ref no component schema answers is that reference too.
       const unanswered = classifyAndExtractResponse({ allOf: [ref('Pet')] }, 'GetPetResponse');
       expect(unanswered.response).toEqual({ kind: 'model', name: 'Pet' });
@@ -672,12 +691,6 @@ describe('workos/oagen#307: properties written beside allOf', () => {
     it("a field's type is the first always-applying declaration's, whatever the member order", async () => {
       const memberOf = { branch, nestedBranch, enum: enumMember, string: stringMember };
       type Kind = keyof typeof memberOf;
-      const permutations = <T>(items: T[]): T[][] =>
-        items.length <= 1
-          ? [items]
-          : items.flatMap((item, i) =>
-              permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
-            );
       const orders = permutations<Kind>(['branch', 'nestedBranch', 'enum', 'string']);
       const schemas = Object.fromEntries(
         orders.map((order, i) => [`Order${i}`, { allOf: order.map((kind) => memberOf[kind]) }]),
@@ -692,6 +705,227 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       }
       expect(warnings).toEqual([]);
       expectSound(spec, Object.keys(schemas));
+    });
+  });
+
+  describe('nested models are built from the declaration the field is typed from (review round 2)', () => {
+    /** A `oneOf` branch declaring an object `child`, under an `allOf`. */
+    const Inner: SchemaObject = {
+      allOf: [{ oneOf: [obj({ child: obj({ branchField: str }) }), obj({ other: str })] }],
+    };
+    const Base = obj({ child: obj({ realField: str }) });
+
+    it("Greptile's case: a member's declaration types the field and builds its model, not an earlier branch's", async () => {
+      const { spec, warnings } = await parse(
+        'chosen-declaration',
+        specDoc({}, { Inner, Base, Outer: { allOf: [ref('Inner'), ref('Base')] } }),
+      );
+      expect(fieldsOf(spec, 'Outer')).toEqual(['child?: OuterChild', 'other?: string']);
+      // Before: `OuterChild { branchField }`, the first declaration the lookup met.
+      expect(fieldsOf(spec, 'OuterChild')).toEqual(['realField?: string']);
+      expect(fieldsOf(spec, 'InnerChild')).toEqual(['branchField?: string']);
+      expect(fieldsOf(spec, 'BaseChild')).toEqual(['realField?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Inner', 'Base', 'Outer']);
+    });
+
+    it("a branch's declaration is the fallback when no member always declares the field", async () => {
+      const { spec, warnings } = await parse(
+        'branch-fallback',
+        specDoc({}, { Inner, Lone: { allOf: [ref('Inner'), obj({ extra: str })] } }),
+      );
+      expect(fieldsOf(spec, 'Lone')).toEqual(['child?: LoneChild', 'other?: string', 'extra?: string']);
+      expect(fieldsOf(spec, 'LoneChild')).toEqual(['branchField?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Inner', 'Lone']);
+    });
+
+    it('array items under the field come from the chosen declaration too', async () => {
+      const InnerItems: SchemaObject = {
+        allOf: [
+          { oneOf: [obj({ children: { type: 'array', items: obj({ branchField: str }) } }), obj({ other: str })] },
+        ],
+      };
+      const BaseItems = obj({ children: { type: 'array', items: obj({ realField: str }) } });
+      const { spec, warnings } = await parse(
+        'nested-items',
+        specDoc({}, { InnerItems, BaseItems, OuterItems: { allOf: [ref('InnerItems'), ref('BaseItems')] } }),
+      );
+      const children = modelOf(spec, 'OuterItems').fields.find((f) => f.name === 'children')!.type;
+      expect(children.kind).toBe('array');
+      const item = children.kind === 'array' ? children.items : children;
+      expect(fieldsOf(spec, show(item))).toEqual(['realField?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['InnerItems', 'BaseItems', 'OuterItems']);
+    });
+
+    it("every ordering of four members builds the nested model from the chosen declaration's fields", async () => {
+      const branch: SchemaObject = { oneOf: [obj({ child: obj({ branchField: str }) }), obj({ other: str })] };
+      const memberOf = {
+        branch,
+        nestedBranch: { allOf: [branch] },
+        a: obj({ child: obj({ aField: str }) }),
+        b: obj({ child: obj({ bField: str }) }),
+      };
+      type Kind = keyof typeof memberOf;
+      const orders = permutations<Kind>(['branch', 'nestedBranch', 'a', 'b']);
+      const schemas = Object.fromEntries(
+        orders.map((order, i) => [`Nest${i}`, { allOf: order.map((kind) => memberOf[kind]) }]),
+      );
+      const { spec, warnings } = await parse('nested-orderings', specDoc({}, schemas));
+      for (const [i, order] of orders.entries()) {
+        const name = `Nest${i}`;
+        const label = `${name}: ${order.join(' > ')}`;
+        const chosen = order.find((kind) => kind === 'a' || kind === 'b')!;
+        const child = modelOf(spec, name).fields.find((f) => f.name === 'child')!.type;
+        expect(show(child), label).toBe(`${name}Child`);
+        // The one model of that name has the chosen declaration's field; the
+        // other member's declaration minted nothing.
+        expect(fieldsOf(spec, `${name}Child`), label).toEqual([`${chosen}Field?: string`]);
+        expect(
+          modelNames(spec).filter((n) => n === `${name}Child`),
+          label,
+        ).toHaveLength(1);
+      }
+      expect(warnings).toEqual([]);
+      expectSound(spec, Object.keys(schemas));
+    });
+
+    it('the same without a $ref: a oneOf member on the component itself, then a member always declaring the field', async () => {
+      const { spec, warnings } = await parse(
+        'inline-branch-then-member',
+        specDoc(
+          {},
+          {
+            Base,
+            Note: { allOf: [{ oneOf: [obj({ child: obj({ branchField: str }) }), obj({ other: str })] }, ref('Base')] },
+          },
+        ),
+      );
+      expect(fieldsOf(spec, 'Note')).toEqual(['child?: NoteChild', 'other?: string']);
+      expect(fieldsOf(spec, 'NoteChild')).toEqual(['realField?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Base', 'Note']);
+    });
+  });
+
+  describe('review (MichaelDeBoey)', () => {
+    it('a `required` beside a lone $ref, or a second $ref, makes the schema the merge at every site; a bare $ref stays the reference', async () => {
+      // `Loose.tag` is optional; a `required` beside the `$ref` makes it required.
+      const Loose = obj({ tag: str });
+      const refRequired: SchemaObject = { allOf: [ref('Loose')], required: ['tag'] };
+      const memberRequired: SchemaObject = { allOf: [ref('Loose'), { required: ['tag'] }] };
+      const { spec, warnings } = await parse(
+        'required-beside-ref',
+        specDoc(
+          {
+            '/a': getOp('refRequired', refRequired),
+            '/b': getOp('memberRequired', memberRequired),
+            '/c': getOp('bareRef', { allOf: [ref('Loose')] }),
+            '/d': getOp('refDoc', { allOf: [ref('Loose'), { description: 'doc' }] }),
+          },
+          {
+            Loose,
+            Owner: obj({ id: str }, { required: ['id'] }),
+            Holder: obj({ req: refRequired, member: memberRequired, bare: { allOf: [ref('Loose')] } }),
+            // The component rule, the same schema under `components.schemas`.
+            Pup: { allOf: [ref('Loose')], required: ['tag'] },
+          },
+        ),
+      );
+      const ops = opsOf(spec);
+      expect(show(ops.refRequired!.response)).toBe('RefRequiredResponse');
+      expect(fieldsOf(spec, 'RefRequiredResponse')).toEqual(['tag: string']);
+      expect(show(ops.memberRequired!.response)).toBe('MemberRequiredResponse');
+      expect(fieldsOf(spec, 'MemberRequiredResponse')).toEqual(['tag: string']);
+      expect(show(ops.bareRef!.response)).toBe('Loose');
+      expect(show(ops.refDoc!.response)).toBe('Loose');
+      expect(fieldsOf(spec, 'Holder')).toEqual(['req?: HolderReq', 'member?: HolderMember', 'bare?: Loose']);
+      expect(fieldsOf(spec, 'HolderReq')).toEqual(['tag: string']);
+      expect(fieldsOf(spec, 'HolderMember')).toEqual(['tag: string']);
+      expect(fieldsOf(spec, 'Pup')).toEqual(['tag: string']);
+      expect(fieldsOf(spec, 'Loose')).toEqual(['tag?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Loose', 'Owner', 'Holder', 'Pup']);
+    });
+
+    it("a member's own properties beside its oneOf/anyOf are read: a $ref member's component, an inline member, the dispatcher axis", async () => {
+      const flatMember: SchemaObject = {
+        properties: { x: str },
+        required: ['x'],
+        oneOf: [obj({ a: str }), obj({ b: str })],
+      };
+      const { spec, warnings } = await parse(
+        'member-properties-beside-union',
+        specDoc(
+          { '/dogs': getOp('getDog', { allOf: [ref('Pet'), flatMember] }) },
+          {
+            Pet: pet,
+            // The component's own model keeps the documented rule: the object, variants not read.
+            Base: { properties: { id: str }, required: ['id'], oneOf: [obj({ a: str }), obj({ b: str })] },
+            Pup: { allOf: [ref('Base')], properties: { breed: str } },
+            Dog: { allOf: [ref('Pet'), flatMember] },
+            Disp: {
+              allOf: [
+                ref('Pet'),
+                {
+                  properties: { x: str },
+                  required: ['x'],
+                  oneOf: [obj({ kind: { const: 'a' }, a: str }), obj({ kind: { const: 'b' }, b: str })],
+                },
+              ],
+            },
+          },
+        ),
+      );
+      expect(fieldsOf(spec, 'Base')).toEqual(['id: string']);
+      expect(fieldsOf(spec, 'Pup')).toEqual(['breed?: string', 'id: string', 'a?: string', 'b?: string']);
+      expect(fieldsOf(spec, 'Dog')).toEqual(['name: string', 'x: string', 'a?: string', 'b?: string']);
+      // The same schema as a response body has the same fields.
+      expect(fieldsOf(spec, show(opsOf(spec).getDog!.response))).toEqual(fieldsOf(spec, 'Dog'));
+      expect(fieldsOf(spec, 'Disp')).toEqual(['name: string', 'x: string']);
+      expect(modelOf(spec, 'Disp').discriminator?.property).toBe('kind');
+      expect(fieldsOf(spec, 'DispA')).toEqual(['name: string', 'x: string', 'kind?: "a"', 'a?: string']);
+      expect(fieldsOf(spec, 'DispB')).toEqual(['name: string', 'x: string', 'kind?: "b"', 'b?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'Base', 'Pup', 'Dog', 'Disp']);
+    });
+
+    it("a union no discriminator dispatches builds no variant model, so nothing nested under a branch takes a field model's name", async () => {
+      const { spec, warnings } = await parse(
+        'flattened-builds-no-variants',
+        specDoc(
+          {},
+          {
+            Flat: {
+              allOf: [
+                { oneOf: [obj({ child: obj({ branchField: str }) }, { title: 'Branch' }), obj({ other: str })] },
+                obj({ child: obj({ realField: str }) }),
+              ],
+            },
+          },
+        ),
+      );
+      expect(fieldsOf(spec, 'Flat')).toEqual(['child?: FlatChild', 'other?: string']);
+      expect(fieldsOf(spec, 'FlatChild')).toEqual(['realField?: string']);
+      expect(modelNames(spec).sort()).toEqual(['Flat', 'FlatChild']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Flat']);
+    });
+
+    it('a single const-pinned variant dispatches: its model is built and the mapping names it', async () => {
+      const { spec, warnings } = await parse(
+        'single-variant-dispatch',
+        specDoc(
+          {},
+          { Pet: pet, Single: { allOf: [ref('Pet'), { oneOf: [obj({ kind: { const: 'only' }, v: str })] }] } },
+        ),
+      );
+      expect(fieldsOf(spec, 'Single')).toEqual(['name: string']);
+      expect(modelOf(spec, 'Single').discriminator).toEqual({ property: 'kind', mapping: { only: 'SingleOnly' } });
+      expect(fieldsOf(spec, 'SingleOnly')).toEqual(['name: string', 'kind?: "only"', 'v?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'Single']);
     });
   });
 });
