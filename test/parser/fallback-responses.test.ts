@@ -589,7 +589,7 @@ describe('headers on fallback responses', () => {
 
   it('promotes an inline header enum, qualified by the response label when a 200 header of the same name differs', () => {
     const policy = (values: string[]) => ({ schema: { type: 'string', enum: values } });
-    const { services, ownedErrorBodies } = extractOperations({
+    const { services, componentSites } = extractOperations({
       '/pets': {
         get: {
           operationId: 'listPets',
@@ -602,7 +602,7 @@ describe('headers on fallback responses', () => {
       },
     } as never);
     const enums: Enum[] = [];
-    collectInlineEnumsFromOperations(services, enums, ownedErrorBodies);
+    collectInlineEnumsFromOperations(services, enums, componentSites);
     const op = services[0].operations[0];
 
     expect(op.defaultResponse?.headers?.[0].type).toEqual({
