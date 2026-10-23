@@ -4,13 +4,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { fieldAdmits, modelAdmits, schemaShapeKey } from '../../src/parser/inline-models.js';
+import { withWrapperDocs } from '../../src/parser/schemas.js';
 import {
   OPERATION_CONSUMED_EXTENSIONS,
   SCHEMA_CONSUMED_EXTENSIONS,
   extensionsOf,
   operationExtensionsEntry,
   schemaExtensionsEntry,
-  withWrapperExtensions,
 } from '../../src/parser/extensions.js';
 import {
   collectModelRefs,
@@ -748,6 +748,123 @@ describe('x-* extensions reach the IR (issue #352)', () => {
       expect(fieldOf(pet, 'vet').extensions).toEqual({ 'x-wrapper': 2 });
       expectSound(spec, ['Pet']);
     });
+
+    describe('nested wrappers compose outermost-first, for every documentation keyword (Greptile round 3)', () => {
+      /** A nullable `oneOf` wrapper around `branch` carrying `docs`. */
+      const nullable = (branch: Record<string, unknown>, docs: Record<string, unknown>) => ({
+        ...docs,
+        oneOf: [branch, { type: 'null' }],
+      });
+      /** A single-member `allOf` wrapper around `member` carrying `docs`. */
+      const lone = (member: Record<string, unknown>, docs: Record<string, unknown>) => ({ ...docs, allOf: [member] });
+      const object = (docs: Record<string, unknown>) => ({
+        type: 'object',
+        ...docs,
+        properties: { city: { type: 'string' } },
+      });
+      const enumeration = (docs: Record<string, unknown>) => ({ type: 'string', enum: ['a', 'b'], ...docs });
+
+      /** Each documentation keyword with a value per level, and what the IR node built from the branch shows for it. */
+      const keywords: Array<{
+        key: 'description' | 'externalDocs' | 'extensions';
+        at: (level: string) => Record<string, unknown>;
+        shown: (level: string) => unknown;
+      }> = [
+        { key: 'description', at: (level) => ({ description: level }), shown: (level) => level },
+        {
+          key: 'externalDocs',
+          at: (level) => ({ externalDocs: { url: `https://docs/${level}` } }),
+          shown: (level) => ({ url: `https://docs/${level}` }),
+        },
+        {
+          key: 'extensions',
+          at: (level) => ({ 'x-both': level, [`x-${level}`]: true }),
+          shown: (level) => expect.objectContaining({ 'x-both': level }),
+        },
+      ];
+
+      for (const { key, at, shown } of keywords) {
+        it(`${key}: two and three nullable wrappers, a nullable wrapper around a single-member allOf — outer wins, inner kept where the outer has none`, async () => {
+          const spec = await parseDocument(
+            document(
+              { '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }) },
+              {
+                components: {
+                  schemas: {
+                    Pet: {
+                      type: 'object',
+                      properties: {
+                        // Every level declares the keyword: the outermost wins.
+                        twoAll: nullable(nullable(object(at('branch')), at('inner')), at('outer')),
+                        threeAll: nullable(
+                          nullable(nullable(object(at('branch')), at('inner')), at('middle')),
+                          at('outer'),
+                        ),
+                        // Only the inner wrapper declares it: it reaches the branch through the silent outer.
+                        innerOnly: nullable(nullable(object({}), at('inner')), {}),
+                        // Only the branch declares it: no wrapper overrides it.
+                        branchOnly: nullable(nullable(object(at('branch')), {}), {}),
+                        // A nullable wrapper around a single-member allOf: three layers compose.
+                        viaAllOf: nullable(lone(object(at('member')), at('allOf')), at('outer')),
+                        // The same levels around an inline enum, lifted by the type builder.
+                        enumTwoAll: nullable(nullable(enumeration(at('branch')), at('inner')), at('outer')),
+                        enumInnerOnly: nullable(nullable(enumeration({}), at('inner')), {}),
+                        enumViaAllOf: nullable(lone(enumeration(at('member')), at('allOf')), at('outer')),
+                      },
+                    },
+                  },
+                },
+              },
+            ),
+          );
+          const model = (name: string) => byName(spec.models, name)[key];
+          const anEnum = (name: string) => byName(spec.enums, name)[key];
+          expect(model('PetTwoAll'), 'two wrappers').toEqual(shown('outer'));
+          expect(model('PetThreeAll'), 'three wrappers').toEqual(shown('outer'));
+          expect(model('PetInnerOnly'), 'inner only').toEqual(shown('inner'));
+          expect(model('PetBranchOnly'), 'branch only').toEqual(shown('branch'));
+          expect(model('PetViaAllOf'), 'nullable around allOf').toEqual(shown('outer'));
+          expect(anEnum('PetEnumTwoAll'), 'enum, two wrappers').toEqual(shown('outer'));
+          expect(anEnum('PetEnumInnerOnly'), 'enum, inner only').toEqual(shown('inner'));
+          expect(anEnum('PetEnumViaAllOf'), 'enum, nullable around allOf').toEqual(shown('outer'));
+          if (key === 'extensions') {
+            // A key only an inner level declares survives beside the outer's.
+            expect(model('PetTwoAll')).toEqual({
+              'x-both': 'outer',
+              'x-outer': true,
+              'x-inner': true,
+              'x-branch': true,
+            });
+            expect(model('PetThreeAll')).toEqual({
+              'x-both': 'outer',
+              'x-outer': true,
+              'x-middle': true,
+              'x-inner': true,
+              'x-branch': true,
+            });
+            expect(model('PetViaAllOf')).toEqual({
+              'x-both': 'outer',
+              'x-outer': true,
+              'x-allOf': true,
+              'x-member': true,
+            });
+            expect(anEnum('PetEnumTwoAll')).toEqual({
+              'x-both': 'outer',
+              'x-outer': true,
+              'x-inner': true,
+              'x-branch': true,
+            });
+            // The field carries the outermost wrapper's keys alone: that wrapper is its schema.
+            expect(fieldOf(byName(spec.models, 'Pet'), 'twoAll').extensions).toEqual({
+              'x-both': 'outer',
+              'x-outer': true,
+            });
+            expect(fieldOf(byName(spec.models, 'Pet'), 'innerOnly')).not.toHaveProperty('extensions');
+          }
+          expectSound(spec, ['Pet']);
+        });
+      }
+    });
   });
 
   describe('a field', () => {
@@ -1072,16 +1189,58 @@ describe('x-* extensions reach the IR (issue #352)', () => {
       expect(extensionsOf({ 'x-n': nested })!['x-n']).toBe(nested);
     });
 
-    it('withWrapperExtensions merges the wrapper’s keys over the branch’s and returns the branch itself when it has none', () => {
-      const inner = { type: 'string', 'x-branch': 1, 'x-both': 'branch' };
-      expect(withWrapperExtensions(inner, { oneOf: [] })).toBe(inner);
-      expect(withWrapperExtensions(inner, { oneOf: [], 'x-wrapper': 1, 'x-both': 'wrapper' })).toEqual({
+    it('withWrapperDocs carries every documentation keyword of the wrapper over the branch’s, and returns the branch itself when it has none', () => {
+      const inner = {
         type: 'string',
+        description: 'branch',
+        externalDocs: { url: 'https://branch' },
+        example: 'branch',
+        examples: ['branch'],
+        'x-branch': 1,
+        'x-both': 'branch',
+      };
+      expect(withWrapperDocs(inner, { oneOf: [] })).toBe(inner);
+      // A wrapper with nothing usable — blank text, a link without a url, an
+      // empty examples list, a consumed key — carries nothing.
+      expect(
+        withWrapperDocs(inner, {
+          oneOf: [],
+          description: '  ',
+          externalDocs: { description: 'no url' },
+          examples: [],
+          'x-enum-descriptions': ['a'],
+        }),
+      ).toBe(inner);
+      expect(
+        withWrapperDocs(inner, {
+          oneOf: [],
+          description: 'wrapper',
+          externalDocs: { url: 'https://wrapper' },
+          example: null,
+          examples: ['wrapper'],
+          'x-wrapper': 1,
+          'x-both': 'wrapper',
+        }),
+      ).toEqual({
+        type: 'string',
+        description: 'wrapper',
+        externalDocs: { url: 'https://wrapper' },
+        example: null,
+        examples: ['wrapper'],
         'x-branch': 1,
         'x-both': 'wrapper',
         'x-wrapper': 1,
       });
-      expect(withWrapperExtensions(inner, { oneOf: [], 'x-enum-descriptions': ['a'] })).toBe(inner);
+      // Each keyword is carried on its own: a wrapper declaring one leaves the others the branch's.
+      for (const [key, value] of Object.entries({
+        description: 'wrapper',
+        externalDocs: { url: 'https://wrapper' },
+        example: 'wrapper',
+        examples: ['wrapper'],
+        'x-both': 'wrapper',
+      })) {
+        expect(withWrapperDocs(inner, { oneOf: [], [key]: value }), key).toEqual({ ...inner, [key]: value });
+      }
     });
   });
 });

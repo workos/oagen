@@ -19,6 +19,7 @@ import {
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
+  withWrapperDocs,
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
@@ -27,13 +28,8 @@ import {
   foldSiblingProperties,
   foldedVariantOrigin,
 } from './schemas.js';
-import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
-import {
-  SCHEMA_CONSUMED_EXTENSIONS,
-  extensionsOf,
-  schemaExtensionsEntry,
-  withWrapperExtensions,
-} from './extensions.js';
+import { externalDocsEntry, readExternalDocs } from './external-docs.js';
+import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 
@@ -1870,19 +1866,20 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
  * keywords, conjoined with the member's, are the schema's limits (see
  * `extractConstraints`), so they ride along with the member and the model
  * built from it carries the same constraints; its `deprecated` is the
- * wrapper's alone, as `Field.deprecated` reads it, and its link is the
- * wrapper's too, when the wrapper has one (`withWrapperExternalDocs`). The
- * wrapper's `description` is not carried: the model built from the member
- * keeps the member's own. The type `schemaToTypeRef` builds from the same
- * member takes the wrapper's text as well as its link (`withWrapperDocs`),
- * so an inline enum under the wrapper is documented by the wrapper.
+ * wrapper's alone, as `Field.deprecated` reads it, and its documentation —
+ * text, link, examples, extensions — is the wrapper's wherever the wrapper
+ * has any, by the one wrapper rule `schemaToTypeRef` applies to the member
+ * it types (`withWrapperDocs`), so the model built from the member and an
+ * inline enum lifted from it are documented by the wrapper alike. Nested
+ * under a nullable wrapper, the outer wrapper's documentation has already
+ * landed on this one (`unwrapNullableField`), so the layers compose
+ * outermost-first.
  */
 export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject): SchemaObject {
-  // The wrapper's extensions ride along as its link does (`withWrapperExtensions`).
-  return withWrapperExtensions(
-    withWrapperExternalDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper), wrapper),
-    wrapper,
-  );
+  // The wrapper's documentation layer — text, link, examples, extensions —
+  // rides onto the member by the one wrapper rule (`withWrapperDocs`), the
+  // wrapper's winning, as the type builder gives the same wrapper on a field.
+  return withWrapperDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper), wrapper);
 }
 
 /**

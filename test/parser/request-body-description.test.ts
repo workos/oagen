@@ -445,7 +445,7 @@ describe('request body descriptions (issue #316)', () => {
       expectSound(spec);
     });
 
-    it('keeps a nullable wrapper’s text on the operation and the object branch’s on the model', async () => {
+    it('keeps a nullable wrapper’s text on the operation and gives it to the model built from the object branch, as to an enum lifted from it (#352 round 3)', async () => {
       const spec = await parseDocument(
         document({
           '/pets': post(
@@ -461,8 +461,12 @@ describe('request body descriptions (issue #316)', () => {
       const models = modelsOf(spec);
 
       expect(op.requestBodyDescription).toBe('Wrapper text.');
-      // The null branch makes the body nullable; the object branch is built as the one variant.
-      expect(describeType(models, op.requestBody)).toBe('nullable union of CreatePetRequest ("Branch text.")');
+      // The null branch makes the body nullable; the object branch is built as
+      // the one variant, and the collapsed wrapper's text is the model's by
+      // the one wrapper rule (`withWrapperDocs`), as it is an enum's lifted
+      // from the same wrapper; the branch's own counts only when the wrapper
+      // has none.
+      expect(describeType(models, op.requestBody)).toBe('nullable union of CreatePetRequest ("Wrapper text.")');
       expectSound(spec);
     });
 
