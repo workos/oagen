@@ -9,7 +9,7 @@ import {
 } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { enumValuesOf, sameEnumShape } from './enum-members.js';
-import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
+import { STATUS_RANGE_LABELS } from './responses.js';
 
 /**
  * Promote the inline enums a model's fields and named-union variants
@@ -62,27 +62,28 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  * renamed enum must step around (`distinctEnumName`), so pass every model of
  * the document, not only the ones to walk into.
  *
- * `ownedErrorBodies` is the parser's record of every inline error body an
- * operation named itself (`OperationExtractionResult.ownedErrorBodies`), by
- * identity. Those step by `Body` on a clash (`GetPetError404Body`), as their
- * `<Op>Error<code>…` names do in the shape registry; every other body — a
- * body shared through `components/responses` at a 404, a `4XX` or
- * `default`, a `default` or `1XX`–`3XX` body, a success body — steps by
- * number, so the one enum a shared component declares settles on one name
- * (`ProblemResponse2`) from every operation that returns it. Without the
- * record (an IR built outside `parseSpec`), every error body is taken as the
- * operation's own (`everyErrorBody`).
+ * `owned` is the parser's record of every inline error body an operation
+ * named itself (`OperationExtractionResult.ownedErrorBodies`, the one
+ * answer to which bodies an operation owns), by identity. Those step by
+ * `Body` on a clash (`GetPetError404Body`), as their `<Op>Error<code>…`
+ * names do in the shape registry; every other body — a body shared through
+ * `components/responses` at a 404, a `4XX` or `default`, a `default` or
+ * `1XX`–`3XX` body, a success body — steps by number, so the one enum a
+ * shared component declares settles on one name (`ProblemResponse2`) from
+ * every operation that returns it. The IR alone cannot tell the two apart
+ * (`ProblemResponse` is a shared body's name wherever it is returned), so
+ * the record is required: a caller that built `services` by hand passes the
+ * bodies it owns, or an empty set when it declares no error body.
  */
 export function collectInlineEnumsFromOperations(
   services: Service[],
   enums: Enum[],
+  owned: ReadonlySet<TypeRef>,
   models: readonly Model[] = [],
   componentNames: ReadonlySet<string> = new Set(),
-  ownedErrorBodies?: ReadonlySet<TypeRef>,
 ): void {
   const enumNames = new Set(enums.map((e) => e.name));
   const modelsByName = new Map(models.map((model) => [model.name, model]));
-  const owned = ownedErrorBodies ?? everyErrorBody(services);
   const modelNames = new Set(modelsByName.keys());
   // Each materialized model is visited once, under the first qualifier that reaches it.
   const visited = new Set<string>();
@@ -206,35 +207,6 @@ export function collectInlineEnumsFromWebhooks(
       collectDistinctEnums(ref, undefined, enums, enumNames, modelNames);
     }
   }
-}
-
-/**
- * Every error body the IR carries, by identity, for a caller that hands the
- * collector no record of which ones the operations named themselves
- * (`collectInlineEnumsFromOperations`): each `errors` entry's `type` and
- * secondary bodies, and the body and secondary bodies of each `4XX`/`5XX`
- * range (`isErrorStatusRange`). The IR alone cannot tell an operation-owned
- * body (`GetPetError404ApplicationYaml`, `GetPetError4Xx`) from one shared
- * through `components/responses` (`ProblemResponse`), so every one of them
- * is taken as the operation's own and steps by `Body`; `parseSpec` passes
- * the parser's record instead (`OperationExtractionResult.ownedErrorBodies`).
- */
-function everyErrorBody(services: readonly Service[]): ReadonlySet<TypeRef> {
-  const types = new Set<TypeRef>();
-  for (const service of services) {
-    for (const op of service.operations) {
-      for (const error of op.errors) {
-        if (error.type) types.add(error.type);
-        for (const content of error.contents ?? []) types.add(content.type);
-      }
-      for (const range of op.rangeResponses ?? []) {
-        if (!isErrorStatusRange(range.range)) continue;
-        if (range.type) types.add(range.type);
-        for (const content of range.contents ?? []) types.add(content.type);
-      }
-    }
-  }
-  return types;
 }
 
 /**

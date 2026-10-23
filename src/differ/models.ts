@@ -78,11 +78,10 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
  * model the old union already dispatched to (bare or wrapped: `nullable<Cat>`
  * added beside `Cat` brings no new model, so a key for `Cat` added with it is
  * an alias) or for no variant, or a key removed while its model stays. So is a
- * change of composition keyword between two
- * unions (`anyOf` → `oneOf` rejects values that match more than one branch;
- * the reverse loosens what callers may receive). A model that gains or loses
- * `variants` altogether reports each variant added or removed, not a
- * composition change.
+ * change of composition keyword between two unions (`anyOf` → `oneOf` rejects
+ * values that match more than one branch; the reverse loosens what callers may
+ * receive). A model that gains or loses `variants` altogether reports each
+ * variant added or removed, not a composition change.
  */
 function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
   const changes: VariantChange[] = [];

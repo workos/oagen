@@ -1252,6 +1252,117 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       }
     });
 
+    it('reads a stop field behind a lone allOf member, as the IR types it, for an override and for detection (MichaelDeBoey)', async () => {
+      const components = {
+        schemas: {
+          Flag: { type: 'boolean' },
+          Count: { type: 'integer' },
+          Meta: { type: 'object', properties: { total: { allOf: [{ $ref: '#/components/schemas/Count' }] } } },
+        },
+      };
+      // `flag` and `meta.total` are names detection does not know, so
+      // `total` is its own pick; each override lands on a field read through
+      // the lone member — a `$ref` with a description beside it, an inline
+      // boolean, a `$ref` one segment down.
+      const body = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          flag: { allOf: [{ $ref: '#/components/schemas/Flag' }], description: 'More pets' },
+          inline_flag: { allOf: [{ type: 'boolean' }] },
+          meta: { $ref: '#/components/schemas/Meta' },
+          total: { type: 'integer' },
+        },
+      };
+      for (const endOfIteration of [
+        { kind: 'hasMore', path: 'flag' },
+        { kind: 'hasMore', path: 'inline_flag' },
+        { kind: 'totalCount', path: 'meta.total' },
+      ] as const) {
+        const ir = await parseJson(issueSpec({ endOfIteration }, undefined, jsonResponse(body), components));
+        expect(onlyOperation(ir).pagination?.endOfIteration).toEqual(endOfIteration);
+        expect(warn).not.toHaveBeenCalled();
+        expectSound(ir, Object.keys(components.schemas));
+      }
+      // Detection reads the same fields: a `has_more` declared through the
+      // lone member is the stop field without any override.
+      const detected = {
+        ...body,
+        properties: { ...body.properties, has_more: { allOf: [{ $ref: '#/components/schemas/Flag' }] } },
+      };
+      const op = onlyOperation(await parseJson(issueSpec(undefined, undefined, jsonResponse(detected), components)));
+      expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    describe('the override is decided once, on the primary, before any success body is read (Greptile)', () => {
+      const ok = (schema: unknown) => ({ description: 'ok', content: { 'application/json': { schema } } });
+      const nested = (extra: Record<string, unknown> = {}) => ({
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          result: {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+            },
+          },
+          total: { type: 'integer' },
+          ...extra,
+        },
+      });
+      const more = { more: { type: 'boolean' } };
+      const selecting = { dataPath: 'result.items', endOfIteration: { kind: 'hasMore', path: 'more' } };
+      const unwrapped = { kind: 'array', items: { kind: 'primitive', type: 'string' } };
+
+      it("a rejection on the primary reaches every 2xx: the 201 unwraps on data as detection does, not on the override's wrapper", async () => {
+        // Only the 201 declares `more`; the 200 is primary and rejects the
+        // override, so the 201 is read exactly as detection reads it.
+        const responses = { '200': ok(nested()), '201': ok(nested(more)) };
+        const { bare, overridden } = await parseBeside(selecting, undefined, responses);
+        rejected('endOfIteration path "more" does not resolve to a field in the response');
+        const op = onlyOperation(overridden);
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unwrapped],
+          [201, unwrapped],
+        ]);
+        expect(overridden.services).toEqual(bare.services);
+        expect(overridden.models).toEqual(bare.models);
+        expectSound(overridden, []);
+      });
+
+      it('an acceptance on the primary applies to every 2xx body the dataPath reaches an array in', async () => {
+        const responses = { '200': ok(nested(more)), '201': ok(nested(more)) };
+        const ir = await parseJson(issueSpec(selecting, undefined, responses));
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toMatchObject({
+          dataPath: 'result.items',
+          itemType: { kind: 'model', name: 'ListPetsResponseResultItem' },
+          endOfIteration: { kind: 'hasMore', path: 'more' },
+        });
+        // Both bodies keep the wrapper the override iterates.
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, { kind: 'model', name: 'ListPetsResponse' }],
+          [201, { kind: 'model', name: 'ListPetsResponse' }],
+        ]);
+        expectSound(ir, []);
+      });
+
+      it('an override only a secondary 2xx could satisfy is rejected, since only the primary decides', async () => {
+        const responses = { '200': ok(totalEnvelope), '201': ok(nested(more)) };
+        const { bare, overridden } = await parseBeside(selecting, undefined, responses);
+        rejected('dataPath "result.items" does not resolve to an array in the response');
+        const op = onlyOperation(overridden);
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unwrapped],
+          [201, unwrapped],
+        ]);
+        expect(overridden.services).toEqual(bare.services);
+        expect(overridden.models).toEqual(bare.models);
+      });
+    });
+
     it('checks only the shape under strategy none: there is no iterator for the other fields to serve', async () => {
       const op = onlyOperation(
         await parseJson(
@@ -1504,18 +1615,116 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         itemType: { kind: 'model', name: 'Pet' },
         endOfIteration: { kind: 'hasMore', path: 'has_more' },
       };
+      // The wrapper's model declares the field the iterator stops on: a
+      // nullable member applies as its one non-null variant for the model as
+      // for the stop field, as a component and as an inline body (MichaelDeBoey).
+      const fieldsOf = (ir: ApiSpec, model: string) =>
+        ir.models.find((m) => m.name === model)?.fields.map((f) => f.name);
       for (const [label, member] of Object.entries(members)) {
         const PetPage = { allOf: [member, { type: 'object', properties: { data: petArray } }] };
         const schemas = { Base, NullableLink, Hop, PetPage };
+        const fields = label === 'nestedAllOf' ? ['has_more', 'page', 'data'] : ['has_more', 'data'];
         // Greptile's case: the wrapper is a referenced component.
-        const referenced = onlyOperation(
-          await parseJson(listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, schemas)),
+        const referencedIr = await parseJson(
+          listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, schemas),
         );
+        const referenced = onlyOperation(referencedIr);
         expect(referenced.pagination, `${label} ($ref wrapper)`).toMatchObject(expected);
+        expect(fieldsOf(referencedIr, 'PetPage'), `${label} ($ref wrapper model)`).toEqual(fields);
         // The same wrapper written inline is not a recognized envelope — the
         // nullable member declares no properties of its own — and is read alike.
-        const inline = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+        const inlineIr = await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas));
+        const inline = onlyOperation(inlineIr);
         expect(inline.pagination, `${label} (inline wrapper)`).toMatchObject(expected);
+        if (label === 'nullableTypeList') {
+          // A type-list member declares `has_more` as a property of its own,
+          // so written inline the body is a recognized envelope and is
+          // unwrapped on `data`, the stop field among its companions.
+          expect(inline.response, label).toEqual({ kind: 'array', items: { kind: 'model', name: 'Pet' } });
+          expect(
+            inline.pagination?.envelopeFields?.map((f) => f.name),
+            label,
+          ).toEqual(['has_more']);
+        } else {
+          expect(inline.response, `${label} (inline wrapper)`).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+          expect(fieldsOf(inlineIr, 'ListPetsResponse'), `${label} (inline wrapper model)`).toEqual(fields);
+        }
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('gives a nullable member’s fields to a recognized envelope and its stop field, with no override (MichaelDeBoey)', async () => {
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const Meta = { type: 'object', properties: { trace_id: { type: 'string' } } };
+      const Base = { type: 'object', properties: { has_more: { type: 'boolean' } } };
+      const detected = (schema: unknown) =>
+        petsSpec(
+          { parameters: [query('page'), query('limit')], responses: jsonResponse(schema) },
+          { schemas: { Pet, Meta, Base } },
+        );
+      // `Meta`'s `trace_id` is a companion of the envelope beside it.
+      const withMeta = {
+        allOf: [nullOf(ref('Meta')), { type: 'object', properties: { data: petArray, has_more: { type: 'boolean' } } }],
+      };
+      expect(projection(onlyOperation(await parseJson(detected(withMeta))))).toEqual({
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+        envelopeFields: ['trace_id', 'has_more'],
+      });
+      // `Base`'s `has_more` ends the iteration of an envelope whose own
+      // companion only says it is one.
+      const meta = { type: 'object', properties: { page: { type: 'integer' } } };
+      const fromBase = { allOf: [nullOf(ref('Base')), { type: 'object', properties: { data: petArray, meta } }] };
+      expect(projection(onlyOperation(await parseJson(detected(fromBase))))).toEqual({
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+        envelopeFields: ['has_more', 'meta'],
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads the stop field beside a nested array under a parent of any name, before the top level (MichaelDeBoey)', async () => {
+      const boolean = { type: 'boolean' };
+      const nested = (fields: Record<string, unknown>) => ({
+        type: 'object',
+        properties: { items: petArray, ...fields },
+      });
+      const cases: Array<[string, Record<string, unknown>, { kind: string; path: string }]> = [
+        [
+          'result.items',
+          { result: nested({ total_pages: { type: 'integer' } }) },
+          { kind: 'totalPages', path: 'result.total_pages' },
+        ],
+        ['data.items', { data: nested({ has_more: boolean }) }, { kind: 'hasMore', path: 'data.has_more' }],
+        [
+          'data.page.items',
+          { data: { type: 'object', properties: { page: nested({ has_more: boolean }) } } },
+          { kind: 'hasMore', path: 'data.page.has_more' },
+        ],
+        // Beside the array first within one kind; the kind order still decides across levels.
+        [
+          'result.items',
+          { result: nested({ has_more: boolean }), has_more: boolean },
+          { kind: 'hasMore', path: 'result.has_more' },
+        ],
+        [
+          'result.items',
+          { result: nested({ total: { type: 'integer' } }), has_more: boolean },
+          { kind: 'hasMore', path: 'has_more' },
+        ],
+      ];
+      for (const [dataPath, properties, endOfIteration] of cases) {
+        const op = onlyOperation(await parseJson(listOp({ type: 'object', properties }, { dataPath })));
+        expect(op.pagination, `${dataPath} beside ${Object.keys(properties).join(',')}`).toMatchObject({
+          dataPath,
+          itemType: { kind: 'model', name: 'Pet' },
+          endOfIteration,
+        });
       }
       expect(warn).not.toHaveBeenCalled();
     });

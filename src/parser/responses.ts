@@ -131,6 +131,20 @@ export interface ResponseClassificationOptions {
 }
 
 /**
+ * The readings an inline body can take, one per way `buildOperation` decides
+ * it (`iteratorSource`): unwrapped on its data array for an iterator a
+ * declared query parameter or a usable override drives, or kept as the wire
+ * shape — `strategy: 'none'`, nothing to page with, an explicit `dataPath`
+ * naming another array (the same reading as `paginationDisabled`, so the
+ * same names). A body that is no list envelope reads the same under both.
+ * Which reading an operation takes is known only when it is read, so a dry
+ * run that reserves a body's names (`bodyModelNames`) classifies it under
+ * every reading here: whichever the operation then picks, the names it mints
+ * are the reserved ones.
+ */
+export const BODY_READINGS: readonly ResponseClassificationOptions[] = [{}, { paginationDisabled: true }];
+
+/**
  * The word that stands in for a range key wherever a status code would
  * qualify a name: the header models and enums of a `4XX` response are
  * `…ClientError`, and the inline body of a `1XX`–`3XX` response is
@@ -231,10 +245,10 @@ export function classifyAndExtractResponse(
  * walk uses — so a `$ref` body, a nullable wrapper around the body or
  * around any member, and a `$ref` chain to one all reach the same object
  * the path walked), and `detectEndOfIteration` reads them as it reads an
- * unwrapped envelope's, with the full path excluded, not its root, so the
- * array the path names is never a stop field while a stop field beside a
- * nested array (`pagination.has_more` next to `pagination.items`) stays
- * visible. `undefined` when nothing recognizable is declared, or the body
+ * unwrapped envelope's: the fields beside the array the path names first,
+ * under a parent of any name (`result.total_pages` next to `result.items`),
+ * then the top level, then the metadata companions, and never the array
+ * itself. `undefined` when nothing recognizable is declared, or the body
  * resolves to no object at all.
  */
 function bodyEndOfIteration(
@@ -295,29 +309,35 @@ function classifyBody(
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
   const envelope = detectListEnvelope(schema);
-  if (envelope.isEnvelope && !options.paginationDisabled) {
+  if (envelope.isEnvelope) {
     const override = options.dataPathOverride;
-    if (override === undefined || override === envelope.dataPath) {
+    if (!options.paginationDisabled && (override === undefined || override === envelope.dataPath)) {
       return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
     }
-    // The override names another array than the one the envelope would be
-    // unwrapped on: detection was wrong for this operation, so the envelope
-    // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
-    // field is read by the caller (`bodyEndOfIteration`), as every kept
-    // wrapper's is.
-    return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+    // A recognized envelope that is not unwrapped is kept as the wire shape,
+    // one model carrying every field, whichever reason keeps it: nothing
+    // pages the operation (`paginationDisabled` — `strategy: 'none'`, or no
+    // declared query parameter and no usable override), or an explicit
+    // `dataPath` names another array than the one it would be unwrapped on
+    // (detection was wrong for this operation; its stop field is read by the
+    // caller, `bodyEndOfIteration`). It never takes the single-resource
+    // reading below: an envelope with one required companion carrying a
+    // constant `type`/`object` (`{ data, pagination: { type: 'pagination',
+    // total } }` with `required: ['pagination']`) fits that shape, and
+    // unwrapping it would make the companion the whole response and drop
+    // `data`. `unpagedEnvelope` tells the caller which reason kept it, so an
+    // envelope kept for want of a paging parameter is warned about.
+    const kept = extractDirectResource(schema, contextName, componentSchemas, options.settle);
+    return options.paginationDisabled ? { ...kept, unpagedEnvelope: true } : kept;
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
+  if (isSingleResourceWrapper(schema)) {
+    return extractWrappedResource(schema, contextName, componentSchemas);
+  }
+
   // 4. Direct resource or plain inline object
-  // An envelope that reaches here is one nothing pages (`paginationDisabled`):
-  // it is read exactly as any other body, and the result says it was an
-  // envelope, so the caller can warn about one kept for want of a paging
-  // parameter.
-  const body = isSingleResourceWrapper(schema)
-    ? extractWrappedResource(schema, contextName, componentSchemas)
-    : extractDirectResource(schema, contextName, componentSchemas, options.settle);
-  return envelope.isEnvelope ? { ...body, unpagedEnvelope: true } : body;
+  return extractDirectResource(schema, contextName, componentSchemas, options.settle);
 }
 
 interface ListEnvelopeResult {
@@ -919,13 +939,16 @@ function extractDirectResource(
   // allOf — read the one way every site reads an inline `allOf`
   // (`readInlineAllOf`), when the `allOf` is what types the body
   // (`classifyInlineSchema`; an `allOf` of bare limits leaves the body to
-  // its own keywords below). `$ref` members with nothing inline beside them
-  // are a reference to the first component, and nothing is minted — as a
-  // field of the same schema is typed (workos/oagen#307: the body was a
-  // copy of the component under its own name); a ref no component answers
-  // is that reference too. A lone member is the body itself, carrying the
-  // wrapper's limits, flag and link (`unwrappedAllOfMember`), read by the
-  // branches of this function as if written in its place. Every other
+  // its own keywords below). A single `$ref` member with nothing beside it
+  // that adds to the component is that component, and nothing is minted —
+  // as a field of the same schema is typed (workos/oagen#307: the body was
+  // a copy of the component under its own name); a ref no component answers
+  // is that reference too. A second `$ref`, or a `required` beside the
+  // `$ref`, makes the body the merge below, as it makes a field (every
+  // component's properties and every `required` kept). A lone member is
+  // the body itself, carrying the wrapper's limits, flag and link
+  // (`unwrappedAllOfMember`), read by the branches of this function as if
+  // written in its place. Every other
   // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
   // branches are resolved against component schemas so the referenced
   // model's fields are merged rather than silently dropped, and the inline
@@ -936,7 +959,7 @@ function extractDirectResource(
   // member's plain `kind` stays the enum here as it does in a field or an
   // array's items.
   if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
-    const reading = readInlineAllOf(schema.allOf);
+    const reading = readInlineAllOf(schema.allOf, schema);
     if (reading === 'reference') {
       return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
     }

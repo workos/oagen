@@ -318,6 +318,51 @@ describe('detectEndOfIteration', () => {
       path: 'has_more',
     });
   });
+  it('reads the fields beside a nested array first, under a parent of any name (MichaelDeBoey)', () => {
+    const beside = (fields: Record<string, SchemaObject>): SchemaObject => ({
+      type: 'object',
+      properties: { items: data, ...fields },
+    });
+    expect(detectEndOfIteration({ result: beside({ total_pages: integer }) }, 'result.items')).toEqual({
+      kind: 'totalPages',
+      path: 'result.total_pages',
+    });
+    expect(detectEndOfIteration({ data: beside({ has_more: boolean }) }, 'data.items')).toEqual({
+      kind: 'hasMore',
+      path: 'data.has_more',
+    });
+    const twoDown: SchemaObject = { type: 'object', properties: { page: beside({ has_more: boolean }) } };
+    expect(detectEndOfIteration({ data: twoDown }, 'data.page.items')).toEqual({
+      kind: 'hasMore',
+      path: 'data.page.has_more',
+    });
+    // The array itself is never a stop field, whatever it is called.
+    const named: SchemaObject = { type: 'object', properties: { total: data } };
+    expect(detectEndOfIteration({ result: named }, 'result.total')).toBeUndefined();
+    // Beside the array before the top level within one kind; the kind order
+    // still decides across levels.
+    expect(detectEndOfIteration({ result: beside({ has_more: boolean }), has_more: boolean }, 'result.items')).toEqual({
+      kind: 'hasMore',
+      path: 'result.has_more',
+    });
+    expect(detectEndOfIteration({ result: beside({ total: integer }), has_more: boolean }, 'result.items')).toEqual({
+      kind: 'hasMore',
+      path: 'has_more',
+    });
+    // The parent is reached as the path is resolved: through a $ref under a
+    // nullable wrapper, and through an allOf.
+    const components: Record<string, SchemaObject> = { Result: beside({ total_pages: integer }) };
+    const wrapped: SchemaObject = { oneOf: [{ $ref: '#/components/schemas/Result' }, { type: 'null' }] };
+    expect(detectEndOfIteration({ result: wrapped }, 'result.items', components)).toEqual({
+      kind: 'totalPages',
+      path: 'result.total_pages',
+    });
+    const composed: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Result' }, beside({ has_more: boolean })] };
+    expect(detectEndOfIteration({ result: composed }, 'result.items', components)).toEqual({
+      kind: 'hasMore',
+      path: 'result.has_more',
+    });
+  });
 });
 
 describe('resolveSchemaPath', () => {
@@ -862,6 +907,41 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     expect(problem('totalPages', 'data')).toBe(
       'endOfIteration path "data" is not an integer or number field, as kind "totalPages" requires',
     );
+  });
+
+  it('reads the field through a lone allOf member, as the IR types it, but not an allOf of bare limits (MichaelDeBoey)', () => {
+    const schemas: Record<string, SchemaObject> = {
+      Flag: { type: 'boolean' },
+      Count: { type: 'integer' },
+      Meta: { type: 'object', properties: { total: { allOf: [{ $ref: '#/components/schemas/Count' }] } } },
+    };
+    const properties: Record<string, SchemaObject> = {
+      data: { type: 'array', items: { type: 'string' } },
+      has_more: { allOf: [{ $ref: '#/components/schemas/Flag' }], description: 'More pets' },
+      inline_flag: { allOf: [{ type: 'boolean' }] },
+      meta: { $ref: '#/components/schemas/Meta' },
+      // Two members are left as written — a merge, not a field of a type —
+      // and an `allOf` of bare limits beside the schema's own type is typed
+      // by that type.
+      pair: { allOf: [{ type: 'boolean' }, { type: 'boolean' }] },
+      bounded: { type: 'integer', allOf: [{ minimum: 0 }] },
+      // A `required` beside a lone `$ref` member makes the merged model the
+      // IR builds, not the component: left as written, as `readInlineAllOf` reads it.
+      withRequired: { allOf: [{ $ref: '#/components/schemas/Flag' }], required: ['x'] },
+    };
+    const body: SchemaObject = { type: 'object', properties };
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'inline_flag' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'meta.total' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'bounded' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'pair' }, body, schemas)).toBe(
+      'endOfIteration path "pair" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'withRequired' }, body, schemas)).toBe(
+      'endOfIteration path "withRequired" is not a boolean field, as kind "hasMore" requires',
+    );
+    // Detection reads `has_more` through the same member.
+    expect(detectEndOfIteration(properties, 'data', schemas)).toEqual({ kind: 'hasMore', path: 'has_more' });
   });
 
   it('agrees with detection about which fields can end an iteration, over the one property map both read', () => {

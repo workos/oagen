@@ -819,16 +819,22 @@ describe('modelAdmits', () => {
     expect(modelAdmits(base, model([{ ...field('a', false), default: 'x' }]))).toBe(false);
     expect(modelAdmits(base, model([{ ...field('a', false), constraints: { minLength: 1 } }]))).toBe(false);
     expect(modelAdmits(base, model([{ ...field('a', false), deprecated: true }]))).toBe(false);
-    expect(modelAdmits(base, model([field('a', false)], { deprecated: true }))).toBe(false);
     expect(modelAdmits(base, model([field('a', false)], { constraints: { minProperties: 1 } }))).toBe(false);
+    // The model's own flag is not shape (issue #312): a live owner admits a
+    // deprecated candidate, a deprecated owner only a deprecated one.
+    expect(modelAdmits(base, model([field('a', false)], { deprecated: true }))).toBe(true);
+    expect(modelAdmits(model([field('a', false)], { deprecated: true }), base)).toBe(false);
+    expect(
+      modelAdmits(model([field('a', false)], { deprecated: true }), model([field('a', false)], { deprecated: true })),
+    ).toBe(true);
     // Documentation is not shape.
     expect(modelAdmits(base, model([{ ...field('a', false), description: 'doc' }], { description: 'doc' }))).toBe(true);
   });
 
-  it('reads every model reference under `modelName` when given — fields, variants and mapping targets, both sides', () => {
+  it('reads every model and inline enum reference under `readName` when given — fields, variants and mapping targets, both sides', () => {
     const ref = (name: string): TypeRef => ({ kind: 'model', name });
     // The `…Json` fold's reading: `PetJson…` as `Pet…`.
-    const fold = { modelName: (name: string) => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name) };
+    const fold = { readName: (name: string) => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name) };
     const owner = model([field('inner', false, ref('PetInner'))]);
     const candidate = model([field('inner', false, ref('PetJsonInner'))]);
     expect(modelAdmits(owner, candidate)).toBe(false);
@@ -856,13 +862,38 @@ describe('modelAdmits', () => {
     expect(modelAdmits(union('PetA'), union('PetJsonA'), fold)).toBe(true);
     expect(union('PetJsonA').discriminator).toEqual({ property: 'kind', mapping: { a: 'PetJsonA' } });
 
-    // An enum reference is read as it is: no pass renames enums.
-    const enumRef = (name: string): TypeRef => ({ kind: 'enum', name });
+    // An inline enum reference — one carrying its values — is read under the name too, with its
+    // members; a component enum reference carries no values and is read as it is.
+    const enumRef = (name: string, values?: string[]): TypeRef => ({
+      kind: 'enum',
+      name,
+      ...(values ? { values } : {}),
+    });
     expect(
       modelAdmits(
         model([field('s', false, enumRef('PetState'))]),
         model([field('s', false, enumRef('PetJsonState'))]),
         fold,
+      ),
+    ).toBe(false);
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState', ['a']))]),
+        model([field('s', false, enumRef('PetJsonState', ['a']))]),
+        fold,
+      ),
+    ).toBe(true);
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState', ['a']))]),
+        model([field('s', false, enumRef('PetJsonState', ['a', 'b']))]),
+        fold,
+      ),
+    ).toBe(false);
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState', ['a']))]),
+        model([field('s', false, enumRef('PetJsonState', ['a']))]),
       ),
     ).toBe(false);
 

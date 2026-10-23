@@ -1,11 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   collapseJsonSuffixModels,
+  fieldInlineModelBundles,
   mergeFieldInlineModels,
   mergeInlineResponseModels,
   reservedTypeNames,
   settleFieldInlineModels,
+  type InlineModelNaming,
 } from '../../src/parser/normalize-inline-models.js';
+import { collectModelRefs } from '../../src/ir/types.js';
 import type { Model, Operation, Service, TypeRef } from '../../src/ir/types.js';
 
 describe('collapseJsonSuffixModels — response content types', () => {
@@ -672,6 +675,211 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
     expect(settled.map((m) => m.name)).toEqual(['PetOwner2']);
     expect(pet.fields[0].type).toEqual({ kind: 'model', name: 'PetOwner2' });
     expect(notes).toEqual(['[oagen] Renamed inline model "PetOwner" → "PetOwner2": enum "PetOwner" owns the name']);
+  });
+});
+
+describe('a parent that references a renamed model leaves a shared name by its site (issue #313)', () => {
+  const str: TypeRef = { kind: 'primitive', type: 'string' };
+  const field = (name: string, type: TypeRef = str, deprecated = false): Model['fields'][number] => ({
+    name,
+    type,
+    required: false,
+    ...(deprecated ? { deprecated: true } : {}),
+  });
+  const modelRef = (name: string): TypeRef => ({ kind: 'model', name });
+  const owner = (name: string, extra = false, deprecated = false): Model => ({
+    name,
+    fields: [field('city'), ...(extra ? [field('zip')] : [])],
+    ...(deprecated ? { deprecated: true } : {}),
+  });
+  /** Every model name a model references, through its fields and variants. */
+  const referencedBy = (model: Model): string[] =>
+    [...model.fields.map((f) => f.type), ...(model.variants ?? [])].flatMap(collectModelRefs);
+
+  /**
+   * Run `merge` over `components` and `inline` with `naming`, returning the
+   * merged models and every warning, and hold the pass to the invariant the
+   * `…Json` fold's tests hold it to: afterwards every reference — a bundle
+   * root's or a model's — names a kept model, every kept model a root or a
+   * model referenced before the pass is still referenced, and no two kept
+   * models share a name.
+   */
+  function settle(
+    merge: (components: Model[], inline: Model[], naming: InlineModelNaming) => Model[],
+    components: Model[],
+    inline: Model[],
+    naming: InlineModelNaming,
+  ): { merged: Model[]; warnings: string[] } {
+    const roots = naming.bundles.flatMap((b) => b.roots);
+    const referencedBefore = new Set([
+      ...roots.flatMap(collectModelRefs),
+      ...[...components, ...inline].flatMap(referencedBy),
+    ]);
+    const warnings: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    });
+    let merged: Model[];
+    try {
+      merged = merge(components, inline, naming);
+    } finally {
+      warnSpy.mockRestore();
+    }
+    const names = new Set(merged.map((m) => m.name));
+    const referencedAfter = new Set([...roots.flatMap(collectModelRefs), ...merged.flatMap(referencedBy)]);
+    expect(
+      [...referencedAfter].filter((name) => !names.has(name)),
+      'dangling references',
+    ).toEqual([]);
+    expect(
+      merged.map((m) => m.name).filter((name) => referencedBefore.has(name) && !referencedAfter.has(name)),
+      'models left unreferenced',
+    ).toEqual([]);
+    expect(names.size, 'duplicate names').toBe(merged.length);
+    return { merged, warnings };
+  }
+
+  it('qualifies the twin whose deprecated child was renamed, in one pass, and leaves the other under the name', () => {
+    // `getA` and `getB` both mint `Widget { owner: WidgetOwner }`; `getB`'s
+    // `WidgetOwner` is deprecated with a field more, so it is renamed first
+    // (bottom-up) and `getB`'s `Widget` references it.
+    const aOwner = owner('WidgetOwner');
+    const bOwner = owner('WidgetOwner', true, true);
+    const aWidget: Model = { name: 'Widget', fields: [field('owner', modelRef('WidgetOwner'))] };
+    const bWidget: Model = { name: 'Widget', fields: [field('owner', modelRef('WidgetOwner'), true)] };
+    const aRef = modelRef('Widget');
+    const bRef = modelRef('Widget');
+    const { merged, warnings } = settle(mergeInlineResponseModels, [], [aWidget, aOwner, bWidget, bOwner], {
+      bundles: [
+        { qualifier: 'GetA', roots: [aRef], models: [aWidget, aOwner] },
+        { qualifier: 'GetB', roots: [bRef], models: [bWidget, bOwner] },
+      ],
+      reserved: new Set(['Widget', 'WidgetOwner']),
+      enums: new Set(),
+    });
+    expect(merged.map((m) => [m.name, referencedBy(m)])).toEqual([
+      ['Widget', ['WidgetOwner']],
+      ['WidgetOwner', []],
+      ['GetBWidget', ['GetBWidgetOwner']],
+      ['GetBWidgetOwner', []],
+    ]);
+    expect(aRef).toEqual(modelRef('Widget'));
+    expect(bRef).toEqual(modelRef('GetBWidget'));
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "WidgetOwner" → "GetBWidgetOwner": it is deprecated while "WidgetOwner" is live',
+      '[oagen] Renamed inline model "Widget" → "GetBWidget": it references a renamed model and "Widget" keeps another definition',
+    ]);
+  });
+
+  it('reads the names an earlier pass minted from `naming.minted`, so the field merge qualifies the parent instead of dropping it', () => {
+    // The response pass left `PetWidgetOwner { object }`; the field pass
+    // brings `PetWidgetOwner { object, address: PetWidgetOwnerAddress2 }`,
+    // whose address was renamed when the fields were settled. Without the
+    // minted name the field copy is dropped for the survivor ("Two inline
+    // models are named …") and the address left referenced by nothing.
+    const response: Model = { name: 'PetWidgetOwner', fields: [field('object')] };
+    const address: Model = { name: 'PetWidgetOwnerAddress2', fields: [field('city')] };
+    const fieldCopy: Model = {
+      name: 'PetWidgetOwner',
+      fields: [field('object'), field('address', modelRef('PetWidgetOwnerAddress2'))],
+    };
+    const responseRef = modelRef('PetWidgetOwner');
+    const fieldRef = modelRef('PetWidgetOwner');
+    const minted = new Set(['PetWidgetOwnerAddress2']);
+    const { merged, warnings } = settle(
+      (components, inline, naming) => mergeFieldInlineModels([...components, response], inline, new Set(), naming),
+      [],
+      [fieldCopy, address],
+      {
+        bundles: [
+          { qualifier: 'GetOwner', roots: [responseRef], models: [response] },
+          { qualifier: 'PetWidget', roots: [fieldRef], models: [fieldCopy, address] },
+        ],
+        reserved: new Set(['PetWidgetOwner', 'PetWidgetOwnerAddress2']),
+        enums: new Set(),
+        minted,
+      },
+    );
+    expect(merged.map((m) => [m.name, referencedBy(m)])).toEqual([
+      ['PetWidgetOwner', []],
+      ['PetWidgetOwner2', ['PetWidgetOwnerAddress2']],
+      ['PetWidgetOwnerAddress2', []],
+    ]);
+    expect(responseRef).toEqual(modelRef('PetWidgetOwner'));
+    expect(fieldRef).toEqual(modelRef('PetWidgetOwner2'));
+    expect(minted).toEqual(new Set(['PetWidgetOwnerAddress2', 'PetWidgetOwner2']));
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "PetWidgetOwner" → "PetWidgetOwner2": it references a renamed model and "PetWidgetOwner" keeps another definition',
+    ]);
+  });
+
+  it('settles same-named models that follow no rename as before, and a group of one is left alone', () => {
+    const aOwner = owner('WidgetOwner');
+    const bOwner = owner('WidgetOwner');
+    const aWidget: Model = { name: 'Widget', fields: [field('owner', modelRef('WidgetOwner'))] };
+    const bWidget: Model = { name: 'Widget', fields: [field('owner', modelRef('WidgetOwner')), field('extra')] };
+    const aRef = modelRef('Widget');
+    const bRef = modelRef('Widget');
+    const { merged, warnings } = settle(mergeInlineResponseModels, [], [aWidget, aOwner, bWidget, bOwner], {
+      bundles: [
+        { qualifier: 'GetA', roots: [aRef], models: [aWidget, aOwner] },
+        { qualifier: 'GetB', roots: [bRef], models: [bWidget, bOwner] },
+      ],
+      reserved: new Set(['Widget', 'WidgetOwner']),
+      enums: new Set(),
+    });
+    // The pass's own choice, as always: the definition with more fields.
+    expect(merged.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+      ['Widget', ['owner', 'extra']],
+      ['WidgetOwner', ['city']],
+    ]);
+    expect([aRef, bRef]).toEqual([modelRef('Widget'), modelRef('Widget')]);
+    expect(warnings).toEqual([
+      '[oagen] Warning: Inline model "Widget" has more than one definition with different fields or field types (2 vs 1) — keeping the one with more fields',
+    ]);
+  });
+
+  it('keeps the leader of a cluster under its minted name when a later pass reads it, so the sites repointed to it stay resolved', () => {
+    // `GetAWidget` was minted by an earlier pass for two identical copies;
+    // `getB` references it through the leader's name, not its own site.
+    const leader: Model = { name: 'GetAWidget', fields: [field('owner', modelRef('GetAWidgetOwner'))] };
+    const child: Model = { name: 'GetAWidgetOwner', fields: [field('city'), field('zip')] };
+    const aRef = modelRef('GetAWidget');
+    const bRef = modelRef('GetAWidget');
+    const { merged, warnings } = settle(
+      (components, inline, naming) => mergeFieldInlineModels([...components, leader, child], inline, new Set(), naming),
+      [],
+      [],
+      {
+        bundles: [
+          { qualifier: 'GetA', roots: [aRef], models: [leader, child] },
+          { qualifier: 'GetB', roots: [bRef], models: [] },
+        ],
+        reserved: new Set(['GetAWidget', 'GetAWidgetOwner']),
+        enums: new Set(),
+        minted: new Set(['GetAWidget', 'GetAWidgetOwner']),
+      },
+    );
+    expect(merged.map((m) => m.name)).toEqual(['GetAWidget', 'GetAWidgetOwner']);
+    expect([aRef, bRef]).toEqual([modelRef('GetAWidget'), modelRef('GetAWidget')]);
+    expect(warnings).toEqual([]);
+  });
+
+  it('bundles the model the schema pass lifted for a field’s schema with the field’s site, and never a component of that name', () => {
+    const pet: Model = { name: 'Pet', fields: [field('widget', modelRef('PetWidget'))] };
+    const lifted: Model = { name: 'PetWidget', fields: [field('owner', modelRef('PetWidgetOwner'))] };
+    const copy: Model = { name: 'PetWidget', fields: [field('owner', modelRef('PetWidgetOwner'))] };
+    const child: Model = { name: 'PetWidgetOwner', fields: [field('city')] };
+    const groups = [{ parentName: 'Pet', fieldName: 'widget', models: [copy, child] }];
+    // `PetWidget` is not a component: the lifted twin joins the site.
+    expect(fieldInlineModelBundles(groups, [pet, lifted], new Set(['Pet']))[0]?.models).toEqual([copy, child, lifted]);
+    // `PetWidget` is a component: its references are its own.
+    expect(fieldInlineModelBundles(groups, [pet, lifted], new Set(['Pet', 'PetWidget']))[0]?.models).toEqual([
+      copy,
+      child,
+    ]);
+    // No component names given (a direct caller): no twin is known.
+    expect(fieldInlineModelBundles(groups, [pet, lifted])[0]?.models).toEqual([copy, child]);
   });
 });
 

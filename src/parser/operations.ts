@@ -72,6 +72,7 @@ import {
   resolveDataPathItemType,
 } from './pagination.js';
 import {
+  BODY_READINGS,
   bodyEndOfIterationProblem,
   classifyAndExtractResponse,
   composedWithoutFields,
@@ -2680,7 +2681,7 @@ function buildOperation(
     envelopeFields,
     endOfIteration: responseEndOfIteration,
     overrideItemType,
-    overrideEndOfIterationProblem,
+    overrideProblem,
     envelopeCompanions,
     unpagedEnvelope,
   } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, typing, {
@@ -2698,31 +2699,17 @@ function buildOperation(
   // (`PetsHeaderXMeta`), never the reverse.
   for (const [raw, typed, location] of pendingParams) deferParameterModels(raw, typed, location, typing);
 
-  // An explicit `dataPath` that does not reach an array cannot type the
-  // iterator's items, so the whole override falls back to detection, as
-  // every other unusable override does.
-  if (
-    paginationOverride &&
-    !paginationDisabled &&
-    paginationOverride.hint.dataPath !== undefined &&
-    !overrideItemType
-  ) {
+  // An override the primary response cannot satisfy — a `dataPath` that
+  // reaches no array in it, an `endOfIteration` that resolves in it to no
+  // field of the fitting type — cannot type the iterator's items or would
+  // send it reading a field that is not there, so the whole override falls
+  // back to detection, as every other unusable override does. The decision
+  // was made before any body was read (`extractResponses`), so no success
+  // body was classified with it; one warning names the source, the
+  // operation and the problem.
+  if (paginationOverride && !paginationDisabled && overrideProblem !== undefined) {
     console.warn(
-      `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: dataPath "${paginationOverride.hint.dataPath}" ` +
-        'does not resolve to an array in the response — ignoring the override',
-    );
-    paginationOverride = undefined;
-  }
-
-  // An explicit `endOfIteration` the primary response cannot satisfy — a
-  // path that resolves to no field, or to one whose type does not fit the
-  // kind — would send an iterator reading a field that is not there, so the
-  // whole override falls back to detection the same way. One warning names
-  // the operation and the path; an override already dropped above is not
-  // reported twice.
-  if (paginationOverride && !paginationDisabled && overrideEndOfIterationProblem !== undefined) {
-    console.warn(
-      `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: ${overrideEndOfIterationProblem} — ignoring the override`,
+      `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: ${overrideProblem} — ignoring the override`,
     );
     paginationOverride = undefined;
   }
@@ -2774,8 +2761,8 @@ function buildOperation(
     console.warn(
       `[oagen] Warning: ${opLabel} returns a list envelope but no query parameter drives an iterator ` +
         `(${describeUndetectedPaging(queryParams)}) — keeping the body as a plain response model with no ` +
-        'pagination; declare the parameter, or set x-pagination / operationHints pagination naming a query ' +
-        'parameter the operation declares',
+        'pagination; declare the parameter, set x-pagination / operationHints pagination naming a query ' +
+        'parameter the operation declares, or set strategy "none" to accept the plain model',
     );
   }
 
@@ -5001,8 +4988,8 @@ interface PaginationExtractionOptions {
   dataPath?: string;
   /**
    * An explicit `endOfIteration` to check against the primary response
-   * (`bodyEndOfIterationProblem`): its path must land on a field whose type fits
-   * its kind, or the override is unusable.
+   * (`decidePaginationOverride`): its path must land on a field whose type
+   * fits its kind, or the override is unusable.
    */
   endOfIteration?: PaginationEndOfIteration;
   /** Component models, so the IR walk can follow a `$ref` wrapper's fields. */
@@ -5017,6 +5004,69 @@ interface PaginationExtractionOptions {
    * a secondary 2xx body that cannot satisfy it is kept the same way.
    */
   overrideOnly?: boolean;
+}
+
+/** Whether the pagination override applies to the operation's responses, decided once against the primary body. */
+interface PaginationOverrideDecision {
+  /**
+   * The override applies: its `dataPath` is handed to classification in
+   * every success body it reaches an array in, and its stop field is the
+   * iterator's.
+   */
+  usable: boolean;
+  /** Why it does not — the text `buildOperation` warns with; unset when it does. */
+  problem?: string;
+}
+
+/**
+ * The lowest 2xx entry that declares a body — `primaryBodySchema` picks a
+ * schema from it, or types a media type declared without one — with that
+ * schema when it has one: the body `Operation.response` describes, read
+ * before any body is classified. `undefined` when no 2xx declares a body.
+ */
+function primaryDeclaredBody(resolved: Map<string, ResponseObject>): { schema?: SchemaObject } | undefined {
+  const declared = [...resolved.entries()]
+    .map(([statusCode, resp]) => ({ code: Number(statusCode), pick: primaryBodySchema(resp) }))
+    .filter(({ code, pick }) => code < 300 && (pick.schema !== undefined || pick.type !== undefined))
+    .sort((a, b) => a.code - b.code);
+  return declared.length > 0 ? { schema: declared[0].pick.schema } : undefined;
+}
+
+/**
+ * Accept or reject the override against the primary body, once, before any
+ * success body is classified — the one check for the fields that depend on
+ * the response, in the order `buildOperation` reports them: a `dataPath`
+ * must reach an array in that body (`resolveDataPathFromSchema`, the walk
+ * that later types the items), then an `endOfIteration` must resolve in it
+ * to a field of the fitting type (`bodyEndOfIterationProblem`). An override
+ * that sets neither asks nothing of the response and is usable; its
+ * parameters were checked before the response was read
+ * (`resolveOverrideParams`). No primary body — no 2xx declares one — and a
+ * body declaring a schema that describes nothing resolve nothing, so an
+ * override that sets either field is rejected against them.
+ */
+function decidePaginationOverride(
+  pagination: PaginationExtractionOptions,
+  primary: { schema?: SchemaObject } | undefined,
+  contextName: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): PaginationOverrideDecision {
+  if (pagination.dataPath !== undefined) {
+    const reaches =
+      primary?.schema !== undefined &&
+      resolveDataPathFromSchema(primary.schema, pagination.dataPath, contextName, componentSchemas) !== undefined;
+    if (!reaches) {
+      return {
+        usable: false,
+        problem: `dataPath "${pagination.dataPath}" does not resolve to an array in the response`,
+      };
+    }
+  }
+  if (pagination.endOfIteration !== undefined) {
+    const problem = bodyEndOfIterationProblem(pagination.endOfIteration, primary?.schema, componentSchemas);
+    if (problem !== undefined) return { usable: false, problem };
+  }
+  return { usable: true };
 }
 
 /**
@@ -5096,8 +5146,13 @@ interface ComponentResponseNaming {
  * other field types, silently; and naming such a body per operation instead
  * would hand two shared bodies of one operation (`OwnerCard` at 200,
  * `NewOwner` at 201) the same `<Op>Response`. The names are read with the
- * extractor the operation will use, under the candidate name, so the whole
- * body moves together and the reference and the models agree by
+ * extractor the operation will use, under the candidate name and under
+ * every reading an operation can give the body — a list envelope unwrapped
+ * for an iterator (`NotePageItem`) or kept as the wire shape
+ * (`NotePageResponse`, `NotePageResponseData`), since which one an
+ * operation takes (`iteratorSource`) is known only when it is read and two
+ * operations returning the same body can differ — so the whole body moves
+ * together and the reference and the models agree by
  * construction; a chain of refs is followed to the body silently, since the
  * operation declaring the ref reports a bad one when it reads it. A clash the
  * stem does not reach — a titled variant, named the same under any stem —
@@ -5162,17 +5217,28 @@ function componentResponseBodySchema(
   return primaryBodySchema(resolved).schema;
 }
 
-/** Every model name a response body mints under `contextName`: the extractor's models and its envelope companions'. */
+/**
+ * Every model name a response body mints under `contextName`, under every
+ * reading an operation can give it (`BODY_READINGS`): the extractor's models
+ * and its envelope companions' when a list envelope is unwrapped
+ * (`NotePageItem`), and the plain model's nested models when it is kept as
+ * the wire shape (`NotePageResponse`, `NotePageResponseData`). Which reading
+ * each operation takes is decided when it is read (`iteratorSource`), and two
+ * operations returning one component response can take different ones, so
+ * both sets are reserved and the stem steps when either clashes.
+ */
 function bodyModelNames(
   schema: SchemaObject,
   contextName: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): string[] {
-  const body = classifyAndExtractResponse(schema, contextName, componentSchemas);
-  return [
-    ...body.inlineModels.map((model) => model.name),
-    ...(body.envelopeCompanions ?? []).flatMap((companion) => companion.models.map((model) => model.name)),
-  ];
+  const names = new Set<string>();
+  for (const reading of BODY_READINGS) {
+    const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
+    for (const model of body.inlineModels) names.add(model.name);
+    for (const companion of body.envelopeCompanions ?? []) for (const model of companion.models) names.add(model.name);
+  }
+  return [...names];
 }
 
 /**
@@ -5773,15 +5839,16 @@ function extractResponses(
   itemType?: TypeRef;
   envelopeFields?: Field[];
   endOfIteration?: PaginationEndOfIteration;
-  /** Element type of the array the override's `dataPath` names; unset when it does not resolve. */
+  /** Element type of the array the override's `dataPath` names; unset when the override was rejected or names none. */
   overrideItemType?: TypeRef;
   /**
-   * Why the override's `endOfIteration` cannot be read from the primary
-   * response — a path that resolves to no field, or to one whose type does
-   * not fit its kind — in the words of `bodyEndOfIterationProblem`; unset when
-   * none was given or it can be.
+   * Why the override cannot apply to the primary response — a `dataPath`
+   * that reaches no array in it, or an `endOfIteration` that resolves in it
+   * to no field of the fitting type — in the words `buildOperation` warns
+   * with (`decidePaginationOverride`); unset when it can, or when it sets
+   * neither field.
    */
-  overrideEndOfIterationProblem?: string;
+  overrideProblem?: string;
   envelopeCompanions?: EnvelopeCompanion[];
   /** The primary body is a list envelope kept as a plain response model because nothing pages it (`ResponseExtractionResult.unpagedEnvelope`). */
   unpagedEnvelope?: boolean;
@@ -5826,6 +5893,44 @@ function extractResponses(
   // through the document when the IR cannot answer.
   const bodySchemas = new Map<number, SchemaObject>();
 
+  // Every 2xx, 3xx and error entry is resolved once, here, and the loop
+  // below reads it from this map. The bundler leaves `$ref:
+  // '#/components/responses/…'` in place, and a Reference Object has no
+  // `headers` or `content` of its own to read, so the ref is resolved before
+  // either is — its sibling `description` read by `ctx.refSiblingDescriptions`,
+  // an unresolvable one warned about once. Only a status code one of the
+  // branches below reads is resolved: `default`, a `2XX` range and an `x-`
+  // extension are left as written, as nothing here reads them, and a 1xx is
+  // read as written too.
+  const resolvedResponses = new Map<string, ResponseObject>();
+  for (const [statusCode, rawResponse] of Object.entries(responses)) {
+    const responseKey = classifyResponseKey(statusCode);
+    if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
+    resolvedResponses.set(
+      statusCode,
+      resolveResponseRef<ResponseObject>(
+        rawResponse,
+        ctx.componentResponses,
+        `${statusCode} response of ${opLabel}`,
+        ctx.refSiblingDescriptions,
+      ),
+    );
+  }
+
+  // The override is accepted or rejected once, before any body is
+  // classified, against the primary body — the lowest 2xx that declares one
+  // (`primaryDeclaredBody`) — and every success body below is read with
+  // that one decision (`overrideDecision`): a rejected override is handed
+  // to no body, so a secondary 2xx is read exactly as detection reads it,
+  // never kept as the wrapper the dropped override would have selected; an
+  // accepted one applies to each body its `dataPath` reaches an array in.
+  const overrideDecision = decidePaginationOverride(
+    pagination,
+    primaryDeclaredBody(resolvedResponses),
+    operationBodyName,
+    componentSchemas,
+  );
+
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
     // and `1XX`–`5XX` are routed to their own fields, an `x-` extension is
@@ -5838,20 +5943,9 @@ function extractResponses(
       continue;
     }
     const code = responseKey.code;
-    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
-    // Reference Object has no `headers` or `content` of its own to read, so
-    // the ref is resolved before either is. Only a status code one of the
-    // branches below reads is resolved: `default`, a `2XX` range and an `x-`
-    // extension are left as written, as nothing here reads them.
-    const resp =
-      code >= 200
-        ? resolveResponseRef<ResponseObject>(
-            rawResponse,
-            ctx.componentResponses,
-            `${statusCode} response of ${opLabel}`,
-            ctx.refSiblingDescriptions,
-          )
-        : rawResponse;
+    // Resolved above for every status code a branch below reads; a 1xx is
+    // read as written.
+    const resp = resolvedResponses.get(statusCode) ?? rawResponse;
     // Set when the response came from a component: its inline body is then
     // named after the component, shared by every operation that returns it —
     // at a status code, as `default` or in a range (`readFallbackResponse`
@@ -5895,32 +5989,28 @@ function extractResponses(
       if (pick.type) extractedType = pick.type;
       if (bodySchema) {
         const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
-        // An explicit `dataPath` is handed to classification only when the
-        // override can apply to this body: the path reaches an array in it,
-        // and an explicit `endOfIteration` resolves in it to a field of the
-        // fitting type. An override that fails either is left for its own
-        // warning, and the body is read exactly as detection reads it.
-        const stopFieldUsable =
-          pagination.disabled ||
-          pagination.endOfIteration === undefined ||
-          bodyEndOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) === undefined;
+        // The override as decided above (`overrideDecision`): a rejected one
+        // is handed to no body, and an accepted one hands its `dataPath` to
+        // classification where it reaches an array in this body — the
+        // primary's by the decision itself, a secondary's on its own shape
+        // — so a secondary the path does not reach is read as detection
+        // reads it.
         const dataPathOverride =
           pagination.disabled ||
+          !overrideDecision.usable ||
           pagination.dataPath === undefined ||
-          !stopFieldUsable ||
           !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
             ? undefined
             : pagination.dataPath;
-        // When only the override can drive an iterator and this body cannot
-        // satisfy it — its `dataPath` reaches no array, or its `endOfIteration`
-        // resolves to no field of the fitting type — nothing will page the
-        // body: a list envelope in it is kept as a plain response model, as
-        // under `disabled`, rather than unwrapped for an iterator that never
-        // comes.
+        // When only the override can drive an iterator, a body it will not
+        // page — every body once the override is rejected, or a secondary
+        // its `dataPath` reaches no array in — keeps a list envelope as a
+        // plain response model, as under `disabled`, rather than unwrapped
+        // for an iterator that never comes.
         const paginationDisabled =
           pagination.disabled === true ||
           (pagination.overrideOnly === true &&
-            ((pagination.dataPath !== undefined && dataPathOverride === undefined) || !stopFieldUsable));
+            (!overrideDecision.usable || (pagination.dataPath !== undefined && dataPathOverride === undefined)));
         // The primary body's array items are settled against the registry
         // (`typeInlineItems`); the dry run that reads a component response's
         // names (`bodyModelNames`) passes none and mints nothing into it.
@@ -6087,17 +6177,21 @@ function extractResponses(
     }
   }
 
-  // An explicit `dataPath` names the array the iterator yields from, so its
-  // element type — not the wrapper — must become `itemType`. It is resolved
-  // against the primary body, whose models (companions included) are the
-  // ones retained above, so the item type it selects always has its model.
+  // An explicit `dataPath` the decision accepted names the array the
+  // iterator yields from, so its element type — not the wrapper — must
+  // become `itemType`. It is resolved against the primary body, whose models
+  // (companions included) are the ones retained above, so the item type it
+  // selects always has its model. An accepted `dataPath` reached an array in
+  // the body the decision was made against, which is this one: a body an
+  // array is reached in is typed, and the lowest typed 2xx is the primary.
   const primarySchema = primaryStatus === undefined ? undefined : bodySchemas.get(primaryStatus);
   if (
     primaryStatus !== undefined &&
     primaryBody &&
     primarySchema &&
     pagination.dataPath !== undefined &&
-    !pagination.disabled
+    !pagination.disabled &&
+    overrideDecision.usable
   ) {
     const resolved = resolveOverrideItemType(
       primaryBody,
@@ -6118,14 +6212,9 @@ function extractResponses(
     }
   }
 
-  // An explicit `endOfIteration` is checked against the same body, over the
-  // property map its own stop field is read from: the path must land on a
-  // field of the primary response whose type fits the kind. Without a
-  // primary body there is no field for it to name.
-  const overrideEndOfIterationProblem =
-    pagination.disabled || pagination.endOfIteration === undefined
-      ? undefined
-      : bodyEndOfIterationProblem(pagination.endOfIteration, primaryBody && primarySchema, componentSchemas);
+  // The one reason the override cannot apply to the response, decided
+  // before any body was read (`decidePaginationOverride`).
+  const overrideProblem = pagination.disabled ? undefined : overrideDecision.problem;
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
@@ -6148,7 +6237,7 @@ function extractResponses(
     envelopeFields,
     endOfIteration,
     overrideItemType,
-    overrideEndOfIterationProblem,
+    overrideProblem,
     envelopeCompanions,
     unpagedEnvelope,
   };
