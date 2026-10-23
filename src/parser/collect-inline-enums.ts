@@ -151,9 +151,12 @@ export function collectInlineEnumsFromOperations(
       // here — after the headers, so a header enum of the same name keeps it
       // as a header model would. The name is already operation-qualified
       // (`GetPetError404`); one a component, header or earlier error enum
-      // owns with other members steps to `GetPetError404Body`. An enum
-      // nested in an error body's model is collected with every other
-      // model's (`collectInlineEnumsFromModels`). A body a component
+      // owns with other members steps to `GetPetError404Body`. No inline
+      // model holds it: the registry reserved it before any deferred model
+      // was named (`deferredEnumName` in operations.ts), so an object `404`
+      // of another operation under the same stem is the one that stepped.
+      // An enum nested in an error body's model is collected with every
+      // other model's (`collectInlineEnumsFromModels`). A body a component
       // response declares (`shared`) is the component's, not the
       // operation's, and steps by number (`CardResponse2`) as it does at a
       // `default` or range site.

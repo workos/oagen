@@ -47,6 +47,7 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
   foldSiblingProperties,
+  inlineEnumSchemaName,
   isInlineObjectSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
@@ -676,6 +677,17 @@ export function extractOperations(
   for (const model of inlineModels) reserveEnumNames(registry, enumRefsOf(model), registry.get(model.name)?.operation);
   for (const [op, qualifier] of qualifierOf) {
     reserveEnumNames(registry, collectOperationTypeRefs(op).flatMap(collectEnumRefs), qualifier);
+  }
+  // An enum a deferred site itself types — a body that is an inline enum, or
+  // an array of one — is named only when the site is resolved, after the
+  // models of every site before it in the document; reserved now
+  // (`deferredEnumName`), a deferred object body of the same name steps
+  // past it whichever of the two the document declares first
+  // (`GetPetError404Body`), as it steps past every other enum in play, so a
+  // model never keeps an enum's name.
+  for (const item of deferred) {
+    const enumName = deferredEnumName(item);
+    if (enumName !== undefined) reserveEnumNames(registry, [enumName], item.operationQualifier);
   }
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
@@ -4193,12 +4205,14 @@ interface ResponseTypingContext {
  * enum, an enum nested in a model it minted) as it is resolved, so the
  * earlier site keeps the name and a later one that derives it steps (an
  * `X-Mode` header parameter object after an earlier operation's `X-Mode`
- * response-header enum is `PetsGetPetXMode`; `getPet`'s object 404 after
- * `get-pet`'s enum 404 is `GetPetError404Body`), while an enum typed after
- * a model of its name steps in the collectors instead
- * (`collectDistinctEnums`, `GetPetError404Body` when the object 404 comes
- * first). So the IR never declares a model and an enum under one name.
- * Returns the models materialized, having set each target's `type`.
+ * response-header enum is `PetsGetPetXMode`) — except that the enum a body
+ * itself is (an error, fallback or secondary body that is an inline enum,
+ * or an array of one) is reserved before any of these sites is named
+ * (`deferredEnumName`), so `getPet`'s object 404 is `GetPetError404Body`
+ * whether `get-pet`'s enum 404 comes before or after it. So the IR never
+ * declares a model and an enum under one name, and the model is always
+ * the one that steps. Returns the models materialized, having set each
+ * target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -4260,7 +4274,10 @@ function resolveDeferredInlineTypes(
  * references along with a renamed deprecated one; a component is never
  * renamed, so a reference to one is left alone. Idempotent: run over the
  * operations' bundles once they are complete (`extractOperations`) and again
- * once the components' field bundles exist (`parseSpec`).
+ * once the components' field bundles exist (`parseSpec`) — there a field's
+ * bundle stands for the object the component pass minted for the field
+ * (`fieldInlineModelBundles`), so a header or fallback body that shared that
+ * object joins the field's site and follows its rename.
  */
 export function attachSharedRefs(bundles: readonly InlineModelBundle[], componentNames: ReadonlySet<string>): void {
   const siteOf = new Map<string, InlineModelBundle>();
@@ -4390,6 +4407,18 @@ function materializeDeferredType(
 /** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
 function isSentSite(item: DeferredInlineType): boolean {
   return item.kind === 'request' || item.kind === 'param';
+}
+
+/**
+ * The enum name a deferred body typed as an inline enum — an error, fallback
+ * or secondary body whose schema is an `enum:` list, or an array of one — is
+ * lifted under when its site is resolved: its first candidate
+ * (`deferredNamingStem`) as `schemaToTypeRef` names an enum under it, the
+ * site's parent qualifying it as a header's does (`inlineEnumSchemaName`);
+ * undefined for every other shape, which mints models or nothing.
+ */
+function deferredEnumName(item: DeferredInlineType): string | undefined {
+  return inlineEnumSchemaName(item.schema, deferredNamingStem(item)(0, []), item.parentName);
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
