@@ -620,6 +620,36 @@ describe('the one reading of an inline allOf', () => {
     ]);
   });
 
+  it('types a name two members declare from the first declaration that declares a type, annotated by a typeless one (Greptile)', () => {
+    const typed: SchemaObject = { type: 'object', properties: { x: { type: 'string' } } };
+    const doc: SchemaObject = { type: 'object', properties: { x: { description: 'doc' } } };
+    // Whichever is read first, `x` is a described string.
+    for (const members of [
+      [typed, doc],
+      [doc, typed],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, components);
+      expect(merged.properties.map((p) => p.name)).toEqual(['x']);
+      expect(merged.properties[0]!.schema).toEqual({ type: 'string', description: 'doc' });
+    }
+    // Two typing declarations keep the first, as written.
+    const two = mergeAllOfMembers(
+      { allOf: [typed, { type: 'object', properties: { x: { type: 'integer' } } }] },
+      components,
+    );
+    expect(two.properties[0]!.schema).toBe(typed.properties!.x);
+    // A component declaring the name typeless beside an `allOf` member that
+    // types it — and the reverse — is a described string field either way.
+    const { models } = extractSchemas({
+      DocFirst: { properties: { x: { description: 'doc' } }, allOf: [typed] },
+      TypeFirst: { properties: { x: { type: 'string' } }, allOf: [doc] },
+    });
+    for (const name of ['DocFirst', 'TypeFirst']) {
+      const [field] = models.find((m) => m.name === name)!.fields;
+      expect(field, name).toMatchObject({ name: 'x', type: { kind: 'primitive', type: 'string' }, description: 'doc' });
+    }
+  });
+
   it('schemaToTypeRef, mintedInlineNameEntries and the field extractor agree that a oneOf member mints the merged model', () => {
     const refPlusUnion: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, union] };
     const unionPlusLimits: SchemaObject = { allOf: [union, { maxProperties: 3 }] };

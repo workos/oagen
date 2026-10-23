@@ -471,6 +471,87 @@ describe('a list envelope on an operation without a paging parameter (issue #309
     });
   });
 
+  describe('a kept envelope on a later status code keeps its own shape (Greptile, round 2)', () => {
+    const plainId = {
+      description: 'ok',
+      content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+    };
+    const envelopeAt = (description: string) => ({
+      description,
+      content: { 'application/json': { schema: totalPagesEnvelope } },
+    });
+    const withResponses = (responses: Record<string, unknown>, parameters: unknown[] = []) => {
+      const doc = petsSpec(parameters, totalPagesEnvelope);
+      doc.paths['/pets'].get.responses = responses as (typeof doc.paths)['/pets']['get']['responses'];
+      return doc;
+    };
+    const fieldsOf = (ir: ApiSpec, model: string) => ir.models.find((m) => m.name === model)?.fields.map((f) => f.name);
+
+    it("Greptile's case: a 200 { id } and a 201 kept envelope are two models, the 201 keeping data and total_pages", async () => {
+      const ir = await parseJson(withResponses({ '200': plainId, '201': envelopeAt('created') }));
+      const op = onlyOperation(ir);
+      expect(op.pagination).toBeUndefined();
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+        [200, { kind: 'model', name: 'ListPetsResponse' }],
+        [201, { kind: 'model', name: 'ListPetsResponse201' }],
+      ]);
+      expect(fieldsOf(ir, 'ListPetsResponse')).toEqual(['id']);
+      expect(fieldsOf(ir, 'ListPetsResponse201')).toEqual(['data', 'total_pages']);
+      // The warning concerns the primary body, which is no envelope here.
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('identical kept envelopes on a 200 and a 201 share one model', async () => {
+      const ir = await parseJson(withResponses({ '200': envelopeAt('ok'), '201': envelopeAt('created') }));
+      const op = onlyOperation(ir);
+      expect(op.pagination).toBeUndefined();
+      expect(op.successResponses?.map((r) => r.type)).toEqual([
+        { kind: 'model', name: 'ListPetsResponse' },
+        { kind: 'model', name: 'ListPetsResponse' },
+      ]);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse']);
+      expect(fieldsOf(ir, 'ListPetsResponse')).toEqual(['data', 'total_pages']);
+      expect(warnings()).toEqual([warningFor('no cursor, offset or page query parameter is declared')]);
+      expectSound(ir);
+    });
+
+    it('an envelope on a 3xx is never paged: the redirect entry stays untyped and its body is a plain content model', async () => {
+      const ir = await parseJson(withResponses({ '200': plainId, '302': envelopeAt('moved') }));
+      const op = onlyOperation(ir);
+      expect(op.pagination).toBeUndefined();
+      expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+        [200, { kind: 'model', name: 'ListPetsResponse' }],
+        [302, { kind: 'primitive', type: 'unknown' }],
+      ]);
+      // A 3xx body is typed on its own content entry, as every 3xx body is,
+      // never unwrapped and never the operation's response.
+      const redirect = op.successResponses?.find((r) => r.statusCode === 302);
+      expect(redirect?.contents?.map((c) => [c.contentType, c.type])).toEqual([
+        ['application/json', { kind: 'model', name: 'ListPetsApplicationJsonResponse' }],
+      ]);
+      expect(fieldsOf(ir, 'ListPetsApplicationJsonResponse')).toEqual(['data', 'total_pages']);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse', 'ListPetsApplicationJsonResponse']);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('an unwrapped 201 envelope beside a 200 { id } still becomes the bare array when a parameter pages it', async () => {
+      const ir = await parseJson(
+        withResponses({ '200': plainId, '201': envelopeAt('created') }, [query('after', 'string')]),
+      );
+      const op = onlyOperation(ir);
+      expect(op.successResponses?.map((r) => r.type)).toEqual([
+        { kind: 'model', name: 'ListPetsResponse' },
+        { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+      ]);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse']);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+  });
+
   it('strategy "none" asks for the plain model and gets no warning', async () => {
     const ir = await parseJson(petsSpec([query('page')], totalPagesEnvelope, { 'x-pagination': { strategy: 'none' } }));
     expectEnvelopeKept(ir, ['data', 'total_pages']);

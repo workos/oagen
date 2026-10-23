@@ -20,14 +20,16 @@ import type { SchemaObject } from '../../src/parser/schemas.js';
  * held a `GetPetError404` and an emitter was handed a model and an enum of
  * one name. The error body, the `default` body and the header model step in
  * the deferred pass's shape registry, which reserves every enum name in play
- * (`reserveEnumNamesInPlay`); an enum body lifted after a model of its name
- * steps in the collectors (`collectDistinctEnums`). The sites the merge
+ * (`reserveEnumNames`) — the name of a body that is itself an enum before
+ * any deferred model is named (`deferredEnumName`). The sites the merge
  * passes name — a request body or primary response named from its
  * operation, a model nested under one, a list-envelope companion, a
- * component field's object — are settled there (`settleSharedNames`): a name
- * one of the document's enums holds is no model's, whatever its shape, so
- * the copy takes the qualified name an inline model named like a component
- * schema of another shape takes (`GetPetResponse2`).
+ * component field's object — are settled there (`settleSharedNames`): a
+ * name an enum holds — the document's own, or one an operation or webhook
+ * carries — is no model's, whatever its shape, so the copy takes the
+ * qualified name an inline model named like a component schema of another
+ * shape takes (`GetPetResponse2`), identical copies sharing one model under
+ * it. One rule: the model steps wherever an enum of its name exists.
  */
 
 const dirs: string[] = [];
@@ -453,5 +455,185 @@ describe('the same rule at every other site the merge passes name', () => {
       '202: enum CreatePetResponse2',
     ]);
     expectSound(spec, ['CreatePetRequest', 'CreatePetResponse', 'CreatePetResponse202']);
+  });
+});
+
+/** The query parameter `name` of an operation, rendered. */
+const queryType = (op: Operation, name: string): string => show(op.queryParams.find((p) => p.name === name)?.type);
+const opsIn = (spec: ApiSpec): Operation[] => spec.services.flatMap((s) => s.operations);
+
+describe('review: one rule — the model steps wherever an enum of its name exists', () => {
+  it('shares one model between identical copies that leave an enum’s name (bodies pinned by `object: widget`)', async () => {
+    const widget = obj({ object: { const: 'widget' } as SchemaObject, name: str });
+    const { spec, warnings } = await parse(
+      'identical-widgets',
+      specDoc(
+        {
+          '/a': { get: { operationId: 'getA', tags: ['widgets'], responses: { '200': response(widget) } } },
+          '/b': { get: { operationId: 'getB', tags: ['widgets'], responses: { '200': response(widget) } } },
+        },
+        { Widget: en(['a', 'b']) },
+      ),
+    );
+    expect(bothKinds(spec)).toEqual([]);
+    expect(modelsOf(spec)).toEqual(['GetAWidget {object,name}']);
+    expect(opsIn(spec).map((op) => show(op.response))).toEqual(['model GetAWidget', 'model GetAWidget']);
+    expect(warnings).toEqual([`${renamed('Widget', 'GetAWidget')} (shared by 2 sites)`]);
+    expectSound(spec, ['Widget']);
+  });
+
+  it('shares one model between two identical `getPet` bodies beside a component enum `GetPetResponse`', async () => {
+    const { spec, warnings } = await parse(
+      'identical-get-pet',
+      specDoc(
+        {
+          ...getPet({ '200': response(obj({ a: str })) }),
+          '/pet/{id}': {
+            get: {
+              operationId: 'get_pet',
+              tags: ['pets'],
+              parameters: [idParam],
+              responses: { '200': response(obj({ a: str })) },
+            },
+          },
+        },
+        { GetPetResponse: en(['r', 's']) },
+      ),
+    );
+    expect(bothKinds(spec)).toEqual([]);
+    expect(modelsOf(spec)).toEqual(['GetPetResponse2 {a}']);
+    expect(opsIn(spec).map((op) => show(op.response))).toEqual(['model GetPetResponse2', 'model GetPetResponse2']);
+    expect(warnings).toEqual([`${renamed('GetPetResponse', 'GetPetResponse2')} (shared by 2 sites)`]);
+    expectSound(spec, ['GetPetResponse']);
+  });
+
+  it('a `createPet` request body beside a `request` query enum of its service: the body steps (`CreatePetRequest2`)', async () => {
+    const { spec, warnings } = await parse(
+      'body-beside-query-enum',
+      specDoc({
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            tags: ['createPet'],
+            parameters: [{ name: 'request', in: 'query', schema: en(['x', 'y']) }],
+            requestBody: json(obj({ n: str })),
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      }),
+    );
+    expect(bothKinds(spec)).toEqual([]);
+    expect(enumsOf(spec)).toEqual(['CreatePetRequest [x,y]']);
+    expect(modelsOf(spec)).toEqual(['CreatePetRequest2 {n}']);
+    const { createPet } = opsOf(spec);
+    expect(show(createPet.requestBody)).toBe('model CreatePetRequest2');
+    expect(queryType(createPet, 'request')).toBe('enum CreatePetRequest');
+    expect(warnings).toEqual([renamed('CreatePetRequest', 'CreatePetRequest2')]);
+    expectSound(spec);
+  });
+
+  it('a `request` query parameter object beside that enum: the object steps in the registry (`CreatePetListPetsRequest`)', async () => {
+    const { spec, warnings } = await parse(
+      'param-beside-query-enum',
+      specDoc({
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            tags: ['createPet'],
+            parameters: [{ name: 'request', in: 'query', style: 'deepObject', schema: obj({ q: str }) }],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+        '/pets/search': {
+          get: {
+            operationId: 'searchPets',
+            tags: ['createPet'],
+            parameters: [{ name: 'request', in: 'query', schema: en(['x', 'y']) }],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      }),
+    );
+    expect(warnings).toEqual([]);
+    expect(bothKinds(spec)).toEqual([]);
+    expect(enumsOf(spec)).toEqual(['CreatePetRequest [x,y]']);
+    expect(modelsOf(spec)).toEqual(['CreatePetListPetsRequest {q}']);
+    const { listPets, searchPets } = opsOf(spec);
+    expect(queryType(listPets, 'request')).toBe('model CreatePetListPetsRequest');
+    expect(queryType(searchPets, 'request')).toBe('enum CreatePetRequest');
+    expectSound(spec);
+  });
+
+  it('a `Pet.status` object beside a `status` query enum: the object steps at the merges (`PetStatus2`), a header sharing it following', async () => {
+    const pet = obj({ id: str, status: obj({ code: str }) });
+    const listPets = (headers: Record<string, unknown> = {}) => ({
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          tags: ['pet'],
+          parameters: [{ name: 'status', in: 'query', schema: en(['x', 'y']) }],
+          responses: { '200': response({ $ref: '#/components/schemas/Pet' }, { headers }) },
+        },
+      },
+    });
+    const plain = await parse('field-beside-query-enum', specDoc(listPets(), { Pet: pet }));
+    expect(bothKinds(plain.spec)).toEqual([]);
+    expect(enumsOf(plain.spec)).toEqual(['PetStatus [x,y]']);
+    expect(modelsOf(plain.spec)).toEqual(['Pet {id,status}', 'PetStatus2 {code}']);
+    expect(show(plain.spec.models[0].fields[1].type)).toBe('model PetStatus2');
+    expect(queryType(opsOf(plain.spec).listPets, 'status')).toBe('enum PetStatus');
+    expect(plain.warnings).toEqual([renamed('PetStatus', 'PetStatus2')]);
+    expectSound(plain.spec, ['Pet']);
+
+    // A `Status` header of the same shape shared the object's model in the
+    // registry; the reference it wrote follows the rename.
+    const shared = await parse(
+      'field-beside-query-enum-shared',
+      specDoc(listPets({ Status: { schema: obj({ code: str }) } }), { Pet: pet }),
+    );
+    expect(bothKinds(shared.spec)).toEqual([]);
+    expect(modelsOf(shared.spec)).toEqual(['Pet {id,status}', 'PetStatus2 {code}']);
+    expect(headersOf(opsOf(shared.spec).listPets)).toEqual({ Status: 'model PetStatus2' });
+    expect(shared.warnings).toEqual([renamed('PetStatus', 'PetStatus2')]);
+    expectSound(shared.spec, ['Pet']);
+  });
+
+  it('an object `404` body and an enum `404` body under one stem: the object steps (`GetPetError404Body`) in either order', async () => {
+    const objectBody = {
+      '/pets/{id}': {
+        get: {
+          operationId: 'getPet',
+          tags: ['pets'],
+          parameters: [idParam],
+          responses: { '200': { description: 'ok' }, '404': response(obj({ reason: str })) },
+        },
+      },
+    };
+    const enumBody = {
+      '/pet/{petId}': {
+        get: {
+          operationId: 'get-pet',
+          tags: ['pets'],
+          parameters: [{ ...idParam, name: 'petId' }],
+          responses: { '200': { description: 'ok' }, '404': response(en(['absent', 'unknown'])) },
+        },
+      },
+    };
+    for (const [label, paths] of [
+      ['object-first', { ...objectBody, ...enumBody }],
+      ['enum-first', { ...enumBody, ...objectBody }],
+    ] as const) {
+      const { spec, warnings } = await parse(label, specDoc(paths));
+      expect(warnings).toEqual([]);
+      expect(bothKinds(spec)).toEqual([]);
+      expect(enumsOf(spec)).toEqual(['GetPetError404 [absent,unknown]']);
+      expect(modelsOf(spec)).toEqual(['GetPetError404Body {reason}']);
+      expect(opsIn(spec).map((op) => errorsOf(op)[0])).toEqual(
+        label === 'object-first'
+          ? ['404: model GetPetError404Body', '404: enum GetPetError404']
+          : ['404: enum GetPetError404', '404: model GetPetError404Body'],
+      );
+      expectSound(spec);
+    }
   });
 });
