@@ -476,7 +476,9 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * do, so a name is never mistaken for a specification extension: a header
  * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`
  * or a property `x-id` is read like any other, and an `x-` key is stepped
- * over only where the readers step over it or read nothing: a Responses
+ * over only where the readers step over it or read nothing: the Paths
+ * Object's and the `webhooks` map's (extensions by the specification, which
+ * `extractOperations` and `extractWebhooks` step over), a Responses
  * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
  * the specification; the parser reads no callbacks). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
@@ -519,7 +521,8 @@ const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head',
  * walking the OpenAPI 3.0/3.1 object model (see `markContestedTitles`):
  *
  *   - the OpenAPI Object's `paths` and `webhooks` (a path or a name per
- *     key) to Path Item Objects; the Components Object's `responses`,
+ *     key, an `x-` extension stepped over) to Path Item Objects; the
+ *     Components Object's `responses`,
  *     `parameters`, `requestBodies`, `headers`, `pathItems` and `callbacks`
  *     (a name per key);
  *   - a Path Item's `parameters` list and operations; an Operation's
@@ -533,11 +536,12 @@ const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head',
  *     property name per key, each an Encoding Object with `headers`).
  *
  * A map whose keys are names is read whole, whatever the keys look like.
- * The Paths Object is read whole too, every key as a Path Item, exactly as
- * `extractOperations` reads it. An `x-` key is stepped over in a Responses
- * Object, as `readFallbackResponse` steps over it, and in a Callback Object,
- * where the specification makes it an extension (the parser reads no
- * callbacks, so nothing named under one is ever typed). A `$ref` entry
+ * An `x-` key is stepped over in the Paths Object and the `webhooks` map,
+ * where the specification makes it an extension and `extractOperations`
+ * and `extractWebhooks` step over it, in a Responses Object, as
+ * `readFallbackResponse` steps over it, and in a Callback Object, where the
+ * specification makes it an extension (the parser reads no callbacks, so
+ * nothing named under one is ever typed). A `$ref` entry
  * anywhere carries no schema of its own: the target is a component, read
  * under its own map. A `schema` is yielded and not entered, so one shared by
  * two sites is yielded for each; every other object is entered once, which
@@ -609,8 +613,10 @@ function schemaRootsOf(
     named(value['callbacks'], (callback) => keyed(callback, pathItem));
   };
 
-  named(document['paths'], pathItem);
-  named(document['webhooks'], pathItem);
+  // Both maps step over `x-` extensions, as `extractOperations` and
+  // `extractWebhooks` do.
+  keyed(document['paths'], pathItem);
+  keyed(document['webhooks'], pathItem);
   if (components) {
     named(components['responses'], response);
     named(components['parameters'], parameter);
