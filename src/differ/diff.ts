@@ -15,6 +15,7 @@ import { diffModels } from './models.js';
 import { classifySecurityChange, securityEqual, type DocumentSecurity, type SecuritySide } from './security.js';
 import { diffServers } from './servers.js';
 import { diffServices } from './services.js';
+import { documentTypes, type DocumentShapes } from './shapes.js';
 import { diffWebhooks } from './webhooks.js';
 
 export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
@@ -25,6 +26,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
   // webhook is judged by what its requests actually carry, not by whether
   // it declares a list of its own.
   const documentSecurity: DocumentSecurity = { old: oldSpec.security, new: newSpec.security };
+  // The documents' named types travel along so two paired bodies compare by
+  // shape: a model the parser only renamed is not a retyped media type.
+  const shapes: DocumentShapes = { old: documentTypes(oldSpec), new: documentTypes(newSpec) };
 
   const changes: Change[] = [
     // Where the client sends requests comes first: it is the one change that
@@ -41,8 +45,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
       newSpec.services,
       { old: oldSpec.servers, new: newSpec.servers },
       documentSecurity,
+      shapes,
     ),
-    ...diffWebhooks(oldSpec.webhooks ?? [], newSpec.webhooks ?? [], documentSecurity),
+    ...diffWebhooks(oldSpec.webhooks ?? [], newSpec.webhooks ?? [], documentSecurity, shapes),
   ];
 
   const behaviorChanges = collectBehaviorChanges(changes);

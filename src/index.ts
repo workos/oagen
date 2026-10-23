@@ -150,6 +150,8 @@ export type {
   WebhookRemoved,
   WebhookModified,
   ParamChange,
+  RequestBodyContentTypesChange,
+  ResponseContentTypesChange,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,

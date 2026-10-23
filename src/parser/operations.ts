@@ -4384,7 +4384,7 @@ function extractResponseContents(
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
-        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry);
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry, contentTypes);
     return entry;
   });
   return { contentTypes, contents };
@@ -4398,10 +4398,13 @@ function extractResponseContents(
  * and one without a schema is `unknown`. The one addition is that an inline
  * object under such a media type is materialized — the primary pick's
  * `...Response` name belongs to the primary body, so this one is named after
- * its media type as well: `RenderPetCardTextHtmlResponse`. That naming waits
- * for every primary model (`resolveDeferredInlineTypes`), so a schema is
- * deferred and `target.type` — returned here as a placeholder — filled in
- * then.
+ * its media type as well: `RenderPetCardTextHtmlResponse`, from the media
+ * type's essence among its `siblings` (the response's content keys), so a
+ * key keeps its model name however it is spelled and two spellings of one
+ * essence side by side are told apart by their parameters
+ * (`mediaTypeNameFragment`). That naming waits for every primary model
+ * (`resolveDeferredInlineTypes`), so a schema is deferred and `target.type`
+ * — returned here as a placeholder — filled in then.
  */
 function typeSecondaryContent(
   contentType: string,
@@ -4409,6 +4412,7 @@ function typeSecondaryContent(
   naming: ContentModelNaming,
   ctx: ResponseTypingContext,
   target: ResponseContent,
+  siblings: readonly string[],
 ): TypeRef {
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
@@ -4422,26 +4426,13 @@ function typeSecondaryContent(
   ctx.deferred.push({
     kind: 'content',
     schema,
-    name: `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`,
+    name: `${naming.base}${mediaTypeNameFragment(contentType, siblings)}${naming.suffix}`,
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
   });
   return target.type;
-}
-
-/**
- * The PascalCase token that qualifies an inline model minted for a secondary
- * media type: `text/html` → `TextHtml`, `application/vnd.api+json` →
- * `ApplicationVndApiJson`. Parameters are part of it (`application/json;
- * charset=utf-8` → `ApplicationJsonCharsetUtf8`) so two parameterizations of
- * one type never share a model, and a wildcard segment reads as `Any`
- * (`application/*` → `ApplicationAny`) since the caser would drop the `*`.
- */
-function mediaTypeToken(contentType: string): string {
-  const token = toPascalCase(contentType.split('*').join('Any'));
-  return token.length > 0 ? token : 'Content';
 }
 
 /**
