@@ -72,6 +72,7 @@ import {
   resolveDataPathItemType,
 } from './pagination.js';
 import {
+  BODY_READINGS,
   classifyAndExtractResponse,
   composedWithoutFields,
   classifyResponseKey,
@@ -2758,8 +2759,8 @@ function buildOperation(
     console.warn(
       `[oagen] Warning: ${opLabel} returns a list envelope but no query parameter drives an iterator ` +
         `(${describeUndetectedPaging(queryParams)}) — keeping the body as a plain response model with no ` +
-        'pagination; declare the parameter, or set x-pagination / operationHints pagination naming a query ' +
-        'parameter the operation declares',
+        'pagination; declare the parameter, set x-pagination / operationHints pagination naming a query ' +
+        'parameter the operation declares, or set strategy "none" to accept the plain model',
     );
   }
 
@@ -5073,8 +5074,13 @@ interface ComponentResponseNaming {
  * other field types, silently; and naming such a body per operation instead
  * would hand two shared bodies of one operation (`OwnerCard` at 200,
  * `NewOwner` at 201) the same `<Op>Response`. The names are read with the
- * extractor the operation will use, under the candidate name, so the whole
- * body moves together and the reference and the models agree by
+ * extractor the operation will use, under the candidate name and under
+ * every reading an operation can give the body — a list envelope unwrapped
+ * for an iterator (`NotePageItem`) or kept as the wire shape
+ * (`NotePageResponse`, `NotePageResponseData`), since which one an
+ * operation takes (`iteratorSource`) is known only when it is read and two
+ * operations returning the same body can differ — so the whole body moves
+ * together and the reference and the models agree by
  * construction; a chain of refs is followed to the body silently, since the
  * operation declaring the ref reports a bad one when it reads it. A clash the
  * stem does not reach — a titled variant, named the same under any stem —
@@ -5139,17 +5145,28 @@ function componentResponseBodySchema(
   return primaryBodySchema(resolved).schema;
 }
 
-/** Every model name a response body mints under `contextName`: the extractor's models and its envelope companions'. */
+/**
+ * Every model name a response body mints under `contextName`, under every
+ * reading an operation can give it (`BODY_READINGS`): the extractor's models
+ * and its envelope companions' when a list envelope is unwrapped
+ * (`NotePageItem`), and the plain model's nested models when it is kept as
+ * the wire shape (`NotePageResponse`, `NotePageResponseData`). Which reading
+ * each operation takes is decided when it is read (`iteratorSource`), and two
+ * operations returning one component response can take different ones, so
+ * both sets are reserved and the stem steps when either clashes.
+ */
 function bodyModelNames(
   schema: SchemaObject,
   contextName: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): string[] {
-  const body = classifyAndExtractResponse(schema, contextName, componentSchemas);
-  return [
-    ...body.inlineModels.map((model) => model.name),
-    ...(body.envelopeCompanions ?? []).flatMap((companion) => companion.models.map((model) => model.name)),
-  ];
+  const names = new Set<string>();
+  for (const reading of BODY_READINGS) {
+    const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
+    for (const model of body.inlineModels) names.add(model.name);
+    for (const companion of body.envelopeCompanions ?? []) for (const model of companion.models) names.add(model.name);
+  }
+  return [...names];
 }
 
 /**

@@ -100,12 +100,15 @@ export function detectPagination(
 export function describeUndetectedPaging(queryParams: Parameter[]): string {
   const declared = (names: readonly string[]): string[] =>
     queryParams.filter((p) => names.includes(p.name)).map((p) => `"${p.name}"`);
+  // `"page" is` / `"offset" and "page" are` / `"a", "b" and "c" are`.
+  const listed = (names: string[]): string =>
+    names.length === 1 ? `${names[0]} is` : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are`;
   const selectors = [...declared(OFFSET_PARAMS), ...declared(PAGE_PARAMS)];
   if (selectors.length > 0) {
-    return `${selectors.join(', ')} is declared without a page-size parameter: ${LIMIT_PARAMS.join(', ')}`;
+    return `${listed(selectors)} declared without a page-size parameter: ${LIMIT_PARAMS.join(', ')}`;
   }
   const sizes = declared(LIMIT_PARAMS);
-  if (sizes.length > 0) return `${sizes.join(', ')} is declared without a cursor, offset or page parameter`;
+  if (sizes.length > 0) return `${listed(sizes)} declared without a cursor, offset or page parameter`;
   return 'no cursor, offset or page query parameter is declared';
 }
 

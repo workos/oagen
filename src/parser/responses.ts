@@ -130,6 +130,20 @@ export interface ResponseClassificationOptions {
 }
 
 /**
+ * The readings an inline body can take, one per way `buildOperation` decides
+ * it (`iteratorSource`): unwrapped on its data array for an iterator a
+ * declared query parameter or a usable override drives, or kept as the wire
+ * shape — `strategy: 'none'`, nothing to page with, an explicit `dataPath`
+ * naming another array (the same reading as `paginationDisabled`, so the
+ * same names). A body that is no list envelope reads the same under both.
+ * Which reading an operation takes is known only when it is read, so a dry
+ * run that reserves a body's names (`bodyModelNames`) classifies it under
+ * every reading here: whichever the operation then picks, the names it mints
+ * are the reserved ones.
+ */
+export const BODY_READINGS: readonly ResponseClassificationOptions[] = [{}, { paginationDisabled: true }];
+
+/**
  * The word that stands in for a range key wherever a status code would
  * qualify a name: the header models and enums of a `4XX` response are
  * `…ClientError`, and the inline body of a `1XX`–`3XX` response is
