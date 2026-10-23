@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from '../../src/parser/envelope-companion-names.js';
+import { fieldAdmits, fieldPropertiesAdmit } from '../../src/parser/inline-models.js';
 import type { Field, Model } from '../../src/ir/types.js';
 
 /**
@@ -362,7 +363,7 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
     for (const c of copies) expect(c.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
 
-  it('folds onto a component only when the flag agrees', () => {
+  it('folds onto a component when the component’s flag admits the copy’s: a live component takes a deprecated copy, never the reverse', () => {
     const live: Model = { name: 'Pagination', fields: next() };
     const deprecated: Model = { name: 'Pagination', deprecated: true, fields: next() };
 
@@ -375,13 +376,181 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
 
     expect(onto(live, undefined)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
     expect(onto(deprecated, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
-    expect(onto(live, true)).toEqual({
-      ref: { kind: 'model', name: 'ListAPagination' },
-      models: [['ListAPagination', true]],
-    });
+    // Issue #312: the copy's own flag is not part of the shape beside a
+    // component; the envelope field keeps it.
+    expect(onto(live, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
     expect(onto(deprecated, undefined)).toEqual({
       ref: { kind: 'model', name: 'ListAPagination' },
       models: [['ListAPagination', undefined]],
+    });
+  });
+
+  it('still keeps a deprecated copy apart from a live component when a model nested in it is deprecated too', () => {
+    const cursor = (op: string): Model => ({ name: `${op}PaginationCursor`, fields: next() });
+    const nestedField = (name: string): Model['fields'] => [
+      { name: 'cursor', type: { kind: 'model', name }, required: false },
+    ];
+    const component: Model = { name: 'Pagination', fields: nestedField('PaginationCursor') };
+    const nestedComponent: Model = { name: 'PaginationCursor', fields: next() };
+
+    // Only the companion's own flag is read apart; a deprecated nested model
+    // beside a live `PaginationCursor` keeps the whole copy apart, since no
+    // field of the component's side would carry that flag.
+    const nested = cursor('ListA');
+    nested.deprecated = true;
+    const c = companion('ListA', 'Pagination', nestedField(nested.name), [nested]);
+    c.models[0].deprecated = true;
+    const models = resolveEnvelopeCompanionNames([c], [component, nestedComponent]);
+    expect(c.field.type).toEqual({ kind: 'model', name: 'ListAPagination' });
+    expect(models.map((m) => [m.name, m.deprecated])).toEqual([
+      ['ListAPagination', true],
+      ['ListAPaginationCursor', true],
+    ]);
+
+    // With the nested model live, the deprecated companion folds onto the component.
+    const liveNested = cursor('ListB');
+    const d = companion('ListB', 'Pagination', nestedField(liveNested.name), [liveNested]);
+    d.models[0].deprecated = true;
+    expect(resolveEnvelopeCompanionNames([d], [component, nestedComponent])).toEqual([]);
+    expect(d.field.type).toEqual({ kind: 'model', name: 'Pagination' });
+  });
+
+  it('folds onto a component only when every field agrees on its own flag, whatever the root flags (Greptile, #364 round 1)', () => {
+    const live = (deprecated: boolean): Model['fields'] => [
+      { name: 'next', type: str, required: false, ...(deprecated ? { deprecated: true } : {}) },
+    ];
+    const component = (fieldDeprecated: boolean): Model => ({ name: 'Pagination', fields: live(fieldDeprecated) });
+    const onto = (comp: Model, rootDeprecated: boolean, fieldDeprecated: boolean) => {
+      const c = companion('ListA', 'Pagination', live(fieldDeprecated));
+      if (rootDeprecated) c.models[0].deprecated = true;
+      const models = resolveEnvelopeCompanionNames([c], [comp]);
+      return { ref: c.field.type, models: models.map((m) => [m.name, m.deprecated, m.fields[0]?.deprecated]) };
+    };
+    const kept = { ref: { kind: 'model', name: 'ListAPagination' } };
+    const folded = { ref: { kind: 'model', name: 'Pagination' }, models: [] };
+
+    // The copy's `next` deprecated, the component's live: the notice would
+    // vanish with the copy, so the copy keeps its name — with a deprecated
+    // root (the reviewer's case) and with a live one alike.
+    expect(onto(component(false), true, true)).toEqual({ ...kept, models: [['ListAPagination', true, true]] });
+    expect(onto(component(false), false, true)).toEqual({ ...kept, models: [['ListAPagination', undefined, true]] });
+    // The component's `next` deprecated, the copy's live: the copy's readers
+    // would gain a notice its schema never wrote, so it keeps its name too.
+    expect(onto(component(true), false, false)).toEqual({
+      ...kept,
+      models: [['ListAPagination', undefined, undefined]],
+    });
+    expect(onto(component(true), true, false)).toEqual({ ...kept, models: [['ListAPagination', true, undefined]] });
+    // Both deprecated: the fold changes nothing a reader sees.
+    expect(onto(component(true), false, true)).toEqual(folded);
+    expect(onto(component(true), true, true)).toEqual(folded);
+  });
+
+  it('keeps a model nested in the companion apart from the component when one of its fields is deprecated', () => {
+    const cursorFields = (deprecated: boolean): Model['fields'] => [
+      { name: 'after', type: str, required: false, ...(deprecated ? { deprecated: true } : {}) },
+    ];
+    const nestedField = (name: string): Model['fields'] => [
+      { name: 'cursor', type: { kind: 'model', name }, required: false },
+    ];
+    const component: Model = { name: 'Pagination', fields: nestedField('PaginationCursor') };
+    const nestedComponent: Model = { name: 'PaginationCursor', fields: cursorFields(false) };
+
+    const nested: Model = { name: 'ListAPaginationCursor', fields: cursorFields(true) };
+    const c = companion('ListA', 'Pagination', nestedField(nested.name), [nested]);
+    c.models[0].deprecated = true;
+    const models = resolveEnvelopeCompanionNames([c], [component, nestedComponent]);
+    expect(c.field.type).toEqual({ kind: 'model', name: 'ListAPagination' });
+    expect(models.map((m) => m.name)).toEqual(['ListAPagination', 'ListAPaginationCursor']);
+  });
+
+  it('never shares a bare name between two live copies that disagree on a field’s flag', () => {
+    const fields = (deprecated: boolean): Model['fields'] => [
+      { name: 'next', type: str, required: false, ...(deprecated ? { deprecated: true } : {}) },
+    ];
+    for (const [first, second] of [
+      [false, true],
+      [true, false],
+    ] as const) {
+      const a = companion('ListA', 'Pagination', fields(first));
+      const b = companion('ListB', 'Pagination', fields(second));
+      const models = resolveEnvelopeCompanionNames([a, b]);
+      // The first declared shape takes the bare name; the other keeps its own.
+      expect(models.map((m) => [m.name, m.fields[0]?.deprecated])).toEqual([
+        ['Pagination', first || undefined],
+        ['ListBPagination', second || undefined],
+      ]);
+      expect(a.field.type).toEqual({ kind: 'model', name: 'Pagination' });
+      expect(b.field.type).toEqual({ kind: 'model', name: 'ListBPagination' });
+    }
+  });
+
+  describe('every field property a component fold preserves (Greptile, #364 round 2)', () => {
+    /** A `next` field with `over` applied — a property, or a type. */
+    const next = (over: Partial<Field> = {}): Field => ({ name: 'next', type: str, required: false, ...over });
+    /** The copy's fate beside a component whose `next` is `componentOver`, with the copy's `next` under `copyOver`. */
+    const onto = (componentOver: Partial<Field>, copyOver: Partial<Field>, rootDeprecated = true) => {
+      const component: Model = { name: 'Pagination', fields: [next(componentOver)] };
+      const c = companion('ListA', 'Pagination', [next(copyOver)]);
+      if (rootDeprecated) c.models[0].deprecated = true;
+      const models = resolveEnvelopeCompanionNames([c], [component]);
+      return { ref: (c.field.type as { name: string }).name, models: models.map((m) => m.name) };
+    };
+    const kept = { ref: 'ListAPagination', models: ['ListAPagination'] };
+    const folded = { ref: 'Pagination', models: [] };
+
+    const cases: Array<[string, Partial<Field>, Partial<Field>]> = [
+      // The reviewer's case: the component's `next` allows 8 characters, the copy's 64.
+      ['maxLength', { constraints: { maxLength: 8 } }, { constraints: { maxLength: 64 } }],
+      ['pattern', { constraints: { pattern: '^[a-z]+$' } }, { constraints: { pattern: '^[0-9]+$' } }],
+      ['default', { default: 'a' }, { default: 'b' }],
+      ['readOnly', { readOnly: true }, {}],
+      ['writeOnly', { writeOnly: true }, {}],
+      ['format', { type: { kind: 'primitive', type: 'string', format: 'uuid' } }, { type: str }],
+      ['nullable (copy only)', { type: str }, { type: { kind: 'nullable', inner: str } }],
+    ];
+    for (const [label, componentOver, copyOver] of cases) {
+      it(`keeps the copy apart when ${label} differs, with a deprecated root and with a live one, and folds it when it agrees`, () => {
+        expect(onto(componentOver, copyOver), `${label}: differs, deprecated root`).toEqual(kept);
+        expect(onto(componentOver, copyOver, false), `${label}: differs, live root`).toEqual(kept);
+        expect(onto(componentOver, componentOver), `${label}: same, deprecated root`).toEqual(folded);
+        expect(onto(componentOver, componentOver, false), `${label}: same, live root`).toEqual(folded);
+      });
+    }
+
+    it('still lets the component be nullable where the copy is not', () => {
+      expect(onto({ type: { kind: 'nullable', inner: str } }, { type: str })).toEqual(folded);
+    });
+
+    it('refuses on every property of `Field` but its documentation and type, so a new property cannot be forgotten', () => {
+      // Every property a `Field` can carry beside its name, documentation and
+      // type, each with a value: a property added to `Field` must be added
+      // here (the type is `Required`), and is then checked below on both
+      // predicates — `fieldAdmits`, which every component fold reads, and
+      // the companion pass, which reads `fieldPropertiesAdmit` on its own.
+      const every: Required<Omit<Field, 'name' | 'type' | 'description' | 'externalDocs' | 'example' | 'examples'>> = {
+        domainName: 'cursor',
+        required: true,
+        readOnly: true,
+        writeOnly: true,
+        deprecated: true,
+        default: 'x',
+        constraints: { maxLength: 8 },
+      };
+      for (const key of Object.keys(every) as Array<keyof typeof every>) {
+        const withKey = next({ [key]: every[key] });
+        const without = next();
+        const where = `property "${key}"`;
+        // A property set on one side only is a different field — except
+        // requiredness, where the owner may be the looser one.
+        expect(fieldPropertiesAdmit(withKey, without), where).toBe(false);
+        expect(fieldPropertiesAdmit(without, withKey), where).toBe(key === 'required');
+        expect(fieldAdmits(withKey, without), where).toBe(false);
+        expect(fieldAdmits(without, withKey), where).toBe(key === 'required');
+        expect(onto({ [key]: every[key] }, {}), `${where}, component only`).toEqual(kept);
+        expect(onto({}, { [key]: every[key] }), `${where}, copy only`).toEqual(key === 'required' ? folded : kept);
+        expect(onto({ [key]: every[key] }, { [key]: every[key] }), `${where}, both`).toEqual(folded);
+      }
     });
   });
 });

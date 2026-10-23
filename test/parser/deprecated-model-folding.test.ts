@@ -365,7 +365,7 @@ describe('an inline model named like a differently flagged component (issue #260
     }
   });
 
-  it('never folds a deprecated field object onto a live component either: the component’s flag is its own', async () => {
+  it('folds a deprecated field object identical to a live component onto it: the field keeps the flag (issue #312)', async () => {
     const schemas = {
       Pet: {
         type: 'object',
@@ -373,14 +373,23 @@ describe('an inline model named like a differently flagged component (issue #260
       },
       PetOwner: { type: 'object', properties: { name: { type: 'string' } } },
     };
-    const spec = await parseSpec(await writeSpec('pet-reverse.json', specDoc(schemas)));
-    expect(describeModels(spec)).toEqual([
-      { deprecated: undefined, fields: ['owner: PetOwner2'], name: 'Pet', required: [] },
-      { deprecated: undefined, fields: ['name: string'], name: 'PetOwner', required: [] },
-      { deprecated: true, fields: ['name: string'], name: 'PetOwner2', required: [] },
-    ]);
-    expect(spec.models.find((m) => m.name === 'Pet')?.fields[0]?.deprecated).toBe(true);
-    expectSound(spec, ['Pet', 'PetOwner']);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const spec = await parseSpec(await writeSpec('pet-reverse.json', specDoc(schemas)));
+      // The component's flag is its own (live); the deprecation is the
+      // field's, not a second `PetOwner2` of the same shape.
+      expect(describeModels(spec)).toEqual([
+        { deprecated: undefined, fields: ['owner: PetOwner'], name: 'Pet', required: [] },
+        { deprecated: undefined, fields: ['name: string'], name: 'PetOwner', required: [] },
+      ]);
+      expect(spec.models.find((m) => m.name === 'Pet')?.fields[0]?.deprecated).toBe(true);
+      expectSound(spec, ['Pet', 'PetOwner']);
+      expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
+        '[oagen] Warning: Inline model "PetOwner" is declared both deprecated and live with the same shape — keeping the live definition under the shared name',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('gives an inline request body a model of its own instead of the deprecated `CreateNoteRequest` component', async () => {
@@ -404,8 +413,9 @@ describe('an inline model named like a differently flagged component (issue #260
     ]);
     expectSound(spec, ['CreateNoteRequest']);
 
-    // And the other way round: the deprecated body keeps its flag under its
-    // own name rather than folding onto the live component.
+    // And the other way round: a deprecated body identical to the live
+    // component folds onto it (issue #312) — the body is what the SDK sends,
+    // so an identical shape is required, and the flag is not part of it.
     const reversed = await parseSpec(
       await writeSpec(
         'note-reverse.json',
@@ -415,10 +425,11 @@ describe('an inline model named like a differently flagged component (issue #260
         ),
       ),
     );
-    expect(opsOf(reversed).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
-    expect(reversed.models.find((m) => m.name === 'CreateNoteRequest2')?.deprecated).toBe(true);
-    expect(reversed.models.find((m) => m.name === 'CreateNoteRequest')?.deprecated).toBeUndefined();
-    expectSound(reversed, ['CreateNoteRequest'], ['createNote.requestBody → CreateNoteRequest2']);
+    expect(opsOf(reversed).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest' });
+    expect(describeModels(reversed)).toEqual([
+      { deprecated: undefined, fields: ['title: string'], name: 'CreateNoteRequest', required: ['title'] },
+    ]);
+    expectSound(reversed, ['CreateNoteRequest']);
   });
 
   it('gives an inline response named like a differently flagged component a qualified name, whatever its shape', async () => {
@@ -428,9 +439,10 @@ describe('an inline model named like a differently flagged component (issue #260
       properties: { object: { type: 'string', const: 'widget' }, k: { type: 'string' } },
       ...extra,
     });
+    // A deprecated response of the component's own shape beside a live
+    // component folds onto it instead (issue #312; see the next test).
     const cases: Array<[string, Widget, Widget]> = [
       ['same shape, component deprecated', widget({ deprecated: true }), widget({})],
-      ['same shape, response deprecated', widget({}), widget({ deprecated: true })],
       [
         'larger response, component deprecated',
         widget({ deprecated: true }),
@@ -473,6 +485,33 @@ describe('an inline model named like a differently flagged component (issue #260
           where,
         ).toEqual([]);
       }
+    }
+  });
+
+  it('folds a deprecated response identical to a live component onto it, and says so, in either path order (issue #312)', async () => {
+    const widget = (extra: Record<string, unknown> = {}) => ({
+      type: 'object',
+      properties: { object: { type: 'string', const: 'widget' }, k: { type: 'string' } },
+      ...extra,
+    });
+    for (const { order, spec, warnings } of await parseBothOrders(
+      'same-shape-response-deprecated',
+      { Widget: widget() },
+      [
+        ['/widgets/{id}', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+        ['/legacy-widgets/{id}', getOp('getLegacyWidget', widget({ deprecated: true }))],
+      ],
+    )) {
+      const ops = opsOf(spec);
+      expect(ops.getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(ops.getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(describeModels(spec), order).toEqual([
+        { deprecated: undefined, fields: ['object: literal', 'k: string'], name: 'Widget', required: [] },
+      ]);
+      expectSound(spec, ['Widget']);
+      expect(warnings, order).toEqual([
+        '[oagen] Warning: Inline model "Widget" is declared both deprecated and live with the same shape — keeping the live definition under the shared name',
+      ]);
     }
   });
 
@@ -958,37 +997,57 @@ describe('a rename repoints references by identity, never by name (review round 
     }
   });
 
-  it('renames a deprecated list-envelope companion that would share a live component field’s model name', async () => {
+  it('settles a deprecated list-envelope companion against a live component field’s model: folded when identical, renamed otherwise', async () => {
     const listMetadata = (extra: Record<string, unknown> = {}) => ({
       type: 'object',
       properties: { before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } },
       ...extra,
     });
-    const envelope = {
+    const envelope = (meta: Record<string, unknown>) => ({
       allOf: [
         {
           type: 'object',
-          properties: { object: { type: 'string', const: 'list' }, list_metadata: listMetadata({ deprecated: true }) },
+          properties: { object: { type: 'string', const: 'list' }, list_metadata: meta },
         },
         { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/User' } } } },
       ],
-    };
-    const listOp = {
+    });
+    const listOp = (meta: Record<string, unknown>) => ({
       get: {
         operationId: 'listLegacyUsers',
         parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
-        responses: { '200': { description: 'ok', content: { 'application/json': { schema: envelope } } } },
+        responses: { '200': { description: 'ok', content: { 'application/json': { schema: envelope(meta) } } } },
       },
-    };
+    });
     // The only list operation deprecates its companion, so the companion
     // takes the bare name `ListMetadata` — which `List.metadata` also mints,
-    // live.
+    // live. Identical but for the flag, the companion folds onto that model
+    // (issue #312): the envelope field keeps the flag.
     const schemas = {
       User: { type: 'object', properties: { id: str } },
       List: { type: 'object', properties: { metadata: listMetadata() } },
     };
     for (const { order, spec } of await parseBothOrders('companion', schemas, [
-      ['/legacy-users', listOp],
+      ['/legacy-users', listOp(listMetadata({ deprecated: true }))],
+      ['/users/{id}', getOp('getUser', { $ref: '#/components/schemas/User' })],
+    ])) {
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      const op = opsOf(spec).listLegacyUsers!;
+      const metaField = op.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+      expect(metaField?.type, order).toEqual({ kind: 'model', name: 'ListMetadata' });
+      expect(metaField?.deprecated, order).toBe(true);
+      expect(byName.List?.fields[0]?.type, order).toEqual({ kind: 'model', name: 'ListMetadata' });
+      expect(byName.ListMetadata?.deprecated, order).toBeUndefined();
+      expect(Object.keys(byName).sort(), order).toEqual(['List', 'ListMetadata', 'User']);
+      expectSound(spec, Object.keys(schemas));
+    }
+    // A companion of another shape (one more field) is renamed, and the
+    // rename repoints the envelope field.
+    for (const { order, spec } of await parseBothOrders('companion-differs', schemas, [
+      [
+        '/legacy-users',
+        listOp(listMetadata({ deprecated: true, properties: { ...listMetadata().properties, page: str } })),
+      ],
       ['/users/{id}', getOp('getUser', { $ref: '#/components/schemas/User' })],
     ])) {
       const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
@@ -999,6 +1058,10 @@ describe('a rename repoints references by identity, never by name (review round 
       expect(byName.List?.fields[0]?.type, order).toEqual({ kind: 'model', name: 'ListMetadata' });
       expect(byName.ListMetadata?.deprecated, order).toBeUndefined();
       expect(byName.ListLegacyUsersListMetadata?.deprecated, order).toBe(true);
+      expect(
+        byName.ListLegacyUsersListMetadata?.fields.map((f) => f.name),
+        order,
+      ).toEqual(['before', 'after', 'page']);
       expectSound(spec, Object.keys(schemas));
     }
   });
@@ -1074,43 +1137,53 @@ describe('review round 2', () => {
     }
   });
 
-  it('keeps a `$ref` to the component inside the renamed inline copy, in both flag directions (MichaelDeBoey)', async () => {
+  it('keeps a `$ref` to the component inside the inline copy, whether the copy is renamed or folded (MichaelDeBoey)', async () => {
     const widget = (extra: Record<string, unknown> = {}) => ({
       type: 'object',
       properties: { object: { type: 'string', const: 'widget' }, parent: { $ref: '#/components/schemas/Widget' } },
       ...extra,
     });
-    for (const [label, componentFlag, inlineFlag] of [
-      ['component live, inline deprecated', false, true],
-      ['component deprecated, inline live', true, false],
-    ] as const) {
-      const schemas = { Widget: widget(componentFlag ? { deprecated: true } : {}) };
-      for (const { order, spec } of await parseBothOrders(`self-ref-${componentFlag}`, schemas, [
-        ['/legacy-widgets/{id}', getOp('getLegacyWidget', widget(inlineFlag ? { deprecated: true } : {}))],
-        ['/widgets/{id}', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
-      ])) {
-        const where = `${label}, ${order}`;
-        const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
-        expect(opsOf(spec).getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
-        // The `$ref` stays the component; only the inline model was renamed.
-        expect(byName.GetLegacyWidgetWidget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
-          kind: 'model',
-          name: 'Widget',
-        });
-        expect(byName.Widget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
-          kind: 'model',
-          name: 'Widget',
-        });
-        expect(byName.GetLegacyWidgetWidget?.deprecated, where).toBe(inlineFlag ? true : undefined);
-        expect(byName.Widget?.deprecated, where).toBe(componentFlag ? true : undefined);
-        expectSound(
-          spec,
-          ['Widget'],
-          componentFlag
-            ? ['getWidget.response → Widget', 'GetLegacyWidgetWidget.parent → Widget']
-            : ['getLegacyWidget.response → GetLegacyWidgetWidget'],
-        );
-      }
+    // A live inline copy beside a deprecated component is renamed; the
+    // `$ref` inside it stays the component.
+    for (const { order, spec } of await parseBothOrders('self-ref-true', { Widget: widget({ deprecated: true }) }, [
+      ['/legacy-widgets/{id}', getOp('getLegacyWidget', widget())],
+      ['/widgets/{id}', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+    ])) {
+      const where = `component deprecated, inline live, ${order}`;
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      expect(opsOf(spec).getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+      // The `$ref` stays the component; only the inline model was renamed.
+      expect(byName.GetLegacyWidgetWidget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
+        kind: 'model',
+        name: 'Widget',
+      });
+      expect(byName.Widget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
+        kind: 'model',
+        name: 'Widget',
+      });
+      expect(byName.GetLegacyWidgetWidget?.deprecated, where).toBeUndefined();
+      expect(byName.Widget?.deprecated, where).toBe(true);
+      expectSound(spec, ['Widget'], ['getWidget.response → Widget', 'GetLegacyWidgetWidget.parent → Widget']);
+    }
+    // A deprecated inline copy identical to the live component — the `$ref`
+    // to the component included — folds onto it (issue #312).
+    for (const { order, spec, warnings } of await parseBothOrders('self-ref-false', { Widget: widget() }, [
+      ['/legacy-widgets/{id}', getOp('getLegacyWidget', widget({ deprecated: true }))],
+      ['/widgets/{id}', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+    ])) {
+      const where = `component live, inline deprecated, ${order}`;
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      expect(opsOf(spec).getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'Widget' });
+      expect(Object.keys(byName), where).toEqual(['Widget']);
+      expect(byName.Widget?.fields.find((f) => f.name === 'parent')?.type, where).toEqual({
+        kind: 'model',
+        name: 'Widget',
+      });
+      expect(byName.Widget?.deprecated, where).toBeUndefined();
+      expectSound(spec, ['Widget']);
+      expect(warnings, where).toEqual([
+        '[oagen] Warning: Inline model "Widget" is declared both deprecated and live with the same shape — keeping the live definition under the shared name',
+      ]);
     }
   });
 
