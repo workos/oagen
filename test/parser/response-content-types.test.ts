@@ -12,6 +12,7 @@ import {
   collectResponseBodyTypes,
   collectModelRefs,
   collectEnumRefs,
+  collectOperationTypeRefs,
   assignModelsToServices,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -2406,6 +2407,126 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         'CreatePetResponse201',
       ]);
       expect(warnings(warn)).toEqual([]);
+      expectSound(spec, []);
+    });
+
+    /** Every `discriminator.mapping` target, on a union type anywhere in the operations or on a model, is one of that union's variants. */
+    function expectMappingsConsistent(spec: ApiSpec): void {
+      const unions: Array<{ variants: TypeRef[]; mapping?: Record<string, string> }> = [];
+      const visit = (ref: TypeRef): void => {
+        if (ref.kind === 'union') {
+          unions.push({ variants: ref.variants, mapping: ref.discriminator?.mapping });
+          for (const variant of ref.variants) visit(variant);
+        } else if (ref.kind === 'array') visit(ref.items);
+        else if (ref.kind === 'nullable') visit(ref.inner);
+        else if (ref.kind === 'map') visit(ref.valueType);
+      };
+      for (const op of spec.services.flatMap((s) => s.operations))
+        for (const ref of collectOperationTypeRefs(op)) visit(ref);
+      for (const model of spec.models) {
+        for (const field of model.fields) visit(field.type);
+        if (model.variants) unions.push({ variants: model.variants, mapping: model.discriminator?.mapping });
+      }
+      expect(unions.length).toBeGreaterThan(0);
+      for (const { variants, mapping } of unions) {
+        if (!mapping) continue;
+        const variantNames = new Set(variants.flatMap((variant) => collectModelRefs(variant)));
+        for (const [value, target] of Object.entries(mapping)) {
+          expect(variantNames.has(target), `mapping ${value} → ${target} names no variant`).toBe(true);
+        }
+      }
+    }
+
+    it("steps a 201 discriminated union with its mapping, so each entry follows its variant (Greptile's case, #309)", async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(
+              {
+                oneOf: [
+                  obj({ kind: { type: 'string', const: 'a' }, x: str }),
+                  obj({ kind: { type: 'string', const: 'b' }, y: str }),
+                ],
+              },
+              'created',
+            ),
+          }),
+        ),
+      );
+
+      // The first variant took the bare `CreatePetResponse` with another shape
+      // than the 200's `{ id }`; it steps to the status code, the const-named
+      // second variant (`B` + the context) moves with it, and the mapping
+      // follows each variant instead of still naming the 200's model under `a`.
+      expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'CreatePetResponse201' },
+          { kind: 'model', name: 'BCreatePetResponse201' },
+        ],
+        discriminator: { property: 'kind', mapping: { a: 'CreatePetResponse201', b: 'BCreatePetResponse201' } },
+      });
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { kind, x }',
+        'BCreatePetResponse201 { kind, y }',
+      ]);
+      expect(warnings(warn)).toEqual([]);
+      expectMappingsConsistent(spec);
+      expectSound(spec, []);
+    });
+
+    it('steps a nested discriminated union under the 201 body, mapping included (#309)', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(
+              obj({
+                owner: obj({ id: str }),
+                shape: {
+                  oneOf: [
+                    obj({ kind: { type: 'string', const: 'circle' }, radius: str }),
+                    obj({ kind: { type: 'string', const: 'square' }, side: str }),
+                  ],
+                },
+              }),
+              'created',
+            ),
+          }),
+        ),
+      );
+
+      expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
+        kind: 'model',
+        name: 'CreatePetResponse201',
+      });
+      const root = spec.models.find((m) => m.name === 'CreatePetResponse201')!;
+      expect(root.fields.find((f) => f.name === 'shape')?.type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'CreatePetResponse201Shape' },
+          { kind: 'model', name: 'SquareCreatePetResponse201Shape' },
+        ],
+        discriminator: {
+          property: 'kind',
+          mapping: { circle: 'CreatePetResponse201Shape', square: 'SquareCreatePetResponse201Shape' },
+        },
+      });
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { owner, shape }',
+        'CreatePetResponse201Owner { id }',
+        'CreatePetResponse201Shape { kind, radius }',
+        'SquareCreatePetResponse201Shape { kind, side }',
+      ]);
+      expect(warnings(warn)).toEqual([]);
+      expectMappingsConsistent(spec);
       expectSound(spec, []);
     });
 
