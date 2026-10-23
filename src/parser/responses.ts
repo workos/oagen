@@ -29,6 +29,8 @@ import {
   extractInlineModelsFromProperties,
   mergeAllOfMembers,
   mergedObjectSchema,
+  readInlineAllOf,
+  unwrappedAllOfMember,
 } from './inline-models.js';
 import { externalDocsEntry } from './external-docs.js';
 import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
@@ -799,17 +801,34 @@ function extractDirectResource(
     };
   }
 
-  // allOf — merge into a single model through `mergeAllOfMembers`, the one
-  // reading every inline `allOf` gets: $ref branches are resolved against
-  // component schemas so the referenced model's fields are merged rather
-  // than silently dropped, and the inline object variants of a
-  // `oneOf`/`anyOf` member contribute their fields as optional ones
-  // (workos/oagen#283), as the same schema's component model has them.
-  // Earlier members win on a shared name there, and the fold places the
-  // body's own properties first, so an own `kind` enum beside a member's
-  // plain `kind` stays the enum here as it does in a field or an array's
-  // items.
-  if (schema.allOf) {
+  // allOf — read the one way every site reads an inline `allOf`
+  // (`readInlineAllOf`), when the `allOf` is what types the body
+  // (`classifyInlineSchema`; an `allOf` of bare limits leaves the body to
+  // its own keywords below). `$ref` members with nothing inline beside them
+  // are a reference to the first component, and nothing is minted — as a
+  // field of the same schema is typed (workos/oagen#307: the body was a
+  // copy of the component under its own name); a ref no component answers
+  // is that reference too. A lone member is the body itself, carrying the
+  // wrapper's limits, flag and link (`unwrappedAllOfMember`), read by the
+  // branches of this function as if written in its place. Every other
+  // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
+  // branches are resolved against component schemas so the referenced
+  // model's fields are merged rather than silently dropped, and the inline
+  // object variants of a `oneOf`/`anyOf` member contribute their fields as
+  // optional ones (workos/oagen#283), as the same schema's component model
+  // has them. Earlier members win on a shared name there, and the fold
+  // places the body's own properties first, so an own `kind` enum beside a
+  // member's plain `kind` stays the enum here as it does in a field or an
+  // array's items.
+  if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
+    const reading = readInlineAllOf(schema.allOf);
+    if (reading === 'reference') {
+      return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
+    }
+    if (reading === 'unwrapped') {
+      const member = unwrappedAllOfMember(schema, schema.allOf[0]!);
+      return extractDirectResource(member, contextName, componentSchemas, settle);
+    }
     const merged = mergeAllOfMembers(schema, componentSchemas);
     const mergedRefFields = merged.resolvedRefs.length > 0;
 
