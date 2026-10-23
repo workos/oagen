@@ -1,4 +1,4 @@
-import type { ApiSpec, AuthScheme, Model } from '../ir/types.js';
+import type { ApiSpec, AuthScheme } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -164,20 +164,19 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // yet, takes it when the merges below settle the fields again against
   // every enum name in play.
   const enumNames: ReadonlySet<string> = new Set(enums.map((e) => e.name));
-  // Each copy dropped here, keyed to what replaced it: a component, or the
-  // object the component pass minted for the same field, which the field's
-  // site then stands for at the merges below (`fieldInlineModelBundles`).
-  const fieldFolds = new Map<Model, Model>();
-  const fieldInlineModels = settleFieldInlineModels(
-    models,
-    extractedFieldModels,
-    {
-      bundles: fieldInlineModelBundles(fieldInlineModelGroups, models),
-      reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
-      enums: enumNames,
-    },
-    fieldFolds,
-  );
+  // The names every merge pass mints, shared across the passes so a later
+  // one can tell a parent whose child an earlier pass renamed
+  // (`InlineModelNaming.minted`). Each field's site already holds the object
+  // the schema pass lifted from the field's own schema
+  // (`fieldInlineModelBundles`, `liftedFieldModelsOf`), so a copy dropped
+  // here for it needs no record.
+  const mintedNames = new Set<string>();
+  const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
+    bundles: fieldInlineModelBundles(fieldInlineModelGroups, models),
+    reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
+    enums: enumNames,
+    minted: mintedNames,
+  });
 
   const { services, inlineModels, inlineModelBundles, sharedDocumentModelRefs, componentSites } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
@@ -264,20 +263,26 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     bundles: [
       ...inlineModelBundles,
       ...webhookInlineModelBundles,
-      // Each field's site stands for whatever survived the early settle — the
-      // object the component pass minted for the field, when the extracted
-      // copy folded onto it — and holds the references the deferred sites
-      // wrote by sharing that model, so a rename here repoints all of them.
-      ...fieldInlineModelBundles(fieldInlineModelGroups, models, {
-        folded: fieldFolds,
-        componentNames,
-        sharedRefs: sharedDocumentModelRefs,
-      }),
+      // Each field's site holds the object the schema pass lifted from the
+      // field's own schema, which the extracted copy folded onto at the early
+      // settle, and the references the deferred sites wrote by sharing one of
+      // the site's models, so a rename here repoints all of them.
+      ...fieldInlineModelBundles(fieldInlineModelGroups, models, { sharedRefs: sharedDocumentModelRefs }),
     ],
     reserved: reserved.all,
     enums: reserved.enums,
+    minted: mintedNames,
   };
-  const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
+  // The components' field models, settled above, own their names here as
+  // the components do (`declared`), so a nested object of a response named
+  // like one is decided against it before its parent is compared — never
+  // passed for it by name under a parent the lifted model admits.
+  const responseNormalizedModels = mergeInlineResponseModels(
+    models,
+    [...inlineModels, ...webhookInlineModels],
+    naming,
+    fieldInlineModels,
+  );
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks, enums, componentNames);
   applyFieldHints(finalModels, options?.fieldHints);

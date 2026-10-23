@@ -18,6 +18,7 @@ import {
   fieldAdmits,
   inheritedModelRefsOf,
   isInheritedModelRef,
+  liftedFieldModelsOf,
   modelAdmits,
   modelShares,
   recordFieldModelRename,
@@ -43,12 +44,19 @@ import {
  * own fields, union variants and array items; when the merges run, every
  * enum name in play — those, and every inline enum an operation's or a
  * webhook's reference carries (`reservedNamesByKind`). A name minted here is
- * added to `reserved`, so both passes, and every mint within one, agree.
+ * added to `reserved`, so both passes, and every mint within one, agree, and
+ * to `minted`, so a later pass can tell a copy whose fields reference a
+ * model an earlier pass renamed — a parent whose child left a shared name —
+ * from one that merely shares a name (`settleSharedNames`); a minted name is
+ * taken against every name in play, so it names that one model and nothing
+ * else. Absent, `minted` is created on first use, so a caller that gives
+ * none still gets it within a pass; the parser hands one set to every pass.
  */
 export interface InlineModelNaming {
   bundles: InlineModelBundle[];
   reserved: Set<string>;
   enums: ReadonlySet<string>;
+  minted?: Set<string>;
 }
 
 /**
@@ -63,6 +71,30 @@ export interface InlineModelNaming {
  * or a webhook's, read after the fields are settled — is created under the
  * settled name. Read once before the operations (`settleFieldInlineModels`)
  * and again, with the copies made since, before the merges.
+ *
+ * `models` also holds the models the schema pass lifted from the same
+ * inline schemas (`extractSchemas`: a component field's object, array items
+ * or union variant, named as the field extractor names them), each
+ * remembered by the field it was read from (`liftedFieldModelsOf`). Those
+ * lifted from the group's own field are the group's twins, read from the
+ * same schema: the group's copy folds onto its twin when the fields are
+ * settled, and from then on the twin's own field references — minted for
+ * the same nested objects the group holds — are the site's. The twins join
+ * the bundle's `models`, so a rename of one of the group's models is
+ * repointed in them as in the copy, and a copy whose child was renamed
+ * still folds onto its twin. A twin is claimed by origin, never by name:
+ * `Foo.barThing` and `FooBar.thing` both spell `FooBarThing`, only one of
+ * them is lifted, and the other field's site leaves it alone. Claimed from
+ * the moment it is lifted, the twin is in the site at the settle too, so a
+ * child renamed there (against a component of its name) is repointed in
+ * the twin as in the copy, and the copy still folds onto it rather than
+ * take a name of its own and leave the twin referenced by nothing. A direct
+ * caller whose schemas were not read by `extractSchemas` has no twins, and
+ * its groups are bundled with their own models alone.
+ *
+ * At the merges, `survivors` adds the references the deferred sites wrote
+ * by sharing one of the site's models (`sharedRefs`), so a rename repoints
+ * them with the field's own.
  */
 export function fieldInlineModelBundles(
   groups: FieldInlineModelGroup[],
@@ -70,16 +102,11 @@ export function fieldInlineModelBundles(
   survivors?: FieldModelSurvivors,
 ): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
-  const survivorOf = (model: Model): Model => {
-    if (!survivors) return model;
-    const winner = survivors.folded.get(model);
-    return winner && !survivors.componentNames.has(winner.name) ? winner : model;
-  };
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
     const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
-    const siteModels = fieldModels.map(survivorOf);
+    const siteModels = [...fieldModels, ...liftedFieldModelsOf(parentName, fieldName)];
     const shared = siteModels.flatMap((model) => survivors?.sharedRefs.get(model) ?? []);
     return {
       qualifier: parentName,
@@ -91,19 +118,14 @@ export function fieldInlineModelBundles(
 }
 
 /**
- * What a field's site holds once the fields are settled and the operations
- * read (`fieldInlineModelBundles` at the merges): `folded`, from
- * `settleFieldInlineModels`, names the definition each dropped copy folded
- * onto, so an object the component pass itself minted for the field stands
- * in for the copy and can be renamed through the field — never a component
- * (`componentNames`), which is never renamed; `sharedRefs`, from
+ * What a field's site holds once the operations are read
+ * (`fieldInlineModelBundles` at the merges): `sharedRefs`, from
  * `extractOperations`, are the references a header, parameter or fallback
- * body wrote by sharing such a model, which the site repoints with the
- * field's own.
+ * body wrote by sharing one of the site's models — a field model, or the
+ * twin the schema pass lifted from the same schema — which the site repoints
+ * with the field's own.
  */
 export interface FieldModelSurvivors {
-  folded: ReadonlyMap<Model, Model>;
-  componentNames: ReadonlySet<string>;
   sharedRefs: ReadonlyMap<Model, readonly TypeRef[]>;
 }
 
@@ -251,9 +273,12 @@ function keepLargestByName(models: Model[]): Model[] {
  *   (`ownerSharesWith`: `modelAdmits` — the same fields and types, the owner
  *   no stricter on requiredness or nullability, everything else identical —
  *   or an identical shape for a copy the SDK sends): the copy is dropped and
- *   its references, which already carry the name, resolve to the owner. An
- *   owner is never replaced, whatever the copy's field count, so every
- *   `$ref` to a component keeps the shape the document declares;
+ *   its references, which already carry the name, resolve to the owner, and
+ *   its site joins the owner's (`foldOnto`), so a later rename of an owner
+ *   that has a site — a field model, a lifted twin — repoints them with the
+ *   owner's own. An owner is never replaced, whatever the copy's field
+ *   count, so every `$ref` to a component keeps the shape the document
+ *   declares;
  * - otherwise takes a name of its own (`renameInlineCopy`), with a note. Two
  *   contenders of one name without an owner are left to the pass's own choice
  *   (`keepLargestByName`).
@@ -283,7 +308,24 @@ function keepLargestByName(models: Model[]): Model[] {
  * so when a parent is compared its children are already named: a parent
  * whose child was just renamed no longer looks identical to its twin, or
  * admitted by its component, and keeps its own model, referencing the
- * renamed child.
+ * renamed child. Under a component, that is the rule above (a copy the
+ * owner does not share is qualified). Among the contenders of one flag
+ * without an owner, where the shared name otherwise keeps whichever
+ * definition the pass's own choice settles on (`keepLargestByName`, by
+ * document order), a contender whose fields reference a model this pass or
+ * an earlier one renamed (`naming.minted`; a reference the site itself
+ * minted, never an explicit `$ref` or one lent by another component's
+ * field) is settled the same way as a copy an owner does not share:
+ * clustered by shape, each cluster qualified by its first site, with a note
+ * — its shape is its site's own now, and folding it by name would leave the
+ * renamed child referenced by nothing, or hand every other site the child
+ * the pass had just kept off the shared name. The contenders that follow no
+ * rename are settled by the pass's own choice, as they always were; when
+ * every contender follows one, the first cluster keeps the name as that
+ * choice would keep the first definition. A contender under a name a
+ * rename minted — the leader of a cluster, which the other sites of the
+ * cluster were repointed to — keeps it. The deprecated copies of a live
+ * name are compared with the live contenders that keep the name alone.
  *
  * A contender without a site — none the parser produces; a direct caller's —
  * cannot be renamed and is left under the shared name, with a warning: the
@@ -311,8 +353,37 @@ function settleSharedNames(
     for (const model of bundle.models) bundleOf.set(model, bundle);
   }
   const flag = (m: Model): string => (m.deprecated ? 'deprecated' : 'live');
+  // Every name the merge passes have minted so far (`renameInlineCopy`),
+  // shared with the passes before and after this one through `naming`.
+  const minted = naming ? (naming.minted ??= new Set<string>()) : new Set<string>();
+  /**
+   * Whether one of `copy`'s own references — a field's or a variant's,
+   * minted by its site: never an explicit `$ref`, never one lent by another
+   * component's field — names a model a merge pass renamed.
+   */
+  const followsRename = (copy: Model): boolean => {
+    let found = false;
+    for (const ref of collectModelTypeRefs(copy)) {
+      walkTypeRef(ref, {
+        model: (r) => {
+          if (inlineRefAdmit(false)(r) && minted.has(r.name)) found = true;
+        },
+      });
+    }
+    return found;
+  };
 
   const folded = new Map<Model, Model>();
+  /** `copies` clustered by shape (`modelFingerprint`), in their order — the clusters `renameClusters` forms. */
+  const byShape = (copies: Model[]): Model[][] => {
+    const clusters = new Map<string, Model[]>();
+    for (const copy of copies) {
+      const shape = modelFingerprint(copy);
+      clusters.set(shape, [...(clusters.get(shape) ?? []), copy]);
+    }
+    return [...clusters.values()];
+  };
+
   for (const name of bottomUp(byName)) {
     const group = byName.get(name)!;
     const owner = owners.get(name);
@@ -344,9 +415,34 @@ function settleSharedNames(
     if (owner) {
       nameDeprecated = !!owner.deprecated;
     } else {
-      live = group.filter((m) => !m.deprecated);
-      if (live.length === 0 || live.length === group.length) continue;
-      nameDeprecated = false;
+      nameDeprecated = group.every((m) => m.deprecated);
+      const holders = group.filter((m) => !!m.deprecated === nameDeprecated);
+      // A holder of the name that follows a rename — a parent whose child
+      // left a shared name — is its site's own shape now, and leaves the
+      // name by its site rather than by the pass's choice between twins
+      // (`keepLargestByName`), which would drop it and orphan the child, or
+      // keep it and hand every other site the child the pass kept off the
+      // name. A holder under a name a rename minted is the leader the other
+      // sites of its cluster were repointed to, and keeps it. The twins that
+      // follow no rename are settled as always; when every holder follows
+      // one, the first cluster keeps the name as the pass's choice would
+      // keep the first definition. The copies of the other flag below are
+      // measured against the holders that keep the name alone.
+      const own = holders.filter((m) => !minted.has(m.name) && followsRename(m));
+      const rest = holders.filter((m) => !own.includes(m));
+      const leaving = byShape(own);
+      const first = rest.length === 0 ? (leaving.shift() ?? []) : [];
+      renameClusters(
+        name,
+        leaving.flat(),
+        naming,
+        bundleOf,
+        folded,
+        `it references a renamed model and "${name}" keeps another definition`,
+        `[oagen] Warning: Inline model "${name}" references a renamed model, is named like another definition and has no site to be renamed from — keeping the usual definition under the shared name`,
+      );
+      live = holders.filter((m) => rest.includes(m) || first.includes(m));
+      if (live.length === 0 || holders.length === group.length) continue;
     }
 
     // Under an owner, every copy is measured against it first: one the
@@ -368,7 +464,7 @@ function settleSharedNames(
             `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
           );
         }
-        folded.set(copy, owner);
+        foldOnto(copy, owner, bundleOf, folded);
         continue;
       }
       if (!!copy.deprecated !== nameDeprecated) continue;
@@ -396,7 +492,7 @@ function settleSharedNames(
         console.warn(
           `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
         );
-        folded.set(copy, preferredDefinition(live));
+        foldOnto(copy, preferredDefinition(live), bundleOf, folded);
         continue;
       }
       const bundle = naming && bundleOf.get(copy);
@@ -432,14 +528,17 @@ function ownerSharesWith(owner: Model, copy: Model, bundle: InlineModelBundle | 
 
 /**
  * Move `copy` off `name` to a free name qualified by its site
- * (`mintQualifiedName`), reserve it, and repoint exactly the references its
- * site minted (`repointSite`). Returns the new name.
+ * (`mintQualifiedName`), reserve it, record it as minted
+ * (`InlineModelNaming.minted`, so a parent referencing it is told from a
+ * mere namesake), and repoint exactly the references its site minted
+ * (`repointSite`). Returns the new name.
  */
 function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, naming: InlineModelNaming): string {
   const renamed = mintQualifiedName(name, bundle.qualifier, naming.reserved);
   naming.reserved.add(renamed);
+  naming.minted?.add(renamed);
   copy.name = renamed;
-  repointSite(bundle, name, renamed);
+  repointSite(bundle, name, renamed, copy);
   return renamed;
 }
 
@@ -449,14 +548,58 @@ function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, 
  * then the references in the models minted beside it, which never include
  * what another site's field lent them — every reference kind alike, a
  * union's discriminator mapping following its variant
- * (`renameTypeRefModels`, `renameModelRefs`). A site that copies references
- * later is told (`InlineModelBundle.renamed`).
+ * (`renameTypeRefModels`, `renameModelRefs`); then, for `model` — the model
+ * of the site leaving `name` — the sites of the copies that folded onto it
+ * (`InlineModelBundle.carried`, read by the model's identity), whose
+ * references under `name` are references to it. A site that copies
+ * references later is told (`InlineModelBundle.renamed`).
  */
-function repointSite(bundle: InlineModelBundle, name: string, renamed: string): void {
+function repointSite(bundle: InlineModelBundle, name: string, renamed: string, model: Model): void {
   const renames = new Map([[name, renamed]]);
   for (const root of bundle.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
-  for (const model of bundle.models) renameModelRefs(model, renames, inlineRefAdmit(false));
+  for (const m of bundle.models) renameModelRefs(m, renames, inlineRefAdmit(false));
+  for (const entry of bundle.carried ?? []) {
+    if (entry.owner !== model) continue;
+    for (const root of entry.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
+    for (const m of entry.models) renameModelRefs(m, renames, inlineRefAdmit(false));
+  }
   bundle.renamed?.(name, renamed);
+}
+
+/**
+ * Fold `copy` onto `winner` — the definition that replaces it under the
+ * shared name: a component or a model the document declares, the live twin
+ * of a deprecated copy, or the leader of its cluster — and carry its site
+ * into the winner's (`InlineModelBundle.carried`), keyed to the winner. The
+ * copy's references name the winner from now on, so when the winner is
+ * renamed through its own site, the references in the copy's roots and in
+ * the models minted beside it that carry the winner's name are repointed
+ * with the winner's own (`repointSite`): a field model folded onto while an
+ * operation's enum of its name is not yet known still carries the
+ * operation's response with it when the field merge moves it off the
+ * enum's name. The carried site is read by the winner's identity, never by
+ * name: a rename of another model of the winner's site leaves it alone,
+ * since a model of the copy's site under that name is the copy's site's
+ * own, decided on its own (a parent decided after its children, say, which
+ * may keep the name the winner's site's model leaves). A site carried onto
+ * the copy earlier is carried on to the winner. A winner without a site — a
+ * component — is never renamed, so nothing is carried.
+ */
+function foldOnto(
+  copy: Model,
+  winner: Model,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+): void {
+  folded.set(copy, winner);
+  const site = bundleOf.get(copy);
+  const into = bundleOf.get(winner);
+  if (!site || !into || site === into) return;
+  const carried = (into.carried ??= []);
+  carried.push({ owner: winner, roots: site.roots, models: site.models.filter((m) => m !== copy) });
+  for (const entry of site.carried ?? []) {
+    if (entry.owner === copy) carried.push({ owner: winner, roots: entry.roots, models: entry.models });
+  }
 }
 
 /**
@@ -502,8 +645,8 @@ function renameClusters(
         leader = copy;
         continue;
       }
-      repointSite(bundle, name, renamed);
-      folded.set(copy, leader);
+      repointSite(bundle, name, renamed, copy);
+      foldOnto(copy, leader, bundleOf, folded);
     }
     if (renamed !== undefined) {
       const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
@@ -684,13 +827,28 @@ function rewriteModelRefs(
  * dropped in favour of the component, with the settle pass's warning; one
  * named like an enum is kept beside it, with a warning, since nothing
  * stands in for it.
+ *
+ * `declared` are the other models the document declares — the components'
+ * own field models, settled first (`settleFieldInlineModels`) and merged
+ * later (`mergeFieldInlineModels`) — which own their names here exactly as
+ * the components do, as they do in the shape registry: an inline model
+ * named like one folds onto it when it admits the shape and takes a
+ * qualified name otherwise, decided bottom-up before its parent is compared
+ * with anything. Read by name alone, a nested object of a response named
+ * like a component field's model would pass for it under a parent the
+ * lifted model admits, and be left behind, renamed, once the field merge
+ * told the two apart. They are not returned: the caller merges them itself.
  */
 export function mergeInlineResponseModels(
   schemaModels: Model[],
   inlineModels: Model[],
   naming?: InlineModelNaming,
+  declared: Model[] = [],
 ): Model[] {
-  return [...schemaModels, ...keepLargestByName(settleAgainstComponents(schemaModels, inlineModels, naming))];
+  return [
+    ...schemaModels,
+    ...keepLargestByName(settleAgainstComponents([...schemaModels, ...declared], inlineModels, naming)),
+  ];
 }
 
 /**
@@ -713,39 +871,32 @@ export function mergeInlineResponseModels(
  * component enum `PetOwner` — takes its qualified name here too (`PetOwner2`),
  * whatever its shape, so the IR never declares a model and an enum under one
  * name. Returns the field models still competing for a name, the renamed
- * ones under their new names; the merges that follow compare them with the
- * operations' survivors only (`mergeFieldInlineModels`). `folded`, when
- * given, receives each dropped copy keyed to the model it folded onto — the
- * component, or the object the component pass itself minted for the same
- * field — so the field's site can stand in for the survivor later
- * (`fieldInlineModelBundles`).
+ * ones under their new names; the response merge that follows settles the
+ * operations' and webhooks' models against them as against the components
+ * (`mergeInlineResponseModels`, `declared`), and the field merge folds them
+ * in (`mergeFieldInlineModels`). A copy dropped here for the object the
+ * schema pass itself lifted from the same field needs no record: that
+ * object is in the field's site from the moment it is lifted
+ * (`fieldInlineModelBundles`, `liftedFieldModelsOf`).
  */
 export function settleFieldInlineModels(
   components: Model[],
   fieldInlineModels: Model[],
   naming?: InlineModelNaming,
-  folded?: Map<Model, Model>,
 ): Model[] {
-  return settleAgainstComponents(components, fieldInlineModels, naming, folded);
+  return settleAgainstComponents(components, fieldInlineModels, naming);
 }
 
 /**
  * `contenders` settled against `components` (`settleSharedNames`), minus
  * those that folded onto one and those still named like one — a kept copy
  * still carrying a component's name had no site to be renamed from, and the
- * component's definition stands. `folded`, when given, receives each folded
- * copy keyed to the definition that replaced it.
+ * component's definition stands.
  */
-function settleAgainstComponents(
-  components: Model[],
-  contenders: Model[],
-  naming?: InlineModelNaming,
-  folded?: Map<Model, Model>,
-): Model[] {
+function settleAgainstComponents(components: Model[], contenders: Model[], naming?: InlineModelNaming): Model[] {
   const owners = new Map(components.map((m) => [m.name, m]));
-  const settled = settleSharedNames(owners, contenders, naming);
-  for (const [copy, winner] of settled.folded) folded?.set(copy, winner);
-  return settled.kept.filter((model) => !owners.has(model.name));
+  const { kept } = settleSharedNames(owners, contenders, naming);
+  return kept.filter((model) => !owners.has(model.name));
 }
 
 /**
@@ -763,13 +914,15 @@ function settleAgainstComponents(
  * takes a qualified name otherwise, so a component is never replaced; and a
  * deprecated and a live definition of one name are told apart. The parser
  * has already settled its field models against the components
- * (`settleFieldInlineModels`), so for it this step decides only the names
- * the field models share with the response pass's survivors; a direct
- * caller's field models are settled here. The fold below then only joins
- * models that agree on the flag, and a field model named like an inline
- * survivor of another shape is dropped in favour of the survivor, with a
- * warning naming both shapes, as the earlier definition of an inline name
- * is kept everywhere. A field model named like one of the document's enums
+ * (`settleFieldInlineModels`) and the response pass's models against the
+ * field models (`mergeInlineResponseModels`, `declared`), so for it no
+ * survivor shares a field model's name any more and this step only folds
+ * the field models in; a direct caller's field models are settled here,
+ * and a field model of theirs named like an inline survivor of another
+ * shape is dropped in favour of the survivor, with a warning naming both
+ * shapes, as the earlier definition of an inline name is kept everywhere.
+ * The fold below only joins models that agree on the flag. A field model
+ * named like one of the document's enums
  * (`naming.enums`) — a `Pet.owner` object beside a component enum
  * `PetOwner` — takes a qualified name (`PetOwner2`) whatever its shape, as
  * the response pass's models do; the parser's field models meet that rule
