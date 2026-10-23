@@ -499,7 +499,7 @@ describe('inline-model merges – deprecated', () => {
     }
   });
 
-  it('keeps a component’s own flag when a larger inline response replaces its fields', () => {
+  it('keeps a component’s own flag and fields under a larger inline response that has no site to be renamed from (issue #285)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const component = (deprecated: boolean): Model => widget(deprecated, true);
@@ -516,33 +516,35 @@ describe('inline-model merges – deprecated', () => {
           fields: m.fields.map((f) => f.name),
         }));
 
-      // A live component takes the response's fields but stays live, the key
-      // absent; a deprecated one keeps its flag under a live response's fields.
+      // The component is never replaced: its flag, present or absent, and its
+      // fields stand whatever the response adds and whichever flag it carries.
       expect(merge(component(false), response(true))).toEqual([
-        { name: 'Widget', deprecated: undefined, hasKey: false, fields: ['k', 'extra'] },
+        { name: 'Widget', deprecated: undefined, hasKey: false, fields: ['k'] },
       ]);
       expect(merge(component(true), response(false))).toEqual([
-        { name: 'Widget', deprecated: true, hasKey: true, fields: ['k', 'extra'] },
+        { name: 'Widget', deprecated: true, hasKey: true, fields: ['k'] },
       ]);
-      // Agreeing flags fold exactly as before.
       expect(merge(component(true), response(true))).toEqual([
-        { name: 'Widget', deprecated: true, hasKey: true, fields: ['k', 'extra'] },
+        { name: 'Widget', deprecated: true, hasKey: true, fields: ['k'] },
       ]);
       expect(merge(component(false), response(false))).toEqual([
-        { name: 'Widget', deprecated: undefined, hasKey: false, fields: ['k', 'extra'] },
+        { name: 'Widget', deprecated: undefined, hasKey: false, fields: ['k'] },
       ]);
-      // Only the two disagreeing merges say so.
-      const flagWarnings = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("component's flag"));
-      expect(flagWarnings).toEqual([
-        '[oagen] Warning: Inline model "Widget" is deprecated but component schema "Widget" is live — keeping the component\'s flag',
-        '[oagen] Warning: Inline model "Widget" is live but component schema "Widget" is deprecated — keeping the component\'s flag',
+      // Without a site to rename the response from, each merge says why the
+      // component's definition stands: the flag where the two disagree on
+      // it, the shape where they agree.
+      expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
+        '[oagen] Warning: Inline model "Widget" is deprecated in one definition and live in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name',
+        '[oagen] Warning: Inline model "Widget" is live in one definition and deprecated in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name',
+        '[oagen] Warning: Inline model "Widget" has a different shape than component schema "Widget" and has no site to be renamed from — using the component schema',
+        '[oagen] Warning: Inline model "Widget" has a different shape than component schema "Widget" and has no site to be renamed from — using the component schema',
       ]);
     } finally {
       warn.mockRestore();
     }
   });
 
-  it('keeps a component’s own description and link when a larger inline response replaces its fields', () => {
+  it('keeps a component’s own description, link and fields under a larger inline response that has no site to be renamed from (issue #285)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const docs = (description: string | undefined, url?: string): Partial<Model> => ({
@@ -565,38 +567,25 @@ describe('inline-model merges – deprecated', () => {
         }));
       const legacy = docs('Legacy widget.', 'https://example.com/legacy');
 
-      // The component's documentation stays with its name; only the fields
-      // are the response's.
+      // The component is never replaced: its documentation and its fields
+      // stand, and a component without documentation does not adopt the
+      // response's — the response's own words go with the response.
       expect(merge(component(docs('A widget.', 'https://example.com/widget')), response(legacy))).toEqual([
         {
           description: 'A widget.',
           externalDocs: { url: 'https://example.com/widget' },
           hasLink: true,
-          fields: ['k', 'extra'],
+          fields: ['k'],
         },
       ]);
-      // A component without them adopts the response's.
       expect(merge(component(docs(undefined)), response(legacy))).toEqual([
-        {
-          description: 'Legacy widget.',
-          externalDocs: { url: 'https://example.com/legacy' },
-          hasLink: true,
-          fields: ['k', 'extra'],
-        },
+        { description: undefined, externalDocs: undefined, hasLink: false, fields: ['k'] },
       ]);
-      // Each fills in on its own: a described component without a link takes
-      // the response's link and keeps its description.
       expect(merge(component(docs('A widget.')), response(legacy))).toEqual([
-        {
-          description: 'A widget.',
-          externalDocs: { url: 'https://example.com/legacy' },
-          hasLink: true,
-          fields: ['k', 'extra'],
-        },
+        { description: 'A widget.', externalDocs: undefined, hasLink: false, fields: ['k'] },
       ]);
-      // Neither documented: the link key stays absent.
       expect(merge(component(docs(undefined)), response(docs(undefined)))).toEqual([
-        { description: undefined, externalDocs: undefined, hasLink: false, fields: ['k', 'extra'] },
+        { description: undefined, externalDocs: undefined, hasLink: false, fields: ['k'] },
       ]);
     } finally {
       warn.mockRestore();
@@ -1300,7 +1289,7 @@ describe('parseSpec – deprecated', () => {
     }
   });
 
-  it('keeps a component’s own description and link under a larger inline response’s fields, in either document order', async () => {
+  it('keeps a component’s own description, link and fields beside a larger inline response, which takes a name of its own, in either document order (issue #285)', async () => {
     const widget = (extra: Record<string, unknown> = {}) => ({
       type: 'object',
       properties: { object: { type: 'string', const: 'widget' }, k: { type: 'string' } },
@@ -1320,14 +1309,14 @@ describe('parseSpec – deprecated', () => {
     const widgetDocs = { description: 'A widget.', externalDocs: { url: 'https://example.com/widget' } };
     const docsOf = (m: Model | undefined) =>
       m && { description: m.description, externalDocs: m.externalDocs, fields: m.fields.map((f) => f.name) };
-    const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
-      ['documented component keeps its own', widgetDocs, widgetDocs],
-      ['undocumented component adopts the response’s', {}, legacyDocs],
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['documented component', widgetDocs],
+      ['undocumented component', {}],
     ];
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      for (const [label, componentDocs, expected] of cases) {
+      for (const [label, componentDocs] of cases) {
         const results = [];
         for (const [order, paths] of [
           ['component-first', { '/widget': fromComponent, '/legacy-widget': inline }],
@@ -1338,17 +1327,25 @@ describe('parseSpec – deprecated', () => {
           const file = await writeSpec(`${order}.json`, specDoc({ Widget: widget(componentDocs) }, paths));
           const spec = await parseSpec(file);
           const warnings = warn.mock.calls.map(([m]) => String(m));
+          // The component is never replaced: its own documentation, or none,
+          // and its own fields. The response keeps its words and its extra
+          // field under an operation-qualified name, and every reference
+          // resolves.
           expect(docsOf(spec.models.find((m) => m.name === 'Widget')), where).toEqual({
-            ...expected,
+            description: componentDocs.description,
+            externalDocs: componentDocs.externalDocs,
+            fields: ['object', 'k'],
+          });
+          expect(docsOf(spec.models.find((m) => m.name === 'GetLegacyWidgetWidget')), where).toEqual({
+            ...legacyDocs,
             fields: ['object', 'k', 'extra'],
           });
           const ops = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
           expect(ops.getWidget?.response, where).toEqual({ kind: 'model', name: 'Widget' });
-          expect(ops.getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'Widget' });
-          expect(
-            warnings.filter((w) => w.includes('Unresolved model reference')),
-            where,
-          ).toEqual([]);
+          expect(ops.getLegacyWidget?.response, where).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+          expect(warnings, where).toEqual([
+            '[oagen] Renamed inline model "Widget" → "GetLegacyWidgetWidget": its shape differs from component schema "Widget"',
+          ]);
           results.push(spec.models.map(docsOf));
         }
         expect(results[0], label).toEqual(results[1]);

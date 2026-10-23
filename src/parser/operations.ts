@@ -451,7 +451,12 @@ export function extractOperations(
   // named against all of it last.
   const registry: ModelShapeRegistry = new Map();
   const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
-  registerInlineModels(registry, registeredModels);
+  // Each seeded with the model itself: a declared model shares its name with
+  // every shape it admits (`ownerShares`), an operation's with an identical
+  // one only.
+  for (const model of registeredModels) {
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
+  }
   // Every enum name decided so far, held as names no model may take
   // (`reserveEnumNames`): the component enums', and every inline enum the
   // component models and the components' field models mint (an `EnumRef`
@@ -2501,7 +2506,7 @@ function buildOperation(
   // reference must follow that model's rename (`attachSharedRefs`).
   inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   if (reqBodyModels.length > 0 && requestBody) {
-    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
   return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
@@ -3639,18 +3644,20 @@ interface ResponseTypingContext {
  * secondary response-body, fallback-body, error-body and parameter schema,
  * now that every primary model is known. The registry comes filled from
  * `extractOperations`: the component models first (with the inline models
- * their fields mint), then every inline model the operations minted —
- * request bodies, primary response bodies with their nested objects, union
- * variants and settled array items, envelope companions — so no deferred
- * schema can take one of their names for a different shape, whichever
- * operation minted it; each resolved schema's own models join it in turn, in
- * document order (path order, then an operation's secondary request bodies
- * in content order, then the response keys as written; a response's headers
- * before its error body and its secondary bodies, a fallback's body before
- * its headers), so the first owner of a name keeps it. Every enum name
- * decided before this pass, component or minted, is held too, as a name no
- * model may take (`reserveEnumNames`): a deferred schema that derives one
- * steps to its next candidate, so a component enum
+ * their fields mint), each seeded with the model itself so it shares its
+ * name with every shape it admits (`ownerShares`), then every inline model
+ * the operations minted — request bodies, primary response bodies with
+ * their nested objects, union variants and settled array items, envelope
+ * companions — shared on an identical shape only, so no deferred schema
+ * can take one of their names for a shape the owner does not share,
+ * whichever operation minted it; each resolved schema's own models join it
+ * in turn, in document order (path order, then an operation's secondary
+ * request bodies in content order, then the response keys as written; a
+ * response's headers before its error body and its secondary bodies, a
+ * fallback's body before its headers), so the first owner of a name keeps
+ * it. Every enum name decided before this pass, component or minted, is
+ * held too, as a name no model may take (`reserveEnumNames`): a deferred
+ * schema that derives one steps to its next candidate, so a component enum
  * `ReplaceWidgetTextCsvRequest` sends the `text/csv` body's model to
  * `ReplaceWidgetTextCsvRequest2`. The sites that derive from one bare name
  * — one kind, parent and name: the same header on several status codes or
@@ -3677,7 +3684,12 @@ function resolveDeferredInlineTypes(
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
     // model minted nothing here, see `attachSharedRefs`).
-    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
+    bundles.push({
+      qualifier: item.operationQualifier,
+      roots: [type],
+      models: models.slice(minted),
+      ...(isSentSite(item) ? { sent: true } : {}),
+    });
   }
   return { models, bundles };
 }
@@ -3690,7 +3702,7 @@ function resolveDeferredInlineTypes(
  * component field's model or an earlier operation's (`typeInlineItems`
  * through `materializeInlineSchema`) — so its reference is not among the
  * owner's roots, and a merge pass that renames the owner (a deprecated copy
- * named like a live one, `separateDeprecatedCopies`) would leave the
+ * named like a live one, `settleSharedNames`) would leave the
  * `default` response, header or array on the old name, which the live copy
  * then takes. The first site to mint a name owns it, as the registry
  * decided; the references every other site's roots and its own models'
@@ -3779,9 +3791,10 @@ export function attachSharedRefs(bundles: readonly InlineModelBundle[], componen
  * within an operation each has a bare name of its own and no sibling to try.
  *
  * Both the type and the models come from the same property name, so nested
- * models (`DocumentsXMeta429Origin`) line up by construction. A shape
- * identical to the name's current owner shares it and materializes nothing
- * new, which is also how a header reuses a matching component model. A
+ * models (`DocumentsXMeta429Origin`) line up by construction. A shape the
+ * name's current owner shares — identical to an operation's model, or one a
+ * component admits (`ownerShares`) — takes the name and materializes nothing
+ * new, which is how a header reuses a component model. A
  * title-mapped union variant (`Circle`) is named from its title whatever the
  * property name, so `materializeInlineSchema` reserves every taken name and
  * such a variant falls back to its context-qualified name
@@ -3809,8 +3822,14 @@ function materializeDeferredType(
     componentSchemas: item.componentSchemas,
     registry,
     operation: item.operationQualifier,
+    sent: isSentSite(item),
     models,
   });
+}
+
+/** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
+function isSentSite(item: DeferredInlineType): boolean {
+  return item.kind === 'request' || item.kind === 'param';
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
@@ -4786,9 +4805,10 @@ function typeFallbackBody(
  * `schemaToTypeRef` references it by, by construction, and checked against
  * the spec-wide registry: a name a component schema, a model nested in one
  * (`GetPet.error404` owns `GetPetError404`), a header or another operation's
- * body already owns with a different shape moves the whole body to the next
- * free name (`GetPetError404Body`, `…Body2`), nested models and ref together;
- * an identical shape shares it. A titled variant that clashes (`Circle`) is
+ * body already owns with a shape it does not share moves the whole body to
+ * the next free name (`GetPetError404Body`, `…Body2`), nested models and ref
+ * together; a shape the owner shares (`ownerShares`) takes the name. A
+ * titled variant that clashes (`Circle`) is
  * reserved and qualified (`CircleGetPetError400`), as under any deferred
  * kind. A body that is itself an inline enum, or an array of one, mints no
  * model and is promoted to `spec.enums` by `collectInlineEnumsFromOperations`.

@@ -1147,29 +1147,165 @@ export function collectModelTypeRefs(model: Model): TypeRef[] {
 }
 
 /**
- * Rename the models a model refers to: every `model` ref in its fields' types
- * and its union variants, and every `discriminator.mapping` target, that
- * `renames` maps is pointed at the new name. Each reference is looked up
- * once, so a map `{ A → B, B → C }` moves `A` to `B`, never on to `C`. The
- * model's own `name` is left to the caller. Every rename and fold site goes
- * through this, so a dispatcher's mapping can never keep naming a model that
- * was renamed away while its variants moved on.
+ * Rename the models a type refers to, in place: every `model` ref under
+ * `ref` — at any depth of array, map, nullable and union wrapper — that
+ * `renames` maps and `admit` accepts is pointed at the new name, and each
+ * `discriminator.mapping` entry of a union follows the variant it belongs
+ * to (`mappingEntriesByVariant`), so a mapping never keeps naming a model
+ * that was renamed away and never moves off a variant that stayed: beside a
+ * `$ref` to `Comp` (`kind: legacy`) an inline variant titled `Comp`
+ * (`kind: new`) renamed to `ThingComp` leaves `{ legacy: 'Comp', new:
+ * 'ThingComp' }`. Each reference is looked up once, so `{ A → B, B → C }`
+ * moves `A` to `B`, never on to `C`. Without an `admit` every reference is
+ * renamed, and so is every mapping target `renames` maps, those naming no
+ * variant included: a document's own mapping may send a value to a model
+ * that is not among the variants, and a fold that removes that model
+ * (`FooJson` into `Foo`) must not leave the mapping naming it. Under an
+ * `admit` — the parser's merge passes pass one that tells a reference minted
+ * for an inline model from an explicit `$ref` to a same-named component —
+ * only an entry a moved variant owns follows it, since a target has no
+ * identity to admit. Returns whether any reference moved. Every rename site
+ * — the merge passes, the shape registry,
+ * the list-envelope pass, the Json fold — goes through this or
+ * `renameModelRefs`, so every reference kind a rename can touch is rewritten
+ * alike: a field's type, a union's variants and mapping, an operation's
+ * bodies, pagination types, headers and secondary bodies, a webhook's
+ * payload and parameters.
  */
-export function renameModelRefs(model: Model, renames: ReadonlyMap<string, string>): void {
-  for (const ref of collectModelTypeRefs(model)) {
-    walkTypeRef(ref, {
-      model: (r) => {
-        const renamed = renames.get(r.name);
-        if (renamed !== undefined) r.name = renamed;
-      },
-    });
+export function renameTypeRefModels(
+  ref: TypeRef,
+  renames: ReadonlyMap<string, string>,
+  admit?: (ref: ModelRef) => boolean,
+): boolean {
+  switch (ref.kind) {
+    case 'model': {
+      const renamed = renames.get(ref.name);
+      if (renamed === undefined || (admit && !admit(ref))) return false;
+      ref.name = renamed;
+      return true;
+    }
+    case 'array':
+      return renameTypeRefModels(ref.items, renames, admit);
+    case 'nullable':
+      return renameTypeRefModels(ref.inner, renames, admit);
+    case 'map': {
+      const key = ref.keyType ? renameTypeRefModels(ref.keyType, renames, admit) : false;
+      const value = renameTypeRefModels(ref.valueType, renames, admit);
+      return key || value;
+    }
+    case 'union':
+      return renameVariants(ref.variants, ref.discriminator?.mapping, renames, admit);
+    case 'enum':
+    case 'literal':
+    case 'primitive':
+      return false;
+    default:
+      return assertNever(ref);
   }
-  const mapping = model.discriminator?.mapping;
-  if (!mapping) return;
+}
+
+/**
+ * Rename the models `variants` refer to, each `mapping` entry following the
+ * variant it belongs to. Returns whether any variant moved.
+ */
+function renameVariants(
+  variants: TypeRef[],
+  mapping: Record<string, string> | undefined,
+  renames: ReadonlyMap<string, string>,
+  admit: ((ref: ModelRef) => boolean) | undefined,
+): boolean {
+  // By name, every entry follows its target; under a filter, only an entry a
+  // moved variant owns.
+  const owned = mapping && admit ? mappingEntriesByVariant(variants, mapping) : undefined;
+  let moved = false;
+  variants.forEach((variant, index) => {
+    if (!renameTypeRefModels(variant, renames, admit)) return;
+    moved = true;
+    const model = variantModel(variant);
+    if (owned && model) for (const value of owned.get(index) ?? []) mapping![value] = model.name;
+  });
+  if (mapping && !admit) renameMappingTargets(mapping, renames);
+  return moved;
+}
+
+/** The model a variant names — directly, or under its nullable wrapper — which its mapping entry targets; none for any other variant. */
+function variantModel(variant: TypeRef): ModelRef | undefined {
+  if (variant.kind === 'nullable') return variantModel(variant.inner);
+  return variant.kind === 'model' ? variant : undefined;
+}
+
+/**
+ * Which variant each `mapping` entry belongs to, by the variants' positions:
+ * a name one variant carries owns every entry naming it (a document's own
+ * mapping may send several values to one schema); a name several variants
+ * carry — a `$ref` to a component beside an inline variant titled like it —
+ * hands the j-th entry naming it to the j-th such variant, since the parser
+ * derives one entry per discriminated variant in variant order. A variant's
+ * model is read through its nullable wrapper. An entry naming no variant
+ * belongs to none and stays as written.
+ */
+function mappingEntriesByVariant(variants: readonly TypeRef[], mapping: Record<string, string>): Map<number, string[]> {
+  const indexesByName = new Map<string, number[]>();
+  variants.forEach((variant, index) => {
+    const model = variantModel(variant);
+    if (model) indexesByName.set(model.name, [...(indexesByName.get(model.name) ?? []), index]);
+  });
+  const owned = new Map<number, string[]>();
+  const handed = new Map<string, number>();
+  for (const [value, target] of Object.entries(mapping)) {
+    const indexes = indexesByName.get(target);
+    if (!indexes) continue;
+    let index = indexes[0]!;
+    if (indexes.length > 1) {
+      const j = handed.get(target) ?? 0;
+      handed.set(target, j + 1);
+      if (j >= indexes.length) continue;
+      index = indexes[j]!;
+    }
+    owned.set(index, [...(owned.get(index) ?? []), value]);
+  }
+  return owned;
+}
+
+/** Point every target of `mapping` that `renames` maps at the new name: a rename by name, which reaches an entry naming no variant too. */
+function renameMappingTargets(mapping: Record<string, string>, renames: ReadonlyMap<string, string>): void {
   for (const [value, target] of Object.entries(mapping)) {
     const renamed = renames.get(target);
     if (renamed !== undefined) mapping[value] = renamed;
   }
+}
+
+/**
+ * Rename the models a model refers to: every `model` ref in its fields' types
+ * and its union variants that `renames` maps and `admit` accepts is pointed
+ * at the new name (`renameTypeRefModels`, so a union's mapping inside a field
+ * follows its variant), and the model's own `discriminator.mapping` is
+ * rewritten with it: without an `admit`, every target `renames` maps, by
+ * name — whether it names a variant, a model outside the variants a
+ * document's own mapping sends a value to, or a member an allOf+oneOf
+ * dispatcher holds in the mapping alone — so a fold that removes a model
+ * never leaves a dispatcher naming it; under an `admit`, only an entry a
+ * moved variant owns (`mappingEntriesByVariant`), since a target has no
+ * identity to admit. Each reference is looked up once, so a map `{ A → B, B → C }`
+ * moves `A` to `B`, never on to `C`. The model's own `name` is left to the
+ * caller. Every rename and fold site goes through this, so a dispatcher's
+ * mapping can never keep naming a model that was renamed away while its
+ * variants moved on. Returns whether any reference moved.
+ */
+export function renameModelRefs(
+  model: Model,
+  renames: ReadonlyMap<string, string>,
+  admit?: (ref: ModelRef) => boolean,
+): boolean {
+  let moved = false;
+  for (const field of model.fields) if (renameTypeRefModels(field.type, renames, admit)) moved = true;
+  const mapping = model.discriminator?.mapping;
+  if (model.variants) {
+    if (renameVariants(model.variants, mapping, renames, admit)) moved = true;
+  } else if (mapping && !admit) {
+    renameMappingTargets(mapping, renames);
+  }
+  return moved;
 }
 
 /**

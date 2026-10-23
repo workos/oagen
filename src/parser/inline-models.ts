@@ -1,5 +1,5 @@
-import type { Constraints, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
-import { collectModelRefs, collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
+import type { Constraints, EnumRef, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
@@ -10,6 +10,7 @@ import {
   deprecatedEntry,
   extractConstraints,
   isComponentModelRef,
+  markComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
   unwrapNullableField,
@@ -24,7 +25,7 @@ import {
   foldedVariantOrigin,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
-import { shapeWithEnumFlags } from './enum-members.js';
+import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -323,15 +324,75 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description',
  */
 export function modelFingerprint(model: Model): string {
   const fields = model.fields
-    .map(
-      (field) =>
-        `${field.name}:${stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) })}`,
-    )
+    .map((field) => `${field.name}:${fieldShapeKey(field)}`)
     .sort()
     .join('|');
+  return `${fields}#${modelShapeKey(model)}`;
+}
+
+/** A field's shape as `modelFingerprint` reads it: everything but its documentation, the type through `shapeWithEnumFlags`. */
+function fieldShapeKey(field: Field): string {
+  return stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) });
+}
+
+/** A model's shape beside its fields: its limits, type parameters, `deprecated`, variants (through `shapeWithEnumFlags`) and dispatch rules. */
+function modelShapeKey(model: Model): string {
   const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
   if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
-  return `${fields}#${stableStringify(rest)}`;
+  return stableStringify(rest);
+}
+
+/** Field properties `modelAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
+const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required']);
+
+/**
+ * Whether `owner` admits `candidate`: every value `candidate` describes is
+ * one `owner` describes too, so a reference typed as `owner` in place of
+ * `candidate` loses strictness and nothing else. The two have the same field
+ * names, and each field agrees with its namesake in everything
+ * `modelFingerprint` reads — type, limits, default, access flags, its own
+ * `deprecated` — except that `owner` may be looser where `candidate` is
+ * strict, never the other way round: a field `candidate` requires may be
+ * optional on `owner`, and a field type `candidate` leaves non-null may be
+ * `nullable<…>` on `owner`. Only the field type's own nullable wrapper is
+ * read that way; a wrapper deeper down (an array's items) must agree. The
+ * models' own limits, type parameters, variants, dispatch rules and
+ * `deprecated` must agree, and a model reference is compared by name: a
+ * nested inline model keeps its name, so a parent whose child was renamed is
+ * not admitted by one whose child was not. An identical shape is admitted.
+ *
+ * The one rule by which an inline model folds onto a model the document
+ * declares — a component schema, or a model a component's field minted — in
+ * the merge passes (`settleSharedNames`) and in the shape registry of
+ * `materializeInlineSchema` (`ownerShares`); two inline models share a name
+ * on an identical fingerprint only. A shape the SDK sends — a request body,
+ * a parameter — is the callers' exception (`ownerShares`,
+ * `settleSharedNames`): it shares a component on an identical shape only,
+ * since typed as a looser component a caller could leave out what the
+ * operation requires. The list-envelope pass compares its companions by a
+ * structural rule of its own, since a companion's nested models are named
+ * per operation.
+ */
+export function modelAdmits(owner: Model, candidate: Model): boolean {
+  if (owner.fields.length !== candidate.fields.length) return false;
+  const ownerFields = new Map(owner.fields.map((field) => [field.name, field]));
+  for (const field of candidate.fields) {
+    const own = ownerFields.get(field.name);
+    if (!own) return false;
+    if (own.required && !field.required) return false;
+    if (!fieldTypeAdmits(own.type, field.type)) return false;
+    if (stableStringify(omitKeys(own, FIELD_ADMIT_KEYS)) !== stableStringify(omitKeys(field, FIELD_ADMIT_KEYS))) {
+      return false;
+    }
+  }
+  return modelShapeKey(owner) === modelShapeKey(candidate);
+}
+
+/** Whether `owner` admits every value of `candidate`'s type: the same type under the field's own nullable wrapper, which `owner` may carry where `candidate` does not. */
+function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef): boolean {
+  if (candidate.kind === 'nullable' && owner.kind !== 'nullable') return false;
+  const inner = (ref: TypeRef): TypeRef => (ref.kind === 'nullable' ? ref.inner : ref);
+  return stableStringify(shapeWithEnumFlags(inner(owner))) === stableStringify(shapeWithEnumFlags(inner(candidate)));
 }
 
 /** The entries of `value` whose key is not in `keys` and whose value is set. */
@@ -888,9 +949,10 @@ function* inlineProperties(schema: SchemaObject): Generator<[string, SchemaObjec
 
 /**
  * Where a group of inline models came from, so a copy that must give up a
- * name it shares with a differently flagged model can be renamed and exactly
- * its own references repointed (see `separateDeprecatedCopies` in the merge
- * passes). `qualifier` is prefixed to the new name — the PascalCase operation
+ * name it shares with a differently flagged or differently shaped model can
+ * be renamed and exactly its own references repointed (see
+ * `settleSharedNames` in the merge passes). `qualifier` is prefixed to the
+ * new name — the PascalCase operation
  * name for an operation's models, as a list-envelope companion or header
  * model is qualified, the component name for a component field's; `roots`
  * are the type references the site owns — an operation's response, its
@@ -904,6 +966,24 @@ export interface InlineModelBundle {
   qualifier: string;
   roots: TypeRef[];
   models: Model[];
+  /**
+   * Told of every rename of one of `models`, for a site whose references are
+   * copied after it is settled — a component field's, whose inline model an
+   * operation's or webhook's `allOf` merge copies a reference to
+   * (`recordFieldModelRename`). Absent for a site nothing copies from.
+   */
+  renamed?: (from: string, to: string) => void;
+  /**
+   * Set when the site's models are what the SDK sends — an operation's
+   * request body, primary or secondary, or an inline parameter — so a
+   * component shares a name with one of them only on an identical shape
+   * (`settleSharedNames`, as `ownerShares` decides for the registry): typed
+   * as a looser component, a caller could leave out what the operation
+   * requires. Absent for a shape the SDK receives — a response body or
+   * header, a webhook's payload or parameter — and for a component field's
+   * object, whose direction the document does not say.
+   */
+  sent?: boolean;
 }
 
 /**
@@ -931,8 +1011,26 @@ export interface FieldInlineModelGroup {
  * a component reference and is not recorded. Reset per document by
  * `extractSchemas`.
  */
-const inheritedModelRefs = new WeakSet<ModelRef>();
+/** Each inherited reference, keyed to the `Parent.field` it was copied from, so a copy of it (`cloneTypeRef`) can be recorded under the same field. */
+const inheritedModelRefs = new WeakMap<ModelRef, string>();
 const inheritedModelRefsByField = new Map<string, ModelRef[]>();
+/**
+ * The renames the merge passes have applied to the inline models of each
+ * component field (`settleFieldInlineModels`, before any operation or
+ * webhook is read), keyed `Parent.field`, so a reference an `allOf` merge
+ * copies from the field afterwards (`recordInheritedModelRefs`) — typed from
+ * the schema, which still mints the original name — is created under the
+ * settled name. Reset per document with the inherited references.
+ */
+const fieldModelRenames = new Map<string, Map<string, string>>();
+
+/** Record that the inline model `from` of `fieldName` of the component resolved to `parentName` is now named `to`. */
+export function recordFieldModelRename(parentName: string, fieldName: string, from: string, to: string): void {
+  const key = `${parentName}.${fieldName}`;
+  const renames = fieldModelRenames.get(key) ?? new Map<string, string>();
+  renames.set(from, to);
+  fieldModelRenames.set(key, renames);
+}
 
 /** Whether `ref` was copied from a component's property by an `allOf` merge (see `inheritedModelRefsOf`). */
 export function isInheritedModelRef(ref: ModelRef): boolean {
@@ -944,22 +1042,91 @@ export function inheritedModelRefsOf(parentName: string, fieldName: string): Mod
   return inheritedModelRefsByField.get(`${parentName}.${fieldName}`) ?? [];
 }
 
-/** Forget every inherited reference recorded so far: a new document is being read. */
+/** Forget every inherited reference and field-model rename recorded so far: a new document is being read. */
 export function resetInheritedModelRefs(): void {
   inheritedModelRefsByField.clear();
+  fieldModelRenames.clear();
 }
 
 function recordInheritedModelRefs(type: TypeRef, parentName: string, fieldName: string): void {
   const key = `${parentName}.${fieldName}`;
+  // A copy made after the field's models were settled names them as the
+  // schema does; it is moved to the settled names first, every reference
+  // minted for an inline model and never an explicit `$ref`.
+  const renames = fieldModelRenames.get(key);
+  if (renames) renameTypeRefModels(type, renames, (ref) => !isComponentModelRef(ref));
   walkTypeRef(type, {
     model: (ref) => {
-      if (isComponentModelRef(ref)) return;
-      inheritedModelRefs.add(ref);
-      const refs = inheritedModelRefsByField.get(key) ?? [];
-      refs.push(ref);
-      inheritedModelRefsByField.set(key, refs);
+      if (!isComponentModelRef(ref)) recordInheritedRef(ref, key);
     },
   });
+}
+
+function recordInheritedRef(ref: ModelRef, key: string): void {
+  inheritedModelRefs.set(ref, key);
+  const refs = inheritedModelRefsByField.get(key) ?? [];
+  refs.push(ref);
+  inheritedModelRefsByField.set(key, refs);
+}
+
+/**
+ * The one way to copy a built type reference. Every pass keys a reference's
+ * provenance by its identity — a `$ref` to a component
+ * (`isComponentModelRef`), a reference an `allOf` merge copied from a
+ * component's field (`isInheritedModelRef`), an inline enum's members and
+ * link (`inlineEnumRef`) — so a structural copy (`structuredClone`, a
+ * spread) silently turns a component reference into one a merge pass may
+ * repoint, drops an inherited reference from its field's site, and leaves an
+ * inline enum a bare name to the lift. A copy made here carries every mark
+ * its original has: the component mark, the inherited record under the same
+ * field, the enum's members and link; a union's mapping is copied with its
+ * variants. For a type copied to a second owner — a webhook sharing a path
+ * item's minting (`extractWebhooks`). A copy made only to be serialized for
+ * comparison, after its flags are spelled out (`foldedVariantKey`), needs
+ * none of this.
+ */
+export function cloneTypeRef(ref: TypeRef): TypeRef {
+  switch (ref.kind) {
+    case 'model': {
+      const copy: ModelRef = { ...ref };
+      if (isComponentModelRef(ref)) markComponentModelRef(copy);
+      const key = inheritedModelRefs.get(ref);
+      if (key !== undefined) recordInheritedRef(copy, key);
+      return copy;
+    }
+    case 'enum': {
+      const copy: EnumRef = { ...ref, ...(ref.values ? { values: [...ref.values] } : {}) };
+      copyInlineEnumMeta(ref, copy);
+      return copy;
+    }
+    case 'array':
+      return { ...ref, items: cloneTypeRef(ref.items) };
+    case 'nullable':
+      return { ...ref, inner: cloneTypeRef(ref.inner) };
+    case 'map':
+      return {
+        ...ref,
+        valueType: cloneTypeRef(ref.valueType),
+        ...(ref.keyType ? { keyType: cloneTypeRef(ref.keyType) } : {}),
+      };
+    case 'union':
+      return {
+        ...ref,
+        variants: ref.variants.map(cloneTypeRef),
+        ...(ref.discriminator
+          ? { discriminator: { ...ref.discriminator, mapping: { ...ref.discriminator.mapping } } }
+          : {}),
+      };
+    case 'literal':
+    case 'primitive':
+      return { ...ref };
+    default:
+      return assertNeverRef(ref);
+  }
+}
+
+function assertNeverRef(ref: never): never {
+  throw new Error(`Unhandled type reference: ${JSON.stringify(ref)}`);
 }
 
 /**

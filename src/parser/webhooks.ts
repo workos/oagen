@@ -10,12 +10,18 @@ import type {
   Webhook,
   WebhookResponse,
 } from '../ir/types.js';
-import { collectModelTypeRefs, collectResponseHeaders, walkTypeRef } from '../ir/types.js';
+import { collectModelTypeRefs, collectResponseHeaders, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
-import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
+import {
+  cloneTypeRef,
+  extractInlineModelsFromProperties,
+  modelFingerprint,
+  qualifyInlineModelName,
+  type InlineModelBundle,
+} from './inline-models.js';
 import {
   HTTP_METHODS,
   extractParams,
@@ -55,6 +61,15 @@ export interface WebhookExtractionResult {
   webhooks: Webhook[];
   /** Models materialized from inline payload and parameter schemas, to merge into `ApiSpec.models`. */
   inlineModels: Model[];
+  /**
+   * Where those models came from: one site per group of entries that share
+   * a minting, qualified by the group's stem and owning every reference of
+   * every webhook in the group — its payload and its parameters
+   * (`collectWebhookTypeRefs`) — so a merge pass that must rename one of the
+   * models (a payload variant titled like a component of another shape)
+   * repoints exactly those, as it does an operation's (`InlineModelBundle`).
+   */
+  inlineModelBundles: InlineModelBundle[];
 }
 
 /** One (key, method) pair of the `webhooks` map, with its references resolved. */
@@ -155,10 +170,10 @@ export function extractWebhooks(
   reservedNames: Iterable<string> = [],
   reservedEnumNames: Iterable<string> = [],
 ): WebhookExtractionResult {
-  if (webhooks === undefined) return { webhooks: [], inlineModels: [] };
+  if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
   if (!isRecord(webhooks)) {
     console.warn('[oagen] Warning: Top-level `webhooks` is not an object; ignoring it.');
-    return { webhooks: [], inlineModels: [] };
+    return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
   }
 
   const entries = collectWebhookEntries(webhooks, components);
@@ -176,8 +191,11 @@ export function extractWebhooks(
   // Document order of the entries, not of the groups: a shared operation's
   // second key keeps its own place. A group's owner takes the minted
   // parameters and payload as they are; every other member gets its own
-  // copy, so no two webhooks share IR nodes.
+  // copy, so no two webhooks share IR nodes — a copy that keeps each
+  // reference's provenance (`cloneMintedShape`), so a `$ref` to a component
+  // stays one on every member when a merge pass renames the group's models.
   const result: Webhook[] = [];
+  const webhooksByGroup = new Map<WebhookGroup, Webhook[]>();
   for (const entry of entries) {
     const group = groupOf.get(entry)!;
     const minted = mintedByGroup.get(group)!;
@@ -191,10 +209,26 @@ export function extractWebhooks(
       requestBodyContentTypes: minted.requestBodyContentTypes,
       requestBodyContents: minted.requestBodyContents,
     };
-    result.push(buildWebhook(entry, entry === group.owner ? shape : structuredClone(shape), components));
+    const webhook = buildWebhook(entry, entry === group.owner ? shape : cloneMintedShape(shape), components);
+    result.push(webhook);
+    webhooksByGroup.set(group, [...(webhooksByGroup.get(group) ?? []), webhook]);
   }
 
-  return { webhooks: result, inlineModels };
+  // Each group's models are one site: every member's references, the
+  // copies included, so a rename reaches every webhook that shares the
+  // minting and nothing else.
+  const inlineModelBundles: InlineModelBundle[] = [];
+  for (const group of groups) {
+    const minted = mintedByGroup.get(group)!;
+    if (minted.inlineModels.length === 0) continue;
+    inlineModelBundles.push({
+      qualifier: toPascalCase(stems.get(group)!),
+      roots: (webhooksByGroup.get(group) ?? []).flatMap((webhook) => collectWebhookTypeRefs(webhook)),
+      models: minted.inlineModels,
+    });
+  }
+
+  return { webhooks: result, inlineModels, inlineModelBundles };
 }
 
 /**
@@ -464,13 +498,15 @@ function resolveComponentRef(
  * order, and a key that stops colliding returns to its plain stem.
  *
  * A name that does not embed the stem — a title-mapped union variant, which
- * is context-free by design — cannot be moved by the hash. One named like a
- * decided enum is renamed under the payload's root instead
- * (`PetAdoptedPayloadCircle`, see `mintSchema`), since a model and an enum
- * under one name would reach an emitter as one symbol; one named like a
- * decided model, or like another webhook's variant, is left to the model
- * merge, which shares an identical shape and warns about a different one, as
- * it does for operations.
+ * is context-free by design — cannot be moved by the hash, so a clash on it
+ * alone leaves the stem plain. One named like a decided enum is renamed
+ * under the payload's root instead (`PetAdoptedPayloadCircle`, see
+ * `mintSchema`), since a model and an enum under one name would reach an
+ * emitter as one symbol; one named like a decided model, or like another
+ * webhook's variant, is left to the model merge, which shares a component's
+ * name when the component admits the shape and renames the variant under
+ * the webhook's stem otherwise (`PetAdoptedComp`), as it does for
+ * operations.
  */
 function resolveWebhookModelStems(
   groups: WebhookGroup[],
@@ -485,10 +521,15 @@ function resolveWebhookModelStems(
   const stems = new Map<WebhookGroup, string>();
   for (const group of groups) {
     const names = minted.get(group)!;
-    const taken = [...names].some(
-      (name) => reserved.all.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name)),
-    );
     const { owner } = group;
+    // Only a clashing name the hash would move — one that embeds the stem —
+    // moves the stem.
+    const stem = toPascalCase(plainStem(owner, ''));
+    const taken = [...names].some(
+      (name) =>
+        name.includes(stem) &&
+        (reserved.all.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name))),
+    );
     const disambiguator = taken ? webhookDisambiguator(owner.stemOperationId ?? owner.name) : '';
     stems.set(group, plainStem(owner, disambiguator));
   }
@@ -629,6 +670,45 @@ function mintWebhook(
     for (const name of own) names.add(name);
   }
   return minted;
+}
+
+/**
+ * A copy of a minted shape for a second member of a group, carrying every
+ * field the shape has: the fields that hold type references — the
+ * parameters, the payload, the content entries — are copied through
+ * `cloneTypeRef`, so each reference keeps the marks the merge passes read (a
+ * `$ref` to a component, an inherited reference, an inline enum's members),
+ * and each reference is cloned once, so a content entry whose `type` is the
+ * payload's own reference shares the copy as it shared the original; every
+ * other field (the encoding, the content type and its list, anything added
+ * to the shape later) is copied structurally, present or absent exactly as
+ * on the original. A field that comes to hold a type reference must join the
+ * first group.
+ */
+function cloneMintedShape(shape: MintedShape): MintedShape {
+  const clones = new Map<TypeRef, TypeRef>();
+  const clone = (ref: TypeRef): TypeRef => {
+    let copy = clones.get(ref);
+    if (!copy) clones.set(ref, (copy = cloneTypeRef(ref)));
+    return copy;
+  };
+  const cloneParameter = ({ type, ...rest }: Parameter): Parameter => ({ ...structuredClone(rest), type: clone(type) });
+  const { headerParams, queryParams, cookieParams, requestBody, requestBodyContents, ...rest } = shape;
+  return {
+    ...structuredClone(rest),
+    headerParams: headerParams.map(cloneParameter),
+    queryParams: queryParams.map(cloneParameter),
+    cookieParams: cookieParams.map(cloneParameter),
+    ...(requestBody ? { requestBody: clone(requestBody) } : {}),
+    ...(requestBodyContents
+      ? {
+          requestBodyContents: requestBodyContents.map(({ type, ...entry }) => ({
+            ...structuredClone(entry),
+            type: clone(type),
+          })),
+        }
+      : {}),
+  };
 }
 
 /** What one schema minted under one synthetic property: its reference, its models, and every name among them. */

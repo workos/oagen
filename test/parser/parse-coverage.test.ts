@@ -26,9 +26,9 @@ describe('parseSpec — coverage gaps', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('prefers inline model with more fields over component schema', async () => {
-    // Covers lines 44-57: inline model has more fields → replaces component schema.
-    // For dedup to trigger, the inline model name must match the component schema name.
+  it('gives a larger inline model named like a component a name of its own and keeps the component (issue #285)', async () => {
+    // The inline model has more fields than the component of its name: the
+    // component is never replaced, the response is renamed after its operation.
     // Response inline models get named via deriveModelName which checks `object.const`.
     const specContent = `
 openapi: '3.1.0'
@@ -82,13 +82,20 @@ components:
     const result = await parseSpec(specPath);
     const widget = result.models.find((m) => m.name === 'Widget');
     expect(widget).toBeDefined();
-    // The inline model has 5 fields while the component has 2 — inline wins
-    expect(widget!.fields.length).toBeGreaterThanOrEqual(4);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('has more fields than component schema'));
+    // The component keeps its 2 fields; the 5-field inline response takes
+    // the operation-qualified name and the operation references it.
+    expect(widget!.fields.map((f) => f.name)).toEqual(['id', 'name']);
+    const own = result.models.find((m) => m.name === 'GetWidgetWidget');
+    expect(own?.fields.map((f) => f.name)).toEqual(['object', 'id', 'name', 'status', 'extra_field']);
+    expect(result.services[0]?.operations[0]?.response).toEqual({ kind: 'model', name: 'GetWidgetWidget' });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[oagen] Renamed inline model "Widget" → "GetWidgetWidget": its shape differs from component schema "Widget"',
+    );
   });
 
-  it('keeps component schema when inline has fewer fields', async () => {
-    // Covers lines 58-63: inline model has different but fewer fields → uses component.
+  it('keeps the component schema when the inline model has other fields, and renames the inline model (issue #285)', async () => {
+    // The inline model has as many fields as the component but not the same
+    // ones: the component stands and the response is renamed after its operation.
     // The inline model name must match the component schema via deriveModelName.
     const specContent = `
 openapi: '3.1.0'
@@ -140,9 +147,17 @@ components:
     const result = await parseSpec(specPath);
     const gadget = result.models.find((m) => m.name === 'Gadget');
     expect(gadget).toBeDefined();
-    // Component has 3 fields, inline has 3 but with differences → component wins
-    expect(gadget!.fields.length).toBe(3);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('using component schema'));
+    // Component has 3 fields, inline has 3 but with differences → the component stands as written
+    expect(gadget!.fields.map((f) => f.name)).toEqual(['id', 'name', 'status']);
+    expect(result.models.find((m) => m.name === 'GetGadgetGadget')?.fields.map((f) => f.name)).toEqual([
+      'object',
+      'id',
+      'alt_field',
+    ]);
+    expect(result.services[0]?.operations[0]?.response).toEqual({ kind: 'model', name: 'GetGadgetGadget' });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[oagen] Renamed inline model "Gadget" → "GetGadgetGadget": its shape differs from component schema "Gadget"',
+    );
   });
 
   it('merges FooJson superset into Foo and rewrites refs', async () => {

@@ -999,7 +999,7 @@ components:
     expect(unresolvedRefs(ir)).toEqual([]);
   });
 
-  it('never replaces a named union component with a same-named inline response model on field count', async () => {
+  it('never replaces a named union component with a same-named inline response model, whatever its field count', async () => {
     const { mergeInlineResponseModels } = await import('../../src/parser/normalize-inline-models.js');
     const union: Model = { name: 'Pet', fields: [], variants: [modelRef('Cat')], compositionKind: 'oneOf' };
     const inline: Model = {
@@ -1011,7 +1011,7 @@ components:
       const merged = mergeInlineResponseModels([union], [inline]);
       expect(merged).toEqual([union]);
       expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
-        '[oagen] Warning: Inline model "Pet" has different fields than the named union component — using component schema',
+        '[oagen] Warning: Inline model "Pet" has a different shape than component schema "Pet" and has no site to be renamed from — using the component schema',
       ]);
     } finally {
       warn.mockRestore();

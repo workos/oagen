@@ -530,7 +530,7 @@ describe('mergeFieldInlineModels', () => {
     try {
       expect(mergeFieldInlineModels(existing, incoming, new Set(['DrawingLayer']))).toEqual(existing);
       expect(warnSpy).toHaveBeenCalledWith(
-        '[oagen] Warning: Inline model "DrawingLayer" has different fields than component schema — using component schema',
+        '[oagen] Warning: Inline model "DrawingLayer" has a different shape than component schema "DrawingLayer" and has no site to be renamed from — using the component schema',
       );
     } finally {
       warnSpy.mockRestore();
@@ -542,7 +542,7 @@ describe('mergeFieldInlineModels', () => {
     try {
       expect(mergeFieldInlineModels(existing, incoming)).toEqual(existing);
       expect(warnSpy).toHaveBeenCalledWith(
-        '[oagen] Warning: Inline model "DrawingLayer" has different fields than component schema — using component schema',
+        '[oagen] Warning: Inline model "DrawingLayer" has a different shape than component schema "DrawingLayer" and has no site to be renamed from — using the component schema',
       );
     } finally {
       warnSpy.mockRestore();
