@@ -36,7 +36,7 @@ IR names use PascalCase. Each emitter is responsible for converting names throug
 
 ## Escaping Spec-Controlled Free-Text
 
-Free-text spec fields (schema/field/operation `description`, and `info.title`, which becomes the default namespace) are **attacker-influenceable data**. Interpolating them verbatim into generated source lets a crafted spec break out of the syntactic context and emit arbitrary top-level code — which then runs when the generated files are imported during `oagen generate` → `oagen verify`, and ships to consumers if published.
+Free-text spec fields (schema/field/operation `description`, every value in an operation's, model's, field's or enum's `extensions`, and `info.title`, which becomes the default namespace) are **attacker-influenceable data**. Interpolating them verbatim into generated source lets a crafted spec break out of the syntactic context and emit arbitrary top-level code — which then runs when the generated files are imported during `oagen generate` → `oagen verify`, and ships to consumers if published.
 
 The core package exports two helpers for this. Apply them at **every** site where spec free-text is interpolated into output:
 

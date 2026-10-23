@@ -66,6 +66,12 @@ import {
 } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
+  SCHEMA_CONSUMED_EXTENSIONS,
+  extensionsOf,
+  operationExtensionsEntry,
+  schemaExtensionsEntry,
+} from './extensions.js';
+import {
   detectPagination,
   derivePageStart,
   describeUndetectedPaging,
@@ -2844,6 +2850,9 @@ function buildOperation(
     // Present only when the document declares at least one usable tag, as on
     // a webhook; absent, not undefined, otherwise.
     ...(tags && { tags }),
+    // The Operation Object's own `x-*` keys, less the ones read into typed
+    // fields above (`OPERATION_CONSUMED_EXTENSIONS`); absent when none remain.
+    ...operationExtensionsEntry(op),
   };
 
   // Where the models came from, so a merge pass that must rename one — a
@@ -3736,6 +3745,7 @@ function typePickedRequestBody(
       fields,
       ...deprecatedEntry(schema),
       ...constraintsEntry(schema),
+      ...schemaExtensionsEntry(schema),
     });
     // Nested inline objects (e.g. a `user` property that is itself an inline
     // object) are referenced by name from the fields above but are not emitted
@@ -3802,6 +3812,7 @@ function typePickedRequestBody(
         fields,
         ...deprecatedEntry(source),
         ...constraintsEntry(source),
+        ...schemaExtensionsEntry(source),
       });
       extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
     }
@@ -3971,6 +3982,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     // The wrapper's own keywords bind every branch, so they ride along; the
     // variants' keywords are alternatives and are not carried.
     ...extractConstraints(schema),
+    // The wrapper's own extensions are the body's, like its link; a
+    // variant's are not carried, since its fields merge into the one model.
+    ...extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
   };
 }
 

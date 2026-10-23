@@ -55,6 +55,27 @@ export interface ExternalDocs {
   description?: string;
 }
 
+/**
+ * The specification extensions (`x-*` keys) an OpenAPI object declares,
+ * each under the key as written with its value verbatim — a string, a
+ * boolean, a number, `null`, an array or an object, nested values
+ * included — in document order. Carried on `Operation`, `Model`, `Field`
+ * and `Enum` as `extensions`, present only when the object declares at
+ * least one key the parser does not already read into a typed field (an
+ * Operation Object's `x-pagination`, `x-oagen-async`,
+ * `x-mutually-exclusive-parameter-groups` and
+ * `x-mutually-exclusive-body-groups`; a Schema Object's
+ * `x-enum-descriptions` and `x-enumDescriptions`), so an emitter can read
+ * the keys it knows (`x-idempotent`, `x-since`) without the parser knowing
+ * each one. Not shape: two schemas that differ only in their extensions
+ * are one model or one enum wherever the parser decides that, and the
+ * differ reports a change to them as additive (`extensionsChanged`,
+ * `field-extensions-changed`), never as a type change. Values come from
+ * the document unvalidated, so an emitter that writes one into generated
+ * source must escape it as it escapes a `description`.
+ */
+export type Extensions = Record<string, unknown>;
+
 /** Root IR node representing the full API surface */
 export interface ApiSpec {
   name: string;
@@ -534,6 +555,15 @@ export interface Operation {
    * this field adds the grouping metadata so emitters can render sum types.
    */
   parameterGroups?: ParameterGroup[];
+  /**
+   * The Operation Object's own `x-*` keys (see `Extensions`), less the ones
+   * the parser reads into typed fields: `x-pagination` (`pagination`),
+   * `x-oagen-async` (`async`), `x-mutually-exclusive-parameter-groups` and
+   * `x-mutually-exclusive-body-groups` (`parameterGroups`). A Path Item
+   * Object's extensions are not read. Present only when at least one key
+   * remains.
+   */
+  extensions?: Extensions;
 }
 
 /**
@@ -993,6 +1023,20 @@ export interface Model {
    * when the schema declares none.
    */
   constraints?: Constraints;
+  /**
+   * The `x-*` keys of the schema the model was built from (see
+   * `Extensions`), less `x-enum-descriptions` / `x-enumDescriptions`: a
+   * component's own, or the inline schema's — a request body, a response,
+   * a `oneOf` variant, an object nested in a field, array items, an
+   * `allOf` wrapper's (a member's keys stay on that member, a `$ref`
+   * member's on its component). A nullable `oneOf`/`anyOf` or single-member
+   * `allOf` wrapper the parser collapses carries its keys onto the model
+   * built from its branch, the wrapper's value winning for a key both
+   * declare, as its link rides onto it. Present only when at least one key
+   * remains. Not shape: an inline schema that differs from a model only
+   * here shares that model, which keeps its own keys.
+   */
+  extensions?: Extensions;
 }
 
 export interface Field {
@@ -1056,6 +1100,21 @@ export interface Field {
    * model carries its own limits.
    */
   constraints?: Constraints;
+  /**
+   * The field schema's own `x-*` keys (see `Extensions`), less
+   * `x-enum-descriptions` / `x-enumDescriptions`, read like `constraints`:
+   * keys written beside a `$ref` (legal in OAS 3.1) are the field's, a bare
+   * `$ref` yields none — the referenced model, union or enum carries its
+   * own — unless it names an array component, whose keys the field then
+   * carries as it carries that component's `description`. A property
+   * several `allOf` members always declare is typed by the first typing
+   * declaration, keys included (a typeless one fills in what it leaves
+   * unset); a property only variants declare carries exactly the keys
+   * every declaration as written agrees on, value for value, whether or
+   * not the declarations share one shape. Present only when at least one
+   * key remains. Not shape: two fields that differ only here are one shape.
+   */
+  extensions?: Extensions;
 }
 
 /** Enum definition */
@@ -1095,6 +1154,21 @@ export interface Enum {
   externalDocs?: ExternalDocs;
   /** Present, and `true`, when the component enum schema says `deprecated: true`; absent otherwise. */
   deprecated?: boolean;
+  /**
+   * The `x-*` keys of the schema that declares the members (see
+   * `Extensions`), less `x-enum-descriptions` / `x-enumDescriptions`, which
+   * the values' `description` is read from: a component enum's own, or —
+   * for an enum lifted from an inline schema — that schema's, read as its
+   * `description` and `externalDocs` are: a nullable `oneOf`/`anyOf` or
+   * single-member `allOf` wrapper the parser collapses carries its keys
+   * onto the branch, the wrapper's value winning for a key both declare.
+   * The field, parameter or header the inline schema types carries the
+   * same keys, since they are its schema's own. When several inline
+   * schemas lift to one name, the first lifted gives the keys, as it gives
+   * the values. Present only when at least one key remains. Not shape: two
+   * inline enums that differ only here are one enum.
+   */
+  extensions?: Extensions;
 }
 
 /**

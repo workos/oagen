@@ -1,4 +1,5 @@
-import type { Operation } from '../ir/types.js';
+import { isDeepStrictEqual } from 'node:util';
+import type { Extensions, Operation } from '../ir/types.js';
 import type { ModelDirection } from './direction.js';
 import type { FieldChange, ParamChange, RequestBodyEncoding, ResponseHeaderChange } from './types.js';
 
@@ -91,6 +92,41 @@ export function tagsShift(oldNode: { tags?: string[] }, newNode: { tags?: string
   const newTags = newNode.tags ?? [];
   const same = oldTags.length === newTags.length && oldTags.every((tag, i) => tag === newTags[i]);
   return same ? undefined : { oldTags, newTags };
+}
+
+/** The two sides of an `extensions` change, carried on the change that reports it; each side present only when the node had extensions there. */
+export interface ExtensionsShift {
+  oldExtensions?: Extensions;
+  newExtensions?: Extensions;
+}
+
+/** A node's `extensions` as compared: an absent key and an empty object both read as none. */
+function declaredExtensions(node: { extensions?: Extensions }): Extensions | undefined {
+  const { extensions } = node;
+  return extensions !== undefined && Object.keys(extensions).length > 0 ? extensions : undefined;
+}
+
+/**
+ * `{ oldExtensions?, newExtensions? }` when a node's `extensions` differ
+ * between the two specs — a key added, removed or given another value,
+ * compared deeply (`isDeepStrictEqual`), key order aside — `undefined` when
+ * they do not. An absent key and an empty object are the same thing: the
+ * parser leaves the key absent when a node declares no extension. The
+ * differ spreads the result onto the owning change, as it does a
+ * deprecation flip, so the `behaviorChanges` mirror never looks the node up
+ * again; a side the node had no extensions on is left absent.
+ */
+export function extensionsShift(
+  oldNode: { extensions?: Extensions },
+  newNode: { extensions?: Extensions },
+): ExtensionsShift | undefined {
+  const oldExtensions = declaredExtensions(oldNode);
+  const newExtensions = declaredExtensions(newNode);
+  if (isDeepStrictEqual(oldExtensions, newExtensions)) return undefined;
+  return {
+    ...(oldExtensions ? { oldExtensions } : {}),
+    ...(newExtensions ? { newExtensions } : {}),
+  };
 }
 
 /** The two sides of a `requestBodyEncoding` change, carried on the change that reports it. */
@@ -190,6 +226,11 @@ export function classifyFieldChange(
       // Deprecation changes no contract: the field is still there with the
       // same type and requiredness, whichever way the flag went. The caller
       // attaches `details` saying which way (see `deprecationDetails`).
+      return { kind, fieldName, classification: 'additive' };
+    case 'field-extensions-changed':
+      // Extensions are not shape: the field is still there with the same
+      // type and requiredness. The caller spreads the two sides on
+      // (`extensionsShift`).
       return { kind, fieldName, classification: 'additive' };
   }
 }

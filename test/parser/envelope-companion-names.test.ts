@@ -528,7 +528,9 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
       // here (the type is `Required`), and is then checked below on both
       // predicates — `fieldAdmits`, which every component fold reads, and
       // the companion pass, which reads `fieldPropertiesAdmit` on its own.
-      const every: Required<Omit<Field, 'name' | 'type' | 'description' | 'externalDocs' | 'example' | 'examples'>> = {
+      const every: Required<
+        Omit<Field, 'name' | 'type' | 'description' | 'externalDocs' | 'example' | 'examples' | 'extensions'>
+      > = {
         domainName: 'cursor',
         required: true,
         readOnly: true,
@@ -550,6 +552,42 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
         expect(onto({ [key]: every[key] }, {}), `${where}, component only`).toEqual(kept);
         expect(onto({}, { [key]: every[key] }), `${where}, copy only`).toEqual(key === 'required' ? folded : kept);
         expect(onto({ [key]: every[key] }, { [key]: every[key] }), `${where}, both`).toEqual(folded);
+      }
+    });
+
+    it('admits on every documentation property of `Field`, extensions included, so none keeps a copy apart (issue #352)', () => {
+      // The counterpart of the pin above: each property `Required<Omit<…>>`
+      // leaves out, with a value, is documentation — set on one side, the
+      // other, or both with different values, the fold still goes through on
+      // both predicates. `extensions` joins the list: it is not shape.
+      const docs: Required<Pick<Field, 'description' | 'externalDocs' | 'example' | 'examples' | 'extensions'>> = {
+        description: 'The next cursor',
+        externalDocs: { url: 'https://example.com/paging' },
+        example: 'abc',
+        examples: ['abc', 'def'],
+        extensions: { 'x-since': '1.2.0', 'x-nested': { list: [1, 2] } },
+      };
+      const other: typeof docs = {
+        description: 'Another text',
+        externalDocs: { url: 'https://example.com/other' },
+        example: 'zzz',
+        examples: ['zzz'],
+        extensions: { 'x-since': '2.0.0' },
+      };
+      for (const key of Object.keys(docs) as Array<keyof typeof docs>) {
+        const withKey = next({ [key]: docs[key] });
+        const withOther = next({ [key]: other[key] });
+        const without = next();
+        const where = `documentation "${key}"`;
+        expect(fieldPropertiesAdmit(withKey, without), where).toBe(true);
+        expect(fieldPropertiesAdmit(without, withKey), where).toBe(true);
+        expect(fieldPropertiesAdmit(withKey, withOther), where).toBe(true);
+        expect(fieldAdmits(withKey, without), where).toBe(true);
+        expect(fieldAdmits(without, withKey), where).toBe(true);
+        expect(fieldAdmits(withKey, withOther), where).toBe(true);
+        expect(onto({ [key]: docs[key] }, {}), `${where}, component only`).toEqual(folded);
+        expect(onto({}, { [key]: docs[key] }), `${where}, copy only`).toEqual(folded);
+        expect(onto({ [key]: docs[key] }, { [key]: other[key] }), `${where}, differing`).toEqual(folded);
       }
     });
   });
