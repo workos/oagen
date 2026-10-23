@@ -214,6 +214,112 @@ describe('operation parameters – a path-level and an operation-level header th
   });
 });
 
+describe('names minted from a header derive from its lower-cased name (#295, review round 1)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const policy = { type: 'string', enum: ['burst', 'sustained'] };
+  const meta = { type: 'object', properties: { etag: { type: 'string' } } };
+
+  it.each(['X-RateLimit-Policy', 'x-ratelimit-policy', 'X-RATELIMIT-POLICY'])(
+    'names the inline enum of header parameter %s `PetsXRatelimitPolicy`',
+    (name) => {
+      const { op } = single({
+        '/pets': {
+          get: { operationId: 'listPets', parameters: [{ name, in: 'header', schema: policy }], responses: ok },
+        },
+      });
+      expect(op.headerParams[0].type).toMatchObject({ kind: 'enum', name: 'PetsXRatelimitPolicy' });
+    },
+  );
+
+  it.each(['X-RateLimit-Meta', 'x-ratelimit-meta'])(
+    'names the inline object of header parameter %s `PetsXRatelimitMeta`, nothing dangling or orphaned',
+    (name) => {
+      const { op, inlineModels } = single({
+        '/pets': {
+          get: { operationId: 'listPets', parameters: [{ name, in: 'header', schema: meta }], responses: ok },
+        },
+      });
+      expect(op.headerParams[0].type).toEqual({ kind: 'model', name: 'PetsXRatelimitMeta' });
+      expect(inlineModels.map((m) => m.name)).toEqual(['PetsXRatelimitMeta']);
+      expectSound(op, inlineModels);
+    },
+  );
+
+  it.each(['X-RateLimit-Policy', 'x-ratelimit-policy'])(
+    'names the inline enum of response header %s `PetsXRatelimitPolicy`',
+    (name) => {
+      const { op } = single({
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: { '200': { ...ok['200'], headers: { [name]: { schema: policy } } } },
+          },
+        },
+      });
+      expect(op.responseHeaders![0]).toMatchObject({ name, type: { kind: 'enum', name: 'PetsXRatelimitPolicy' } });
+    },
+  );
+
+  it.each(['X-RateLimit-Meta', 'x-ratelimit-meta'])(
+    'names the inline object of response header %s `PetsXRatelimitMeta`, nothing dangling or orphaned',
+    (name) => {
+      const { op, inlineModels } = single({
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: { '200': { ...ok['200'], headers: { [name]: { schema: meta } } } },
+          },
+        },
+      });
+      expect(op.responseHeaders![0]).toEqual({
+        name,
+        type: { kind: 'model', name: 'PetsXRatelimitMeta' },
+        required: false,
+        description: undefined,
+        deprecated: undefined,
+      });
+      expect(inlineModels.map((m) => m.name)).toEqual(['PetsXRatelimitMeta']);
+      expectSound(op, inlineModels);
+    },
+  );
+
+  it('keeps a query parameter name as written, since only header names fold', () => {
+    const { op, inlineModels } = single({
+      '/pets': {
+        get: { operationId: 'listPets', parameters: [{ name: 'rateLimit', in: 'query', schema: meta }], responses: ok },
+      },
+    });
+    expect(op.queryParams[0].type).toEqual({ kind: 'model', name: 'PetsRateLimit' });
+    expect(inlineModels.map((m) => m.name)).toEqual(['PetsRateLimit']);
+  });
+
+  it.each(['X-RateLimit-Policy', 'x-ratelimit-policy'])(
+    'names a webhook header %s under the stem from the lower-cased name, enum and object alike',
+    (name) => {
+      const { webhooks, inlineModels } = extractWebhooks({
+        petAdopted: {
+          post: {
+            parameters: [
+              { name, in: 'header', schema: policy },
+              { name: name.replace(/policy/i, 'Meta'), in: 'header', schema: meta },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      });
+      const [hook] = webhooks;
+      expect(hook.headerParams.map((p) => p.type)).toEqual([
+        expect.objectContaining({ kind: 'enum', name: 'PetAdoptedXRatelimitPolicy' }),
+        { kind: 'model', name: 'PetAdoptedXRatelimitMeta' },
+      ]);
+      expect(inlineModels.map((m) => m.name)).toEqual(['PetAdoptedXRatelimitMeta']);
+    },
+  );
+});
+
 describe('webhook parameters – a path-item-level and an operation-level header that differ in case alone (#295)', () => {
   it("is one parameter, the operation's, in the path-item-level position", () => {
     const { webhooks } = extractWebhooks({

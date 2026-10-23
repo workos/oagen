@@ -15,6 +15,7 @@ import { diffModels } from './models.js';
 import { classifySecurityChange, securityEqual, type DocumentSecurity, type SecuritySide } from './security.js';
 import { diffServers } from './servers.js';
 import { diffServices } from './services.js';
+import { documentTypes, type DocumentShapes } from './shapes.js';
 import { diffWebhooks } from './webhooks.js';
 
 export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
@@ -25,6 +26,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
   // webhook is judged by what its requests actually carry, not by whether
   // it declares a list of its own.
   const documentSecurity: DocumentSecurity = { old: oldSpec.security, new: newSpec.security };
+  // The documents' named types travel along so two paired bodies compare by
+  // shape: a model the parser only renamed is not a retyped media type.
+  const shapes: DocumentShapes = { old: documentTypes(oldSpec), new: documentTypes(newSpec) };
 
   const changes: Change[] = [
     // Where the client sends requests comes first: it is the one change that
@@ -41,8 +45,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
       newSpec.services,
       { old: oldSpec.servers, new: newSpec.servers },
       documentSecurity,
+      shapes,
     ),
-    ...diffWebhooks(oldSpec.webhooks ?? [], newSpec.webhooks ?? [], documentSecurity),
+    ...diffWebhooks(oldSpec.webhooks ?? [], newSpec.webhooks ?? [], documentSecurity, shapes),
   ];
 
   const behaviorChanges = collectBehaviorChanges(changes);
@@ -60,16 +65,22 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
  * The document-level `security` compared between the two documents: one
  * `security-changed` change when the lists differ as sets of alternatives,
  * nothing otherwise. `[]` and an undeclared list both mean no authentication
- * and compare equal. Classified from the caller's side — the list is the
- * default every operation inherits — and, when a webhook in either document
- * inherits it, from the receiver's side as well, breaking if either breaks.
+ * and compare equal. Classified from each side that actually reads the
+ * default: the caller's when an operation in either document declares no
+ * `security` of its own, the receiver's when a webhook does — breaking if
+ * any such side breaks. When nothing inherits it, no request reads the
+ * default, so the change is additive.
  */
 function diffDocumentSecurity(oldSpec: ApiSpec, newSpec: ApiSpec): Change[] {
   const oldSecurity = oldSpec.security ?? [];
   const newSecurity = newSpec.security ?? [];
   if (securityEqual(oldSecurity, newSecurity)) return [];
-  const inherits = (spec: ApiSpec): boolean => (spec.webhooks ?? []).some((w) => w.security === undefined);
-  const sides: SecuritySide[] = inherits(oldSpec) || inherits(newSpec) ? ['caller', 'receiver'] : ['caller'];
+  const inherits = (nodes: Array<{ security?: SecurityRequirementSet[] }>): boolean =>
+    nodes.some((node) => node.security === undefined);
+  const operations = (spec: ApiSpec) => spec.services.flatMap((service) => service.operations);
+  const sides: SecuritySide[] = [];
+  if (inherits(operations(oldSpec)) || inherits(operations(newSpec))) sides.push('caller');
+  if (inherits(oldSpec.webhooks ?? []) || inherits(newSpec.webhooks ?? [])) sides.push('receiver');
   const breaking = sides.some((side) => classifySecurityChange(oldSecurity, newSecurity, side) === 'breaking');
   return [{ kind: 'security-changed', oldSecurity, newSecurity, classification: breaking ? 'breaking' : 'additive' }];
 }

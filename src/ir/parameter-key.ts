@@ -19,6 +19,10 @@ export type ParameterLocation = 'path' | 'query' | 'header' | 'cookie';
  * A header name as it is compared: lower-cased, since RFC 9110 §5.1 makes
  * header names case-insensitive (`X-Request-Id` and `x-request-id` name one
  * header). A header name is an ASCII token, so plain case folding is exact.
+ * It is also the name the parser mints a header's inline model or enum
+ * from (`X-RateLimit-Policy` → `…XRatelimitPolicy`, whatever its case), so
+ * two spellings of one header type the same way; the IR's `name` stays as
+ * written.
  */
 export function foldHeaderName(name: string): string {
   return name.toLowerCase();
@@ -27,7 +31,9 @@ export function foldHeaderName(name: string): string {
 /**
  * A parameter name as it is compared at `location`: a header's is folded by
  * `foldHeaderName`; a path, query or cookie name is case-sensitive and kept
- * as written (`Limit` and `limit` are two query parameters).
+ * as written (`Limit` and `limit` are two query parameters). It is also the
+ * name the parser mints a parameter's inline model or enum from, so a
+ * header's type name does not move with the header's case.
  */
 export function foldParameterName(location: ParameterLocation, name: string): string {
   return location === 'header' ? foldHeaderName(name) : name;

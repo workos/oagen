@@ -1,5 +1,5 @@
 import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectResponseBodyTypes } from '../ir/types.js';
+import { walkTypeRef, collectResponseHeaders, collectRequestBodyTypes, collectResponseBodyTypes } from '../ir/types.js';
 
 export function validateModelRefs(spec: ApiSpec): void {
   const knownNames = new Set<string>();
@@ -45,6 +45,9 @@ export function validateModelRefs(spec: ApiSpec): void {
       for (const { type, source } of collectResponseBodyTypes(op)) {
         walkRef(type, `${service.name}.${op.name}.${source}`);
       }
+      for (const { type, source } of collectRequestBodyTypes(op)) {
+        walkRef(type, `${service.name}.${op.name}.${source}`);
+      }
     }
   }
 
@@ -54,5 +57,11 @@ export function validateModelRefs(spec: ApiSpec): void {
       walkRef(p.type, `${context}.${p.name}`);
     }
     if (webhook.requestBody) walkRef(webhook.requestBody, `${context}.requestBody`);
+    // The payload of every other media type, which shares no reference with `requestBody`.
+    for (const content of webhook.requestBodyContents ?? []) {
+      if (content.type !== webhook.requestBody) {
+        walkRef(content.type, `${context}.requestBodyContents.${content.contentType}`);
+      }
+    }
   }
 }

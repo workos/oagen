@@ -1,5 +1,5 @@
 import type { Webhook } from '../ir/types.js';
-import type { Change, ParamChange } from './types.js';
+import type { Change, ParamChange, RequestBodyContentTypesChange } from './types.js';
 import { locatedParams, paramKey } from './params.js';
 import {
   deprecationDetails,
@@ -12,6 +12,8 @@ import {
 } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
+import { diffRequestBodyContentTypes, ownRepresentationKept } from './media-types.js';
+import type { DocumentShapes } from './shapes.js';
 
 /**
  * Report webhooks added, removed and modified between two specs. A webhook is
@@ -25,6 +27,7 @@ export function diffWebhooks(
   oldWebhooks: Webhook[],
   newWebhooks: Webhook[],
   documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
 ): Change[] {
   const changes: Change[] = [];
   const key = (webhook: Webhook): string => `${webhook.httpMethod} ${webhook.name}`;
@@ -58,7 +61,7 @@ export function diffWebhooks(
     if (!oldWebhook) continue;
 
     const paramChanges = diffWebhookParams(oldWebhook, newWebhook);
-    const body = diffWebhookBody(oldWebhook, newWebhook);
+    const body = diffWebhookBody(oldWebhook, newWebhook, shapes);
     const responses = diffWebhookResponses(oldWebhook, newWebhook);
     // Additive either way: the handler's signature is unchanged, but a
     // changelog has to say it, so a flipped flag alone is a change.
@@ -100,6 +103,7 @@ export function diffWebhooks(
       paramChanges,
       requestBodyChanged: body.changes.length > 0,
       ...body.encoding,
+      ...(body.mediaTypes ? { requestBodyContentTypeChange: body.mediaTypes } : {}),
       responsesChanged: responses.changes.length > 0,
       deprecatedChanged,
       ...deprecation,
@@ -119,17 +123,37 @@ export function diffWebhooks(
  * Compare what the handler is handed as a body, from the receiver's side:
  *
  * - type changed, gained or lost: breaking — it is the handler's parameter type.
- * - encoding changed: breaking — the handler decodes a different wire format.
- *   Read through `requestBodyEncodingShift`, the function `diffOperations`
- *   reads an operation's body encoding with, and carried as `encoding`
- *   beside the `details` string so the change can report both sides.
+ * - encoding changed: breaking when the representation the sender now uses
+ *   — the media type the new payload is read from, with its shape — is not
+ *   one the old spec declared with that shape (compared as a retype is,
+ *   `sameShape` through `shapes`), so the handler decodes a wire format it
+ *   never saw; additive when the old spec already declared it (a media type
+ *   dropped beside a kept one). A payload without media-type lists reads as
+ *   breaking. Read through `requestBodyEncodingShift`, the function
+ *   `diffOperations` reads an operation's body encoding with — so, as on an
+ *   operation, compared only while both sides carry a payload: one
+ *   appearing or disappearing takes its encoding with it and is `payload
+ *   added` / `payload removed` alone — and carried as `encoding` beside the
+ *   `details` string so the change can report both sides.
  * - required → optional: breaking — a handler that assumed a body may get none.
  * - optional → required: additive — the body is now always there.
+ * - media types changed, both sides declaring a payload: one the sender can
+ *   newly use, or whose body changed type, is breaking — the handler must
+ *   decode it; one it can no longer use, or one that only changed a
+ *   parameter other than `charset`, is additive. Compared by essence as an
+ *   operation's are (`diffRequestBodyContentTypes`), and carried structured
+ *   as `mediaTypes` beside the `details` strings.
  */
 function diffWebhookBody(
   oldWebhook: Webhook,
   newWebhook: Webhook,
-): { changes: string[]; breaking: boolean; encoding?: RequestBodyEncodingShift } {
+  shapes?: DocumentShapes,
+): {
+  changes: string[];
+  breaking: boolean;
+  encoding?: RequestBodyEncodingShift;
+  mediaTypes?: RequestBodyContentTypesChange;
+} {
   const changes: string[] = [];
   let breaking = false;
 
@@ -144,7 +168,11 @@ function diffWebhookBody(
   const encoding = requestBodyEncodingShift(oldWebhook, newWebhook);
   if (encoding) {
     changes.push(requestBodyEncodingDetails(encoding));
-    breaking = true;
+    // From the receiver's side: what the sender now sends must be a
+    // representation the old handler already decoded. The sides stay in
+    // old → new order, with `shapes`, so the documents are read the right
+    // way round; `side` picks whose body must survive.
+    if (!ownRepresentationKept(oldWebhook, newWebhook, 'receiver', shapes)) breaking = true;
   }
 
   const wasRequired = oldWebhook.requestBodyRequired === true;
@@ -154,7 +182,17 @@ function diffWebhookBody(
     if (!isRequired) breaking = true;
   }
 
-  return { changes, breaking, ...(encoding ? { encoding } : {}) };
+  const mediaTypes = diffRequestBodyContentTypes(oldWebhook, newWebhook, 'receiver', shapes);
+  if (mediaTypes) {
+    const said = (what: string, list: string[]): string[] =>
+      list.length > 0 ? [`payload media type${list.length > 1 ? 's' : ''} ${list.join(', ')} ${what}`] : [];
+    changes.push(...said('added', mediaTypes.added), ...said('removed', mediaTypes.removed));
+    changes.push(...said('retyped', mediaTypes.retyped));
+    changes.push(...mediaTypes.reparameterized.map(({ from, to }) => `payload media type ${from} → ${to}`));
+    if (mediaTypes.classification === 'breaking') breaking = true;
+  }
+
+  return { changes, breaking, ...(encoding ? { encoding } : {}), ...(mediaTypes ? { mediaTypes } : {}) };
 }
 
 /**
