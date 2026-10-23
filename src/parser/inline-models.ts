@@ -1,4 +1,4 @@
-import type { Constraints, EnumRef, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import type { Constraints, EnumRef, Extensions, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -28,6 +28,12 @@ import {
   foldedVariantOrigin,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
+import {
+  SCHEMA_CONSUMED_EXTENSIONS,
+  extensionsOf,
+  schemaExtensionsEntry,
+  withWrapperExtensions,
+} from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 
@@ -307,10 +313,23 @@ export function schemaShapeKey(schema: SchemaObject): string {
   return JSON.stringify(schemaKey(schema));
 }
 
-/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
-/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+/** Field properties that only document a field — its extensions included; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'description',
+  'externalDocs',
+  'example',
+  'examples',
+  'extensions',
+]);
+/** Model properties outside its shape: the name, its documentation (description, link, extensions), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'description',
+  'externalDocs',
+  'extensions',
+  'fields',
+]);
 /** `MODEL_IDENTITY_KEYS` and the model's own `deprecated`, which the admit predicates read on its own (`flagAdmits`) rather than as part of the shape. */
 const MODEL_ADMIT_KEYS: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, 'deprecated']);
 
@@ -1080,54 +1099,58 @@ export function extractInlineModelsFromSchemas(
   if (!schemas) return [];
 
   const inlineModels: Model[] = [];
-
   for (const [schemaName, schema] of Object.entries(schemas)) {
-    const parentName = resolveSchemaName(schemaName);
-    // The same sibling set `extractModel` / `extractAllOfModel` type the
-    // component's fields from, `$ref`'d allOf members included.
-    const siblings = collectProperties(schema, schemas);
-    // The declaration each field is typed from (`componentPropertyLedger`,
-    // the ledger `extractModel`/`extractAllOfModel` build the fields from).
-    const ledger = componentPropertyLedger(parentName, schema, schemas);
-    // One field at a time — the inline `allOf` members' properties first,
-    // then the schema's own, in the order `extractInlineModelsFromProperties`
-    // walks them — so the models each field produced are known (`groups`)
-    // and the merge pass can rename one by the field that references it.
-    // Every call sees the same siblings, reserved names and results list, so
-    // the names are exactly those one call over the whole schema would mint.
-    // Only the declaration the field is typed from mints here: one another
-    // inline member outranks (a branch's beside an always-applying one, the
-    // second of two members declaring one name) mints nothing, and one a
-    // `$ref` member outranks is built by the nested-model pass from that
-    // component's declaration — so the models under a field always have the
-    // shape its type was built from.
-    for (const [fieldName, fieldSchema] of inlineProperties(schema)) {
-      const entry = ledger.get(fieldName);
-      if (!entry || declaredComponentProperty(entry) !== fieldSchema) continue;
-      const before = inlineModels.length;
-      extractInlineModelsFromProperties(
-        { properties: { [fieldName]: fieldSchema } },
-        inlineModels,
-        parentName,
-        schemas,
-        siblings,
-      );
-      groups?.push({ parentName, fieldName, models: inlineModels.slice(before) });
-    }
+    extractComponentFieldModels(schemaName, schema, schemas, inlineModels, groups);
   }
-
   return inlineModels;
 }
 
 /**
- * A schema's inline properties in extraction order: those of its inline
- * `allOf` members (each walked the same way, members first) before its own —
- * the order `extractInlineModelsFromProperties` visits them in, so splitting
- * a schema by field changes nothing about which models are minted, or when.
+ * The inline models the fields of one component schema (`key`) mint, into
+ * `results`: for every field of its model — the declaration
+ * `componentPropertyLedger` chose for it, the component's own, one
+ * inherited through a `$ref` member, or a branch's when no member always
+ * declares the field — everything the field's type reaches (an inline
+ * object, array items, map values, a union's variants, under a nullable
+ * wrapper, at any depth), through the field extractor
+ * (`extractInlineModelsFromProperties`), under the component's name with the
+ * sibling set its fields were typed with. The one path through which the
+ * field pass (`extractInlineModelsFromSchemas`, run by `parseSpec` on every
+ * component) builds a component field's nested models, so a model is built
+ * exactly when a component's field references it — `Puppy.meta`, inherited
+ * from `Dog` and typed `PuppyMeta` under `Puppy`, has its `PuppyMeta`, and
+ * the values of an inherited map their model (workos/oagen#359 review: an
+ * inherited map's values were typed but never built, since the field pass
+ * walked only the inline declarations and the nested-model backstop of
+ * `extractSchemas` follows a reference only into an array or a union). One
+ * field at a time, in field order, so the models each field
+ * produced are known (`groups`) and the merge pass can rename one by the
+ * field that references it. Every call sees the same siblings, reserved
+ * names and results list, so the names are exactly those one call over
+ * the whole schema would mint.
  */
-function* inlineProperties(schema: SchemaObject): Generator<[string, SchemaObject]> {
-  for (const sub of schema.allOf ?? []) if (sub.properties) yield* inlineProperties(sub);
-  for (const [name, property] of Object.entries(schema.properties ?? {})) if (property) yield [name, property];
+export function extractComponentFieldModels(
+  key: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  results: Model[],
+  groups?: FieldInlineModelGroup[],
+): void {
+  const parentName = resolveSchemaName(key);
+  // The same sibling set `extractModel` / `extractAllOfModel` type the
+  // component's fields from, `$ref`'d allOf members included.
+  const siblings = collectProperties(schema, schemas);
+  for (const entry of componentPropertyLedger(parentName, schema, schemas).values()) {
+    const before = results.length;
+    extractInlineModelsFromProperties(
+      { properties: { [entry.name]: declaredComponentProperty(entry) } },
+      results,
+      parentName,
+      schemas,
+      siblings,
+    );
+    groups?.push({ parentName, fieldName: entry.name, models: results.slice(before) });
+  }
 }
 
 /**
@@ -1225,10 +1248,36 @@ export function inheritedModelRefsOf(parentName: string, fieldName: string): Mod
   return inheritedModelRefsByField.get(`${parentName}.${fieldName}`) ?? [];
 }
 
-/** Forget every inherited reference and field-model rename recorded so far: a new document is being read. */
+/**
+ * The models the schema pass lifts from a component field's own inline
+ * schema (`collectNestedInlineModels` in `extractSchemas`: a nested object,
+ * array items or a union variant, named as the field extractor names them),
+ * keyed `Parent.field` by the field each was read from. The field's site
+ * claims them by that origin (`fieldInlineModelBundles`), never by name:
+ * `Foo.barThing` and `FooBar.thing` both spell `FooBarThing`, only one of
+ * them is lifted, and the other field's site must not touch it. Reset per
+ * document with the inherited references.
+ */
+const liftedFieldModels = new Map<string, Model[]>();
+
+/** Record that the schema pass lifted `model` from `fieldName` of the component resolved to `parentName`. */
+export function recordLiftedFieldModel(parentName: string, fieldName: string, model: Model): void {
+  const key = `${parentName}.${fieldName}`;
+  const lifted = liftedFieldModels.get(key) ?? [];
+  lifted.push(model);
+  liftedFieldModels.set(key, lifted);
+}
+
+/** The models the schema pass lifted from `fieldName` of the component resolved to `parentName`, in the order it lifted them. */
+export function liftedFieldModelsOf(parentName: string, fieldName: string): Model[] {
+  return liftedFieldModels.get(`${parentName}.${fieldName}`) ?? [];
+}
+
+/** Forget every inherited reference, field-model rename and lifted field model recorded so far: a new document is being read. */
 export function resetInheritedModelRefs(): void {
   inheritedModelRefsByField.clear();
   fieldModelRenames.clear();
+  liftedFieldModels.clear();
 }
 
 function recordInheritedModelRefs(type: TypeRef, parentName: string, fieldName: string): void {
@@ -1666,6 +1715,8 @@ export interface MergedAllOf {
   constraints: Constraints | undefined;
   /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
   deprecated: boolean | undefined;
+  /** The wrapper's own extensions (`extensionsOf`), read like its link; a member's stay on that member, a `$ref` member's on its component. */
+  extensions: Extensions | undefined;
 }
 
 /**
@@ -1724,8 +1775,17 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     inline object with no fields, as it is as a plain field or a union
  *     variant (`isInlineObjectSchema`), so its model is built with none
  *     rather than left for the reference to dangle on.
- *   - `'unwrapped'`: a single non-`$ref` member, typed and extracted as the
- *     schema itself (`unwrappedAllOfMember`).
+ *   - `'unwrapped'`: a single non-`$ref` member with nothing beside it that
+ *     adds to it, typed and extracted as the schema itself
+ *     (`unwrappedAllOfMember`, which carries the wrapper's limits, flag and
+ *     link onto it). A `required` list the wrapper writes beside a lone
+ *     member that declares properties (`declaresInlineProperties`) adds to
+ *     it: the schema is then the merged model, which reads both lists
+ *     (workos/oagen#359 review: the unwrap carried the member's `required`
+ *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
+ *     left `name` optional). Beside a member that declares none — an
+ *     array, a primitive, an enum — `required` constrains nothing, and the
+ *     member is the schema.
  *   - `'reference'`: a single `$ref` member with nothing beside it that adds
  *     to the component — a `description`, limits — is that component, and
  *     nothing is minted. A second `$ref` member, or a `required` list
@@ -1746,7 +1806,11 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
     const addsRequired = [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0);
     return addsRequired ? 'merged' : 'reference';
   }
-  if (members.length === 1) return 'unwrapped';
+  if (members.length === 1) {
+    const only = members[0]!;
+    const addsRequired = (wrapper?.required?.length ?? 0) > 0 && declaresInlineProperties(only);
+    return addsRequired ? 'merged' : 'unwrapped';
+  }
   return members.some(declaresInlineProperties) ? 'merged' : 'reference';
 }
 
@@ -1763,8 +1827,9 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
  * so an inline enum under the wrapper is documented by the wrapper.
  */
 export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject): SchemaObject {
-  return withWrapperExternalDocs(
-    withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper),
+  // The wrapper's extensions ride along as its link does (`withWrapperExtensions`).
+  return withWrapperExtensions(
+    withWrapperExternalDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper), wrapper),
     wrapper,
   );
 }
@@ -1775,18 +1840,69 @@ export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject
  */
 export interface PropertyDeclarations {
   name: string;
-  /** The first always-applying declaration, with the component it is inherited from (`null` for the schema's own). */
+  /** The always-applying declaration that types the property (`combineDeclarations`), with the component it is inherited from (`null` for the schema's own). */
   unconditional?: { schema: SchemaObject; origin: MergedProperty['origin'] };
   /** Each branch-only declaration — a `oneOf`/`anyOf` variant's — in order. */
   conditional: SchemaObject[];
 }
 
 /**
+ * Whether a declaration says what an instance is: a `type`, a `$ref`,
+ * `properties`, `items`, an `enum` or `const`, a composition, or an
+ * `additionalProperties`/`patternProperties` map. One that declares none —
+ * a bare `description`, `title`, `example`, `deprecated`, `default`, or a
+ * validation keyword on its own (`minimum: 1`) — annotates or constrains a
+ * type another declaration gives, and is never read as the type itself
+ * (`combineDeclarations`).
+ */
+export function declaresType(schema: SchemaObject): boolean {
+  return (
+    schema.type !== undefined ||
+    schema.$ref !== undefined ||
+    schema.properties !== undefined ||
+    schema.items !== undefined ||
+    schema.enum !== undefined ||
+    schema.const !== undefined ||
+    schema.allOf !== undefined ||
+    schema.oneOf !== undefined ||
+    schema.anyOf !== undefined ||
+    schema.additionalProperties !== undefined ||
+    schema.patternProperties !== undefined
+  );
+}
+
+/**
+ * The always-applying declaration of one property once a second arrives, in
+ * document order — the one precedence rule for a name two members declare,
+ * applied by `declareProperty` for every `allOf` merge and by the envelope
+ * collector for the properties it reads (`collectObjectProperties`), so a
+ * model's field and a list's stop field are typed from the same declaration.
+ * The first declaration that declares a type (`declaresType`) types the
+ * property, whatever comes after it; a declaration that declares none never
+ * does, before or after, and only fills in the keywords the typing one
+ * leaves unset — so `has_more: { type: 'boolean' }` beside an `allOf`
+ * member's `has_more: { description: 'More pages' }` is a described boolean
+ * whichever is read first (workos/oagen#308 review: the collector took the
+ * later declaration, so a component's own boolean, folded in first, lost
+ * its type to the description). Two typing declarations keep the first as
+ * written; the second is not conjoined into it. Returns `held` itself when
+ * `next` adds nothing to it, so a lone declaration keeps its identity.
+ */
+export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
+  if (declaresType(held) && declaresType(next)) return held;
+  const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
+  return unset.length === 0 ? held : { ...Object.fromEntries(unset), ...held };
+}
+
+/**
  * Record one declaration of `name` in `ledger`: the one precedence rule
  * every `allOf` merge applies, whether the declaration arrives from a direct
  * member, a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
- * depth. The first always-applying declaration wins, whatever is declared
- * before or after it; a branch-only declaration (`onBranch`) is only a
+ * depth. Of the always-applying declarations, the first that declares a
+ * type wins, whatever is declared before or after it, and a typeless one
+ * only annotates it (`combineDeclarations`); the entry's origin is the
+ * typing declaration's. A branch-only declaration (`onBranch`) is only a
  * fallback, kept in order for the reader to use when no member always
  * declares the name — `mergeAllOfMembers` as the union of the distinct
  * branch declarations, the component readers (`extractAllOfModel`,
@@ -1804,7 +1920,12 @@ export function declareProperty(
   let entry = ledger.get(name);
   if (!entry) ledger.set(name, (entry = { name, conditional: [] }));
   if (onBranch) entry.conditional.push(schema);
-  else entry.unconditional ??= { schema, origin };
+  else if (!entry.unconditional) entry.unconditional = { schema, origin };
+  else {
+    const held = entry.unconditional;
+    const typesIt = !declaresType(held.schema) && declaresType(schema);
+    entry.unconditional = { schema: combineDeclarations(held.schema, schema), origin: typesIt ? origin : held.origin };
+  }
 }
 
 /**
@@ -1825,6 +1946,13 @@ export function declareProperty(
  * (`componentAllOfMembers`) — tagged with that component's model name, so the merged
  * model can type them exactly as the component's own model does; a ref no
  * component answers contributes nothing and is listed in `unresolvedRefs`.
+ * The component tagged is the one whose own model carries the field under
+ * its name: an `allOf` component that inherits it stays the origin of
+ * everything reached inside its chain (`DogMeta`), while a bare alias
+ * (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref: Base
+ * }, { type: 'null' }] }`) or a chain of either declares nothing of its own
+ * and builds no model, so a reference met inside one starts its own origin
+ * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for a `oneOf`/`anyOf` it carries, those of every
  * variant that declares properties inline — read through the variant's own
@@ -1842,8 +1970,10 @@ export function declareProperty(
  * keeps its own fields), and a union a `$ref` member's component carries is
  * not read (the component's own model dispatches or flattens it).
  *
- * A property keeps the first declaration an always-applying member gives
- * it, whatever a variant says: a variant can only narrow what every instance
+ * A property keeps the always-applying declaration `declareProperty` settles
+ * on — the first that declares a type, a typeless one before or after it
+ * only annotating it (`combineDeclarations`) — whatever a variant says: a
+ * variant can only narrow what every instance
  * carries. A property only variants declare is typed as the union of its
  * distinct declarations (`unionOfDeclarations`): one declaration, or several
  * of one shape, is that declaration; several shapes become a `oneOf` of
@@ -1887,9 +2017,19 @@ export function mergeAllOfMembers(
       const refs = target ? resolvedRefs : unresolvedRefs;
       if (!refs.includes(s.$ref)) refs.push(s.$ref);
       if (!target) return;
-      // A ref inside a component's own allOf chain stays that component's;
-      // a top-level ref member is the component the properties belong to.
-      visit(target, origin ?? { name: resolveSchemaName(rawName), schema: target }, onBranch);
+      // The component the properties belong to is the one whose own model
+      // carries them under its name. A ref inside an `allOf` component's own
+      // chain stays that component's: its model inherits through its
+      // members, nullable ones included, and types their fields under its
+      // own name (`DogMeta`). Any other component met on the way declares
+      // nothing of its own that this reference adds to — a bare alias
+      // (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref:
+      // Base }, { type: 'null' }] }`), a chain of either — and builds no
+      // model for the fields, so the reference starts its own origin, as a
+      // top-level ref member does (workos/oagen#308 round 4: `HolderValue.meta`
+      // named `AliasMeta`, which nothing built, where `BaseMeta` exists).
+      const owner = origin?.schema.allOf ? origin : { name: resolveSchemaName(rawName), schema: target };
+      visit(target, owner, onBranch);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
@@ -1931,6 +2071,7 @@ export function mergeAllOfMembers(
     externalDocs: readExternalDocs(schema.externalDocs),
     constraints: extractConstraints(schema),
     deprecated: schema.deprecated === true || undefined,
+    extensions: extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
   };
 }
 
@@ -2003,6 +2144,14 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
     const first = stableStringify(values[0]);
     if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[keyword] = values[0];
   }
+  // The extensions every declaration agrees on are the field's too, value
+  // for value, as its link is; the keys the parser consumes stay where they
+  // are read.
+  for (const key of Object.keys(extensionsOf(shapes[0]!, SCHEMA_CONSUMED_EXTENSIONS) ?? {})) {
+    const values = shapes.map((shape) => shape[key]);
+    const first = stableStringify(values[0]);
+    if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[key] = values[0];
+  }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
   return { ...agreed, oneOf: variants };
@@ -2074,6 +2223,7 @@ export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...merged.constraints,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
+    ...merged.extensions,
   };
 }
 
@@ -2111,6 +2261,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     fields,
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
+    ...(merged.extensions ? { extensions: merged.extensions } : {}),
   };
 }
 
@@ -2157,5 +2308,6 @@ export function buildInlineModel(
     fields,
     ...deprecatedEntry(schema),
     ...constraintsEntry(schema),
+    ...schemaExtensionsEntry(schema),
   };
 }

@@ -24,7 +24,7 @@ export function documentTypes(spec: Pick<ApiSpec, 'models' | 'enums'>): Document
   };
 }
 
-/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
+/** Field properties that only document a field — its extensions included; two shapes that differ in these alone are one shape. */
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'name',
   'type',
@@ -32,12 +32,14 @@ const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'externalDocs',
   'example',
   'examples',
+  'extensions',
 ]);
-/** Model properties outside its shape: the name, its documentation, and what is compared on its own (fields, variants, discriminator). */
+/** Model properties outside its shape: the name, its documentation (extensions included), and what is compared on its own (fields, variants, discriminator). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
   'name',
   'description',
   'externalDocs',
+  'extensions',
   'fields',
   'variants',
   'discriminator',

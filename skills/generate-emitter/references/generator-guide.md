@@ -94,6 +94,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `compositionKind?` — `oneOf` | `anyOf`, the keyword that produced `variants`; present exactly when `variants` is
   - `discriminator?` — `{ property, mapping }` when the model is a discriminated union: a named union with a `discriminator:` or a const-pinned property every variant shares, or an allOf+oneOf dispatcher (no `variants`; the mapping alone names the variant models). Generate a dispatcher instead of a data class; `mapping` values are IR model names. A named union without one is emitted as an undiscriminated union of `variants`
   - `constraints?` — the object schema's own `minProperties` / `maxProperties` / `dependentRequired`
+  - `extensions?` — the `x-*` keys of the schema the model was built from, keys as written and values verbatim, less `x-enum-descriptions` / `x-enumDescriptions`; read the keys you know (`x-since`) and escape a value before writing it into source, as you escape a description
 - Each `Field` has:
   - `name` — wire key, as spelled in the spec
   - `domainName?` — domain-facing name override from `fieldHints`; derive the identifier from it, serialize with `name`
@@ -103,6 +104,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `externalDocs?` — the field schema's own link (a `$ref` sibling's included; a bare `$ref` yields none), for a `@see`-style tag
   - `default?`, `example?`, `examples?` — spec-declared values (`example` is the schema's `example`, else `examples[0]`)
   - `constraints?` — validation keywords on the field's schema (`Constraints`)
+  - `extensions?` — the field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none), read like `constraints`; escape a value before writing it into source
 - Output: One file per model, using the exact model pattern from the design doc
 - Use `type-map.ts` to convert field types
 
@@ -119,6 +121,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `default?` — the schema's `default:` value (`string | number`)
   - `externalDocs?` — the enum schema's link, when usable: a component enum's own, or the inline schema's an enum was lifted from
   - `deprecated?` — present and `true` when the component enum schema says `deprecated: true`
+  - `extensions?` — the `x-*` keys of the schema that declares the members (a component enum's own, or the inline schema's the enum was lifted from; a collapsed wrapper's keys win over its branch's), less `x-enum-descriptions` / `x-enumDescriptions`; escape a value before writing it into source
 - Each `EnumValue` has:
   - `name` — UPPER_SNAKE_CASE display name
   - `value` — the spec's value, `string | number` (numeric enums keep numbers)
@@ -167,6 +170,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
   - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
+  - `extensions?` — the Operation Object's own `x-*` keys, keys as written and values verbatim, less the ones the parser reads into typed fields (`x-pagination`, `x-oagen-async`, `x-mutually-exclusive-parameter-groups`, `x-mutually-exclusive-body-groups`); read the keys you know (`x-idempotent`, `x-since`) and escape a value before writing it into source
 - Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `externalDocs?` (the parameter schema's link, else its `$ref` target's), `default?`, `example?`, `examples?`, `style?`, `explode?`, `contentType?` (the `content` key a `content`-declared parameter is serialized under, e.g. `application/json`: serialize the value in that media type instead of by `style`/`explode`), `constraints?`
   - `type` may reference a model the parser created for an inline object parameter (`style: deepObject` → `PetsFilter`), or an array, map or union of such, exactly as a response header's does; render it as that model and serialize it per `style`/`explode`
 - Output: One file per service/resource

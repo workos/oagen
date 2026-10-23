@@ -38,6 +38,7 @@ import {
   classifyResponseHeaderChange,
   deprecationDetails,
   deprecationFlip,
+  extensionsShift,
   parameterNameShift,
   requestBodyEncodingShift,
   tagsShift,
@@ -190,6 +191,11 @@ export function diffOperations(
     // a caller compiles against, but a changelog has to say it.
     const tags = tagsShift(oldOp, newOp);
     const tagsChanged = tags !== undefined;
+    // Additive always, as a flipped flag is: the operation's own extensions
+    // are not shape, but an emitter may read one, so a changelog has to say
+    // it. The flag is present only when they differ (`extensionsShift`).
+    const extensions = extensionsShift(oldOp, newOp);
+    const extensionsChanged = extensions !== undefined;
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -216,7 +222,8 @@ export function diffOperations(
       deprecatedChanged ||
       serversChanged ||
       securityChanged ||
-      tagsChanged;
+      tagsChanged ||
+      extensionsChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -335,6 +342,7 @@ export function diffOperations(
         ...security,
         tagsChanged,
         ...tags,
+        ...(extensions ? { extensionsChanged: true, ...extensions } : {}),
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
