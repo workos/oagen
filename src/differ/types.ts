@@ -1,4 +1,4 @@
-import type { Operation, SecurityRequirementSet } from '../ir/types.js';
+import type { Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
 import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
@@ -72,6 +72,17 @@ export type DeprecatedNode =
       operationName: string;
       paramName: string;
       paramLocation: ParamLocation;
+    }
+  | {
+      node: 'response-header';
+      serviceName: string;
+      operationName: string;
+      /** The header's name as written in the new spec. */
+      headerName: string;
+      /** The response entry's status code, as on `ResponseHeaderChange`; unset for a fallback response. */
+      statusCode?: number;
+      /** Set instead of `statusCode` for the `default` or a range response. */
+      fallback?: 'default' | StatusRange;
     }
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
@@ -367,7 +378,9 @@ export interface OperationModified {
   /**
    * The operation's own `deprecated` flipped. Additive either way: the
    * signature is unchanged. A parameter's flag flipping is a
-   * `param-deprecated-changed` entry in `paramChanges` instead.
+   * `param-deprecated-changed` entry in `paramChanges` instead, and a
+   * response header's a `header-deprecated-changed` entry in
+   * `responseHeaderChanges`.
    */
   deprecatedChanged: boolean;
   /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
@@ -412,21 +425,127 @@ export interface OperationModified {
    */
   responseContentTypesChanged: boolean;
   responseContentTypeChanges: ResponseContentTypesChange[];
+  /**
+   * True when a response entry gained, lost, retyped, re-required, renamed
+   * or deprecated one of the headers it declares; `responseHeaderChanges`
+   * says which.
+   */
+  responseHeadersChanged: boolean;
+  responseHeaderChanges: ResponseHeaderChange[];
+  /**
+   * `Operation.responseStatusCode` — the status code the primary success
+   * response is read from — differs while both specs carry one: a lone
+   * `201` that became a lone `200`, a `200` added beside a lone `201` (the
+   * `200` is now the primary), or a `201` that became the primary beside a
+   * `200` whose body is no longer typed. Additive on its own: the old code
+   * may still be declared, as in the second case, and whether a bare status
+   * move breaks callers is left to a separate issue — this flag only says
+   * the move happened, so a changelog can. Compared only while both sides
+   * carry a code, as `requestBodyRequired` is while both carry a body; an
+   * operation gaining or losing its only 2xx/3xx is not a move. Not mirrored
+   * into `behaviorChanges`.
+   */
+  responseStatusCodeChanged: boolean;
+  /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
+  oldResponseStatusCode?: number;
+  newResponseStatusCode?: number;
   /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
   fallbackResponsesChanged: boolean;
   classification: 'additive' | 'breaking';
 }
 
 /**
+ * A change to one header a response declares — `Operation.responseHeaders`
+ * on the primary success response, `headers` on each other `SuccessResponse`,
+ * on each `ErrorResponse`, on the `DefaultResponse` and on each
+ * `RangeResponse` — between two specs. The SDK reads these headers off the
+ * response and never sends them, so each kind is classified from the
+ * reader's side, as a webhook's parameters are: a header added is additive,
+ * required or not (the server simply starts sending it); one removed is
+ * breaking (an accessor the SDK exposed is gone); a type change is breaking,
+ * a format-only change additive, as elsewhere; optional → required is
+ * additive (the header is now always present) and required → optional
+ * breaking (code that assumed it breaks); a `deprecated` flip and a
+ * respelling are additive.
+ *
+ * Response entries pair up between the two specs exactly as they do for
+ * `responseContentTypeChanges`: by status code — every 2xx entry, the
+ * primary among them (a lone 2xx by `Operation.responseStatusCode`), and
+ * every error — with `statusCode` set; two lone primaries of different
+ * codes pair with each other, the move reported once as
+ * `responseStatusCodeChanged`; a lone 2xx that carries no code (a hand-built
+ * IR) pairs with the entry of the other spec that offers its media types,
+ * else with that spec's primary, and is reported with `statusCode` unset;
+ * the `default` and range responses by key, with `fallback` set. Within an entry, headers pair
+ * by name case-insensitively (RFC 9110 §5.1, `foldHeaderName`), so
+ * `X-Rate-Limit` and `x-rate-limit` are one header: a pair whose written
+ * names differ is reported as `header-name-changed` with `oldName`/`newName`
+ * beside it, additive, since an emitter may derive an identifier from the
+ * name as written. Two names of one folding declared side by side (a
+ * hand-built IR; the parser keeps one) stay two headers: each pairs with the
+ * one spelled the same way on the other side, else with the other side's
+ * next unpaired name of its folding, and one left over is added or removed.
+ * A 2xx entry the old spec declared and the new does not has no other diff
+ * to report its headers, so each is reported `header-removed`; an error or
+ * fallback entry only one spec declares is the errors or fallback diff's
+ * business, and so is a 2xx the new spec adds. A webhook's accepted
+ * responses (`WebhookResponse`) carry no headers in the IR, so a
+ * `webhook-modified` change has no such list.
+ */
+export interface ResponseHeaderChange {
+  kind:
+    | 'header-added'
+    | 'header-removed'
+    | 'header-type-changed'
+    | 'header-format-changed'
+    | 'header-required-changed'
+    | 'header-name-changed'
+    | 'header-deprecated-changed';
+  /** The header's name as written in the spec that declares it: the new spec's for a header both declare. */
+  headerName: string;
+  /**
+   * The response entry's status code — `Operation.responseStatusCode` for a
+   * lone 2xx — of the entry that declares what changed: the old spec's for
+   * `header-removed`, the new spec's for every other kind — so an operation
+   * that lost its only 2xx, whose new primary carries no code, reports that
+   * entry's headers under its old code. Unset for a fallback response, and
+   * for a lone 2xx of a hand-built IR that carries no code.
+   */
+  statusCode?: number;
+  /** Set instead of `statusCode` for the `default` or a `1XX`–`5XX` range response, which carry no code. */
+  fallback?: 'default' | StatusRange;
+  classification: 'additive' | 'breaking';
+  /** For `header-name-changed`: the name as written in the old spec. */
+  oldName?: string;
+  /** For `header-name-changed`: the name as written in the new spec (the same as `headerName`). */
+  newName?: string;
+  /** For `header-deprecated-changed`: the flag's two sides, old → new. */
+  oldDeprecated?: boolean;
+  newDeprecated?: boolean;
+  /**
+   * What changed, in words: `format <old> → <new>` for `header-format-changed`,
+   * `optional → required` or `required → optional` for
+   * `header-required-changed`, `name <old> → <new>` for `header-name-changed`,
+   * `live → deprecated` or `deprecated → live` for `header-deprecated-changed`.
+   */
+  details?: string;
+}
+
+/**
  * How one response entry's media types changed between two specs. Entries
  * pair up by status code — 2xx entries from `successResponses`, the primary
  * among them, errors from `errors` — so a primary that changes status still
- * pairs with the entry of its code; a lone 2xx is not listed in
- * `successResponses` (its code is `Operation.responseStatusCode`, which takes
- * no part in pairing) and is paired with the entry of the other spec that
- * offers its media types,
- * else with that spec's primary — reported with `statusCode` unset when it is
- * the new spec's lone entry. The `default` and range responses pair by key
+ * pairs with the entry of its code; a lone 2xx pairs by its
+ * `Operation.responseStatusCode` and is reported with that code, and two
+ * lone primaries of different codes pair with each other
+ * (`responseStatusCodeChanged` reports the move); a primary that carries no
+ * code (an operation declaring no 2xx/3xx, or a hand-built IR's lone 2xx) is
+ * paired with the entry of the other spec that offers its media types, else
+ * with that spec's primary. A change is located at the new spec's entry,
+ * or — when that entry carries no code and the change only removes, as
+ * when an operation lost its only 2xx — at the old spec's entry, which
+ * declared what is gone, so `statusCode` is unset only for a lone 2xx of a
+ * hand-built IR that carries no code. The `default` and range responses pair by key
  * and are reported with `fallback` set. A 2xx the old spec declared and the
  * new does not is reported with its media types `removed`; one the new spec
  * adds is no media-type change. Media types are compared by essence —

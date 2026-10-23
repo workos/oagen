@@ -4,16 +4,19 @@ import type {
   Operation,
   PaginationEndOfIteration,
   ResponseContent,
+  ResponseHeader,
   ServerEntry,
   StatusRange,
   TypeRef,
 } from '../ir/types.js';
+import { foldHeaderName } from '../ir/parameter-key.js';
 import { resolveServerUrl } from '../ir/server-url.js';
 import { diffServers } from './servers.js';
 import {
   diffRequestBodyContentTypes,
   ownRepresentationKept,
   mediaTypeBodies,
+  pairByName,
   pairMediaTypeBodies,
   reparameterizedBodies,
   respelling,
@@ -21,10 +24,11 @@ import {
   type MediaTypeBody,
 } from './media-types.js';
 import type { DocumentShapes } from './shapes.js';
-import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange } from './types.js';
+import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange, ResponseHeaderChange } from './types.js';
 import { locatedParams, paramKey } from './params.js';
 import {
   classifyParamChange,
+  classifyResponseHeaderChange,
   deprecationDetails,
   deprecationFlip,
   parameterNameShift,
@@ -133,6 +137,22 @@ export function diffOperations(
     const errorsChanged = errorsDiff !== 'none';
     const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp, shapes);
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
+    // The headers each response entry declares, which an SDK may expose as
+    // typed accessors on a response wrapper (#296).
+    const responseHeaderChanges = diffResponseHeaders(oldOp, newOp);
+    const responseHeadersChanged = responseHeaderChanges.length > 0;
+    // The status code `response` is read from (`responseStatusCode`, present
+    // exactly when a 2xx or 3xx is declared), compared only while both sides
+    // carry one, as `requestBodyRequired` is while both carry a body: an
+    // operation gaining or losing its only 2xx/3xx is not a move. Reported
+    // as additive: the old code may still be declared (a `200` added beside
+    // a lone `201` makes the `200` the primary), and whether a bare status
+    // move breaks callers is left to a separate issue.
+    const bothCarryStatus = oldOp.responseStatusCode !== undefined && newOp.responseStatusCode !== undefined;
+    const responseStatusCodeChanged = bothCarryStatus && oldOp.responseStatusCode !== newOp.responseStatusCode;
+    const status = responseStatusCodeChanged
+      ? { oldResponseStatusCode: oldOp.responseStatusCode, newResponseStatusCode: newOp.responseStatusCode }
+      : {};
     const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
     // Additive either way: the operation's signature is unchanged, but a
@@ -177,6 +197,8 @@ export function diffOperations(
       injectIdempotencyKeyChanged ||
       errorsChanged ||
       responseContentTypesChanged ||
+      responseHeadersChanged ||
+      responseStatusCodeChanged ||
       fallbackResponsesChanged ||
       deprecatedChanged ||
       serversChanged ||
@@ -217,6 +239,10 @@ export function diffOperations(
       // that changed shape, breaks them; one they can newly ask for, or one
       // that only changed a parameter, does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
+      // A header the SDK exposed that is gone, retyped or no longer always
+      // sent breaks the code that read it; one added, respelled, deprecated
+      // or now always sent does not.
+      const responseHeadersBreaking = responseHeaderChanges.some((c) => c.classification === 'breaking');
       // A media type callers could send that is gone, or a secondary body
       // that changed shape, breaks them; one they can newly send does not.
       const requestBodyContentTypesBreaking = requestBodyContentTypeChange?.classification === 'breaking';
@@ -247,6 +273,7 @@ export function diffOperations(
         injectIdempotencyKeyBreaking ||
         errorsBreaking ||
         responseContentTypesBreaking ||
+        responseHeadersBreaking ||
         requestBodyContentTypesBreaking ||
         fallbackBreaking ||
         serversChanged ||
@@ -277,6 +304,10 @@ export function diffOperations(
         errorsChanged,
         responseContentTypesChanged,
         responseContentTypeChanges,
+        responseHeadersChanged,
+        responseHeaderChanges,
+        responseStatusCodeChanged,
+        ...status,
         fallbackResponsesChanged,
         deprecatedChanged,
         ...deprecation,
@@ -331,11 +362,15 @@ function asDocument(servers: ServerEntry[]): Pick<ApiSpec, 'baseUrl' | 'servers'
 }
 
 /**
- * One response entry's media types, with what the parser left off restored
- * so the two specs' entries compare alike: an error that declares only
- * `application/json` with a schema carries no lists in the IR, so its
- * implicit JSON entry is restored from `type`; a response without content
- * has no bodies.
+ * One response entry's media types and headers, with what the parser left
+ * off restored so the two specs' entries compare alike: an error that
+ * declares only `application/json` with a schema carries no lists in the IR,
+ * so its implicit JSON entry is restored from `type`; a response without
+ * content has no bodies; one without `headers` has none. `contentEntries`
+ * is the differ's one walk of every response kind an operation declares,
+ * and `pairContentEntries` its one rule for which entry of the other spec
+ * each is, so the media-type diff and the header diff compare the same
+ * pairs.
  */
 interface ContentEntry {
   key: string;
@@ -346,6 +381,8 @@ interface ContentEntry {
   isPrimary: boolean;
   /** The entry's media types, one per `contentTypes` entry, in document order. */
   bodies: MediaTypeBody[];
+  /** The headers the entry declares, in document order; `[]` when it declares none. */
+  headers: ResponseHeader[];
   /**
    * Whether another comparison reports a change to the own body when this
    * entry is paired with one of its own kind: `responseChanged` for the
@@ -365,28 +402,40 @@ const JSON_MEDIA_TYPE = 'application/json';
  * up by status code: every 2xx/3xx entry as `success:<code>`, every error as
  * `error:<code>`, the `default` and each range response as
  * `fallback:<key>`. The primary success response (the one `response` is the
- * body of, read from the operation's own lists) is `success:<code>` too when
- * `successResponses` lists it — with several 2xx it is the lowest-coded entry
- * whose type is the operation's `response`, the parser's own pick — so a
- * primary that changes status still pairs with the entry of its code; a lone
- * 2xx is not listed in `successResponses` and is keyed `primary` — its
- * `responseStatusCode` is not used as a key, so the two specs' lone primaries
- * pair with each other whatever their codes (see `pairContentEntries` for
- * what it pairs with).
+ * body of, read from the operation's own lists) is `success:<code>` too: the
+ * entry of `responseStatusCode` when `successResponses` lists it — the
+ * parser's own pick, so a primary that changes status still pairs with the
+ * entry of its code — and, for a lone 2xx that `successResponses` does not
+ * list, `responseStatusCode` itself, the code the parser read `response`
+ * from, so a lone `201` pairs with the other spec's `201` whether that spec
+ * declares it alone or beside a `200` it added. A primary that carries no
+ * code — an operation declaring no 2xx/3xx at all, or a hand-built IR's
+ * lone 2xx — is keyed `primary` (see `pairContentEntries` for what it pairs
+ * with).
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
   const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
-  const primaryEntry = successes.find(
-    (entry) =>
-      (op.responseContents !== undefined && entry.contents === op.responseContents) ||
-      typeRefsEqual(entry.type, op.response),
-  );
+  // The entry `response` was read from: the one of `responseStatusCode`
+  // when the IR carries it, else — a hand-built IR without the code — the
+  // one that shares `response`'s content list or type.
+  const primaryEntry =
+    successes.find((entry) => entry.statusCode === op.responseStatusCode) ??
+    successes.find(
+      (entry) =>
+        (op.responseContents !== undefined && entry.contents === op.responseContents) ||
+        typeRefsEqual(entry.type, op.response),
+    );
+  const primaryStatus = primaryEntry?.statusCode ?? op.responseStatusCode;
+  // The primary's headers are `responseHeaders`, the same array as its
+  // `successResponses` entry's when both exist (how the parser builds it);
+  // a hand-built IR that sets only the entry's is read from the entry.
   entries.push({
-    key: primaryEntry ? `success:${primaryEntry.statusCode}` : 'primary',
-    ...(primaryEntry ? { statusCode: primaryEntry.statusCode } : {}),
+    key: primaryStatus !== undefined ? `success:${primaryStatus}` : 'primary',
+    ...(primaryStatus !== undefined ? { statusCode: primaryStatus } : {}),
     isPrimary: true,
     bodies: mediaTypeBodies(op.responseContentTypes ?? [], op.responseContents ?? [], op.response),
+    headers: op.responseHeaders ?? primaryEntry?.headers ?? [],
     ownCoveredElsewhere: true,
   });
   for (const entry of successes) {
@@ -396,6 +445,7 @@ function contentEntries(op: Operation): ContentEntry[] {
       statusCode: entry.statusCode,
       isPrimary: false,
       bodies: mediaTypeBodies(entry.contentTypes ?? [], entry.contents ?? [], entry.type),
+      headers: entry.headers ?? [],
       ownCoveredElsewhere: false,
     });
   }
@@ -411,12 +461,16 @@ function contentEntries(op: Operation): ContentEntry[] {
         error.type,
         JSON_MEDIA_TYPE,
       ),
+      headers: error.headers ?? [],
       ownCoveredElsewhere: true,
     });
   }
   // A fallback's own body is its JSON entry, whose retype `fallbackResponsesChanged` reports.
   const fallbacks: Array<
-    ['default' | StatusRange, { type?: TypeRef; contentTypes?: string[]; contents?: ResponseContent[] }]
+    [
+      'default' | StatusRange,
+      { type?: TypeRef; contentTypes?: string[]; contents?: ResponseContent[]; headers?: ResponseHeader[] },
+    ]
   > = [];
   if (op.defaultResponse) fallbacks.push(['default', op.defaultResponse]);
   for (const range of op.rangeResponses ?? []) fallbacks.push([range.range, range]);
@@ -426,10 +480,127 @@ function contentEntries(op: Operation): ContentEntry[] {
       fallback,
       isPrimary: false,
       bodies: mediaTypeBodies(entry.contentTypes ?? [], entry.contents ?? [], entry.type),
+      headers: entry.headers ?? [],
       ownCoveredElsewhere: true,
     });
   }
   return entries;
+}
+
+/** `pairByName` over an entry's headers: spelled as written, folded as HTTP compares header names. */
+function pairResponseHeaders(
+  oldHeaders: ResponseHeader[],
+  newHeaders: ResponseHeader[],
+): { pairs: Array<[ResponseHeader, ResponseHeader]>; added: ResponseHeader[]; removed: ResponseHeader[] } {
+  return pairByName(
+    oldHeaders,
+    newHeaders,
+    (header) => header.name,
+    (header) => foldHeaderName(header.name),
+  );
+}
+
+/**
+ * Per response entry both specs have, the headers the new spec added,
+ * removed, retyped, re-required, respelled or deprecated, each change
+ * carrying the entry's `statusCode` or `fallback`. Entries pair as
+ * `diffResponseContentTypes` pairs them (`pairContentEntries`), so the entry
+ * whose media types are compared with another's is the one whose headers
+ * are; within an entry, headers pair by case-folded name
+ * (`pairResponseHeaders`), so a header that only changed case is one header,
+ * reported `header-name-changed`. A change is located at the entry of the
+ * spec that declares what changed: a header removed at the old spec's
+ * entry, one added or changed at the new spec's — so an operation that
+ * lost its only 2xx, whose new primary carries no code, reports that
+ * entry's headers under its old code, not nowhere. A 2xx the old spec declared and
+ * the new does not has no other diff to report it, so each of its headers
+ * is reported `header-removed`, as its media types are reported removed; an
+ * error or fallback entry only one spec declares is the errors or fallback
+ * diff's business, and a 2xx the new spec adds is no header change. A
+ * webhook's accepted responses carry no headers in the IR, so `diffWebhooks`
+ * has nothing of the kind to compare.
+ */
+function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeaderChange[] {
+  const oldEntries = contentEntries(oldOp);
+  const newEntries = contentEntries(newOp);
+  const pairs = pairContentEntries(oldEntries, newEntries);
+  const paired = new Set<ContentEntry>();
+  const changes: ResponseHeaderChange[] = [];
+  // Every change says which response entry it is about, in the position
+  // `ResponseContentTypesChange` reports an entry: a status code (a lone
+  // 2xx's `responseStatusCode` included), or the fallback key, or neither
+  // only for a lone 2xx of a hand-built IR that carries no code.
+  const at = (entry: ContentEntry, change: ResponseHeaderChange): ResponseHeaderChange => {
+    const { kind, headerName, ...rest } = change;
+    return { kind, headerName, ...entryLocation(entry), ...rest };
+  };
+  for (const entry of newEntries) {
+    const old = pairs.get(entry);
+    if (!old) continue;
+    paired.add(old);
+    const { pairs: headers, added, removed } = pairResponseHeaders(old.headers, entry.headers);
+    for (const header of added) changes.push(at(entry, classifyResponseHeaderChange('header-added', header.name)));
+    for (const header of removed) changes.push(at(old, classifyResponseHeaderChange('header-removed', header.name)));
+    for (const [before, after] of headers) {
+      for (const change of headerChanges(before, after)) changes.push(at(entry, change));
+    }
+  }
+  for (const old of oldEntries) {
+    if (paired.has(old) || !old.key.startsWith('success:')) continue;
+    for (const header of old.headers)
+      changes.push(at(old, classifyResponseHeaderChange('header-removed', header.name)));
+  }
+  return changes;
+}
+
+/**
+ * Where a response entry is, as a change reports it: its status code (a
+ * lone 2xx's `responseStatusCode` included), else its fallback key, else
+ * nothing — a primary that carries no code, which among the parser's
+ * operations is only one declaring no 2xx/3xx, whose primary carries no
+ * headers or media types of its own to report.
+ */
+function entryLocation(entry: ContentEntry): Pick<ResponseHeaderChange, 'statusCode' | 'fallback'> {
+  return {
+    ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
+    ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
+  };
+}
+
+/**
+ * What changed about one header both specs declare, in the order
+ * `diffParams` reports a parameter's: its spelling, its type, its
+ * requiredness, its `deprecated` flag. Each kind is classified from the
+ * reader's side by `classifyResponseHeaderChange`; the name is the new
+ * spec's spelling.
+ */
+function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseHeaderChange[] {
+  const changes: ResponseHeaderChange[] = [];
+  const name = after.name;
+  const respelled = parameterNameShift(before, after);
+  if (respelled) changes.push({ ...classifyResponseHeaderChange('header-name-changed', name), ...respelled });
+  if (!typeRefsEqual(before.type, after.type)) {
+    if (primitivesDifferOnlyByFormat(before.type, after.type)) {
+      changes.push({
+        ...classifyResponseHeaderChange('header-format-changed', name),
+        details: formatChangeDetails(before.type, after.type),
+      });
+    } else {
+      changes.push(classifyResponseHeaderChange('header-type-changed', name));
+    }
+  }
+  if (before.required !== after.required) {
+    changes.push(classifyResponseHeaderChange('header-required-changed', name, after.required));
+  }
+  const deprecation = deprecationFlip(before, after);
+  if (deprecation) {
+    changes.push({
+      ...classifyResponseHeaderChange('header-deprecated-changed', name),
+      ...deprecation,
+      details: deprecationDetails(deprecation.newDeprecated),
+    });
+  }
+  return changes;
 }
 
 /**
@@ -443,13 +614,13 @@ function contentEntries(op: Operation): ContentEntry[] {
  * comparison reports that very body: the entry's own body on both sides,
  * for two primaries (`responseChanged`) or two errors of one code
  * (`errorsChanged`) — never for a primary paired with an alternate 2xx.
- * Entries pair by status code (`pairContentEntries`); a primary that
- * `successResponses` does not list (a lone 2xx — its `responseStatusCode`
- * is not a key) pairs with the entry of the other spec that offers its
- * media types, else with that spec's primary. An error only one spec has is
- * not a media-type change — a code that came or went is the
- * errors diff's business — and neither is a 2xx the new spec adds, but a
- * 2xx the old spec declared and the new does not has no other diff to
+ * Entries pair by status code (`pairContentEntries`), a lone 2xx by its
+ * `responseStatusCode`; two lone primaries of different codes pair with each
+ * other, and only a lone 2xx that carries no code (a hand-built IR) pairs by
+ * the media types it offers, else with the other spec's primary. An error
+ * only one spec has is not a media-type change — a code that came or went
+ * is the errors diff's business — and neither is a 2xx the new spec adds,
+ * but a 2xx the old spec declared and the new does not has no other diff to
  * report it, so its media types are reported as removed: the formats
  * callers could ask for under that code are gone.
  */
@@ -471,9 +642,14 @@ function diffResponseContentTypes(
     const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
     const reparameterized = reparameterizedBodies(bodies);
     if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) continue;
+    // Located at the new spec's entry, or — when that entry carries no code
+    // and the change only removes, as when an operation lost its only 2xx —
+    // at the old spec's entry, which declared what is gone; as a removed
+    // header is located at the old entry.
+    const onlyRemoves = added.length === 0 && retyped.length === 0 && reparameterized.length === 0;
+    const unlocated = entry.statusCode === undefined && entry.fallback === undefined;
     changes.push({
-      ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
-      ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
+      ...entryLocation(onlyRemoves && unlocated ? old : entry),
       added: added.map((body) => body.mediaType),
       removed: removed.map((body) => body.mediaType),
       retyped: retyped.map(([, after]) => after.mediaType),
@@ -498,18 +674,23 @@ function diffResponseContentTypes(
 }
 
 /**
- * Which old entry each new entry is compared with. Entries pair by key: a
- * status code, or `primary` for a lone 2xx, which `successResponses` does
- * not list (its `responseStatusCode` is not used as a key, so two lone
- * primaries pair whatever their codes).
- * A lone 2xx on one side only has no counterpart by key, so it pairs with
- * the 2xx entry of the other side that offers the very same media types,
- * whatever that entry's code — the response it most plausibly still is, as
- * when a spec adds a `200` beside an unchanged lone `201` — and, when none
- * does, with the other side's primary. Pairing the two primaries blindly
- * would compare that unchanged `201` with the new `200` and report every
- * format the `200` does not offer as removed. A new entry nothing pairs with
- * is left out of the map.
+ * Which old entry each new entry is compared with. Entries pair by key — a
+ * status code, a lone 2xx's `responseStatusCode` included — so a lone `201`
+ * pairs with the other spec's `201` whether that spec declares it alone or
+ * beside a `200` it added, and the added `200` pairs with nothing. When
+ * neither primary has a counterpart by code and both carry one, the primary
+ * moved (a lone `201` became a lone `200`): the two primaries pair, and
+ * `responseStatusCodeChanged` reports the move once rather than every header
+ * and media type as removed under one code and added under the other. Only
+ * a primary that carries no code (keyed `primary`: an operation declaring no
+ * 2xx/3xx at all, whose `response` is `unknown`, or a hand-built IR's lone
+ * 2xx) falls back to shape: it pairs with the 2xx entry of the other side
+ * that offers the very same media types, whatever that entry's code — the
+ * response it most plausibly still is — and, when none does, with the other
+ * side's primary; so an operation that lost its only 2xx pairs that entry
+ * with its new, empty primary, and `diffResponseHeaders` and
+ * `diffResponseContentTypes` report what it declared under its old code. A
+ * new entry nothing pairs with is left out of the map.
  */
 function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry[]): Map<ContentEntry, ContentEntry> {
   const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
@@ -521,9 +702,14 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
   const oldPrimary = oldEntries.find((entry) => entry.isPrimary);
   const newPrimary = newEntries.find((entry) => entry.isPrimary);
   if (!oldPrimary || !newPrimary || pairs.has(newPrimary)) return pairs;
-  if (newPrimary.key === 'primary') {
+  // The old primary is some new entry's by code (a lone `201` beside a new
+  // `200`): the new primary is a 2xx the new spec adds, paired with nothing.
+  if (new Set(pairs.values()).has(oldPrimary)) return pairs;
+  if (oldPrimary.statusCode !== undefined && newPrimary.statusCode !== undefined) {
+    pairs.set(newPrimary, oldPrimary);
+  } else if (newPrimary.statusCode === undefined) {
     pairs.set(newPrimary, survivingEntry(newPrimary, oldEntries) ?? oldPrimary);
-  } else if (oldPrimary.key === 'primary') {
+  } else {
     pairs.set(survivingEntry(oldPrimary, newEntries) ?? newPrimary, oldPrimary);
   }
   return pairs;
@@ -533,7 +719,9 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
  * The 2xx entry among `others` that offers exactly `lone`'s media types,
  * order aside: one spelled the same way first, else one that offers them by
  * essence (`Text/HTML` + `application/pdf` still offers `application/pdf` +
- * `text/html`) — the primary among those, if any.
+ * `text/html`) — the primary among those, if any. The shape fallback
+ * `pairContentEntries` uses for a lone 2xx that carries no
+ * `responseStatusCode`.
  */
 function survivingEntry(lone: ContentEntry, others: ContentEntry[]): ContentEntry | undefined {
   const candidates = others.filter((entry) => entry.isPrimary || entry.key.startsWith('success:'));

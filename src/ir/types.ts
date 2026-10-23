@@ -387,8 +387,10 @@ export interface Operation {
    * case where `response` is `unknown`. When `successResponses` is set, this
    * equals the `statusCode` of the entry `response` was taken from. Read it
    * to check or document the status an operation succeeds with instead of
-   * guessing one from the HTTP method; the differ does not key or compare
-   * by it.
+   * guessing one from the HTTP method. The differ pairs a lone 2xx/3xx with
+   * the other spec's entry of this code, so an entry added beside it is not
+   * mistaken for it, and reports it moving while both specs carry one as
+   * `responseStatusCodeChanged`.
    */
   responseStatusCode?: number;
   /**

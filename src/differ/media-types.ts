@@ -115,6 +115,52 @@ export interface MediaTypeBodiesDiff {
 }
 
 /**
+ * Which item of the old list each item of the new list is, for two lists
+ * whose items are matched by a folded name — a response entry's headers by
+ * case-folded name, as HTTP compares them (`foldHeaderName`: `X-Rate-Limit`
+ * is `x-rate-limit`). Two names of one folding declared side by side
+ * (`X-Foo` beside `x-foo`, which the parser keeps apart only in a hand-built
+ * IR) never collapse into one: a new item claims the old item spelled
+ * exactly as it is, else the first old item of its folding that nothing
+ * claimed, in document order. What is left on the new side was `added`;
+ * what is left on the old side was `removed`. Every pair is in the new
+ * list's order. `pairMediaTypeBodies` below pairs an entry's media types
+ * the same way at its first and last tiers, with parameter and shape tiers
+ * of its own between them.
+ */
+export function pairByName<T>(
+  oldItems: T[],
+  newItems: T[],
+  written: (item: T) => string,
+  folded: (item: T) => string,
+): { pairs: Array<[T, T]>; added: T[]; removed: T[] } {
+  const unclaimed = new Set(oldItems);
+  const claim = (matches: (old: T) => boolean): T | undefined => {
+    for (const old of oldItems) {
+      if (!unclaimed.has(old) || !matches(old)) continue;
+      unclaimed.delete(old);
+      return old;
+    }
+    return undefined;
+  };
+  // Exact spellings claim first, whatever their position, so a respelled
+  // name never takes the old item an unchanged name still names.
+  const bySpelling = new Map<T, T>();
+  for (const item of newItems) {
+    const old = claim((candidate) => written(candidate) === written(item));
+    if (old) bySpelling.set(item, old);
+  }
+  const pairs: Array<[T, T]> = [];
+  const added: T[] = [];
+  for (const item of newItems) {
+    const old = bySpelling.get(item) ?? claim((candidate) => folded(candidate) === folded(item));
+    if (old) pairs.push([old, item]);
+    else added.push(item);
+  }
+  return { pairs, added, removed: oldItems.filter((old) => unclaimed.has(old)) };
+}
+
+/**
  * Which body of the old entry each body of the new entry is, so the two
  * entries' media types compare by essence the way the parser types them —
  * `Text/HTML` is `text/html`, `application/problem+json; charset=utf-8` is

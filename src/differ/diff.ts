@@ -210,6 +210,25 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
         );
       }
     }
+    // A response header's flip, with the entry it belongs to carried the way
+    // the change carries it (a status code, a fallback key, or neither for a
+    // lone 2xx); only the flag is mirrored, as for a parameter.
+    for (const hc of c.responseHeaderChanges) {
+      if (hc.kind !== 'header-deprecated-changed') continue;
+      out.push(
+        flipped(
+          {
+            node: 'response-header',
+            serviceName: c.serviceName,
+            operationName: c.operationName,
+            headerName: hc.headerName,
+            ...(hc.statusCode !== undefined ? { statusCode: hc.statusCode } : {}),
+            ...(hc.fallback !== undefined ? { fallback: hc.fallback } : {}),
+          },
+          hc,
+        ),
+      );
+    }
   }
   return out;
 }
