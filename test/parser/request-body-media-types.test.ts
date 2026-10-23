@@ -7,7 +7,7 @@ import {
   extractOperations,
   selectRequestBodyContent,
   schemalessRequestBodyType,
-  warnDroppedRequestBody,
+  warnUnreadRequestBody,
 } from '../../src/parser/operations.js';
 import { extractWebhooks } from '../../src/parser/webhooks.js';
 import { collectModelRefs } from '../../src/ir/types.js';
@@ -76,10 +76,10 @@ function fieldNames(models: Model[], name: string): string[] | undefined {
 }
 
 const DROPPED = (label: string, keys: string) =>
-  `[oagen] Warning: Request body of ${label} is dropped: none of its media types (${keys}) is read. ` +
-  `A body is read from application/json or a +json media type, multipart/form-data or ` +
-  `application/x-www-form-urlencoded when it declares a schema, and from application/octet-stream or ` +
-  `text/plain with or without one, parameters and case aside.`;
+  `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
+  `(${keys}) is one the parser reads — application/json or a +json media type, ` +
+  `multipart/form-data or application/x-www-form-urlencoded with a schema, application/octet-stream or ` +
+  `text/plain with or without one, parameters and case aside. It is carried in requestBodyContents only.`;
 
 describe('request body media types are matched by essence (issue #278)', () => {
   afterEach(() => {
@@ -271,7 +271,9 @@ describe('request body media types are matched by essence (issue #278)', () => {
       });
       expect(op.queryParams.map((p) => p.name)).toEqual(['name']);
       expect(spec.webhooks?.[0].requestBody).toBeUndefined();
-      expect(spec.models).toEqual([]);
+      // The unread XML body is carried in `requestBodyContents`, typed under its media type.
+      expect(spec.models.map((m) => m.name)).toEqual(['CreatePetApplicationXmlRequest']);
+      expect(op.requestBodyContents?.[0].type).toEqual({ kind: 'model', name: 'CreatePetApplicationXmlRequest' });
       expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
         DROPPED('createPet', 'application/xml'),
         DROPPED('webhooks.petAdopted.post', 'image/png'),
@@ -471,7 +473,7 @@ describe('request body media types are matched by essence (issue #278)', () => {
   });
 
   describe('bodies none of whose media types is read', () => {
-    it('drops a body under an unread media type and says so once, naming the operation and the key', () => {
+    it('sets no requestBody for a body under an unread media type and says so once, naming the operation and the key', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const { op, inlineModels } = createPet({ 'application/xml': { schema: NAME_SCHEMA } });
       expect(bodyFields(op)).toEqual({
@@ -480,7 +482,11 @@ describe('request body media types are matched by essence (issue #278)', () => {
         requestBodyRequired: undefined,
         hasFlag: false,
       });
-      expect(inlineModels).toEqual([]);
+      // The body is still carried, typed under its media type, in `requestBodyContents`.
+      expect(inlineModels.map((m) => m.name)).toEqual(['CreatePetApplicationXmlRequest']);
+      expect(op.requestBodyContents?.map((c) => c.type)).toEqual([
+        { kind: 'model', name: 'CreatePetApplicationXmlRequest' },
+      ]);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toBe(DROPPED('createPet', 'application/xml'));
     });
@@ -523,7 +529,7 @@ describe('request body media types are matched by essence (issue #278)', () => {
         },
       );
       expect(op.requestBody).toBeUndefined();
-      const dropped = warn.mock.calls.filter((call) => String(call[0]).includes('is dropped'));
+      const dropped = warn.mock.calls.filter((call) => String(call[0]).includes('is not read as requestBody'));
       expect(dropped).toHaveLength(1);
       // With no body read, the query parameter stays a query parameter.
       expect(op.queryParams.map((p) => p.name)).toEqual(['name']);
@@ -633,7 +639,12 @@ describe('request body media types are matched by essence (issue #278)', () => {
     it('returns the picked key as written, with its encoding and schema', () => {
       expect(
         selectRequestBodyContent({ content: { ' Application/JSON ; charset=utf-8': { schema: NAME_SCHEMA } } }),
-      ).toEqual({ contentType: ' Application/JSON ; charset=utf-8', encoding: 'json', schema: NAME_SCHEMA });
+      ).toEqual({
+        contentType: ' Application/JSON ; charset=utf-8',
+        essence: 'application/json',
+        encoding: 'json',
+        schema: NAME_SCHEMA,
+      });
     });
 
     it('is undefined without content, with an empty content map, and when nothing is read', () => {
@@ -661,16 +672,16 @@ describe('request body media types are matched by essence (issue #278)', () => {
     });
   });
 
-  describe('warnDroppedRequestBody', () => {
+  describe('warnUnreadRequestBody', () => {
     it('warns only for a body that declares media types none of which is read', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      warnDroppedRequestBody(undefined, 'createPet');
-      warnDroppedRequestBody({}, 'createPet');
-      warnDroppedRequestBody({ content: {} }, 'createPet');
-      warnDroppedRequestBody({ content: { 'application/vnd.api+json': { schema: NAME_SCHEMA } } }, 'createPet');
-      warnDroppedRequestBody({ content: { 'application/octet-stream; foo=bar': {} } }, 'createPet');
+      warnUnreadRequestBody(undefined, 'createPet');
+      warnUnreadRequestBody({}, 'createPet');
+      warnUnreadRequestBody({ content: {} }, 'createPet');
+      warnUnreadRequestBody({ content: { 'application/vnd.api+json': { schema: NAME_SCHEMA } } }, 'createPet');
+      warnUnreadRequestBody({ content: { 'application/octet-stream; foo=bar': {} } }, 'createPet');
       expect(warn).not.toHaveBeenCalled();
-      warnDroppedRequestBody({ content: { 'application/xml': { schema: NAME_SCHEMA } } }, 'createPet');
+      warnUnreadRequestBody({ content: { 'application/xml': { schema: NAME_SCHEMA } } }, 'createPet');
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toBe(DROPPED('createPet', 'application/xml'));
     });

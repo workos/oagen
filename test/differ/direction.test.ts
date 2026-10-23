@@ -58,6 +58,67 @@ describe('buildDirectionIndex — response content types', () => {
   });
 });
 
+describe('buildDirectionIndex — request body content types', () => {
+  it('marks a model reached only through a secondary request media type as request-facing', () => {
+    const body = { kind: 'model' as const, name: 'ThingInput' };
+    const index = buildDirectionIndex(
+      spec(
+        [
+          { name: 'ThingInput', fields: [] },
+          { name: 'ThingXml', fields: [] },
+        ],
+        [
+          op({
+            httpMethod: 'post',
+            requestBody: body,
+            requestBodyEncoding: 'json',
+            requestBodyContentType: 'application/json',
+            requestBodyContentTypes: ['application/json', 'application/xml'],
+            requestBodyContents: [
+              { contentType: 'application/json', type: body },
+              { contentType: 'application/xml', type: { kind: 'model', name: 'ThingXml' } },
+            ],
+          }),
+        ],
+      ),
+    );
+    expect(directionOf(index, 'ThingInput')).toBe('request');
+    expect(directionOf(index, 'ThingXml')).toBe('request');
+  });
+
+  it('marks a model reached only through a webhook secondary payload as response-facing, like the payload', () => {
+    const payload = { kind: 'model' as const, name: 'PetAdoptedPayload' };
+    const index = buildDirectionIndex({
+      ...spec(
+        [
+          { name: 'PetAdoptedPayload', fields: [] },
+          { name: 'PetAdoptedApplicationXmlPayload', fields: [] },
+        ],
+        [],
+      ),
+      webhooks: [
+        {
+          name: 'petAdopted',
+          httpMethod: 'post',
+          headerParams: [],
+          queryParams: [],
+          requestBody: payload,
+          requestBodyEncoding: 'json',
+          requestBodyContentType: 'application/json',
+          requestBodyContentTypes: ['application/json', 'application/xml'],
+          requestBodyContents: [
+            { contentType: 'application/json', type: payload },
+            { contentType: 'application/xml', type: { kind: 'model', name: 'PetAdoptedApplicationXmlPayload' } },
+          ],
+          responses: [],
+        },
+      ],
+    });
+    expect(directionOf(index, 'PetAdoptedPayload')).toBe('response');
+    expect(directionOf(index, 'PetAdoptedApplicationXmlPayload')).toBe('response');
+  });
+});
+
 describe('buildDirectionIndex — pagination', () => {
   it('marks a model reached only through the iterator item type as response-facing', () => {
     // Under `x-pagination: { dataPath }` the body stays a wrapper, and the
