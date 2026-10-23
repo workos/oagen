@@ -7,7 +7,7 @@ import { diffSpecs } from '../../src/differ/diff.js';
 import { buildDirectionIndex, directionOf } from '../../src/differ/direction.js';
 import type { Change, DiffReport, ModelModified } from '../../src/differ/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
-import type { ApiSpec, Field, Model, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Field, Model, Operation, TypeRef } from '../../src/ir/types.js';
 import { parseSpec } from '../../src/parser/parse.js';
 
 const pet: Model = {
@@ -267,6 +267,116 @@ describe('diffModels — a variant added to a discriminated union (issue #306)',
       classification: 'additive',
       variantChanges: [{ kind: 'variant-added', variant: 'union<Bird|string>', details: "mapping added for 'bird'" }],
     });
+  });
+
+  it('decides "new" on the model under every wrapper on both sides, so a wrapped copy of a kept model folds no key', () => {
+    const nullableCat: TypeRef = { kind: 'nullable', inner: { kind: 'model', name: 'Cat' } };
+    const kitty = { ...pet.discriminator!.mapping, kitty: 'Cat' };
+    const anyOfPet: Model = { ...pet, compositionKind: 'anyOf' };
+    // Greptile's case: `Cat` kept bare, `nullable<Cat>` added beside it with an alias `kitty: Cat`.
+    const wrappedCopy: Model = {
+      ...anyOfPet,
+      variants: [...pet.variants!, nullableCat],
+      discriminator: { property: 'kind', mapping: kitty },
+    };
+    const overlapped = modifiedModel(diffModels([anyOfPet], [wrappedCopy]), 'Pet');
+    expect(overlapped).toMatchObject({
+      classification: 'breaking',
+      variantChanges: [
+        { kind: 'variant-added', variant: 'nullable<Cat>', classification: 'additive' },
+        {
+          kind: 'discriminator-changed',
+          variant: 'kind',
+          classification: 'breaking',
+          details: "mapping changed for 'kitty'",
+        },
+      ],
+    });
+    expect(overlapped.variantChanges![0]).not.toHaveProperty('details');
+    // The mirror: the old side wrapped and the new side bare, the alias going with the wrapper.
+    const unwrapped = modifiedModel(diffModels([wrappedCopy], [anyOfPet]), 'Pet');
+    expect(unwrapped).toMatchObject({
+      classification: 'breaking',
+      variantChanges: [
+        { kind: 'variant-removed', variant: 'nullable<Cat>', classification: 'breaking' },
+        {
+          kind: 'discriminator-changed',
+          variant: 'kind',
+          classification: 'breaking',
+          details: "mapping changed for 'kitty'",
+        },
+      ],
+    });
+    expect(unwrapped.variantChanges![0]).not.toHaveProperty('details');
+    // The wrapper swapped for the bare model with a key added for it: the same model on both sides.
+    const wrappedOnly: Model = { ...pet, variants: [nullableCat, { kind: 'model', name: 'Dog' }] };
+    const aliasedBare: Model = { ...pet, discriminator: { property: 'kind', mapping: kitty } };
+    const swapped = modifiedModel(diffModels([wrappedOnly], [aliasedBare]), 'Pet');
+    expect(swapped).toMatchObject({
+      classification: 'breaking',
+      variantChanges: [
+        { kind: 'variant-added', variant: 'Cat', classification: 'additive' },
+        { kind: 'variant-removed', variant: 'nullable<Cat>', classification: 'breaking' },
+        { kind: 'discriminator-changed', classification: 'breaking', details: "mapping changed for 'kitty'" },
+      ],
+    });
+    expect(swapped.variantChanges![0]).not.toHaveProperty('details');
+    expect(swapped.variantChanges![1]).not.toHaveProperty('details');
+    // A genuine addition inside a new wrapper still folds its key (see above), and so does its removal.
+    const nullableBird: Model = {
+      ...grownPet,
+      variants: [...pet.variants!, { kind: 'nullable', inner: { kind: 'model', name: 'Bird' } }],
+    };
+    expect(diffModels([nullableBird], [pet])).toEqual([
+      {
+        kind: 'model-modified',
+        deprecatedChanged: false,
+        name: 'Pet',
+        fieldChanges: [],
+        variantChanges: [
+          {
+            kind: 'variant-removed',
+            variant: 'nullable<Bird>',
+            classification: 'breaking',
+            details: "mapping removed for 'bird'",
+          },
+        ],
+        classification: 'breaking',
+      },
+    ]);
+  });
+
+  it('lists the keys of a multi-type variant once each and sorted, whatever the order of its members', () => {
+    const bird: Model = {
+      name: 'Pet',
+      fields: [],
+      variants: [{ kind: 'model', name: 'Bird' }],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { bird: 'Bird' } },
+    };
+    const members: TypeRef[] = [
+      { kind: 'model', name: 'Cat' },
+      { kind: 'model', name: 'Dog' },
+    ];
+    const orders: Array<[string, TypeRef[]]> = [
+      ['union<Cat|Dog>', members],
+      ['union<Dog|Cat>', [...members].reverse()],
+    ];
+    for (const [label, variants] of orders) {
+      const grown: Model = {
+        ...bird,
+        variants: [...bird.variants!, { kind: 'union', variants }],
+        discriminator: { property: 'kind', mapping: { bird: 'Bird', z: 'Cat', a: 'Dog' } },
+      };
+      expect(diffModels([bird], [grown])[0]).toMatchObject({
+        classification: 'additive',
+        variantChanges: [{ kind: 'variant-added', variant: label, details: "mapping added for 'a', 'z'" }],
+      });
+      expect(diffModels([grown], [bird])[0]).toMatchObject({
+        classification: 'breaking',
+        variantChanges: [{ kind: 'variant-removed', variant: label, details: "mapping removed for 'a', 'z'" }],
+      });
+    }
   });
 
   it('folds the mapping entry a removed variant takes with it into its variant-removed entry, breaking', () => {
