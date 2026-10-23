@@ -397,7 +397,7 @@ describe('the same rule at every other site the merge passes name', () => {
     expectSound(spec, ['PetOwner']);
   });
 
-  it('a component response’s inline body steps in the shape registry, silently (`NotFoundResponseBody`)', async () => {
+  it('a component response’s inline body steps in the shape registry, silently, by number (`NotFoundResponse2`)', async () => {
     const { spec, warnings } = await parse(
       'component-response',
       specDoc(
@@ -411,8 +411,8 @@ describe('the same rule at every other site the merge passes name', () => {
     );
     expect(warnings).toEqual([]);
     expect(bothKinds(spec)).toEqual([]);
-    expect(modelsOf(spec)).toEqual(['Pet {id}', 'NotFoundResponseBody {a}']);
-    expect(errorsOf(opsOf(spec).getPet)).toEqual(['404: model NotFoundResponseBody']);
+    expect(modelsOf(spec)).toEqual(['Pet {id}', 'NotFoundResponse2 {a}']);
+    expect(errorsOf(opsOf(spec).getPet)).toEqual(['404: model NotFoundResponse2']);
     expectSound(spec, ['NotFoundResponse']);
   });
 
