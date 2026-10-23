@@ -219,10 +219,10 @@ export function classifyAndExtractResponse(
  * walk uses — so a `$ref` body, a nullable wrapper around the body or
  * around any member, and a `$ref` chain to one all reach the same object
  * the path walked), and `detectEndOfIteration` reads them as it reads an
- * unwrapped envelope's, with the full path excluded, not its root, so the
- * array the path names is never a stop field while a stop field beside a
- * nested array (`pagination.has_more` next to `pagination.items`) stays
- * visible. `undefined` when nothing recognizable is declared, or the body
+ * unwrapped envelope's: the fields beside the array the path names first,
+ * under a parent of any name (`result.total_pages` next to `result.items`),
+ * then the top level, then the metadata companions, and never the array
+ * itself. `undefined` when nothing recognizable is declared, or the body
  * resolves to no object at all.
  */
 function bodyEndOfIteration(

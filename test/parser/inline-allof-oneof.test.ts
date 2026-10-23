@@ -579,6 +579,47 @@ describe('the one reading of an inline allOf', () => {
     expect(merged.unresolvedRefs).toEqual(['#/components/schemas/Missing']);
   });
 
+  it('reads a nullable union member as its one variant, applying as the member does, in the merge and in a component (MichaelDeBoey)', () => {
+    const nullOf = (variant: SchemaObject): SchemaObject => ({ oneOf: [variant, { type: 'null' }] });
+    const baseRef: SchemaObject = { $ref: '#/components/schemas/Base' };
+    const flag: SchemaObject = { type: 'object', properties: { flag: { type: 'boolean' } }, required: ['flag'] };
+    // The variant's `$ref` is followed, its `required` read, its properties always-applying.
+    const merged = mergeAllOfMembers({ allOf: [nullOf(baseRef), nullOf(flag), base] }, components);
+    expect(merged.properties.map((p) => `${p.name}${p.origin ? ` (${p.origin.name})` : ''}`)).toEqual([
+      'root (Base)',
+      'id (Base)',
+      'flag',
+      'name',
+    ]);
+    expect(merged.required).toEqual(['id', 'root', 'flag', 'name']);
+    expect(merged.resolvedRefs).toEqual(['#/components/schemas/Base', '#/components/schemas/Root']);
+    // A union with more than one non-null variant is still read as branches,
+    // its `$ref` variant left to its component and its `required` unread.
+    const branches = mergeAllOfMembers(
+      {
+        allOf: [
+          { oneOf: [baseRef, { properties: { x: { type: 'string' } }, required: ['x'] }, { type: 'null' }] },
+          base,
+        ],
+      },
+      components,
+    );
+    expect(branches.properties.map((p) => p.name)).toEqual(['x', 'name']);
+    expect(branches.required).toEqual(['name']);
+    // The component model of the same shape carries the same fields.
+    const data: SchemaObject = { type: 'array', items: { type: 'string' } };
+    const { models } = extractSchemas({
+      Root: components.Root!,
+      Base: components.Base!,
+      Wrap: { allOf: [nullOf(baseRef), { type: 'object', properties: { data } }] },
+    });
+    expect(models.find((m) => m.name === 'Wrap')?.fields.map((f) => `${f.name}${f.required ? '' : '?'}`)).toEqual([
+      'root',
+      'id',
+      'data?',
+    ]);
+  });
+
   it('schemaToTypeRef, mintedInlineNameEntries and the field extractor agree that a oneOf member mints the merged model', () => {
     const refPlusUnion: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, union] };
     const unionPlusLimits: SchemaObject = { allOf: [union, { maxProperties: 3 }] };

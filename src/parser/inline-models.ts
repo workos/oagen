@@ -13,6 +13,7 @@ import {
   markComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
+  nullableUnionBranch,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -937,11 +938,15 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
 /**
  * Every property the object described by `schema` exposes, by name: its own
  * `properties`, those of its `allOf` members (following a member's `$ref`
- * into `schemas` when given, as `extractAllOfModel` does), and those of
- * inline `oneOf`/`anyOf` variants, whose fields the model extractors flatten
- * in; the first definition of a name wins. This is the sibling set
- * `elementContextName` decides from; the TypeRef builder and every extractor
- * derive it through this one function so they agree.
+ * into `schemas` when given, as `extractAllOfModel` does), those of a
+ * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
+ * member it wraps (`nullableUnionBranch`, the definition the model walks
+ * resolve a member by, so a nullable `$ref` member's component is followed
+ * here as `mergeAllOfMembers` and `readComponentAllOfMember` follow it), and
+ * those of every other inline `oneOf`/`anyOf` variant, whose fields the
+ * model extractors flatten in; the first definition of a name wins. This is
+ * the sibling set `elementContextName` decides from; the TypeRef builder and
+ * every extractor derive it through this one function so they agree.
  */
 export function collectProperties(
   schema: SchemaObject,
@@ -960,7 +965,9 @@ export function collectProperties(
       if (value && !properties.has(key)) properties.set(key, value);
     }
     for (const sub of s.allOf ?? []) visit(sub, true);
-    for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false);
+    const branch = nullableUnionBranch(s);
+    if (branch) visit(branch, followRef);
+    else for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false);
   };
   visit(schema, false);
   return properties;
@@ -1770,9 +1777,22 @@ export function mergeAllOfMembers(
     }
     if (s.required && !onBranch) required.push(...s.required);
     for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);
-    // An inline union is flattened; one a `$ref` member's component carries
-    // belongs to that component's model.
-    if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
+    // A nullable union wrapper — one non-null variant beside `null`, decided
+    // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
+    // collapses by, which `readComponentAllOfMember` reads a component's
+    // member through and the envelope collector reads every member through
+    // (`resolveBareSchema`) — is that variant, applying as the member does:
+    // an instance that is not null is the variant, and beside an object
+    // member it is never null. So the variant is read in the member's own
+    // capacity — its `$ref` followed, its `required` read, its properties
+    // always-applying — wherever the member sits, a `$ref` member's
+    // component included (workos/oagen#308: read as a branch, `Base`'s
+    // `has_more` ended the iteration but was missing from the model). Any
+    // other inline union is flattened; one a `$ref` member's component
+    // carries belongs to that component's model.
+    const branch = nullableUnionBranch(s);
+    if (branch) visit(branch, origin, onBranch);
+    else if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
   };
   visit(schema, null, false);
   const properties: MergedProperty[] = [...declared.values()].map(({ name, unconditional, conditional }) =>

@@ -3409,19 +3409,30 @@ type AllOfDiscriminator = { property: string; mapping: Record<string, string> };
 
 /**
  * Read one member of a component's `allOf` into `ledger` and `required`,
- * each declaration with its provenance (`declareProperty`). A `$ref` member
- * is resolved to its component. An `allOf` member — a component composed
- * with `allOf`, or an inline wrapper — is read by `readComponentAllOf`, so a
- * declaration it makes under a `oneOf`/`anyOf` variant stays branch-only
- * however deep it sits; its own discriminator, if any, is its own model's
- * and is not returned (the model reading it carries the base fields only).
- * A `oneOf`/`anyOf` member whose variants pin one property to distinct
- * consts is a dispatcher (`detectAllOfVariantDiscriminator`): its variants'
- * properties are not read, and the discriminator is returned; otherwise
- * every variant's properties are read as branch-only, and its `required`
- * is not read, since its properties are present only on that branch. Any
- * other member contributes its `properties` as always-applying and its
- * `required`. Shared by `extractAllOfModel` and the dispatcher base of
+ * each declaration with its provenance (`declareProperty`). The member is
+ * read as the schema it applies: a `$ref` as its component, and a nullable
+ * union wrapper — one non-null variant beside `null`, decided by
+ * `nullableUnionBranch`, the definition `unwrapNullableSchema` collapses by,
+ * which `mergeAllOfMembers` reads an inline member through and the envelope
+ * collector reads every member through (`resolveBareSchema`) — as that
+ * variant, however the two alternate: `{ oneOf: [{ $ref: Base }, { type:
+ * 'null' }] }` applies `Base` whole, since an instance that is not null is
+ * a `Base` and beside an object member it is never null (workos/oagen#308:
+ * the member was read as a union, so `Base`'s `has_more` ended the
+ * operation's iteration but was missing from the model). A component met
+ * again on the chain declares nothing more. An `allOf` member — a component
+ * composed with `allOf`, or an inline wrapper — is read by
+ * `readComponentAllOf`, so a declaration it makes under a `oneOf`/`anyOf`
+ * variant stays branch-only however deep it sits; its own discriminator, if
+ * any, is its own model's and is not returned (the model reading it carries
+ * the base fields only). A `oneOf`/`anyOf` member whose variants pin one
+ * property to distinct consts is a dispatcher
+ * (`detectAllOfVariantDiscriminator`): its variants' properties are not
+ * read, and the discriminator is returned; otherwise every variant's
+ * properties are read as branch-only, and its `required` is not read, since
+ * its properties are present only on that branch. Any other member
+ * contributes its `properties` as always-applying and its `required`.
+ * Shared by `extractAllOfModel` and the dispatcher base of
  * `extractDiscriminatedAllOfVariantModels`, so the two read a member alike.
  */
 function readComponentAllOfMember(
@@ -3432,12 +3443,22 @@ function readComponentAllOfMember(
   required: Set<string>,
   seen: Set<SchemaObject>,
 ): AllOfDiscriminator | undefined {
-  // Resolve $ref sub-schemas by looking up the referenced component schema
   let resolved = member;
-  if (member.$ref && schemas) {
-    const segments = member.$ref.split('/');
-    const refName = segments[segments.length - 1];
-    if (refName && Object.hasOwn(schemas, refName)) resolved = schemas[refName]!;
+  const chain = new Set<SchemaObject>();
+  for (;;) {
+    if (resolved.$ref) {
+      const segments = resolved.$ref.split('/');
+      const refName = segments[segments.length - 1];
+      if (!schemas || !refName || !Object.hasOwn(schemas, refName)) break;
+      const target = schemas[refName]!;
+      if (seen.has(target) || chain.has(target)) return undefined;
+      chain.add(target);
+      resolved = target;
+      continue;
+    }
+    const branch = nullableUnionBranch(resolved);
+    if (!branch) break;
+    resolved = branch;
   }
   if (resolved.allOf) {
     readComponentAllOf(name, resolved, schemas, ledger, required, seen);

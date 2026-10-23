@@ -656,11 +656,12 @@ export interface PaginationMeta {
    * `PaginationEndOfIteration`). Detected from a recognized list envelope
    * when it carries an obvious field — a boolean `has_more`/`hasMore`, an
    * integer `total_pages`/`totalPages`, or an integer `total`/`total_count` —
-   * at the top level or one level down inside a companion object
-   * (`pagination.totalPages`), and the same way from the body an explicit
-   * `dataPath` keeps as a wrapper — a component the response is a `$ref` to,
-   * or an inline body detection did not recognize — beside the array the
-   * path names; a `hasMore` field is preferred over a
+   * beside the array a nested `dataPath` names (`result.total_pages`), at
+   * the top level, or one level down inside a pagination companion object
+   * (`pagination.totalPages`), in that order, and the same way from the body
+   * an explicit `dataPath` keeps as a wrapper — a component the response is
+   * a `$ref` to, or an inline body detection did not recognize; a `hasMore`
+   * field is preferred over a
    * `totalPages` one, which is preferred over a count. The operation's
    * `x-pagination` extension or its `operationHints` entry can set it
    * explicitly. Absent when nothing recognizable is declared; an emitter then
