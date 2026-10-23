@@ -8,7 +8,7 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
+import { classifyInlineSchema, resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -349,13 +349,24 @@ function isNumeric(schema: SchemaObject): boolean {
 }
 
 /**
- * The schema under every `$ref` and nullable wrapper: a `$ref` is followed
- * to its component, a nullable wrapper — an OAS 3.1 type list naming
- * `'null'`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
- * variant — is stripped by `unwrapNullableSchema`, the one definition the
- * model side unwraps by, and the two alternate until the schema is neither,
- * so `{ oneOf: [{ $ref: 'Tags' }, { type: 'null' }] }` with `Tags: { type:
- * ['array', 'null'], items }` reaches the array. A `$ref` met a second time
+ * The schema under every `$ref`, nullable wrapper and lone `allOf` member:
+ * a `$ref` is followed to its component; a nullable wrapper — an OAS 3.1
+ * type list naming `'null'`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf`
+ * with one non-null variant — is stripped by `unwrapNullableSchema`, the
+ * one definition the model side unwraps by; and an `allOf` with one member
+ * that is what types the schema (`classifyInlineSchema`: a `$ref` member,
+ * or an inline member with a type of its own — not an `allOf` of bare
+ * limits beside the schema's own `type`) is read as that member, as
+ * `schemaToTypeRef` types it (`readInlineAllOf`), so `has_more: { allOf:
+ * [{ $ref: Flag }], description }` with `Flag: { type: boolean }` is a
+ * boolean here as it is in the IR. The three alternate until the schema is
+ * none of them, so `{ oneOf: [{ $ref: 'Tags' }, { type: 'null' }] }` with
+ * `Tags: { type: ['array', 'null'], items }` reaches the array. Sibling
+ * `properties` are folded into the `allOf` by the unwrap
+ * (`foldSiblingProperties`), so a member with properties beside it is
+ * never alone, and an `allOf` of several members is left as written for
+ * the readers that merge them (`objectProperties`,
+ * `collectEnvelopeProperties`). A `$ref` met a second time
  * (`Flag: { oneOf: [{ $ref: Flag }, { type: 'null' }] }`) ends the walk on
  * the reference instead of looping on it, as `resolveSchemaKeyword` and
  * `objectProperties` stop; so does a `$ref` with no component map or to no
@@ -375,7 +386,9 @@ export function resolveBareSchema(
     return resolved ? resolveBareSchema(resolved, componentSchemas, seen) : schema;
   }
   const bare = unwrapNullableSchema(schema);
-  return bare.$ref ? resolveBareSchema(bare, componentSchemas, seen) : bare;
+  if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen);
+  const lone = bare.allOf?.length === 1 && classifyInlineSchema(bare) === 'allOf' ? bare.allOf[0] : undefined;
+  return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
 }
 
 function isNullSchema(schema: SchemaObject): boolean {
