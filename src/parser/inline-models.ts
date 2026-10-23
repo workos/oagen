@@ -5,6 +5,8 @@ import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   classifyInlineSchema,
+  componentPropertyLedger,
+  declaredComponentProperty,
   nonObjectVariantContexts,
   constraintsEntry,
   deprecatedEntry,
@@ -118,7 +120,7 @@ export function mintedInlineNameEntries(
   };
   if (kind === 'allOf' && s.allOf) {
     // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
-    const reading = readInlineAllOf(s.allOf);
+    const reading = readInlineAllOf(s.allOf, s);
     if (reading === 'unwrapped') return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved);
     return reading === 'merged' ? modelName() : [];
   }
@@ -939,31 +941,35 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
  * `properties`, those of its `allOf` members (following a member's `$ref`
  * into `schemas` when given, as `extractAllOfModel` does), and those of
  * inline `oneOf`/`anyOf` variants, whose fields the model extractors flatten
- * in; the first definition of a name wins. This is the sibling set
- * `elementContextName` decides from; the TypeRef builder and every extractor
- * derive it through this one function so they agree.
+ * in — in the order first declared, each name with the declaration
+ * `declareProperty`'s precedence picks: the first always-applying one, else
+ * the first variant's. This is the sibling set `elementContextName` decides
+ * from; the TypeRef builder and every extractor derive it through this one
+ * function so they agree.
  */
 export function collectProperties(
   schema: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): Map<string, SchemaObject> {
-  const properties = new Map<string, SchemaObject>();
+  const ledger = new Map<string, PropertyDeclarations>();
   const seen = new Set<SchemaObject>();
-  const visit = (s: SchemaObject | undefined, followRef: boolean): void => {
+  const visit = (s: SchemaObject | undefined, followRef: boolean, onBranch: boolean): void => {
     if (!s || seen.has(s)) return;
     seen.add(s);
     if (s.$ref) {
-      if (followRef && schemas) visit(schemas[s.$ref.split('/').pop() ?? ''], true);
+      if (followRef && schemas) visit(schemas[s.$ref.split('/').pop() ?? ''], true, onBranch);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value && !properties.has(key)) properties.set(key, value);
+      if (value) declareProperty(ledger, key, value, null, onBranch);
     }
-    for (const sub of s.allOf ?? []) visit(sub, true);
-    for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false);
+    for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
+    for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false, true);
   };
-  visit(schema, false);
-  return properties;
+  visit(schema, false, false);
+  return new Map(
+    [...ledger.values()].map((entry) => [entry.name, entry.unconditional?.schema ?? entry.conditional[0]!]),
+  );
 }
 
 /**
@@ -986,13 +992,24 @@ export function extractInlineModelsFromSchemas(
     // The same sibling set `extractModel` / `extractAllOfModel` type the
     // component's fields from, `$ref`'d allOf members included.
     const siblings = collectProperties(schema, schemas);
+    // The declaration each field is typed from (`componentPropertyLedger`,
+    // the ledger `extractModel`/`extractAllOfModel` build the fields from).
+    const ledger = componentPropertyLedger(parentName, schema, schemas);
     // One field at a time — the inline `allOf` members' properties first,
     // then the schema's own, in the order `extractInlineModelsFromProperties`
     // walks them — so the models each field produced are known (`groups`)
     // and the merge pass can rename one by the field that references it.
     // Every call sees the same siblings, reserved names and results list, so
     // the names are exactly those one call over the whole schema would mint.
+    // Only the declaration the field is typed from mints here: one another
+    // inline member outranks (a branch's beside an always-applying one, the
+    // second of two members declaring one name) mints nothing, and one a
+    // `$ref` member outranks is built by the nested-model pass from that
+    // component's declaration — so the models under a field always have the
+    // shape its type was built from.
     for (const [fieldName, fieldSchema] of inlineProperties(schema)) {
+      const entry = ledger.get(fieldName);
+      if (!entry || declaredComponentProperty(entry) !== fieldSchema) continue;
       const before = inlineModels.length;
       extractInlineModelsFromProperties(
         { properties: { [fieldName]: fieldSchema } },
@@ -1334,7 +1351,7 @@ export function extractInlineModelsFromProperties(
     //  - `'reference'` — `$ref` members only: a plain reference to the first
     //    component, nothing to materialize.
     if (kind === 'allOf' && fieldSchema.allOf) {
-      const reading = readInlineAllOf(fieldSchema.allOf);
+      const reading = readInlineAllOf(fieldSchema.allOf, fieldSchema);
       if (reading === 'merged') {
         const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
         materializeMergedAllOf(modelName, fieldSchema, results, componentSchemas);
@@ -1615,13 +1632,26 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     rather than left for the reference to dangle on.
  *   - `'unwrapped'`: a single non-`$ref` member, typed and extracted as the
  *     schema itself (`unwrappedAllOfMember`).
- *   - `'reference'`: `$ref` members with nothing inline beside them — the
- *     first component is the type, nothing is minted.
+ *   - `'reference'`: a single `$ref` member with nothing beside it that adds
+ *     to the component — a `description`, limits — is that component, and
+ *     nothing is minted. A second `$ref` member, or a `required` list
+ *     (`wrapper`'s own, or a member's) adds to it: the schema is then the
+ *     merged model, which carries every component's properties and every
+ *     `required` (workos/oagen#359 review: `allOf: [{ $ref: Pet },
+ *     { $ref: Owner }]` was `Pet`, `Owner`'s fields gone; `allOf: [{ $ref:
+ *     Pet }], required: [name]` was `Pet` with `name` optional).
  *
- * `allOfTypesSchema` admits no other shape as an `allOf`.
+ * `allOfTypesSchema` admits no other shape as an `allOf`. `wrapper` is the
+ * schema the `allOf` is written on, for its own `required`; a site reading
+ * bare members passes none.
  */
-export function readInlineAllOf(members: readonly SchemaObject[]): InlineAllOfReading {
-  if (members.some((m) => m.$ref)) return members.some(isInlineAllOfMember) ? 'merged' : 'reference';
+export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: SchemaObject): InlineAllOfReading {
+  const refs = members.filter((m) => m.$ref).length;
+  if (refs > 0) {
+    if (members.some(isInlineAllOfMember) || refs > 1) return 'merged';
+    const addsRequired = [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0);
+    return addsRequired ? 'merged' : 'reference';
+  }
   if (members.length === 1) return 'unwrapped';
   return members.some(declaresInlineProperties) ? 'merged' : 'reference';
 }
