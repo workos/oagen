@@ -3102,7 +3102,7 @@ export interface SelectedRequestBodyContent {
  * `application/x-www-form-urlencoded` — each only with a schema — then
  * `application/octet-stream`, then `text/plain`. Within one tier the first
  * matching key in document order wins. `undefined` when the body declares no
- * content, or none of its media types is read; `warnDroppedRequestBody`
+ * content, or none of its media types is read; `warnUnreadRequestBody`
  * reports the latter. Every pass that asks what the body is — the body
  * extractor, the body-owned query names, the const prefixes, the body
  * parameter groups, a webhook payload — reads it through this one pick.
