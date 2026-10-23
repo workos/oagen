@@ -38,12 +38,18 @@ import {
  * passes run: the component enums, and the inline enums lifted from the
  * component schemas' own fields, union variants and array items — which no
  * inline model may keep, whatever its shape. A name minted here is added to
- * `reserved`, so both passes, and every mint within one, agree.
+ * `reserved`, so both passes, and every mint within one, agree, and to
+ * `minted`, so a later pass can tell a copy whose fields reference a model
+ * an earlier pass renamed — a parent whose child left a shared name — from
+ * one that merely shares a name (`settleSharedNames`). Absent, `minted` is
+ * created on first use, so a caller that gives none still gets it within a
+ * pass; the parser hands one set to every pass.
  */
 export interface InlineModelNaming {
   bundles: InlineModelBundle[];
   reserved: Set<string>;
   enums: ReadonlySet<string>;
+  minted?: Set<string>;
 }
 
 /**
@@ -58,17 +64,39 @@ export interface InlineModelNaming {
  * or a webhook's, read after the fields are settled — is created under the
  * settled name. Read once before the operations (`settleFieldInlineModels`)
  * and again, with the copies made since, before the merges.
+ *
+ * `models` also holds the models the schema pass lifted from the same
+ * inline schemas (`extractSchemas`: a component field's object, array items
+ * or union variant, named as the field extractor names them). Such a model
+ * is not a component (`componentNames`) and shares a group model's name
+ * exactly when it was read from that model's schema, so it is the group's
+ * twin: the group's copy folds onto it when the fields are settled, and
+ * from then on the twin's own field references — minted for the same nested
+ * objects the group holds — are the site's. The twin joins the bundle's
+ * `models`, so a rename of one of the group's models is repointed in it as
+ * in the copy, and a copy whose child was renamed still folds onto its
+ * twin. Without `componentNames`, no twin is known, and a direct caller's
+ * groups are bundled with their own models alone.
  */
-export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
+export function fieldInlineModelBundles(
+  groups: FieldInlineModelGroup[],
+  models: Model[],
+  componentNames?: ReadonlySet<string>,
+): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
     const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
+    const twins = componentNames
+      ? fieldModels
+          .map((m) => byName.get(m.name))
+          .filter((m): m is Model => m !== undefined && !componentNames.has(m.name))
+      : [];
     return {
       qualifier: parentName,
       roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
-      models: fieldModels,
+      models: [...fieldModels, ...twins],
       renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
     };
   });
@@ -214,7 +242,24 @@ function keepLargestByName(models: Model[]): Model[] {
  * so when a parent is compared its children are already named: a parent
  * whose child was just renamed no longer looks identical to its twin, or
  * admitted by its component, and keeps its own model, referencing the
- * renamed child.
+ * renamed child. Under a component, that is the rule above (a copy the
+ * owner does not share is qualified). Among the contenders of one flag
+ * without an owner, where the shared name otherwise keeps whichever
+ * definition the pass's own choice settles on (`keepLargestByName`, by
+ * document order), a contender whose fields reference a model this pass or
+ * an earlier one renamed (`naming.minted`; a reference the site itself
+ * minted, never an explicit `$ref` or one lent by another component's
+ * field) is settled the same way as a copy an owner does not share:
+ * clustered by shape, each cluster qualified by its first site, with a note
+ * — its shape is its site's own now, and folding it by name would leave the
+ * renamed child referenced by nothing, or hand every other site the child
+ * the pass had just kept off the shared name. The contenders that follow no
+ * rename are settled by the pass's own choice, as they always were; when
+ * every contender follows one, the first cluster keeps the name as that
+ * choice would keep the first definition. A contender under a name a
+ * rename minted — the leader of a cluster, which the other sites of the
+ * cluster were repointed to — keeps it. The deprecated copies of a live
+ * name are compared with the live contenders that keep the name alone.
  *
  * A contender without a site — none the parser produces; a direct caller's —
  * cannot be renamed and is left under the shared name, with a warning: the
@@ -242,8 +287,73 @@ function settleSharedNames(
     for (const model of bundle.models) bundleOf.set(model, bundle);
   }
   const flag = (m: Model): string => (m.deprecated ? 'deprecated' : 'live');
+  // Every name the merge passes have minted so far (`renameInlineCopy`),
+  // shared with the passes before and after this one through `naming`.
+  const minted = naming ? (naming.minted ??= new Set<string>()) : new Set<string>();
+  /**
+   * Whether one of `copy`'s own references — a field's or a variant's,
+   * minted by its site: never an explicit `$ref`, never one lent by another
+   * component's field — names a model a merge pass renamed.
+   */
+  const followsRename = (copy: Model): boolean => {
+    let found = false;
+    for (const ref of collectModelTypeRefs(copy)) {
+      walkTypeRef(ref, {
+        model: (r) => {
+          if (inlineRefAdmit(false)(r) && minted.has(r.name)) found = true;
+        },
+      });
+    }
+    return found;
+  };
 
   const folded = new Map<Model, Model>();
+  /**
+   * Move every copy in `clusters` — the copies that must leave `name`,
+   * clustered by shape in document order — off the name: each cluster's
+   * first copy with a site is renamed (`renameInlineCopy`) and leads it,
+   * every other copy of the cluster is repointed onto the leader and folded,
+   * so identical copies share one model under the new name as they would
+   * share the bare name without a clash (`keepLargestByName`). One note per
+   * cluster, saying `why` and how many sites share the model; a copy
+   * without a site is left where it is, with `noSite` as its warning.
+   */
+  const leaveName = (name: string, clusters: ReadonlyMap<string, Model[]>, why: string, noSite: string): void => {
+    for (const cluster of clusters.values()) {
+      let renamed: string | undefined;
+      let leader: Model | undefined;
+      for (const copy of cluster) {
+        const bundle = naming && bundleOf.get(copy);
+        if (!bundle) {
+          console.warn(`[oagen] Warning: Inline model "${name}" ${noSite}`);
+          continue;
+        }
+        if (renamed === undefined || leader === undefined) {
+          renamed = renameInlineCopy(copy, name, bundle, naming);
+          leader = copy;
+          continue;
+        }
+        repointSite(bundle, name, renamed);
+        folded.set(copy, leader);
+      }
+      if (renamed !== undefined) {
+        const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
+        console.warn(
+          `[oagen] Renamed inline model "${name}" → "${renamed}": ${why}${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
+        );
+      }
+    }
+  };
+  /** `copies` clustered by shape (`modelFingerprint`), in their order. */
+  const byShape = (copies: Model[]): Map<string, Model[]> => {
+    const clusters = new Map<string, Model[]>();
+    for (const copy of copies) {
+      const shape = modelFingerprint(copy);
+      clusters.set(shape, [...(clusters.get(shape) ?? []), copy]);
+    }
+    return clusters;
+  };
+
   for (const name of bottomUp(byName)) {
     const group = byName.get(name)!;
     const owner = owners.get(name);
@@ -272,9 +382,33 @@ function settleSharedNames(
     if (owner) {
       nameDeprecated = !!owner.deprecated;
     } else {
-      live = group.filter((m) => !m.deprecated);
-      if (live.length === 0 || live.length === group.length) continue;
-      nameDeprecated = false;
+      nameDeprecated = group.every((m) => m.deprecated);
+      const holders = group.filter((m) => !!m.deprecated === nameDeprecated);
+      // A holder of the name that follows a rename — a parent whose child
+      // left a shared name — is its site's own shape now, and leaves the
+      // name by its site rather than by the pass's choice between twins
+      // (`keepLargestByName`), which would drop it and orphan the child, or
+      // keep it and hand every other site the child the pass kept off the
+      // name. A holder under a name a rename minted is the leader the other
+      // sites of its cluster were repointed to, and keeps it. The twins that
+      // follow no rename are settled as always; when every holder follows
+      // one, the first cluster keeps the name as the pass's choice would
+      // keep the first definition. The copies of the other flag below are
+      // measured against the holders that keep the name alone.
+      const own = holders.filter((m) => !minted.has(m.name) && followsRename(m));
+      const rest = holders.filter((m) => !own.includes(m));
+      const leaving = [...byShape(own).values()];
+      const first = rest.length === 0 ? (leaving.shift() ?? []) : [];
+      if (leaving.length > 0) {
+        leaveName(
+          name,
+          new Map(leaving.map((cluster, i) => [String(i), cluster])),
+          `it references a renamed model and "${name}" keeps another definition`,
+          `references a renamed model, is named like another definition and has no site to be renamed from — keeping the usual definition under the shared name`,
+        );
+      }
+      live = holders.filter((m) => rest.includes(m) || first.includes(m));
+      if (live.length === 0 || holders.length === group.length) continue;
     }
 
     // The copies that agree with the name's flag and that the owner does
@@ -292,32 +426,12 @@ function settleSharedNames(
       const shape = modelFingerprint(copy);
       clashing.set(shape, [...(clashing.get(shape) ?? []), copy]);
     }
-    for (const cluster of clashing.values()) {
-      let renamed: string | undefined;
-      let leader: Model | undefined;
-      for (const copy of cluster) {
-        const bundle = naming && bundleOf.get(copy);
-        if (!bundle) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
-          );
-          continue;
-        }
-        if (renamed === undefined || leader === undefined) {
-          renamed = renameInlineCopy(copy, name, bundle, naming);
-          leader = copy;
-          continue;
-        }
-        repointSite(bundle, name, renamed);
-        folded.set(copy, leader);
-      }
-      if (renamed !== undefined) {
-        const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
-        console.warn(
-          `[oagen] Renamed inline model "${name}" → "${renamed}": its shape differs from component schema "${name}"${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
-        );
-      }
-    }
+    leaveName(
+      name,
+      clashing,
+      `its shape differs from component schema "${name}"`,
+      `has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
+    );
 
     for (const copy of group) {
       if (!!copy.deprecated === nameDeprecated) continue;
@@ -365,12 +479,15 @@ function ownerSharesWith(owner: Model, copy: Model, bundle: InlineModelBundle | 
 
 /**
  * Move `copy` off `name` to a free name qualified by its site
- * (`mintQualifiedName`), reserve it, and repoint exactly the references its
- * site minted (`repointSite`). Returns the new name.
+ * (`mintQualifiedName`), reserve it, record it as minted
+ * (`InlineModelNaming.minted`, so a parent referencing it is told from a
+ * mere namesake), and repoint exactly the references its site minted
+ * (`repointSite`). Returns the new name.
  */
 function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, naming: InlineModelNaming): string {
   const renamed = mintQualifiedName(name, bundle.qualifier, naming.reserved);
   naming.reserved.add(renamed);
+  naming.minted?.add(renamed);
   copy.name = renamed;
   repointSite(bundle, name, renamed);
   return renamed;
