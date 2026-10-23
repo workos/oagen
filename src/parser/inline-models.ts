@@ -1007,54 +1007,58 @@ export function extractInlineModelsFromSchemas(
   if (!schemas) return [];
 
   const inlineModels: Model[] = [];
-
   for (const [schemaName, schema] of Object.entries(schemas)) {
-    const parentName = resolveSchemaName(schemaName);
-    // The same sibling set `extractModel` / `extractAllOfModel` type the
-    // component's fields from, `$ref`'d allOf members included.
-    const siblings = collectProperties(schema, schemas);
-    // The declaration each field is typed from (`componentPropertyLedger`,
-    // the ledger `extractModel`/`extractAllOfModel` build the fields from).
-    const ledger = componentPropertyLedger(parentName, schema, schemas);
-    // One field at a time — the inline `allOf` members' properties first,
-    // then the schema's own, in the order `extractInlineModelsFromProperties`
-    // walks them — so the models each field produced are known (`groups`)
-    // and the merge pass can rename one by the field that references it.
-    // Every call sees the same siblings, reserved names and results list, so
-    // the names are exactly those one call over the whole schema would mint.
-    // Only the declaration the field is typed from mints here: one another
-    // inline member outranks (a branch's beside an always-applying one, the
-    // second of two members declaring one name) mints nothing, and one a
-    // `$ref` member outranks is built by the nested-model pass from that
-    // component's declaration — so the models under a field always have the
-    // shape its type was built from.
-    for (const [fieldName, fieldSchema] of inlineProperties(schema)) {
-      const entry = ledger.get(fieldName);
-      if (!entry || declaredComponentProperty(entry) !== fieldSchema) continue;
-      const before = inlineModels.length;
-      extractInlineModelsFromProperties(
-        { properties: { [fieldName]: fieldSchema } },
-        inlineModels,
-        parentName,
-        schemas,
-        siblings,
-      );
-      groups?.push({ parentName, fieldName, models: inlineModels.slice(before) });
-    }
+    extractComponentFieldModels(schemaName, schema, schemas, inlineModels, groups);
   }
-
   return inlineModels;
 }
 
 /**
- * A schema's inline properties in extraction order: those of its inline
- * `allOf` members (each walked the same way, members first) before its own —
- * the order `extractInlineModelsFromProperties` visits them in, so splitting
- * a schema by field changes nothing about which models are minted, or when.
+ * The inline models the fields of one component schema (`key`) mint, into
+ * `results`: for every field of its model — the declaration
+ * `componentPropertyLedger` chose for it, the component's own, one
+ * inherited through a `$ref` member, or a branch's when no member always
+ * declares the field — everything the field's type reaches (an inline
+ * object, array items, map values, a union's variants, under a nullable
+ * wrapper, at any depth), through the field extractor
+ * (`extractInlineModelsFromProperties`), under the component's name with the
+ * sibling set its fields were typed with. The one path through which the
+ * field pass (`extractInlineModelsFromSchemas`, run by `parseSpec` on every
+ * component) builds a component field's nested models, so a model is built
+ * exactly when a component's field references it — `Puppy.meta`, inherited
+ * from `Dog` and typed `PuppyMeta` under `Puppy`, has its `PuppyMeta`, and
+ * the values of an inherited map their model (workos/oagen#359 review: an
+ * inherited map's values were typed but never built, since the field pass
+ * walked only the inline declarations and the nested-model backstop of
+ * `extractSchemas` follows a reference only into an array or a union). One
+ * field at a time, in field order, so the models each field
+ * produced are known (`groups`) and the merge pass can rename one by the
+ * field that references it. Every call sees the same siblings, reserved
+ * names and results list, so the names are exactly those one call over
+ * the whole schema would mint.
  */
-function* inlineProperties(schema: SchemaObject): Generator<[string, SchemaObject]> {
-  for (const sub of schema.allOf ?? []) if (sub.properties) yield* inlineProperties(sub);
-  for (const [name, property] of Object.entries(schema.properties ?? {})) if (property) yield [name, property];
+export function extractComponentFieldModels(
+  key: string,
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  results: Model[],
+  groups?: FieldInlineModelGroup[],
+): void {
+  const parentName = resolveSchemaName(key);
+  // The same sibling set `extractModel` / `extractAllOfModel` type the
+  // component's fields from, `$ref`'d allOf members included.
+  const siblings = collectProperties(schema, schemas);
+  for (const entry of componentPropertyLedger(parentName, schema, schemas).values()) {
+    const before = results.length;
+    extractInlineModelsFromProperties(
+      { properties: { [entry.name]: declaredComponentProperty(entry) } },
+      results,
+      parentName,
+      schemas,
+      siblings,
+    );
+    groups?.push({ parentName, fieldName: entry.name, models: results.slice(before) });
+  }
 }
 
 /**
