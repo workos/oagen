@@ -278,5 +278,12 @@ export function classifyParamChange(kind: ParamChange['kind'], paramName: string
       // two paired parameters, and the wire reads it the same, so this is
       // additive at the IR layer like `param-format-changed`.
       return { kind, paramName, classification: 'additive' };
+    case 'param-content-type-changed':
+      // See `parameterContentTypeShift`: the media type decides how the value
+      // is serialized (JSON-encoded under `application/json`, by style and
+      // explode under `schema`), so a caller encoding it the old way sends a
+      // value the API no longer reads — breaking in both directions, like a
+      // type change.
+      return { kind, paramName, classification: 'breaking' };
   }
 }

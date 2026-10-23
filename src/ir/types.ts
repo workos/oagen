@@ -793,6 +793,20 @@ export interface Parameter {
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
   /**
+   * The media type the parameter's value is serialized in: the `content`
+   * key its schema was read from, as written (`application/json;
+   * charset=utf-8`). Present exactly when the parameter is declared with
+   * `content` and the map is read (see `type`) — a schema-less `text/plain`
+   * entry included; absent for a `schema` parameter, and for a `content`
+   * map none of whose media types is read, whose string value is sent as
+   * written. An emitter that serializes parameters by `style` and `explode`
+   * must instead serialize such a value in this media type: JSON-encode an
+   * `application/json` or `+json` value, send a `text/plain` value as text.
+   * `oagen diff` compares it by essence and reports a change as a breaking
+   * `param-content-type-changed`.
+   */
+  contentType?: string;
+  /**
    * Validation keywords from the parameter's schema. When that schema is a
    * `$ref`, the target's keywords are merged underneath the parameter's own
    * — the per-value fallback `default` and `example` use — so a parameter
@@ -1607,14 +1621,17 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
 
 /**
  * Every type reference an operation carries: its parameters' types in every
- * location (the query parameters the body owns included), its request body,
+ * location (the query parameters the body owns included), its request body
+ * and the body of every other request media type (`collectRequestBodyTypes`),
  * its primary response and every other success body, every error body, the
  * pagination iterator's item type and envelope fields, every response header
  * (`collectResponseHeaders`) and every secondary, fallback and range body
  * (`collectResponseBodyTypes`). The one list for a pass that reserves or
- * collects names across an operation's references, as
- * `collectWebhookTypeRefs` is for a webhook's, so a field added to
- * `Operation` later has one place to join. When `successResponses` exists
+ * collects names across an operation's references — the enum names held
+ * before the deferred schemas are named, the names a merge pass must mint
+ * around, the names a webhook must step around — as `collectWebhookTypeRefs`
+ * is for a webhook's, so a field added to `Operation` later has one place to
+ * join and every reader gets the same list. When `successResponses` exists
  * the primary entry's `type` is the very reference `response` carries, so
  * that reference appears twice; a reader that only collects names is
  * unaffected.
@@ -1631,6 +1648,7 @@ export function collectOperationTypeRefs(op: Operation): TypeRef[] {
     refs.push(param.type);
   }
   if (op.requestBody) refs.push(op.requestBody);
+  for (const { type } of collectRequestBodyTypes(op)) refs.push(type);
   refs.push(op.response);
   for (const entry of op.successResponses ?? []) refs.push(entry.type);
   for (const error of op.errors) if (error.type) refs.push(error.type);
