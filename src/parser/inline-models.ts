@@ -1850,7 +1850,7 @@ export function declaresType(schema: SchemaObject): boolean {
  * The always-applying declaration of one property once a second arrives, in
  * document order — the one precedence rule for a name two members declare,
  * applied by `declareProperty` for every `allOf` merge and by the envelope
- * collector for the properties it reads (`collectEnvelopeProperties`), so a
+ * collector for the properties it reads (`collectObjectProperties`), so a
  * model's field and a list's stop field are typed from the same declaration.
  * The first declaration that declares a type (`declaresType`) types the
  * property, whatever comes after it; a declaration that declares none never
@@ -1921,6 +1921,13 @@ export function declareProperty(
  * (`componentAllOfMembers`) — tagged with that component's model name, so the merged
  * model can type them exactly as the component's own model does; a ref no
  * component answers contributes nothing and is listed in `unresolvedRefs`.
+ * The component tagged is the one whose own model carries the field under
+ * its name: an `allOf` component that inherits it stays the origin of
+ * everything reached inside its chain (`DogMeta`), while a bare alias
+ * (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref: Base
+ * }, { type: 'null' }] }`) or a chain of either declares nothing of its own
+ * and builds no model, so a reference met inside one starts its own origin
+ * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for a `oneOf`/`anyOf` it carries, those of every
  * variant that declares properties inline — read through the variant's own
@@ -1985,9 +1992,19 @@ export function mergeAllOfMembers(
       const refs = target ? resolvedRefs : unresolvedRefs;
       if (!refs.includes(s.$ref)) refs.push(s.$ref);
       if (!target) return;
-      // A ref inside a component's own allOf chain stays that component's;
-      // a top-level ref member is the component the properties belong to.
-      visit(target, origin ?? { name: resolveSchemaName(rawName), schema: target }, onBranch);
+      // The component the properties belong to is the one whose own model
+      // carries them under its name. A ref inside an `allOf` component's own
+      // chain stays that component's: its model inherits through its
+      // members, nullable ones included, and types their fields under its
+      // own name (`DogMeta`). Any other component met on the way declares
+      // nothing of its own that this reference adds to — a bare alias
+      // (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref:
+      // Base }, { type: 'null' }] }`), a chain of either — and builds no
+      // model for the fields, so the reference starts its own origin, as a
+      // top-level ref member does (workos/oagen#308 round 4: `HolderValue.meta`
+      // named `AliasMeta`, which nothing built, where `BaseMeta` exists).
+      const owner = origin?.schema.allOf ? origin : { name: resolveSchemaName(rawName), schema: target };
+      visit(target, owner, onBranch);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
