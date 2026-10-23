@@ -21,7 +21,7 @@ import type {
   ServerEntry,
 } from '../ir/types.js';
 import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
-import { serverListsEqual } from '../ir/server-url.js';
+import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -3795,8 +3795,18 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * already reads both as undeclared), or the winning list restates the
  * document's. Precedence is applied before the comparison, so an operation
  * that restates the document's servers under a Path Item that diverges
- * inherits, not the Path Item's. A document without `servers` compares as an
- * empty list, so any usable list at either level is kept.
+ * inherits, not the Path Item's.
+ *
+ * OpenAPI's default server is one thing however it is spelled (#291): a list
+ * that means it — no servers, `servers: []`, or nothing but `/` without
+ * variables, by `isDefaultServerList` — under a document whose list means it
+ * too is inherited as well. So an operation or Path Item that writes `/` out
+ * under a document that declares nothing inherits, the entry's description
+ * included, since the default server has none. Any other list is compared
+ * entry for entry as written, `/` entries included, because position decides
+ * the default host: `/` under a document that names a host is kept, a named
+ * host under a document that writes `/` out is kept, and a named host alone
+ * under a document that lists `/` before that host is kept.
  */
 function operationServers(
   own: ServerEntry[] | undefined,
@@ -3805,7 +3815,8 @@ function operationServers(
 ): ServerEntry[] | undefined {
   const effective = own ?? pathLevel;
   if (!effective) return undefined;
-  return serverListsEqual(effective, documentServers ?? []) ? undefined : effective;
+  if (serverListsEqual(effective, documentServers ?? [])) return undefined;
+  return isDefaultServerList(effective) && isDefaultServerList(documentServers) ? undefined : effective;
 }
 
 /**

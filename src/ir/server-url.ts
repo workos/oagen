@@ -109,3 +109,68 @@ function serverVariablesEqual(a: ServerVariable, b: ServerVariable): boolean {
   const bEnum = b.enum ?? [];
   return aEnum.length === bEnum.length && aEnum.every((value, i) => value === bEnum[i]);
 }
+
+/** The server OpenAPI gives a document that declares none: a single entry at `/`. */
+const DEFAULT_SERVER_URL = '/';
+
+/**
+ * Whether a server entry is OpenAPI's default server: its `url` is `/` and
+ * it declares no variables (`variables` absent or empty, by own key). Its
+ * `description` does not count: the default server has none, and a
+ * description changes nothing about where a request goes. An entry at `/`
+ * that declares a variable is a knob a caller can set, and a template that
+ * merely resolves to `/` is a template; neither is the default server.
+ */
+export function isDefaultServerEntry(server: ServerEntry): boolean {
+  return server.url === DEFAULT_SERVER_URL && Object.keys(server.variables ?? {}).length === 0;
+}
+
+/**
+ * Whether a server list means OpenAPI's default server. OpenAPI gives a
+ * document with no `servers`, or `servers: []`, a single server at `/`; a
+ * document that writes that server out declares nothing beyond it, and
+ * neither does one that writes it out twice. So `undefined`, an empty list,
+ * and a list whose every entry is the default by `isDefaultServerEntry` are
+ * all the default. A list with any other entry is not, wherever `/` sits in
+ * it, because position decides the default host.
+ *
+ * The parser asks this of an operation's list and the document's: both at
+ * the default means the operation inherits (`Operation.servers`, #291). The
+ * differ asks it to tell the `/` a document is only implied to have, which
+ * is never reported as added or removed, from one it lists beside another
+ * server, which is.
+ */
+export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
+  return !servers || servers.every(isDefaultServerEntry);
+}
+
+/**
+ * The servers a document is served from: its list as written (the same
+ * array, not a copy) when it declares anything beyond the default, else
+ * OpenAPI's default server, a single `{ url: '/' }`. A document without
+ * `servers`, one with `servers: []`, one whose only server is `/`, and one
+ * that writes `/` out twice all come out as `[{ url: '/' }]` (a description
+ * on the entry is not carried: the default server has none), while
+ * `[/, host]` stays `[/, host]`, because there `/` is a server the document
+ * lists, not one it is implied to have. The differ matches servers on this,
+ * so the three spellings of the default pair with each other and with a `/`
+ * listed beside a host.
+ */
+export function serversOrDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
+  return servers && !isDefaultServerList(servers) ? servers : [{ url: DEFAULT_SERVER_URL }];
+}
+
+/**
+ * A document's default address beyond OpenAPI's default: `''` when
+ * `baseUrl` is `''` (the parser's value for a document with no server) or
+ * `/` (the resolved address of the default server, written out or not),
+ * else `baseUrl` as given. The differ compares `base-url-changed` on this,
+ * so the three spellings of the default share one address and a document
+ * whose first server merely resolves to `/` has not moved from it. Any other
+ * `baseUrl` — a host, or `/v1` — is compared as written, even with no
+ * `servers` beside it (an IR built by hand, which the parser never
+ * produces).
+ */
+export function baseUrlBeyondDefault(baseUrl: string): string {
+  return baseUrl === DEFAULT_SERVER_URL ? '' : baseUrl;
+}

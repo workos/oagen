@@ -355,6 +355,8 @@ export interface OperationModified {
    * on both sides is unchanged: the operation inherits twice, and a moved
    * document is the document-level diff's to report. So a document that moves
    * to where an operation already pointed is not a change to that operation.
+   * OpenAPI's default server is one list however it is spelled (#291): no
+   * servers and `/` alone without variables are served from the same place.
    */
   serversChanged: boolean;
   /**
@@ -656,22 +658,30 @@ export interface ParamChange {
  * requests somewhere else. Reported once per diff whatever moved it: a
  * changed `servers[0]` template (also a `server-removed` plus a
  * `server-added`), a changed variable default (also a `server-modified`), a
- * reordered list, or a `servers` list that appeared or disappeared.
+ * reordered list, or a `servers` list that appeared or disappeared. The
+ * comparison reads `''` and `/` as one address — OpenAPI's default, whether
+ * the document declares no server, writes `/` out, or resolves its first
+ * server to `/` — so nothing is reported between those (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** `''` when the old document declared no server. */
+  /** `''` when the old document declared no server; `/` when its first server resolved to `/`, which means the same. */
   oldBaseUrl: string;
-  /** `''` when the new document declares no server. */
+  /** `''` when the new document declares no server; `/` when its first server resolves to `/`, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
-   * document declared no server: every existing caller had to name a host
-   * themselves and still can.
+   * document's default address was `''` or `/`: every existing caller had to
+   * name a host themselves and still can.
    */
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * A server the new document lists and the old did not. The `/` a document
+ * is only implied to have — its list means OpenAPI's default — is never
+ * reported here; `/` listed beside another server is, like any other (#291).
+ */
 export interface ServerAdded {
   kind: 'server-added';
   /** The URL template as written in the document, placeholders included. */
@@ -679,6 +689,11 @@ export interface ServerAdded {
   classification: 'additive';
 }
 
+/**
+ * A server the old document listed and the new does not. The `/` a document
+ * is only implied to have is never reported here; `/` listed beside another
+ * server is, like any other (#291).
+ */
 export interface ServerRemoved {
   kind: 'server-removed';
   /** The URL template as written in the document, placeholders included. */

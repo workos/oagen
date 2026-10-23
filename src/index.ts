@@ -104,7 +104,14 @@ export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 
 // Server URL templates and server-list equality
 export type { ResolvedServerUrl } from './ir/server-url.js';
-export { resolveServerUrl, serverListsEqual } from './ir/server-url.js';
+export {
+  baseUrlBeyondDefault,
+  isDefaultServerEntry,
+  isDefaultServerList,
+  resolveServerUrl,
+  serverListsEqual,
+  serversOrDefault,
+} from './ir/server-url.js';
 
 // Errors
 export {
