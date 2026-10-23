@@ -194,6 +194,22 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
     if (c.extensionsChanged) {
       out.push(extended({ node: 'operation', serviceName: c.serviceName, operationName: c.operationName }, c));
     }
+    // A list envelope's field, which no model carries, named by the
+    // operation it belongs to.
+    for (const fc of c.envelopeFieldChanges ?? []) {
+      if (fc.kind !== 'field-extensions-changed') continue;
+      out.push(
+        extended(
+          {
+            node: 'envelope-field',
+            serviceName: c.serviceName,
+            operationName: c.operationName,
+            fieldName: fc.fieldName,
+          },
+          fc,
+        ),
+      );
+    }
     if (c.securityChanged) {
       out.push(
         shiftedOn({ node: 'operation', serviceName: c.serviceName, operationName: c.operationName }, c, 'caller'),
