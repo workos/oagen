@@ -418,8 +418,20 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       property: 'event',
       mapping: { created: 'DispatchCreated', deleted: 'DispatchDeleted' },
     });
-    expect(fieldsOf(spec, 'DispatchCreated')).toEqual(['id: string', 'event?: "created"', 'c?: string']);
-    expect(fieldsOf(spec, 'DispatchDeleted')).toEqual(['id: string', 'event?: "deleted"', 'd?: string']);
+    // The base is read as the dispatcher model's is (`readComponentAllOfMember`):
+    // a `$ref` base member's fields reach every variant too.
+    expect(fieldsOf(spec, 'DispatchCreated')).toEqual([
+      'id: string',
+      'name: string',
+      'event?: "created"',
+      'c?: string',
+    ]);
+    expect(fieldsOf(spec, 'DispatchDeleted')).toEqual([
+      'id: string',
+      'name: string',
+      'event?: "deleted"',
+      'd?: string',
+    ]);
     expect(fieldsOf(spec, 'Flat')).toEqual(['id: string', 'name: string', 'c?: string', 'd?: string']);
     expect(warnings).toEqual([]);
     expectSound(spec, ['Pet', 'Dispatch', 'Flat']);
@@ -537,6 +549,149 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       expect(lone.inlineModels.map((m) => `${m.name} { ${m.fields.map((f) => f.name).join(', ')} }`)).toEqual([
         'GetThingResponse { a }',
       ]);
+    });
+  });
+
+  describe('declaration precedence at every depth (review round 1)', () => {
+    /** `tag` declared on a branch only, under a nested `allOf` on a branch only, by an enum member, and by a plain string member. */
+    const branch: SchemaObject = { oneOf: [obj({ tag: int }), obj({ other: str })] };
+    const nestedBranch: SchemaObject = { allOf: [branch] };
+    const enumMember = obj({ tag: { type: 'string', enum: ['a', 'b'] } });
+    const stringMember = obj({ tag: str });
+    const tagOf = (spec: ApiSpec, name: string): string | undefined =>
+      fieldsOf(spec, name).find((f) => f.startsWith('tag'));
+
+    it('the first always-applying declaration wins, over a branch before it and a member after it', async () => {
+      const { spec, warnings } = await parse(
+        'three-members',
+        specDoc({}, { Comp: { allOf: [branch, enumMember, stringMember] } }),
+      );
+      // Before: the string member replaced the enum, since the branch's entry stayed replaceable.
+      expect(fieldsOf(spec, 'Comp')).toEqual(['tag?: CompTag', 'other?: string']);
+      expect(spec.enums.find((e) => e.name === 'CompTag')?.values.map((v) => v.value)).toEqual(['a', 'b']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Comp']);
+    });
+
+    it("a nested union's branch literal does not beat a later outer member's string", async () => {
+      const { spec, warnings } = await parse(
+        'nested-literal',
+        specDoc(
+          {},
+          {
+            Comp: {
+              allOf: [{ allOf: [{ oneOf: [obj({ tag: { const: 'a' } }), obj({ other: str })] }] }, obj({ tag: str })],
+            },
+          },
+        ),
+      );
+      // `tag` is the string every instance carries, so a value the other
+      // branch allows is accepted; before, the nested branch's literal won.
+      expect(fieldsOf(spec, 'Comp')).toEqual(['tag?: string', 'other?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Comp']);
+    });
+
+    it('a branch-only declaration stays branch-only two $ref levels down', async () => {
+      const { spec, warnings } = await parse(
+        'two-levels',
+        specDoc(
+          {},
+          {
+            Inner: { allOf: [{ oneOf: [obj({ x: int }), obj({ y: str })] }] },
+            Mid: { allOf: [ref('Inner')] },
+            Outer: { allOf: [ref('Mid'), obj({ x: str }, { required: ['x'] })] },
+          },
+        ),
+      );
+      expect(fieldsOf(spec, 'Inner')).toEqual(['x?: integer', 'y?: string']);
+      expect(fieldsOf(spec, 'Mid')).toEqual(['x?: integer', 'y?: string']);
+      expect(fieldsOf(spec, 'Outer')).toEqual(['x: string', 'y?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Inner', 'Mid', 'Outer']);
+    });
+
+    it('a property named like an `Object.prototype` member reaches the dispatcher and every variant', async () => {
+      // Built with `Object.fromEntries`, since `{ __proto__: … }` in a literal sets the prototype.
+      const protoProps = Object.fromEntries([
+        ['constructor', str],
+        ['toString', str],
+        ['__proto__', str],
+      ]) as Record<string, SchemaObject>;
+      const { spec, warnings } = await parse(
+        'proto-dispatcher',
+        specDoc(
+          {},
+          {
+            Disp: {
+              allOf: [
+                {
+                  oneOf: [
+                    obj({ kind: { const: 'a' }, a: str }),
+                    obj({ kind: { const: 'b' }, b: str }),
+                    // A variant wrapped in its own `allOf`, narrowing `__proto__`.
+                    { allOf: [obj({ kind: { const: 'c' } }), obj(Object.fromEntries([['__proto__', int]]))] },
+                  ],
+                },
+              ],
+              properties: protoProps,
+              required: ['constructor'],
+            },
+          },
+        ),
+      );
+      const disp = modelOf(spec, 'Disp');
+      expect(fieldsOf(spec, 'Disp')).toEqual(['constructor: string', 'toString?: string', '__proto__?: string']);
+      expect(disp.discriminator?.property).toBe('kind');
+      const mapping = disp.discriminator!.mapping;
+      expect(Object.keys(mapping).sort()).toEqual(['a', 'b', 'c']);
+      expect(fieldsOf(spec, mapping.a!)).toEqual([
+        'constructor: string',
+        'toString?: string',
+        '__proto__?: string',
+        'kind?: "a"',
+        'a?: string',
+      ]);
+      expect(fieldsOf(spec, mapping.b!)).toEqual([
+        'constructor: string',
+        'toString?: string',
+        '__proto__?: string',
+        'kind?: "b"',
+        'b?: string',
+      ]);
+      expect(fieldsOf(spec, mapping.c!)).toEqual([
+        'constructor: string',
+        'toString?: string',
+        '__proto__?: integer',
+        'kind?: "c"',
+      ]);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Disp']);
+    });
+
+    it("a field's type is the first always-applying declaration's, whatever the member order", async () => {
+      const memberOf = { branch, nestedBranch, enum: enumMember, string: stringMember };
+      type Kind = keyof typeof memberOf;
+      const permutations = <T>(items: T[]): T[][] =>
+        items.length <= 1
+          ? [items]
+          : items.flatMap((item, i) =>
+              permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
+            );
+      const orders = permutations<Kind>(['branch', 'nestedBranch', 'enum', 'string']);
+      const schemas = Object.fromEntries(
+        orders.map((order, i) => [`Order${i}`, { allOf: order.map((kind) => memberOf[kind]) }]),
+      );
+      const { spec, warnings } = await parse('orderings', specDoc({}, schemas));
+      for (const [i, order] of orders.entries()) {
+        const name = `Order${i}`;
+        const first = order.find((kind) => kind === 'enum' || kind === 'string');
+        const expected = first === 'enum' ? `${name}Tag` : 'string';
+        expect(tagOf(spec, name), `${name}: ${order.join(' > ')}`).toBe(`tag?: ${expected}`);
+        expect(fieldsOf(spec, name), name).toContain('other?: string');
+      }
+      expect(warnings).toEqual([]);
+      expectSound(spec, Object.keys(schemas));
     });
   });
 });
