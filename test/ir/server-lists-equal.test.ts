@@ -58,9 +58,30 @@ describe('serverListsEqual', () => {
         [{ url: 'https://api.example.com{basePath}/', variables: basePath }],
       ),
     ).toBe(false);
-    // A bare authority, and one under a placeholder scheme, with and without `/`.
+    // A bare authority with and without `/`; under a placeholder scheme the
+    // rest may be anything (`{s}` = `https://gateway.example.com/path` makes it
+    // a path), so there the `/` is a difference.
     expect(serverListsEqual([api], [{ url: 'https://api.example.com/' }])).toBe(true);
-    expect(serverListsEqual([{ url: '{s}://api.example.com' }], [{ url: '{s}://api.example.com/' }])).toBe(true);
+    const s = { s: { default: 'https://gateway.example.com/path' } };
+    expect(
+      serverListsEqual(
+        [{ url: '{s}://api.example.com', variables: s }],
+        [{ url: '{s}://api.example.com/', variables: s }],
+      ),
+    ).toBe(false);
+    // The text before a placeholder in the authority may be a username
+    // (`suffix` = `@api.example.com`), so its case is a difference too.
+    const suffix = { suffix: { default: '@api.example.com' } };
+    expect(
+      serverListsEqual(
+        [{ url: 'https://USER{suffix}/v1', variables: suffix }],
+        [{ url: 'https://user{suffix}/v1', variables: suffix }],
+      ),
+    ).toBe(false);
+    // A placeholder only in the path leaves the scheme and authority to fold.
+    expect(
+      serverListsEqual([{ url: 'HTTPS://API.example.com:443/{v}' }], [{ url: 'https://api.example.com/{v}' }]),
+    ).toBe(true);
     // After a placeholder the authority is kept as written, so a port or `/`
     // that a placeholder value could turn into path text is a difference
     // (Greptile): `host` = `api.example.com/v1` gives `/v1:443/v2` vs `/v1/v2`.
