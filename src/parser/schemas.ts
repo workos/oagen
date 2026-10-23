@@ -1,11 +1,18 @@
-import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
+import type { Model, ModelRef, Enum, EnumValue, Extensions, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
 import {
+  SCHEMA_CONSUMED_EXTENSIONS,
+  extensionsOf,
+  schemaExtensionsEntry,
+  withWrapperExtensions,
+} from './extensions.js';
+import {
   enumShapeKey,
   enumValuesOf,
   inlineEnumDescriptionOf,
+  inlineEnumExtensionsOf,
   inlineEnumExternalDocsOf,
   inlineEnumRef,
   toEnumValue,
@@ -588,7 +595,12 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
 export function unwrapNullableField(schema: SchemaObject): SchemaObject {
   const inner = unwrapNullableSchema(schema);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return withWrapperExternalDocs(withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema), schema);
+  // The wrapper's limits, flag, link and extensions ride onto the branch, so
+  // the model built from it carries what the document wrote at the field.
+  return withWrapperExtensions(
+    withWrapperExternalDocs(withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema), schema),
+    schema,
+  );
 }
 
 /**
@@ -643,7 +655,9 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
 export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const linked = withWrapperExternalDocs(inner, wrapper);
   const described = typeof wrapper.description === 'string' && wrapper.description.trim() !== '';
-  return described ? { ...linked, description: wrapper.description } : linked;
+  // The wrapper's extensions ride along the same way (`withWrapperExtensions`),
+  // so an inline enum lifted from the branch carries them as its link.
+  return withWrapperExtensions(described ? { ...linked, description: wrapper.description } : linked, wrapper);
 }
 
 /** Keywords where the stricter of two declarations is the larger value. */
@@ -1063,11 +1077,13 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
         seen.add(r.name);
         const description = inlineEnumDescriptionOf(r);
         const externalDocs = inlineEnumExternalDocsOf(r);
+        const extensions = inlineEnumExtensionsOf(r);
         enums.push({
           name: r.name,
           ...(description !== undefined ? { description } : {}),
           values: enumValuesOf(r),
           ...(externalDocs ? { externalDocs } : {}),
+          ...(extensions ? { extensions } : {}),
         });
       }
     },
@@ -1331,6 +1347,7 @@ function extractNestedSchema(
         fields,
         ...deprecatedEntry(source),
         ...constraintsEntry(source),
+        ...schemaExtensionsEntry(source),
       });
     }
     return models;
@@ -1353,6 +1370,7 @@ function extractNestedSchema(
         fields,
         ...deprecatedEntry(schema),
         ...constraintsEntry(schema),
+        ...schemaExtensionsEntry(schema),
       },
     ];
   }
@@ -1377,6 +1395,7 @@ function extractNestedSchema(
         fields,
         ...deprecatedEntry(schema.items),
         ...constraintsEntry(schema.items),
+        ...schemaExtensionsEntry(schema.items),
       },
     ];
   }
@@ -2266,6 +2285,9 @@ export function buildFieldFromSchema(
   // `example`. A `$ref` to a model, named union or enum leaves them on it.
   const alias = refTarget !== undefined && isArrayComponentRef(fieldSchema) ? refTarget : undefined;
   const externalDocs = readExternalDocs(fieldSchema.externalDocs) ?? readExternalDocs(alias?.externalDocs);
+  const extensions =
+    extensionsOf(fieldSchema, SCHEMA_CONSUMED_EXTENSIONS) ??
+    (alias ? extensionsOf(alias, SCHEMA_CONSUMED_EXTENSIONS) : undefined);
   return {
     name: fieldName,
     type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
@@ -2286,6 +2308,10 @@ export function buildFieldFromSchema(
     // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
     // a bare `$ref` declares none, and the referenced model carries its limits.
     ...constraintsEntry(fieldSchema),
+    // The schema's own `x-*` keys, read the same way; a `$ref` to an array
+    // component that declares none takes the component's, as it takes its
+    // `description`.
+    ...(extensions ? { extensions } : {}),
   };
 }
 
@@ -2302,6 +2328,7 @@ function buildSyntheticEnumRef(
   parentModelName: string | undefined,
   rawExternalDocs: unknown,
   rawDescription: unknown,
+  extensions: Extensions | undefined,
 ): TypeRef {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
@@ -2310,7 +2337,7 @@ function buildSyntheticEnumRef(
   // a project-level rename map (e.g. `RadarAction` → `RadarListAction` in
   // `oagen.config.ts`) catches inline parameter enums too.
   const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-  return inlineEnumRef(finalName, members, rawExternalDocs, rawDescription);
+  return inlineEnumRef(finalName, members, rawExternalDocs, rawDescription, extensions);
 }
 
 /**
@@ -2519,6 +2546,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
     default: def,
     ...externalDocsEntry(schema.externalDocs),
     ...deprecatedEntry(schema),
+    ...schemaExtensionsEntry(schema),
   };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
@@ -2578,6 +2606,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     ...deprecatedEntry(schema),
     ...namedUnionEntry(name, schema, schemas),
     ...constraintsEntry(schema),
+    ...schemaExtensionsEntry(schema),
   };
 }
 
@@ -3623,6 +3652,9 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
     // members keep theirs on the referenced model.
     ...constraintsEntry(schema),
+    // The wrapper's own extensions, as its flag and link: a member's stay on
+    // that member, a `$ref` member's on its component.
+    ...schemaExtensionsEntry(schema),
   };
 }
 
@@ -3813,8 +3845,9 @@ function extractDiscriminatedAllOfVariantModels(
         ...deprecatedEntry(variant),
         ...combineConstraints(baseConstraints, extractConstraints(variant)),
         // The variant's own link rides along like its keywords, so the model
-        // built from the rebuilt schema carries it.
+        // built from the rebuilt schema carries it; so do its own extensions.
         ...externalDocsEntry(variant.externalDocs),
+        ...extensionsOf(variant, SCHEMA_CONSUMED_EXTENSIONS),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -4187,6 +4220,7 @@ export function schemaToTypeRef(
         parentModelName,
         schema.externalDocs,
         schema.description,
+        extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
       );
       // An `enum:` list beside the union that leaves `null` out forbids it,
       // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
@@ -4386,7 +4420,13 @@ export function schemaToTypeRef(
     // the ref so the lifted `Enum` carries them (`collectInlineEnumFromRef`);
     // the nullable unwraps above spread the schema, so a wrapped enum's text
     // and link reach here too.
-    const enumRef = inlineEnumRef(finalName, enumListMembers(schema) ?? [], schema.externalDocs, schema.description);
+    const enumRef = inlineEnumRef(
+      finalName,
+      enumListMembers(schema) ?? [],
+      schema.externalDocs,
+      schema.description,
+      extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
+    );
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 

@@ -69,6 +69,24 @@ A `Model` built from an inline schema — a request body, a response, a `oneOf` 
 
 A Schema Object that does not become a model of its own keeps its link too. `Field.externalDocs` is the property schema's own, read like `description`: for a `$ref` with an `externalDocs` sibling (legal in OAS 3.1) the field carries the sibling's link while the referenced model keeps its own, and a bare `$ref` gives the field none — except a bare `$ref` to an array component, which has no model to keep the link, so the field takes it as it takes the component's `example` (see Array components). Every path that builds a field reads it: component properties, `allOf` merges, flattened `oneOf` variants, inline request bodies and responses, nested inline objects, list-envelope companions and header models. It is documentation, not shape: where two inline models are folded into one by structural agreement (`modelFingerprint`, the header-model registry, the same-named merge passes), two fields that differ only in their link are one shape, as two that differ only in `description` are. `Parameter.externalDocs` and `ResponseHeader.externalDocs` are read from the schema, as described under each. An `Enum` carries its schema's: a component enum's own, and — for an enum lifted into `spec.enums` from an inline schema on a property, parameter, response header, request body, response body (primary, secondary-media-type, error or fallback) or webhook parameter or payload, including array items, `oneOf` variants and a `oneOf` of string consts collapsed into one enum — that schema's. A nullable wrapper or single-member `allOf` the parser collapses carries its link onto the lifted enum by the rule above for models (the wrapper's wins; the branch's only when the wrapper has none). When several inline schemas lift to one enum name, the first lifted gives the link, as it gives the values. The link lives on the `Enum`, not on the field's or parameter's `EnumRef`.
 
+### Extensions
+
+```typescript
+type Extensions = Record<string, unknown>;
+```
+
+The specification extensions (`x-*` keys) an OpenAPI object declares, each under the key as written with its value verbatim — a string, a boolean, a number, `null`, an array or an object, nested values included, the document's own value rather than a copy — in document order. Carried as `extensions` on `Operation`, `Model`, `Field` and `Enum`, present only when at least one key remains after the ones below are left out, so an emitter can read the keys it knows (`x-idempotent: true` on a `POST` that is safe to repeat, `x-since` for an `@since` tag) without the parser knowing each one. No other node carries one: the `x-*` keys of a Parameter Object, a Header Object, a Request Body or Response Object, a Path Item Object, a webhook's Operation Object, a tag, a server or the document are not read.
+
+**Consumed keys.** A key the parser already reads into a typed field is not repeated in `extensions`. On an Operation Object: `x-pagination` (`pagination`), `x-oagen-async` (`async`), `x-mutually-exclusive-parameter-groups` and `x-mutually-exclusive-body-groups` (`parameterGroups`). On a Schema Object: `x-enum-descriptions` and `x-enumDescriptions` (each `EnumValue.description`). The sets are `OPERATION_CONSUMED_EXTENSIONS` and `SCHEMA_CONSUMED_EXTENSIONS` in `src/parser/extensions.ts`. A key is consumed by the object it is read from: `x-mutually-exclusive-body-groups` is read from the Operation Object only, so the same key written on a request body schema is carried on that schema's model.
+
+**Source per node.** `Operation.extensions` is the Operation Object's own keys. `Model.extensions` is the keys of the schema the model was built from — a component's own, or the inline schema's for a request body, a response, a `oneOf` variant (each variant model carries its own variant's keys), an object nested in a field, array items; an `allOf` wrapper's own keys, a member's staying on that member and a `$ref` member's on its component, for a component `allOf`, an inline `allOf` merged into one model and an `allOf` response alike; a discriminated `oneOf` body merged into one model carries the wrapper's keys, not a variant's; a discriminated `allOf` + `oneOf` component's variant models carry each variant's own. `Field.extensions` is the field schema's own keys, read like `constraints`: keys written beside a `$ref` (OAS 3.1) are the field's, a bare `$ref` yields none — the referenced model, union or enum carries its own — unless it names an array component, whose keys the field then carries as it carries that component's `description`; a property an inline `allOf` declares in more than one `oneOf` variant carries the keys every declaration agrees on, value for value, as it carries their agreed `externalDocs`. A list envelope's `envelopeFields` carry theirs the same way. `Enum.extensions` is the keys of the schema that declares the members: a component enum's own, or, for an enum lifted from an inline schema, that schema's — the field, parameter or header the schema types carries the same keys, since they are its schema's own — read as the enum's `description` and `externalDocs` are, through `collectInlineEnumFromRef`; when several inline schemas lift to one name, the first lifted gives the keys, as it gives the values.
+
+**Collapsed wrappers.** A nullable `oneOf`/`anyOf` or single-member `allOf` wrapper the parser collapses carries its keys onto the model built from its branch and the enum lifted from it, merged over the branch's own with the wrapper's value winning for a key both declare (`withWrapperExtensions`, read wherever a wrapper is collapsed: `unwrapNullableField`, `unwrappedAllOfMember`, `withWrapperDocs`), so `oneOf: [{ enum: [...] }, { type: "null" }]` and `type: ["string", "null"]` give the same enum the same keys. The field the wrapper types carries the wrapper's keys alone, since the wrapper is its schema.
+
+**Not shape.** Extensions never decide whether two schemas are one model or one enum: `schemaShapeKey` skips `x-*` keywords, `modelAdmits`, `fieldAdmits`, `modelFingerprint` and the differ's `sameShape` leave `extensions` out, the list-envelope and parameter-group fingerprints never read it, and two inline enums are shared on their members alone. An inline schema that differs from a model only in its extensions folds onto that model, which keeps its own keys; the folded copy's are dropped with it. The differ reports a change to a node's extensions as additive — `extensionsChanged: true` with `oldExtensions`/`newExtensions` on an `operation-modified`, `model-modified` or `enum-modified` change, a `field-extensions-changed` entry in `fieldChanges`, each mirrored into `behaviorChanges` as `extensions-changed` — and never as a type change (see [docs/cli.md](../cli.md)).
+
+**Untrusted values.** Extension values come from the document unvalidated: an emitter that writes one into generated source must escape it as it escapes a `description`.
+
 ### SdkBehavior
 
 Source: `src/ir/sdk-behavior.ts`
@@ -345,6 +363,7 @@ interface Operation {
   summary?: string; // The document's summary alone; only when it has non-whitespace content
   description?: string; // summary + "\n\n" + description when both have content, else whichever does
   externalDocs?: ExternalDocs; // The operation's own externalDocs, when usable
+  extensions?: Extensions; // The Operation Object's own x-* keys, less the ones the parser consumes (see Extensions)
   httpMethod: HttpMethod; // All 8 standard HTTP methods
   path: string; // e.g., "/organizations/{id}"
   servers?: ServerEntry[]; // The operation's own servers, else its Path Item's; only when they differ from ApiSpec.servers
@@ -667,6 +686,7 @@ interface Model {
   compositionKind?: "oneOf" | "anyOf"; // Which keyword produced `variants`; present exactly when `variants` is
   discriminator?: { property: string; mapping: Record<string, string> }; // Dispatch property and value → IR model name
   constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
+  extensions?: Extensions; // The x-* keys of the schema the model was built from, less x-enum-descriptions / x-enumDescriptions (see Extensions)
 }
 
 interface Field {
@@ -682,6 +702,7 @@ interface Field {
   example?: unknown; // The schema's `example`, else `examples[0]`
   examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
   constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref yields none
+  extensions?: Extensions; // The field schema's own x-* keys, read like constraints (see Extensions)
 }
 ```
 
@@ -803,6 +824,7 @@ interface Enum {
   values: EnumValue[];
   externalDocs?: ExternalDocs; // The enum schema's externalDocs, when usable — a component's, or the inline schema's the enum was lifted from
   deprecated?: boolean; // The component enum schema's own `deprecated: true`; absent otherwise
+  extensions?: Extensions; // The x-* keys of the schema that declares the members, less x-enum-descriptions / x-enumDescriptions (see Extensions)
 }
 
 interface EnumValue {

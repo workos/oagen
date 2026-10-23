@@ -34,6 +34,7 @@ import {
   unwrappedAllOfMember,
 } from './inline-models.js';
 import { externalDocsEntry } from './external-docs.js';
+import { schemaExtensionsEntry } from './extensions.js';
 import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
 
 /**
@@ -1153,6 +1154,7 @@ function extractInlineModel(
       fields,
       ...deprecatedEntry(schema),
       ...constraintsEntry(schema),
+      ...schemaExtensionsEntry(schema),
     },
     ...nestedModels,
   ];

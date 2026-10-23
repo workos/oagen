@@ -1,7 +1,7 @@
 import type { Model, TypeRef } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
 import type { Change, FieldChange, VariantChange } from './types.js';
-import { classifyFieldChange, deprecationDetails, deprecationFlip } from './classify.js';
+import { classifyFieldChange, deprecationDetails, deprecationFlip, extensionsShift } from './classify.js';
 import type { DirectionIndex, ModelDirection } from './direction.js';
 import { directionOf } from './direction.js';
 
@@ -36,7 +36,10 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
     // A flipped flag alone is a change: nothing the model's callers compile
     // against moves, but a changelog has to say it.
     const deprecation = deprecationFlip(oldModel, newModel);
-    if (fieldChanges.length > 0 || variantChanges.length > 0 || deprecation) {
+    // So is a change to the model's own extensions, which are not shape
+    // either; the flag is present only when they differ (`extensionsShift`).
+    const extensions = extensionsShift(oldModel, newModel);
+    if (fieldChanges.length > 0 || variantChanges.length > 0 || deprecation || extensions) {
       const hasBreaking = [...fieldChanges, ...variantChanges].some((c) => c.classification === 'breaking');
       changes.push({
         kind: 'model-modified',
@@ -45,6 +48,7 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
         ...(variantChanges.length > 0 ? { variantChanges } : {}),
         deprecatedChanged: deprecation !== undefined,
         ...deprecation,
+        ...(extensions ? { extensionsChanged: true, ...extensions } : {}),
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
@@ -348,6 +352,13 @@ function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection 
         ...deprecation,
         details: deprecationDetails(deprecation.newDeprecated),
       });
+    }
+
+    // The field's own extensions are not shape either; reported beside, not
+    // instead of, whatever else changed about the field.
+    const extensions = extensionsShift(oldField, newField);
+    if (extensions) {
+      changes.push({ ...classifyFieldChange('field-extensions-changed', name), ...extensions });
     }
   }
 

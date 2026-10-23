@@ -1,4 +1,4 @@
-import type { Constraints, EnumRef, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import type { Constraints, EnumRef, Extensions, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -28,6 +28,12 @@ import {
   foldedVariantOrigin,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
+import {
+  SCHEMA_CONSUMED_EXTENSIONS,
+  extensionsOf,
+  schemaExtensionsEntry,
+  withWrapperExtensions,
+} from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 
@@ -307,10 +313,23 @@ export function schemaShapeKey(schema: SchemaObject): string {
   return JSON.stringify(schemaKey(schema));
 }
 
-/** Field properties that only document a field; two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
-/** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+/** Field properties that only document a field — its extensions included; two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'description',
+  'externalDocs',
+  'example',
+  'examples',
+  'extensions',
+]);
+/** Model properties outside its shape: the name, its documentation (description, link, extensions), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'description',
+  'externalDocs',
+  'extensions',
+  'fields',
+]);
 /** `MODEL_IDENTITY_KEYS` and the model's own `deprecated`, which the admit predicates read on its own (`flagAdmits`) rather than as part of the shape. */
 const MODEL_ADMIT_KEYS: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, 'deprecated']);
 
@@ -1666,6 +1685,8 @@ export interface MergedAllOf {
   constraints: Constraints | undefined;
   /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
   deprecated: boolean | undefined;
+  /** The wrapper's own extensions (`extensionsOf`), read like its link; a member's stay on that member, a `$ref` member's on its component. */
+  extensions: Extensions | undefined;
 }
 
 /**
@@ -1760,8 +1781,9 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
  * carries onto the member it types (`withWrapperExternalDocs`).
  */
 export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject): SchemaObject {
-  return withWrapperExternalDocs(
-    withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper),
+  // The wrapper's extensions ride along as its link does (`withWrapperExtensions`).
+  return withWrapperExtensions(
+    withWrapperExternalDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper), wrapper),
     wrapper,
   );
 }
@@ -1928,6 +1950,7 @@ export function mergeAllOfMembers(
     externalDocs: readExternalDocs(schema.externalDocs),
     constraints: extractConstraints(schema),
     deprecated: schema.deprecated === true || undefined,
+    extensions: extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
   };
 }
 
@@ -2000,6 +2023,14 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
     const first = stableStringify(values[0]);
     if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[keyword] = values[0];
   }
+  // The extensions every declaration agrees on are the field's too, value
+  // for value, as its link is; the keys the parser consumes stay where they
+  // are read.
+  for (const key of Object.keys(extensionsOf(shapes[0]!, SCHEMA_CONSUMED_EXTENSIONS) ?? {})) {
+    const values = shapes.map((shape) => shape[key]);
+    const first = stableStringify(values[0]);
+    if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[key] = values[0];
+  }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
   return { ...agreed, oneOf: variants };
@@ -2071,6 +2102,7 @@ export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...merged.constraints,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
+    ...merged.extensions,
   };
 }
 
@@ -2108,6 +2140,7 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     fields,
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...(merged.constraints ? { constraints: merged.constraints } : {}),
+    ...(merged.extensions ? { extensions: merged.extensions } : {}),
   };
 }
 
@@ -2154,5 +2187,6 @@ export function buildInlineModel(
     fields,
     ...deprecatedEntry(schema),
     ...constraintsEntry(schema),
+    ...schemaExtensionsEntry(schema),
   };
 }
