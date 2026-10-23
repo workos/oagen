@@ -31,7 +31,7 @@ oagen provides a three-stage pipeline for transforming OpenAPI specs into SDK co
 Entry point: `parse.ts` → `parseSpec(specPath: string): Promise<ApiSpec>`
 
 1. **refs.ts** — Loads the spec file, uses `@redocly/openapi-core` to bundle and resolve all `$ref` pointers
-2. **schemas.ts** — Walks `components.schemas`, extracts `Model[]` and `Enum[]`
+2. **schemas.ts** — Walks `components.schemas`, extracts `Model[]` and `Enum[]` (an array component yields no model: a `$ref` to it is typed as the array, and only what its items reference becomes a model or enum)
 3. **operations.ts** — Walks `paths`, groups endpoints into `Service[]` with `Operation[]`
 4. **pagination.ts** — Detects cursor-based pagination from query params; also detected from response shape in `responses.ts` (either source sets `paginated: true`)
 
