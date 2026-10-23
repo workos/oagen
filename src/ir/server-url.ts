@@ -176,61 +176,72 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  * variable name is never case-folded (`{Region}` and `{region}` are different
  * variables) and a template is never confused with what it resolves to
  * (`https://{region}.api.example.com` and `https://eu.api.example.com` stay
- * two servers). Inside the authority a placeholder also ends what can be
- * known about the URL's structure: its value may carry a host suffix, a
- * port or a path (`{host}` defaulting to `api.example.com/v1` makes a
- * following `:443` path text), so from the first placeholder on the
- * authority is kept as written — nothing after it is case-folded, no port is
- * dropped, and no `/` is added for an empty path. The literal text before it
- * is folded as usual: `HTTPS://API.example.com{basePath}` is
- * `https://api.example.com{basePath}`, while `https://{host}:443/v2` and
- * `https://{host}/v2`, or `…{basePath}` and `…{basePath}/`, stay two servers.
- * A template that opens with a placeholder (`{scheme}://…`) has no known
- * scheme, so no port is dropped from it. Every folding therefore applies to
- * text whose role no variable value can change, and two templates that come
- * out as one string resolve to one URL under every value of their variables.
- * A relative reference (`/v1`, `//api.example.com/v1`) goes through the same
- * rules from wherever its syntax starts.
+ * two servers). A placeholder also ends what can be known about the URL's
+ * structure: its value may carry any delimiter — `@` (which makes the text
+ * before it in the authority a username), `:` and a port, `/` and a path,
+ * `://` and a whole URL — so nothing from the first placeholder on is folded,
+ * and a component is folded only when it is complete before that point: the
+ * scheme when its `:` comes first, the authority when its end (`/`, `?`, `#`
+ * or the end of the template) comes first. So `HTTPS://API.example.com/{v}`
+ * is `https://api.example.com/{v}` and `HTTPS://API.example.com{basePath}`
+ * is `https://API.example.com{basePath}`, while `…{basePath}` and
+ * `…{basePath}/`, `https://{host}:443/v2` and `https://{host}/v2`,
+ * `https://USER{suffix}/v1` and `https://user{suffix}/v1` (a `suffix` of
+ * `@api.example.com` makes `USER` a username), and `{prefix}://api.example.com`
+ * and `{prefix}://api.example.com/` (a `prefix` of
+ * `https://gateway.example.com/path` makes the rest a path) all stay two
+ * servers. Every folding therefore applies to text whose part no variable
+ * value can change, and two templates that come out as one string resolve to
+ * one URL under every value of their variables. A relative reference (`/v1`,
+ * `//api.example.com/v1`) goes through the same rules from wherever its
+ * syntax starts.
  */
 export function normalizeServerUrl(url: string): string {
   const units = templateUnits(url);
+  // A placeholder's value may carry any delimiter, so it can change which
+  // part every later character belongs to and, through a `@`, which part
+  // the text before it in its authority belongs to. Nothing from the first
+  // placeholder on is folded, and a component is folded only when it is
+  // complete before that point. Percent-encoding is folded everywhere: an
+  // unreserved character is the same encoded or not in every part.
+  const firstPlaceholder = units.findIndex((unit) => unit.placeholder);
+  const literalEnd = firstPlaceholder === -1 ? units.length : firstPlaceholder;
   let out = '';
   let cursor = 0;
 
-  // Scheme: the units before the first `:`, provided every literal character
-  // among them may appear in a scheme and the first one is a letter (RFC
-  // 3986 §3.1). A unit that may not — `/`, `?`, `#`, `@` — makes the URL a
-  // relative reference with no scheme.
+  // Scheme: the units before the first `:`, provided every character among
+  // them may appear in a scheme and the first one is a letter (RFC 3986
+  // §3.1); a `/`, `?`, `#` or `@` before any `:` makes the URL a relative
+  // reference with no scheme. Folded only when that `:` comes before the
+  // first placeholder: a scheme with a placeholder in it (`{prefix}://…`)
+  // may resolve to anything, so the whole template is kept as written.
   const schemeEnd = schemeLength(units);
   let scheme: string | undefined;
+  if (schemeEnd !== undefined && schemeEnd >= literalEnd) return render(units, normalizePercentEncoding);
   if (schemeEnd !== undefined) {
-    const schemeUnits = units.slice(0, schemeEnd);
-    const schemeText = render(schemeUnits, (text) => text.toLowerCase());
-    out += schemeText + ':';
-    // A scheme written as a placeholder is unknown, so no default port applies.
-    if (schemeUnits.every((unit) => !unit.placeholder)) scheme = schemeText;
+    scheme = render(units.slice(0, schemeEnd), (text) => text.toLowerCase());
+    out += scheme + ':';
     cursor = schemeEnd + 1;
   }
 
-  // Authority: after `//`, up to the first `/`, `?` or `#`. A placeholder is
-  // never a boundary, so one inside the authority (`{region}.api.example.com`,
-  // `api.example.com:{port}`) belongs to it.
+  // Authority: after `//`, up to the first `/`, `?` or `#`. Folded only when
+  // that end comes before the first placeholder: a placeholder inside the
+  // authority may resolve to a host suffix, a port, a path, or a `@` that
+  // makes the text before it a username, so an authority with one is kept
+  // as written and gets no `/` for an empty path.
   let literalAuthority = false;
   if (isLiteral(units[cursor], '/') && isLiteral(units[cursor + 1], '/')) {
     const start = cursor + 2;
     cursor = start;
     while (cursor < units.length && !isLiteral(units[cursor], '/', '?', '#')) cursor++;
     const authority = units.slice(start, cursor);
-    literalAuthority = authority.every((unit) => !unit.placeholder);
-    out += '//' + normalizeAuthority(authority, scheme);
+    literalAuthority = cursor <= literalEnd;
+    out +=
+      '//' + (literalAuthority ? normalizeAuthority(authority, scheme) : render(authority, normalizePercentEncoding));
   }
 
   // Path: up to the first `?` or `#`; `/` when a wholly literal authority is
-  // followed by none. A placeholder in the authority may resolve to a value
-  // that carries a path (`https://api.example.com{basePath}` with `basePath`
-  // defaulting to `/v1`; `https://{host}` with `api.example.com/v1`), so
-  // nothing is added after one: `…{basePath}` and `…{basePath}/` stay two
-  // templates.
+  // followed by none (`…{basePath}` and `…{basePath}/` stay two templates).
   const pathStart = cursor;
   while (cursor < units.length && !isLiteral(units[cursor], '?', '#')) cursor++;
   const path = render(units.slice(pathStart, cursor), normalizePercentEncoding);
@@ -256,29 +267,13 @@ function schemeLength(units: TemplateUnit[]): number | undefined {
 }
 
 /**
- * The authority normalised as far as its structure is known.
- *
- * Up to the first placeholder the text is userinfo or host: userinfo is kept
- * as written and the host lower-cased. From the first placeholder on, what
- * the placeholder resolves to decides what the rest is — a host suffix, a
- * port, or a path (`{host}` defaulting to `api.example.com/v1` makes a
- * following `:443` path text) — so it is kept exactly as written,
- * percent-encoding aside, and no port is read from it. A `@` after the
- * placeholder makes everything before it userinfo, which keeps its case too.
- *
- * A wholly literal authority also has its port read — what follows the last
- * `:` after any `]` that closes an IP literal, so the colons inside
- * `[2001:db8::1]` are never read as one — and dropped when it is empty or
- * the scheme's default.
+ * A wholly literal authority with userinfo kept as written, the host
+ * lower-cased and a port that is empty or the scheme's default dropped. The
+ * port is what follows the last `:` after any `]` that closes an IP literal,
+ * so the colons inside `[2001:db8::1]` are never read as one.
  */
 function normalizeAuthority(units: TemplateUnit[], scheme: string | undefined): string {
-  const firstPlaceholder = units.findIndex((unit) => unit.placeholder);
   const at = units.findIndex((unit) => isLiteral(unit, '@'));
-  if (firstPlaceholder !== -1) {
-    const known = at > firstPlaceholder ? 0 : firstPlaceholder;
-    return foldUserinfoAndHost(units.slice(0, known)) + render(units.slice(known), normalizePercentEncoding);
-  }
-
   const hostUnits = units.slice(at + 1);
   let closeBracket = -1;
   for (let i = hostUnits.length - 1; i >= 0; i--) {
