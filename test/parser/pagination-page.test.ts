@@ -864,6 +864,35 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     );
   });
 
+  it('reads the field through a lone allOf member, as the IR types it, but not an allOf of bare limits (MichaelDeBoey)', () => {
+    const schemas: Record<string, SchemaObject> = {
+      Flag: { type: 'boolean' },
+      Count: { type: 'integer' },
+      Meta: { type: 'object', properties: { total: { allOf: [{ $ref: '#/components/schemas/Count' }] } } },
+    };
+    const properties: Record<string, SchemaObject> = {
+      data: { type: 'array', items: { type: 'string' } },
+      has_more: { allOf: [{ $ref: '#/components/schemas/Flag' }], description: 'More pets' },
+      inline_flag: { allOf: [{ type: 'boolean' }] },
+      meta: { $ref: '#/components/schemas/Meta' },
+      // Two members are left as written — a merge, not a field of a type —
+      // and an `allOf` of bare limits beside the schema's own type is typed
+      // by that type.
+      pair: { allOf: [{ type: 'boolean' }, { type: 'boolean' }] },
+      bounded: { type: 'integer', allOf: [{ minimum: 0 }] },
+    };
+    const body: SchemaObject = { type: 'object', properties };
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'inline_flag' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'meta.total' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'bounded' }, body, schemas)).toBeUndefined();
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'pair' }, body, schemas)).toBe(
+      'endOfIteration path "pair" is not a boolean field, as kind "hasMore" requires',
+    );
+    // Detection reads `has_more` through the same member.
+    expect(detectEndOfIteration(properties, 'data', schemas)).toEqual({ kind: 'hasMore', path: 'has_more' });
+  });
+
   it('agrees with detection about which fields can end an iteration, over the one property map both read', () => {
     // A string `has_more` is no stop field to detection, and no stop field to an override either.
     const properties: Record<string, SchemaObject> = {

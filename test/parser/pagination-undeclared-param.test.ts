@@ -300,6 +300,135 @@ describe('a list envelope on an operation without a paging parameter (issue #309
     });
   });
 
+  describe('a kept envelope is read as the wire shape, never as a single-resource wrapper (Greptile)', () => {
+    // One required companion carrying a constant `type` is exactly the shape
+    // `isSingleResourceWrapper` accepts, so an envelope that reached that
+    // check was unwrapped onto its pagination object and lost `data`. Every
+    // reason that keeps an envelope must read it as one model with every
+    // field.
+    const constCompanion = {
+      type: 'object',
+      properties: {
+        data: { type: 'array', items: { type: 'string' } },
+        pagination: {
+          type: 'object',
+          properties: { type: { type: 'string', const: 'pagination' }, total: { type: 'integer' } },
+          required: ['type', 'total'],
+        },
+      },
+      required: ['pagination'],
+    };
+
+    /** The response is one model with `data` and `pagination`, and `pagination` is the companion model. */
+    function expectWireShape(ir: ApiSpec): Operation {
+      const op = expectEnvelopeKept(ir, ['data', 'pagination']);
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      const wrapper = ir.models.find((m) => m.name === 'ListPetsResponse')!;
+      expect(wrapper.fields.find((f) => f.name === 'data')?.type).toEqual({
+        kind: 'array',
+        items: { kind: 'primitive', type: 'string' },
+      });
+      const companionRef = wrapper.fields.find((f) => f.name === 'pagination')?.type;
+      expect(companionRef?.kind).toBe('model');
+      const companion = ir.models.find((m) => companionRef?.kind === 'model' && m.name === companionRef.name);
+      expect(companion?.fields.map((f) => [f.name, f.type])).toEqual([
+        ['type', { kind: 'literal', value: 'pagination' }],
+        ['total', { kind: 'primitive', type: 'integer' }],
+      ]);
+      return op;
+    }
+
+    it("Greptile's example: no paging parameter keeps data beside the pagination object", async () => {
+      expectWireShape(await parseJson(petsSpec([], constCompanion)));
+      expect(warnings()).toEqual([warningFor('no cursor, offset or page query parameter is declared')]);
+    });
+
+    it('the same under strategy "none", with a declared cursor parameter', async () => {
+      expectWireShape(
+        await parseJson(petsSpec([query('after', 'string')], constCompanion, { 'x-pagination': { strategy: 'none' } })),
+      );
+      expect(warnings()).toEqual([]);
+    });
+
+    it('the same under a rejected override, with the rejection as the one warning', async () => {
+      expectWireShape(
+        await parseJson(petsSpec([], constCompanion, { 'x-pagination': { strategy: 'cursor', param: 'after' } })),
+      );
+      expect(warnings()).toEqual([
+        '[oagen] Warning: x-pagination on listPets: param "after" is not a query parameter of the operation — ignoring the override',
+      ]);
+    });
+
+    it('the same when only the override could page the body and its dataPath reaches no array', async () => {
+      expectWireShape(
+        await parseJson(
+          petsSpec([query('c', 'string')], constCompanion, {
+            'x-pagination': { strategy: 'cursor', param: 'c', dataPath: 'nope' },
+          }),
+        ),
+      );
+      expect(warnings()).toEqual([
+        '[oagen] Warning: x-pagination on listPets: dataPath "nope" does not resolve to an array in the response — ignoring the override',
+      ]);
+    });
+
+    it('the same for an envelope kept as a wrapper under a dataPath that names another array', async () => {
+      const nested = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          pagination: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', const: 'pagination' },
+              items: { type: 'array', items: { type: 'integer' } },
+            },
+            required: ['type', 'items'],
+          },
+        },
+        required: ['pagination'],
+      };
+      const ir = await parseJson(
+        petsSpec([query('after', 'string')], nested, { 'x-pagination': { dataPath: 'pagination.items' } }),
+      );
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      const wrapper = ir.models.find((m) => m.name === 'ListPetsResponse')!;
+      expect(wrapper.fields.map((f) => f.name)).toEqual(['data', 'pagination']);
+      expect(op.pagination).toMatchObject({
+        strategy: 'cursor',
+        param: 'after',
+        dataPath: 'pagination.items',
+        itemType: { kind: 'primitive', type: 'integer' },
+      });
+      expect(op.pagination).not.toHaveProperty('envelopeFields');
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('a single-resource wrapper that is not an envelope still unwraps onto its resource', async () => {
+      const ir = await parseJson(
+        petsSpec([], {
+          type: 'object',
+          properties: {
+            pet: {
+              type: 'object',
+              properties: { object: { type: 'string', const: 'pet' }, name: { type: 'string' } },
+              required: ['object', 'name'],
+            },
+          },
+          required: ['pet'],
+        }),
+      );
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'model', name: 'Pet' });
+      expect(op.pagination).toBeUndefined();
+      expect(ir.models.find((m) => m.name === 'Pet')?.fields.map((f) => f.name)).toEqual(['object', 'name']);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+  });
+
   it('strategy "none" asks for the plain model and gets no warning', async () => {
     const ir = await parseJson(petsSpec([query('page')], totalPagesEnvelope, { 'x-pagination': { strategy: 'none' } }));
     expectEnvelopeKept(ir, ['data', 'total_pages']);
