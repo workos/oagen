@@ -70,6 +70,7 @@ import { extractSecurityRequirements, type RawSecurityRequirements } from './sec
 import { extractServerList } from './servers.js';
 import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
+import { warnOnIgnoredCallbacks } from './callbacks.js';
 
 export interface PathItem {
   /**
@@ -117,6 +118,8 @@ export interface OperationObject {
   servers?: unknown;
   'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
+  /** Not read; `warnOnIgnoredCallbacks` reports an operation that declares any. */
+  callbacks?: unknown;
 }
 
 /**
@@ -2110,6 +2113,7 @@ function buildOperation(
   operationQualifier: string;
 } {
   const opLabel = operationLabel(op, path, method);
+  warnOnIgnoredCallbacks(op.callbacks, opLabel);
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
