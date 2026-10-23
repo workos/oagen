@@ -1465,7 +1465,7 @@ describe("a component response's other media types and headers (issue #302)", ()
     expect(headersOf({ headers: getNote.responseHeaders })).toEqual(['X-Meta: NotesXMeta']);
     expect(contentsOf(getNote.errors[0])).toEqual([
       'application/json: GetNoteError404',
-      'application/yaml: GetNoteApplicationYamlError',
+      'application/yaml: GetNoteError404ApplicationYaml',
     ]);
     expect(headersOf(getNote.errors[0])).toEqual(['X-Meta: NotesXMeta']);
     expectSound(spec);

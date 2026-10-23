@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
-import { modelAdmits } from '../../src/parser/inline-models.js';
+import { fieldAdmits, modelAdmits, typeShapeKey } from '../../src/parser/inline-models.js';
 import { renameTypeRefModels } from '../../src/ir/types.js';
 import {
   collectModelRefs,
@@ -655,7 +655,10 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
             operationId: 'shared',
             parameters: [{ name: 'X-Comp', in: 'header', schema: { $ref: '#/components/schemas/Comp' } }],
             requestBody: {
-              content: { 'application/json': { schema: { oneOf: [titled('Comp', 'c', 'c'), titled('B', 'b', 'b')] } } },
+              content: {
+                'application/json': { schema: { oneOf: [titled('Comp', 'c', 'c'), titled('B', 'b', 'b')] } },
+                'application/xml': { schema: obj({ x: str }) },
+              },
             },
             responses: { '200': { description: 'ok' } },
           },
@@ -667,6 +670,23 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
   it('renames the shared variant on both and keeps an explicit `$ref` to the component on both', async () => {
     const { spec, warnings } = await parse('shared-webhooks', doc);
     expect(spec.webhooks?.map((w) => w.name)).toEqual(['pet.adopted', 'pet.returned']);
+    // The second key's copy carries every field of the first's — the declared
+    // media types and the secondary payload among them — with every type
+    // reference cloned once, so the content entry that is the payload's own
+    // reference shares the copy as it shares the original.
+    const [first, second] = spec.webhooks!;
+    expect(Object.keys(second!).sort()).toEqual(Object.keys(first!).sort());
+    expect(second!.requestBodyContentType).toBe('application/json');
+    expect(second!.requestBodyContentTypes).toEqual(['application/json', 'application/xml']);
+    expect(second!.requestBodyContents).toEqual(first!.requestBodyContents);
+    expect(second!.requestBodyContents?.map((c) => c.contentType)).toEqual(['application/json', 'application/xml']);
+    for (const webhook of [first!, second!]) {
+      const json = webhook.requestBodyContents?.find((c) => c.contentType === 'application/json');
+      expect(json?.type === webhook.requestBody, webhook.name).toBe(
+        first!.requestBodyContents?.find((c) => c.contentType === 'application/json')?.type === first!.requestBody,
+      );
+    }
+    expect(second!.requestBody).not.toBe(first!.requestBody);
     for (const webhook of spec.webhooks ?? []) {
       expect(webhook.requestBody, webhook.name).toEqual({
         kind: 'union',
@@ -685,6 +705,7 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
     expect(describeModels(spec).sort()).toEqual([
       'B { kind: literal, b: string }',
       'Comp { id: string }',
+      'SharedApplicationXmlPayload { x: string }',
       'SharedComp { kind: literal, c: string }',
     ]);
     expect(warnings).toEqual([renamed('Comp', 'SharedComp')]);
@@ -802,5 +823,58 @@ describe('modelAdmits', () => {
     expect(modelAdmits(base, model([field('a', false)], { constraints: { minProperties: 1 } }))).toBe(false);
     // Documentation is not shape.
     expect(modelAdmits(base, model([{ ...field('a', false), description: 'doc' }], { description: 'doc' }))).toBe(true);
+  });
+
+  it('reads every model reference under `modelName` when given — fields, variants and mapping targets, both sides', () => {
+    const ref = (name: string): TypeRef => ({ kind: 'model', name });
+    // The `…Json` fold's reading: `PetJson…` as `Pet…`.
+    const fold = { modelName: (name: string) => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name) };
+    const owner = model([field('inner', false, ref('PetInner'))]);
+    const candidate = model([field('inner', false, ref('PetJsonInner'))]);
+    expect(modelAdmits(owner, candidate)).toBe(false);
+    expect(modelAdmits(owner, candidate, fold)).toBe(true);
+    expect(modelAdmits(candidate, owner, fold)).toBe(true);
+    expect(modelAdmits(owner, model([field('inner', false, ref('PetOther'))]), fold)).toBe(false);
+    // A reference deeper down is read the same way; the model itself is never touched.
+    const items = (inner: TypeRef): TypeRef => ({ kind: 'array', items: inner });
+    expect(
+      modelAdmits(
+        model([field('a', false, items(ref('PetInner')))]),
+        model([field('a', false, items(ref('PetJsonInner')))]),
+        fold,
+      ),
+    ).toBe(true);
+    expect(candidate.fields[0]?.type).toEqual(ref('PetJsonInner'));
+
+    const union = (name: string): Model =>
+      model([], {
+        variants: [ref(name)],
+        compositionKind: 'oneOf',
+        discriminator: { property: 'kind', mapping: { a: name } },
+      });
+    expect(modelAdmits(union('PetA'), union('PetJsonA'))).toBe(false);
+    expect(modelAdmits(union('PetA'), union('PetJsonA'), fold)).toBe(true);
+    expect(union('PetJsonA').discriminator).toEqual({ property: 'kind', mapping: { a: 'PetJsonA' } });
+
+    // An enum reference is read as it is: no pass renames enums.
+    const enumRef = (name: string): TypeRef => ({ kind: 'enum', name });
+    expect(
+      modelAdmits(
+        model([field('s', false, enumRef('PetState'))]),
+        model([field('s', false, enumRef('PetJsonState'))]),
+        fold,
+      ),
+    ).toBe(false);
+
+    // The per-field rule and the type key read the same way.
+    expect(fieldAdmits(field('inner', false, ref('PetInner')), field('inner', true, ref('PetJsonInner')), fold)).toBe(
+      true,
+    );
+    expect(fieldAdmits(field('inner', true, ref('PetInner')), field('inner', false, ref('PetJsonInner')), fold)).toBe(
+      false,
+    );
+    expect(fieldAdmits(field('inner', false, ref('PetInner')), field('inner', false, ref('PetJsonInner')))).toBe(false);
+    expect(typeShapeKey(items(ref('PetJsonInner')), fold)).toBe(typeShapeKey(items(ref('PetInner'))));
+    expect(typeShapeKey(items(ref('PetJsonInner')))).not.toBe(typeShapeKey(items(ref('PetInner'))));
   });
 });

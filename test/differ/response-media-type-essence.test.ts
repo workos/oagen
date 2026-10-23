@@ -726,8 +726,9 @@ describe('parser to differ — a secondary inline body on a default or range res
         .map((c) => (c as { name: string }).name)
         .sort(),
     ).toEqual([
-      'ListNotesClientErrorApplicationYamlVersion1Response',
+      // A `4XX` secondary body is an error body, `<Op>Error4Xx<MediaType>` (workos/oagen#304).
       'ListNotesDefaultApplicationYamlVersion1Response',
+      'ListNotesError4XxApplicationYamlVersion1',
     ]);
     const respelled = { from: 'application/yaml; version=1', to: 'application/yaml; version=3' };
     expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({

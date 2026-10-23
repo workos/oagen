@@ -9,7 +9,7 @@ import {
 } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { enumValuesOf, sameEnumShape } from './enum-members.js';
-import { STATUS_RANGE_LABELS } from './responses.js';
+import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
 
 /**
  * Promote the inline enums a model's fields and named-union variants
@@ -61,15 +61,28 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  * silently given the component's values. It is also the set of names a
  * renamed enum must step around (`distinctEnumName`), so pass every model of
  * the document, not only the ones to walk into.
+ *
+ * `ownedErrorBodies` is the parser's record of every inline error body an
+ * operation named itself (`OperationExtractionResult.ownedErrorBodies`), by
+ * identity. Those step by `Body` on a clash (`GetPetError404Body`), as their
+ * `<Op>Error<code>…` names do in the shape registry; every other body — a
+ * body shared through `components/responses` at a 404, a `4XX` or
+ * `default`, a `default` or `1XX`–`3XX` body, a success body — steps by
+ * number, so the one enum a shared component declares settles on one name
+ * (`ProblemResponse2`) from every operation that returns it. Without the
+ * record (an IR built outside `parseSpec`), every error body is taken as the
+ * operation's own (`everyErrorBody`).
  */
 export function collectInlineEnumsFromOperations(
   services: Service[],
   enums: Enum[],
   models: readonly Model[] = [],
   componentNames: ReadonlySet<string> = new Set(),
+  ownedErrorBodies?: ReadonlySet<TypeRef>,
 ): void {
   const enumNames = new Set(enums.map((e) => e.name));
   const modelsByName = new Map(models.map((model) => [model.name, model]));
+  const owned = ownedErrorBodies ?? everyErrorBody(services);
   const modelNames = new Set(modelsByName.keys());
   // Each materialized model is visited once, under the first qualifier that reaches it.
   const visited = new Set<string>();
@@ -130,13 +143,18 @@ export function collectInlineEnumsFromOperations(
       // An error body that is itself an inline enum, or an array of one, is
       // typed by `schemaToTypeRef` and reaches no model, so it is promoted
       // here — after the headers, so a header enum of the same name keeps it
-      // as a header model would. The name is already operation-qualified
-      // (`GetPetError404`); one a component, header or earlier error enum
-      // owns with other members steps to `GetPetError404Body`. An enum
-      // nested in an error body's model is collected with every other
+      // as a header model would. An operation-owned body's name is already
+      // operation-qualified (`GetPetError404`); one a component, header or
+      // earlier error enum owns with other members steps to
+      // `GetPetError404Body`. A body shared through `components/responses`
+      // (`ProblemResponse`, not in `owned`) steps by number instead
+      // (`ProblemResponse2`), the name the same body takes at a `default`
+      // or range site, so every operation returning it shares one enum. An
+      // enum nested in an error body's model is collected with every other
       // model's (`collectInlineEnumsFromModels`).
       for (const error of op.errors) {
-        if (error.type) collectDistinctEnums(error.type, 'Body', enums, enumNames, modelNames);
+        if (error.type)
+          collectDistinctEnums(error.type, owned.has(error.type) ? 'Body' : undefined, enums, enumNames, modelNames);
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`), or for a `default` or range response, is typed
@@ -145,9 +163,12 @@ export function collectInlineEnumsFromOperations(
       // model and is walked here; enums nested in its inline models are
       // reached through them. Its name is already operation-qualified
       // (`ListPetsDefaultResponse`); a clash with a different value set falls
-      // back to a numeric suffix.
+      // back to a numeric suffix — except for an operation-owned error body
+      // (`owned`: a 4xx/5xx or `4XX`/`5XX` body under a secondary media type,
+      // a `4XX`/`5XX` range's body), named `<Op>Error<code>…` like
+      // `errors[].type`, which steps to `…Body` as that does.
       for (const { type } of collectResponseBodyTypes(op)) {
-        collectThroughModels(type, undefined);
+        collectThroughModels(type, owned.has(type) ? 'Body' : undefined);
       }
       // A request body declared only for a secondary media type (`text/csv`
       // next to `application/json`) is typed like one, with its name already
@@ -188,6 +209,35 @@ export function collectInlineEnumsFromWebhooks(
 }
 
 /**
+ * Every error body the IR carries, by identity, for a caller that hands the
+ * collector no record of which ones the operations named themselves
+ * (`collectInlineEnumsFromOperations`): each `errors` entry's `type` and
+ * secondary bodies, and the body and secondary bodies of each `4XX`/`5XX`
+ * range (`isErrorStatusRange`). The IR alone cannot tell an operation-owned
+ * body (`GetPetError404ApplicationYaml`, `GetPetError4Xx`) from one shared
+ * through `components/responses` (`ProblemResponse`), so every one of them
+ * is taken as the operation's own and steps by `Body`; `parseSpec` passes
+ * the parser's record instead (`OperationExtractionResult.ownedErrorBodies`).
+ */
+function everyErrorBody(services: readonly Service[]): ReadonlySet<TypeRef> {
+  const types = new Set<TypeRef>();
+  for (const service of services) {
+    for (const op of service.operations) {
+      for (const error of op.errors) {
+        if (error.type) types.add(error.type);
+        for (const content of error.contents ?? []) types.add(content.type);
+      }
+      for (const range of op.rangeResponses ?? []) {
+        if (!isErrorStatusRange(range.range)) continue;
+        if (range.type) types.add(range.type);
+        for (const content of range.contents ?? []) types.add(content.type);
+      }
+    }
+  }
+  return types;
+}
+
+/**
  * Header lists to walk, each with the status-code qualifier that keeps a
  * colliding enum name apart. When `successResponses` exists the primary list
  * is the same array as its entry there, so the entries are walked with their
@@ -209,7 +259,9 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
     if (error.headers) groups.push({ headers: error.headers, qualifier: String(error.statusCode) });
   }
   // A fallback response has no status code to qualify by; its label
-  // (`Default`, `ClientError`) is what names its inline models too.
+  // (`Default`, `ClientError`) qualifies its header models and enums, and
+  // names the inline body of a `default` or `1XX`–`3XX` response (a `4XX`
+  // or `5XX` body is named by its range key, `<Op>Error4Xx`).
   if (op.defaultResponse?.headers) groups.push({ headers: op.defaultResponse.headers, qualifier: 'Default' });
   for (const range of op.rangeResponses ?? []) {
     if (range.headers) groups.push({ headers: range.headers, qualifier: STATUS_RANGE_LABELS[range.range] });

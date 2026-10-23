@@ -341,8 +341,8 @@ describe('range responses (1XX–5XX)', () => {
       { range: '2XX', description: 'other success' },
       {
         range: '4XX',
-        type: model('ListPetsClientErrorResponse'),
-        ...jsonBody(model('ListPetsClientErrorResponse')),
+        type: model('ListPetsError4Xx'),
+        ...jsonBody(model('ListPetsError4Xx')),
         description: 'rejected',
       },
       { range: '1XX', description: 'info' },
@@ -352,7 +352,7 @@ describe('range responses (1XX–5XX)', () => {
     expect(op.response).toEqual(model('Pet'));
     expect(op.successResponses).toBeUndefined();
     expect(op.errors).toEqual([]);
-    expect(collectFallbackResponseTypes(op)).toEqual([model('Error'), model('ListPetsClientErrorResponse')]);
+    expect(collectFallbackResponseTypes(op)).toEqual([model('Error'), model('ListPetsError4Xx')]);
     expectConsistent(ir);
   });
 
@@ -369,8 +369,8 @@ describe('range responses (1XX–5XX)', () => {
     ['1XX', 'ListPetsInformationalResponse'],
     ['2XX', 'ListPetsSuccessResponse'],
     ['3XX', 'ListPetsRedirectResponse'],
-    ['4XX', 'ListPetsClientErrorResponse'],
-    ['5XX', 'ListPetsServerErrorResponse'],
+    ['4XX', 'ListPetsError4Xx'],
+    ['5XX', 'ListPetsError5Xx'],
   ])('names the inline body of a %s response %s', async (range, name) => {
     const ir = await parseWithoutWarnings(
       petsSpec({
@@ -650,7 +650,7 @@ describe('fallback response bodies reach every pass', () => {
     const assigned = assignModelsToServices(ir.models, ir.services);
 
     expect(assigned.get('Error')).toBe('Pets');
-    expect(assigned.get('ListPetsServerErrorResponse')).toBe('Pets');
+    expect(assigned.get('ListPetsError5Xx')).toBe('Pets');
     expect(assigned.get('Pet')).toBeUndefined();
   });
 });
@@ -727,7 +727,7 @@ describe('every body shape a field can take is materialized, for default and for
   ];
   const keys: Array<[key: string, name: string, pick: (op: Operation) => TypeRef | undefined]> = [
     ['default', 'ListPetsDefaultResponse', (op) => op.defaultResponse?.type],
-    ['4XX', 'ListPetsClientErrorResponse', (op) => op.rangeResponses?.[0].type],
+    ['4XX', 'ListPetsError4Xx', (op) => op.rangeResponses?.[0].type],
   ];
 
   for (const [key, name, pick] of keys) {
@@ -763,11 +763,11 @@ describe('fallback body enums reach spec.enums', () => {
     });
     expect(op.rangeResponses?.[0].type).toEqual({
       kind: 'enum',
-      name: 'ListPetsServerErrorResponse',
+      name: 'ListPetsError5Xx',
       values: ['wait', 'later'],
     });
     expect(enumOf(ir, 'ListPetsDefaultResponse')).toEqual(['retry', 'stop']);
-    expect(enumOf(ir, 'ListPetsServerErrorResponse')).toEqual(['wait', 'later']);
+    expect(enumOf(ir, 'ListPetsError5Xx')).toEqual(['wait', 'later']);
   });
 
   it('promotes the items enum of an array body', async () => {
@@ -914,24 +914,24 @@ describe('a fallback body never overwrites a model that owns its name', () => {
 
   it('does the same for a range body', async () => {
     const ir = await parseWithoutWarnings(
-      withComponent('ListPetsClientErrorResponse', obj({ message: str }), {
+      withComponent('ListPetsError4Xx', obj({ message: str }), {
         '200': ok,
         '4XX': { description: 'r', content: json(obj({ code: str })) },
       }),
     );
     const types = fieldTypesByModel(ir.models);
 
-    expect(types['ListPetsClientErrorResponse']).toEqual({ message: str });
+    expect(types['ListPetsError4Xx']).toEqual({ message: str });
     expect(only(ir).rangeResponses).toEqual([
       {
         range: '4XX',
-        type: model('ListPetsClientErrorResponse2'),
-        ...jsonBody(model('ListPetsClientErrorResponse2')),
+        type: model('ListPetsError4XxBody'),
+        ...jsonBody(model('ListPetsError4XxBody')),
         description: 'r',
       },
     ]);
-    expect(types['ListPetsClientErrorResponse2']).toEqual({ code: str });
-    expectConsistent(ir, ['Pet', 'Error', 'ListPetsClientErrorResponse']);
+    expect(types['ListPetsError4XxBody']).toEqual({ code: str });
+    expectConsistent(ir, ['Pet', 'Error', 'ListPetsError4Xx']);
   });
 
   it('moves the whole body when only a nested model name is owned by a component', async () => {

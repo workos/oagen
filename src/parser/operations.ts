@@ -19,6 +19,7 @@ import type {
   PaginationEndOfIteration,
   ExternalDocs,
   ServerEntry,
+  StatusRange,
 } from '../ir/types.js';
 import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
@@ -73,6 +74,7 @@ import {
   classifyAndExtractResponse,
   composedWithoutFields,
   classifyResponseKey,
+  isErrorStatusRange,
   resolveDataPathFromSchema,
   STATUS_RANGE_LABELS,
   warnUnrecognizedResponseKey,
@@ -430,6 +432,21 @@ export interface OperationExtractionResult {
    * `resolveEnvelopeCompanionNames` settles their names once and for all.
    */
   inlineModelBundles: InlineModelBundle[];
+  /**
+   * The type of every inline error body an operation named itself, by
+   * identity: the `errors[].type` and `errors[].contents[].type` of a
+   * 4xx/5xx status code and the `type` and `contents[].type` of a `4XX`/`5XX`
+   * range, each written as `<Op>Error<code>…` (`ownedErrorBodyTypes`). A
+   * body a `components/responses` entry declares is never here, at
+   * whichever of those sites an operation returns it: it is named after the
+   * component (`<Component>Response`, `<Component><MediaType>Response`) and
+   * shared by every operation that returns it, so an enum body among them
+   * must step by number at every site (`ProblemResponse2`), as the
+   * component's model does, never by the `Body` the operation-owned bodies
+   * step by — the collector reads this set to tell the two apart
+   * (`collectInlineEnumsFromOperations`).
+   */
+  ownedErrorBodies: ReadonlySet<TypeRef>;
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -458,7 +475,7 @@ export function extractOperations(
   componentEnums?: readonly Enum[],
   componentPathItems?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
+  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [], ownedErrorBodies: new Set() };
 
   // Every pass below reads the resolved map: each entry as itself, or as the
   // `components/pathItems` item its `$ref` leads to, with an entry that
@@ -710,7 +727,33 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels, inlineModelBundles };
+  return { services, inlineModels, inlineModelBundles, ownedErrorBodies: ownedErrorBodyTypes(deferred) };
+}
+
+/**
+ * The type of every inline error body the operations named themselves, by
+ * identity, once every deferred schema is resolved (so each target's `type`
+ * is the TypeRef the IR carries): the deferred sites of kind `error` that
+ * carry no `componentBody`. Every operation-owned error body is deferred
+ * that way and nothing else is — the JSON body of a 4xx/5xx status code and
+ * of a `4XX`/`5XX` range (`typeErrorBody`), and the bodies of their
+ * secondary media types (`typeSecondaryContent`, role `Error`) — while a
+ * body a `components/responses` entry declares is deferred with
+ * `componentBody` (its JSON body, at a status code, `default` or a range
+ * alike) or as `content` under the component's `Response` name (its
+ * secondary bodies, `contentModelNaming`), whether the operation wrote the
+ * `$ref` directly or through a chain (`resolveResponseRef` follows it before
+ * the site is deferred). A body that is a `$ref` into `components/schemas`
+ * is not deferred at all and references a component, so it is no inline
+ * body of either kind. See `OperationExtractionResult.ownedErrorBodies`.
+ */
+function ownedErrorBodyTypes(deferred: readonly DeferredInlineType[]): ReadonlySet<TypeRef> {
+  const types = new Set<TypeRef>();
+  for (const item of deferred) {
+    if (item.kind !== 'error' || item.componentBody) continue;
+    for (const target of item.targets) if (target.type) types.add(target.type);
+  }
+  return types;
 }
 
 /**
@@ -3984,11 +4027,14 @@ interface DeferredInlineType {
   kind: 'header' | 'content' | 'request' | 'fallback' | 'error' | 'param';
   schema: SchemaObject;
   /**
-   * The bare name the models derive from: the header name, the response stem
-   * + media type + role, a secondary request body's `<Op><MediaType>Request`,
-   * a fallback body's `<Op><Label>Response`, an error body's
-   * `<Op>Error<code>`, a parameter's name, or `<Component>Response` for a
-   * fallback or error body a `components/responses` entry declares.
+   * The bare name the models derive from: the header name; a success or
+   * fallback entry's secondary body, the stem + media type + `Response`; a
+   * secondary request body's `<Op><MediaType>Request`; a fallback body's
+   * `<Op><Label>Response` (`default`, `1XX`–`3XX`); an error body's
+   * `<Op>Error<code>` — the status code or the `4XX`/`5XX` range key, then
+   * the media type for a secondary body (`<Op>Error<code><MediaType>`); a
+   * parameter's name; or `<Component>Response` for a fallback or error body
+   * a `components/responses` entry declares.
    */
   name: string;
   /**
@@ -4001,9 +4047,9 @@ interface DeferredInlineType {
   componentBody?: boolean;
   /**
    * What tells this site from another of the same name within one operation:
-   * a status code, the label of a fallback response (`Default`,
-   * `ClientError`), or a parameter's location (`query`); a request body has
-   * none.
+   * a status code, the key of a `4XX`/`5XX` range (`4XX`), the label of a
+   * `default` or `1XX`–`3XX` response (`Default`, `Success`), or a
+   * parameter's location (`query`); a request body has none.
    */
   statusCode?: number | string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
@@ -4195,11 +4241,13 @@ function attachSharedDeferredRefs(
  * body from the operation's response stem and media type,
  * `RenderPetCardTextHtmlResponse`; either, on a response shared through
  * `components/responses`, from the component's stem instead (`CardXMeta`,
- * `CardApplicationYamlResponse`; see `responseModelSite`); a fallback body
- * from the stem and the response's label, `ListPetsDefaultResponse`; an
- * error body from the stem and its status code, `GetPetError404`
- * (`deriveErrorModelName`); a parameter from the service and parameter
- * name, `PetsFilter`. Any of them
+ * `CardApplicationYamlResponse`; see `responseModelSite`); a `default` or
+ * `1XX`–`3XX` body from the stem and the response's label,
+ * `ListPetsDefaultResponse`; an error body from the stem and its status code
+ * or `4XX`/`5XX` range key, `GetPetError404`, `GetPetError4Xx`
+ * (`deriveErrorModelName`), and a secondary media type's error body from
+ * that name and the media type, `GetPetError404ApplicationYaml`; a
+ * parameter from the service and parameter name, `PetsFilter`. Any of them
  * is a name a component schema, a model nested in one (`GetPet.error404` owns
  * `GetPetError404`), a primary body, the same header on a 429 or another
  * operation may already own with a different shape, or an enum — a
@@ -4221,14 +4269,18 @@ function attachSharedDeferredRefs(
  *             3. the other of those two
  *             4. operation and status code    `DocumentsCreateDocumentXMeta429`
  *             5. a numeric suffix             `DocumentsXMeta2`, `DocumentsXMeta3`, …
- *   content   1. the bare name                `RenderPetCardTextHtmlResponse`
+ *   content   (a success or fallback entry's secondary body)
+ *             1. the bare name                `RenderPetCardTextHtmlResponse`
  *             2. the status code              `RenderPetCardTextHtmlResponse201`
  *             3. a numeric suffix             `…Response2`, `…Response3`, …
  *   request   1. the bare name                `ReplaceWidgetTextCsvRequest`
  *             2. a numeric suffix             `ReplaceWidgetTextCsvRequest2`, `…3`, …
- *   fallback  1. the bare name                `ListPetsDefaultResponse`
+ *   fallback  (a `default` or `1XX`–`3XX` body)
+ *             1. the bare name                `ListPetsDefaultResponse`
  *             2. a numeric suffix             `ListPetsDefaultResponse2`, `…3`, …
- *   error     1. the bare name                `GetPetError404`
+ *   error     (an error entry's JSON body, its secondary bodies, and a
+ *             `4XX`/`5XX` range's bodies alike)
+ *             1. the bare name                `GetPetError404`, `GetPetError404ApplicationYaml`, `GetPetError4Xx`
  *             2. a `Body` suffix              `GetPetError404Body`
  *             3. a numbered `Body` suffix     `GetPetError404Body2`, `…Body3`, …
  *   a fallback or error body a `components/responses` entry declares
@@ -5067,13 +5119,27 @@ function componentResponseModelBase(componentName: string): string {
  */
 const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html', 'text/xml', 'application/xml'];
 
-/** Where an inline body declared for a secondary media type gets its name. */
+/** Where an inline body declared for a secondary media type gets its name (`typeSecondaryContent`). */
 interface ContentModelNaming {
-  /** The stem: the operation's (`RenderPetCard`; with the response's label for a fallback, `ListPetsDefault`) or a component response's (`Card`). */
+  /**
+   * The stem the media type's token follows (`ResponseModelSite.stem`): the
+   * operation's (`RenderPetCard`; with the response's label for a `default`
+   * or `1XX`–`3XX` range, `ListPetsDefault`), a component response's
+   * (`Card`), or an inline error entry's body name (`GetNoteError404`,
+   * `GetNoteError4Xx`).
+   */
   base: string;
-  /** `Response` for a success or fallback entry, `Error` for an error entry; `Response` for a component response wherever it is mounted. */
-  suffix: string;
-  /** A status code, or the label of a fallback response (`Default`, `ClientError`). */
+  /**
+   * How the body is named and steps. `Response`: `<base><MediaType>Response`
+   * (`RenderPetCardTextHtmlResponse`), deferred as `content` — a success
+   * entry, a `default` or `1XX`–`3XX` range, and a component response
+   * wherever it is mounted. `Error`: `<base><MediaType>`
+   * (`GetNoteError404ApplicationYaml`), deferred as `error`, the kind the
+   * entry's JSON body steps by — an inline error entry, at a 4xx/5xx status
+   * code or in a `4XX`/`5XX` range.
+   */
+  role: 'Response' | 'Error';
+  /** A status code, the key of a `4XX`/`5XX` range (`4XX`), or the label of a `default` or `1XX`–`3XX` response (`Default`, `Success`). */
   statusCode: number | string;
 }
 
@@ -5086,10 +5152,15 @@ interface ContentModelNaming {
  */
 interface ResponseModelSite {
   /**
-   * The stem every such model starts with: the component's
-   * (`componentResponseModelBase`: `Card`) for a response written as a
-   * `$ref` into `components/responses`, else the operation's response stem
-   * (`GetNote`; with the response's label for a fallback, `ListPetsDefault`).
+   * The stem every such model starts with: the entry's body name less a
+   * trailing `Response` — the shared body name for a response written as a
+   * `$ref` into `components/responses` (`CardResponse` → `Card`), else the
+   * name the entry's own inline body is materialized under: `<Op>Response`
+   * for a success or redirect entry (`GetNote`), `<Op><Label>Response` for
+   * a `default` or `1XX`–`3XX` range (`ListPetsDefault`), and the error
+   * body's `<Op>Error<code>` for a 4xx/5xx status code or a `4XX`/`5XX`
+   * range (`GetNoteError404`, `GetNoteError4Xx`), which has no `Response`
+   * to drop.
    */
   stem: string;
   /**
@@ -5105,37 +5176,39 @@ interface ResponseModelSite {
 
 /**
  * Decide where everything a response declares besides its primary body is
- * named from. A response written as a `$ref` into `components/responses` is
- * one thing however many operations return it and whatever key each mounts
- * it at, so an inline object under another media type and an object-shaped
- * header are named from the stem of the model its body is shared under
- * (`componentModelName`, see `sharedResponseModelName`) — that name less its
- * `Response`, the way the operation's stem is `deriveResponseName` less its
- * `Response`: `Card` + `ApplicationYaml` + `Response` for the body under
- * `application/yaml`, `Card` + `XMeta` for an `X-Meta` header, and
- * `CardResponse2…` when the body stepped to `CardResponse2` — the same names
- * from `GET /notes` at 200, from `GET /pets` at 404 and from a `default` or
- * `4XX` that refs it, so every operation shares one model of each
- * (workos/oagen#302). An inline response's are named after the operation:
- * the response stem, media type and the entry's role
- * (`GetNoteApplicationYamlResponse`, `GetNoteApplicationYamlError`,
- * `ListPetsDefaultTextPlainResponse`) and the service plus header name
- * (`NotesXMeta`). The names of either kind go through the shape registry as
- * before (`resolveDeferredInlineTypes`), so one a component schema or
- * another site owns with a shape it does not share steps to the kind's next
- * candidate.
+ * named from: the stem is the entry's body name less a trailing `Response`.
+ * A response written as a `$ref` into `components/responses` is one thing
+ * however many operations return it and whatever key each mounts it at, so
+ * an inline object under another media type and an object-shaped header are
+ * named from the model its body is shared under (`componentModelName`, see
+ * `sharedResponseModelName`): `Card` + `ApplicationYaml` + `Response` for
+ * the body under `application/yaml`, `Card` + `XMeta` for an `X-Meta`
+ * header, and `CardResponse2…` when the body stepped to `CardResponse2` —
+ * the same names from `GET /notes` at 200, from `GET /pets` at 404 and from
+ * a `default` or `4XX` that refs it, so every operation shares one model of
+ * each (workos/oagen#302). An inline response's are named from the name its
+ * own body is materialized under (`bodyName`): `<Op>Response` for a success
+ * or redirect entry and `<Op><Label>Response` for a `default` or `1XX`–`3XX`
+ * range give `GetNoteApplicationYamlResponse` and
+ * `ListPetsDefaultTextPlainResponse`; `<Op>Error<code>` for an error entry
+ * — a 4xx/5xx status code or a `4XX`/`5XX` range — gives
+ * `GetNoteError404ApplicationYaml` and `GetNoteError4XxApplicationYaml`,
+ * with the status code or range key always in the name, as it is in the
+ * JSON body's (workos/oagen#304); a header is the service plus header name
+ * (`NotesXMeta`) whatever the entry. The names of either kind go through the
+ * shape registry as before (`resolveDeferredInlineTypes`), so one a
+ * component schema or another site owns with a shape it does not share
+ * steps to the kind's next candidate.
  */
 function responseModelSite(
   componentModelName: string | undefined,
-  operationStem: string,
+  bodyName: string,
   ctx: ResponseTypingContext,
 ): ResponseModelSite {
-  if (componentModelName !== undefined) {
-    const stem = componentModelName.replace(/Response$/, '');
-    return { stem, shared: true, headerParent: stem };
-  }
+  const stem = (componentModelName ?? bodyName).replace(/Response$/, '');
+  if (componentModelName !== undefined) return { stem, shared: true, headerParent: stem };
   return {
-    stem: operationStem,
+    stem,
     shared: false,
     headerParent: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
   };
@@ -5144,16 +5217,17 @@ function responseModelSite(
 /**
  * The naming of an inline body under a secondary media type of one response
  * entry: the site's stem, then the entry's role — `Error` for an error
- * entry, `Response` otherwise — except that a component response's bodies
- * are `Response` at any key, as its primary body is `<Component>Response`
- * whether an operation mounts it at 200 or 404.
+ * entry (a 4xx/5xx status code, a `4XX`/`5XX` range), `Response` otherwise
+ * — except that a component response's bodies are `Response` at any key, as
+ * its primary body is `<Component>Response` whether an operation mounts it
+ * at 200, at 404 or in a `4XX` range.
  */
 function contentModelNaming(
   site: ResponseModelSite,
   role: 'Response' | 'Error',
   statusCode: number | string,
 ): ContentModelNaming {
-  return { base: site.stem, suffix: site.shared ? 'Response' : role, statusCode };
+  return { base: site.stem, role: site.shared ? 'Response' : role, statusCode };
 }
 
 /**
@@ -5193,16 +5267,19 @@ function extractResponseContents(
  * and `application/pdf` are binary and the text and XML types are strings
  * whatever their schema says, any other media type is typed from its schema,
  * and one without a schema is `unknown`. The one addition is that an inline
- * object under such a media type is materialized — the primary pick's
- * `...Response` name belongs to the primary body, so this one is named after
- * its media type as well, from the stem `naming` carries —
- * `RenderPetCardTextHtmlResponse` for an inline response,
- * `CardApplicationYamlResponse` for one shared through `components/responses`
- * (`responseModelSite`) — with the media type's fragment taken from its
- * essence among its `siblings` (the response's content keys), so a
- * key keeps its model name however it is spelled and two spellings of one
- * essence side by side are told apart by their parameters
- * (`mediaTypeNameFragment`). That naming waits for every primary model
+ * object under such a media type is materialized — the primary pick's name
+ * belongs to the primary body, so this one is named after its media type as
+ * well, from the stem and role `naming` carries (`responseModelSite`,
+ * `contentModelNaming`): `RenderPetCardTextHtmlResponse` for a success
+ * entry, `CardApplicationYamlResponse` for a response shared through
+ * `components/responses`, and `GetNoteError404ApplicationYaml` or
+ * `GetNoteError4XxApplicationYaml` for an inline error entry, whose bodies
+ * are deferred as `error` so they step by `Body` as the entry's JSON body
+ * does — with the media type's fragment taken from its essence among its
+ * `siblings` (the response's content keys), so a key keeps its model name
+ * however it is spelled and two spellings of one essence side by side are
+ * told apart by their parameters (`mediaTypeNameFragment`). That naming
+ * waits for every primary model
  * (`resolveDeferredInlineTypes`), so a schema is deferred and `target.type`
  * — returned here as a placeholder — filled in then.
  */
@@ -5223,10 +5300,11 @@ function typeSecondaryContent(
   }
   if (TEXT_RESPONSE_MEDIA_TYPES.includes(essence)) return { kind: 'primitive', type: 'string' };
   if (!schema) return { kind: 'primitive', type: 'unknown' };
+  const fragment = mediaTypeNameFragment(contentType, siblings);
   ctx.deferred.push({
-    kind: 'content',
+    kind: naming.role === 'Error' ? 'error' : 'content',
     schema,
-    name: `${naming.base}${mediaTypeNameFragment(contentType, siblings)}${naming.suffix}`,
+    name: naming.role === 'Error' ? `${naming.base}${fragment}` : `${naming.base}${fragment}Response`,
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
@@ -5236,13 +5314,14 @@ function typeSecondaryContent(
 }
 
 /**
- * `<Op>DefaultResponse`, `<Op>ClientErrorResponse`: a fallback body's inline
- * model, named like the primary body's `<Op>Response` with the response's
- * label (`Default`, or the word for its range) in between. Starts with the
- * operation's stem, so `operationIdModelBase` reserves it with the rest. A
- * fallback written as a `$ref` into `components/responses` is named after
- * the component instead (`sharedResponseModelName`); this name then only
- * prefixes the inline bodies of its secondary media types.
+ * `<Op>DefaultResponse`, `<Op>SuccessResponse`: the inline body of a
+ * `default` or `1XX`–`3XX` response, named like the primary body's
+ * `<Op>Response` with the response's label (`Default`, or the word for its
+ * range) in between. A `4XX` or `5XX` body is an error body and is named
+ * `<Op>Error4Xx` instead (`deriveErrorModelName`, `isErrorStatusRange`).
+ * Starts with the operation's stem, so `operationIdModelBase` reserves it
+ * with the rest. A fallback written as a `$ref` into `components/responses`
+ * is named after the component instead (`sharedResponseModelName`).
  */
 function deriveFallbackResponseName(op: OperationObject | undefined, pathModelBaseName: string, label: string): string {
   if (op?.operationId) {
@@ -5253,25 +5332,41 @@ function deriveFallbackResponseName(op: OperationObject | undefined, pathModelBa
 
 /**
  * The model name an inline error body is materialized under: the operation's
- * stem plus `Error<code>` (`GetPetError404`), so two operations' inline 404s
- * never share one model, nor do two status codes of one operation. Built by
- * the rule `deriveResponseName` uses for `<Op>Response`: `operationIdModelName`
- * when the operation has an `operationId`, else the path-derived prefix
- * (`PetsByPetIdGetError404`), which `resolvePathModelBaseNames` already keeps
- * clear of every component schema name.
+ * stem plus `Error<code>` — the status code (`GetPetError404`) or, for a
+ * `4XX`/`5XX` range, the range key in PascalCase (`GetPetError4Xx`) — so two
+ * operations' inline 404s never share one model, nor do two status codes or
+ * a status code and a range of one operation. The one source of every
+ * inline error body's name: the JSON body of a 4xx/5xx status code
+ * (`extractResponses`), of a `4XX`/`5XX` range (`fillFallbackResponse`), and
+ * through `responseModelSite` the bodies of their secondary media types
+ * (`GetPetError404ApplicationYaml`), so the status code is in every one of
+ * them (workos/oagen#304). Built by the rule `deriveResponseName` uses for
+ * `<Op>Response`: `operationIdModelName` when the operation has an
+ * `operationId`, else the path-derived prefix (`PetsByPetIdGetError404`),
+ * which `resolvePathModelBaseNames` already keeps clear of every component
+ * schema name.
  */
-function deriveErrorModelName(op: OperationObject | undefined, pathModelBaseName: string, code: number): string {
+function deriveErrorModelName(
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  code: number | StatusRange,
+): string {
+  // A range key is cased as every identifier is (`toPascalCase`: `4XX` →
+  // `4Xx`), which is what the extractor makes of the name anyway; a status
+  // code is digits and stays as written.
+  const suffix = `Error${typeof code === 'number' ? code : toPascalCase(code)}`;
   if (op?.operationId) {
-    return operationIdModelName(op.operationId, `Error${code}`);
+    return operationIdModelName(op.operationId, suffix);
   }
-  return `${pathModelBaseName}Error${code}`;
+  return `${pathModelBaseName}${suffix}`;
 }
 
 /**
  * Where the fallback responses (`default`, `1XX`–`5XX`) of one operation
  * land while its responses are read, with what typing their bodies and
  * headers needs. An entry is attached as its key is read; a body with an
- * inline schema is deferred like a header's (`typeFallbackBody`) and its
+ * inline schema is deferred like a header's (`typeFallbackBody` for
+ * `default` and `1XX`–`3XX`, `typeErrorBody` for `4XX` and `5XX`) and its
  * `type` filled in once every operation has been read.
  */
 interface FallbackResponseSink {
@@ -5326,53 +5421,74 @@ function readFallbackResponse(
   // very object once every operation has been read.
   if (range) {
     const entry: RangeResponse = { range };
-    fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink, componentModelName);
+    fillFallbackResponse(entry, resolved, range, sink, componentModelName);
     sink.rangeResponses.push(entry);
   } else {
     const entry: DefaultResponse = {};
-    fillFallbackResponse(entry, resolved, 'Default', sink, componentModelName);
+    fillFallbackResponse(entry, resolved, undefined, sink, componentModelName);
     sink.defaultResponse = entry;
   }
 }
 
 /**
  * Read the body, media types and headers of one fallback response onto
- * `entry`; a key is left off when absent. The body is named after the
- * operation and the response's label (`deriveFallbackResponseName`) or, when
- * the response is a `$ref` into `components/responses`, after the component
+ * `entry`; a key is left off when absent (`range` is unset for `default`).
+ * The body of a `default` or `1XX`–`3XX` response is named after the
+ * operation and the response's label (`deriveFallbackResponseName`) and
+ * deferred as a fallback body (`typeFallbackBody`); the body of a `4XX` or
+ * `5XX` response is an error body (`isErrorStatusRange`), named
+ * `<Op>Error4Xx` and deferred exactly as a 404's is (`deriveErrorModelName`,
+ * `typeErrorBody`), with the range key where that has the status code, so
+ * it steps by `Body` as that does (workos/oagen#304). A response that is a
+ * `$ref` into `components/responses` is named after the component instead
  * (`componentModelName`, see `sharedResponseModelName`), the name every
- * operation returning the component shares. The body is read before the
- * headers so its deferred models are named first, as they were when every
- * fallback body was typed ahead of every header. The media types are read
- * exactly as a success entry's: every one declared, the one `type` was read
- * from sharing its TypeRef, each other typed on its own — an inline object
- * under `text/plain` of the `default` response is `<Op>DefaultTextPlainResponse`.
- * The secondary bodies and headers of a response written as a `$ref` into
- * `components/responses` are named from the component's shared body name
- * (`responseModelSite`), as an explicit status code's are.
+ * operation returning the component shares, whichever kind of site it is.
+ * The body is read before the headers so its deferred models are named
+ * first, as they were when every fallback body was typed ahead of every
+ * header. The media types are read exactly as a success entry's: every one
+ * declared, the one `type` was read from sharing its TypeRef, each other
+ * typed on its own — an inline object under `text/plain` of the `default`
+ * response is `<Op>DefaultTextPlainResponse`, under `application/yaml` of a
+ * `4XX` response `<Op>Error4XxApplicationYaml`. The secondary bodies and
+ * headers of a response written as a `$ref` into `components/responses` are
+ * named from the component's shared body name (`responseModelSite`), as an
+ * explicit status code's are.
  */
 function fillFallbackResponse(
   entry: DefaultResponse | RangeResponse,
   resp: ResponseObject,
-  label: string,
+  range: StatusRange | undefined,
   sink: FallbackResponseSink,
   componentModelName: string | undefined,
 ): void {
-  const operationName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
+  const label = range === undefined ? 'Default' : STATUS_RANGE_LABELS[range];
+  // The key a `4XX`/`5XX` body is named and qualified by, as a 404's is by
+  // its status code; a `default` or `1XX`–`3XX` body is named by its label.
+  const errorRange = range !== undefined && isErrorStatusRange(range) ? range : undefined;
+  const operationName =
+    errorRange === undefined
+      ? deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label)
+      : deriveErrorModelName(sink.op, sink.pathModelBaseName, errorRange);
   const contextName = componentModelName ?? operationName;
-  const site = responseModelSite(componentModelName, operationName.replace(/Response$/, ''), sink.ctx);
+  const componentBody = componentModelName !== undefined;
+  const site = responseModelSite(componentModelName, operationName, sink.ctx);
   const json = jsonResponseSchema(resp);
   // Shared by reference with the deferred body, so the content entry of the
   // media type `type` was read from can join it once it exists.
   const targets: Array<{ type?: TypeRef }> = [entry];
   if (json) {
-    entry.type = typeFallbackBody(json.schema, contextName, label, sink, targets, componentModelName !== undefined);
+    entry.type =
+      errorRange === undefined
+        ? typeFallbackBody(json.schema, contextName, label, sink, targets, componentBody)
+        : typeErrorBody(json.schema, contextName, errorRange, sink.ctx, targets, componentBody);
   }
   const contents = extractResponseContents(
     resp.content,
     json?.contentType,
     entry.type,
-    contentModelNaming(site, 'Response', label),
+    errorRange === undefined
+      ? contentModelNaming(site, 'Response', label)
+      : contentModelNaming(site, 'Error', errorRange),
     sink.ctx,
   );
   if (contents) {
@@ -5458,14 +5574,19 @@ function typeFallbackBody(
  * after the component (`<Component>Response`) and steps by number
  * (`<Component>Response2`) rather than by `Body`, the way the same
  * component's body steps at a `default` or range site, so every site that
- * returns the component settles on one model. List envelope and
- * resource-wrapper detection are skipped on purpose, as for a fallback body.
- * Returns the placeholder the resolution replaces on every target.
+ * returns the component settles on one model. The body of a `4XX` or `5XX`
+ * range comes through here too (`fillFallbackResponse`), under
+ * `<Op>Error4Xx` with the range key as `code`, so it is named, stepped and
+ * qualified exactly as a 404's body is; and so does an error entry's body
+ * under a secondary media type (`typeSecondaryContent`), under
+ * `<Op>Error<code><MediaType>`. List envelope and resource-wrapper
+ * detection are skipped on purpose, as for a fallback body. Returns the
+ * placeholder the resolution replaces on every target.
  */
 function typeErrorBody(
   schema: SchemaObject,
   contextName: string,
-  code: number,
+  code: number | StatusRange,
   ctx: ResponseTypingContext,
   targets: Array<{ type?: TypeRef }>,
   componentBody: boolean,
@@ -5608,11 +5729,12 @@ function extractResponses(
   // fields are read from the status chosen as primary once every status code
   // has been read.
   const bodyResults = new Map<number, ResponseExtractionResult>();
-  // The operation's response stem, which names an inline response's
-  // secondary bodies (`RenderPetCard` + `TextHtml` + `Response`) — a
-  // component response's are named from the component instead
+  // The name an inline success or redirect body is materialized under
+  // (`<Op>Response`), whose stem names its secondary bodies (`RenderPetCard`
+  // + `TextHtml` + `Response`); an error entry's are named from its own
+  // `<Op>Error<code>` and a component response's from the component
   // (`responseModelSite`).
-  const operationStem = deriveResponseName(op, pathModelBaseName).replace(/Response$/, '');
+  const operationBodyName = deriveResponseName(op, pathModelBaseName);
   const fallback: FallbackResponseSink = { op, pathModelBaseName, opLabel, ctx, rangeResponses: [] };
   // Each classified body's schema, for resolving an overridden `dataPath`
   // through the document when the IR cannot answer.
@@ -5649,10 +5771,13 @@ function extractResponses(
     // at a status code, as `default` or in a range (`readFallbackResponse`
     // asks the same helper).
     const componentModelName = code >= 200 ? sharedResponseModelName(rawResponse, ctx) : undefined;
+    // The name this entry's own inline body is materialized under: the error
+    // body's `<Op>Error<code>` for a 4xx/5xx, else `<Op>Response`.
+    const bodyName = code >= 400 ? deriveErrorModelName(op, pathModelBaseName, code) : operationBodyName;
     // Where this response's secondary bodies and headers are named from: the
     // component's shared body name for a `$ref` into `components/responses`,
-    // else the operation.
-    const site = responseModelSite(componentModelName, operationStem, ctx);
+    // else `bodyName`.
+    const site = responseModelSite(componentModelName, bodyName, ctx);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
     // response, which no branch below keeps, declares none worth
@@ -5749,7 +5874,7 @@ function extractResponses(
       const type = json
         ? typeErrorBody(
             json.schema,
-            componentModelName ?? deriveErrorModelName(op, pathModelBaseName, code),
+            componentModelName ?? bodyName,
             code,
             ctx,
             targets,

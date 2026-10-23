@@ -26,6 +26,7 @@ import {
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs } from './external-docs.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
+import { readDiscriminator } from './union-shape.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -335,64 +336,129 @@ function fieldShapeKey(field: Field): string {
   return stableStringify({ ...omitKeys(field, FIELD_DOC_KEYS), type: shapeWithEnumFlags(field.type) });
 }
 
-/** A model's shape beside its fields: its limits, type parameters, `deprecated`, variants (through `shapeWithEnumFlags`) and dispatch rules. */
-function modelShapeKey(model: Model): string {
+/**
+ * A model's shape beside its fields: its limits, type parameters,
+ * `deprecated`, variants (through `readShape`) and dispatch rules, the
+ * mapping's targets read under `options.modelName` as the variants are.
+ */
+function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
   const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
-  if (model.variants) rest.variants = model.variants.map(shapeWithEnumFlags);
+  if (model.variants) rest.variants = model.variants.map((variant) => readShape(variant, options));
+  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.modelName);
   return stableStringify(rest);
 }
 
-/** Field properties `modelAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
+/** Field properties `fieldAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
 const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required']);
+
+/**
+ * How `modelAdmits`, `fieldAdmits` and `typeShapeKey` read a shape before
+ * they compare it.
+ */
+export interface ShapeReadOptions {
+  /**
+   * The name every model reference is read under, on both sides, before the
+   * shapes are compared — in a field's type, a union's variants and a
+   * discriminator's mapping targets alike. Absent, a reference is read under
+   * the name it carries, so a nested inline model that was renamed keeps a
+   * parent from being admitted by one whose child was not. A pass about to
+   * rename models hands the name its renaming gives each one, so two shapes
+   * compare as that renaming leaves them: the `…Json` fold
+   * (`collapseJsonSuffixModels`) reads `<Name>Json…` as `<Name>…`, so a child
+   * it will rename counts as its namesake, while a reference it will not
+   * rename is still read as it is. An enum reference is never renamed by any
+   * pass and is always read as it is.
+   */
+  readonly modelName?: (name: string) => string;
+}
 
 /**
  * Whether `owner` admits `candidate`: every value `candidate` describes is
  * one `owner` describes too, so a reference typed as `owner` in place of
  * `candidate` loses strictness and nothing else. The two have the same field
- * names, and each field agrees with its namesake in everything
- * `modelFingerprint` reads — type, limits, default, access flags, its own
- * `deprecated` — except that `owner` may be looser where `candidate` is
- * strict, never the other way round: a field `candidate` requires may be
+ * names, and each field admits its namesake (`fieldAdmits`): it agrees in
+ * everything `modelFingerprint` reads — type, limits, default, access flags,
+ * its own `deprecated` — except that `owner` may be looser where `candidate`
+ * is strict, never the other way round: a field `candidate` requires may be
  * optional on `owner`, and a field type `candidate` leaves non-null may be
  * `nullable<…>` on `owner`. Only the field type's own nullable wrapper is
  * read that way; a wrapper deeper down (an array's items) must agree. The
  * models' own limits, type parameters, variants, dispatch rules and
- * `deprecated` must agree, and a model reference is compared by name: a
- * nested inline model keeps its name, so a parent whose child was renamed is
- * not admitted by one whose child was not. An identical shape is admitted.
+ * `deprecated` must agree, and a model reference is compared by name — the
+ * name it carries, or the one `options.modelName` reads it under: a nested
+ * inline model keeps its name, so a parent whose child was renamed is not
+ * admitted by one whose child was not. An identical shape is admitted.
  *
  * The one rule by which an inline model folds onto a model the document
  * declares — a component schema, or a model a component's field minted — in
  * the merge passes (`settleSharedNames`) and in the shape registry of
- * `materializeInlineSchema` (`ownerShares`); two inline models share a name
- * on an identical fingerprint only. A shape the SDK sends — a request body,
- * a parameter — is the callers' exception (`ownerShares`,
- * `settleSharedNames`): it shares a component on an identical shape only,
- * since typed as a looser component a caller could leave out what the
- * operation requires. The list-envelope pass compares its companions by a
- * structural rule of its own, since a companion's nested models are named
- * per operation.
+ * `materializeInlineSchema` (`ownerShares`), and by which the `…Json` fold
+ * (`collapseJsonSuffixModels`) collapses a `<Name>Json…` child onto the
+ * `<Name>…` model that already holds its folded name, every reference read
+ * under the fold; two inline models share a name on an identical fingerprint
+ * only. A shape the SDK sends — a request body, a parameter — is the
+ * callers' exception (`ownerShares`, `settleSharedNames`): it shares a
+ * component on an identical shape only, since typed as a looser component a
+ * caller could leave out what the operation requires. The list-envelope pass
+ * compares its companions by a structural rule of its own, since a
+ * companion's nested models are named per operation.
  */
-export function modelAdmits(owner: Model, candidate: Model): boolean {
+export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOptions = {}): boolean {
   if (owner.fields.length !== candidate.fields.length) return false;
   const ownerFields = new Map(owner.fields.map((field) => [field.name, field]));
   for (const field of candidate.fields) {
     const own = ownerFields.get(field.name);
-    if (!own) return false;
-    if (own.required && !field.required) return false;
-    if (!fieldTypeAdmits(own.type, field.type)) return false;
-    if (stableStringify(omitKeys(own, FIELD_ADMIT_KEYS)) !== stableStringify(omitKeys(field, FIELD_ADMIT_KEYS))) {
-      return false;
-    }
+    if (!own || !fieldAdmits(own, field, options)) return false;
   }
-  return modelShapeKey(owner) === modelShapeKey(candidate);
+  return modelShapeKey(owner, options) === modelShapeKey(candidate, options);
+}
+
+/**
+ * Whether `owner` admits `candidate` as the field of its name: the rule
+ * `modelAdmits` applies to each field, on its own. The two agree in
+ * everything but their documentation — type (through `fieldTypeAdmits`,
+ * model references read under `options.modelName`), limits, default, access
+ * flags, their own `deprecated` — except that `owner` may be optional where
+ * `candidate` is required, and `nullable<…>` where `candidate` is not. The
+ * `…Json` fold asks this of every field the base and the `…Json` model both
+ * declare, since the base takes the `…Json` model's fields.
+ */
+export function fieldAdmits(owner: Field, candidate: Field, options: ShapeReadOptions = {}): boolean {
+  if (owner.required && !candidate.required) return false;
+  if (!fieldTypeAdmits(owner.type, candidate.type, options)) return false;
+  return stableStringify(omitKeys(owner, FIELD_ADMIT_KEYS)) === stableStringify(omitKeys(candidate, FIELD_ADMIT_KEYS));
 }
 
 /** Whether `owner` admits every value of `candidate`'s type: the same type under the field's own nullable wrapper, which `owner` may carry where `candidate` does not. */
-function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef): boolean {
+function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef, options: ShapeReadOptions): boolean {
   if (candidate.kind === 'nullable' && owner.kind !== 'nullable') return false;
   const inner = (ref: TypeRef): TypeRef => (ref.kind === 'nullable' ? ref.inner : ref);
-  return stableStringify(shapeWithEnumFlags(inner(owner))) === stableStringify(shapeWithEnumFlags(inner(candidate)));
+  return typeShapeKey(inner(owner), options) === typeShapeKey(inner(candidate), options);
+}
+
+/**
+ * A type's shape as the admit predicates read it — every inline enum with
+ * its per-value deprecation (`shapeWithEnumFlags`), every model reference
+ * under `options.modelName` — stable-stringified, so two types compare by
+ * string equality. The `…Json` fold compares a base union's variants with
+ * the `…Json` model's through this, both read under the fold.
+ */
+export function typeShapeKey(ref: TypeRef, options: ShapeReadOptions = {}): string {
+  return stableStringify(readShape(ref, options));
+}
+
+/** `shapeWithEnumFlags(ref)`, with every model reference renamed by `options.modelName` on a copy — the flags are read first, since the copy has no identity in the enum side table. */
+function readShape(ref: TypeRef, options: ShapeReadOptions): unknown {
+  const shape = shapeWithEnumFlags(ref);
+  const { modelName } = options;
+  if (!modelName) return shape;
+  const read = structuredClone(shape) as TypeRef;
+  walkTypeRef(read, {
+    model: (r) => {
+      (r as { name: string }).name = modelName(r.name);
+    },
+  });
+  return read;
 }
 
 /** The entries of `value` whose key is not in `keys` and whose value is set. */
