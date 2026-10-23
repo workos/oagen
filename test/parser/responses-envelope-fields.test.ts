@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyAndExtractResponse } from '../../src/parser/responses.js';
+import type { SchemaObject } from '../../src/parser/schemas.js';
 
 /**
  * Covers `envelopeFields` on the list-envelope path of `classifyAndExtractResponse`:
@@ -315,5 +316,38 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
       'ListUsersResponse',
     );
     expect(bareArray.envelopeFields).toBeUndefined();
+  });
+
+  it('reads the companions once when an allOf member loops back, by reference or by identity (Greptile)', () => {
+    const list = { type: 'array', items: { type: 'string' } };
+    const expectRead = (result: ReturnType<typeof classifyAndExtractResponse>) => {
+      expect(result.isPaginated).toBe(true);
+      expect(result.dataPath).toBe('data');
+      expect(result.envelopeFields).toEqual([
+        { name: 'has_more', type: { kind: 'primitive', type: 'boolean' }, required: true },
+      ]);
+      expect(result.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+    };
+
+    // Greptile's cycle: `Base.allOf` holds a nullable reference back to `Base`,
+    // and the envelope combines that wrapper with `{ data, has_more }`.
+    const baseRef = { $ref: '#/components/schemas/Base' };
+    const nullableBase = { oneOf: [baseRef, { type: 'null' }] };
+    const companions = {
+      type: 'object',
+      properties: { data: list, has_more: { type: 'boolean' } },
+      required: ['data', 'has_more'],
+    };
+    expectRead(
+      classifyAndExtractResponse({ type: 'object', allOf: [nullableBase, companions] }, 'ListPetsResponse', {
+        Base: { allOf: [nullableBase] },
+      }),
+    );
+
+    // The same loop in the document's own objects: the nullable member is the
+    // envelope itself, so the walk meets one object twice rather than one name.
+    const envelope: SchemaObject = { type: 'object', allOf: [companions] };
+    envelope.allOf!.unshift({ oneOf: [envelope, { type: 'null' }] });
+    expectRead(classifyAndExtractResponse(envelope, 'ListPetsResponse'));
   });
 });

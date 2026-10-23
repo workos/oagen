@@ -98,19 +98,23 @@ export interface OperationHint {
  * is then kept as a plain response model rather than unwrapped. Any other
  * strategy needs a `param`, from some source, that names one of the
  * operation's query parameters. An override that fails validation — unknown
- * strategy, missing or undeclared parameter, a `dataPath` that does not reach
- * an array, malformed field — is reported with an `[oagen] Warning:` and
- * ignored, leaving the detected metadata as is.
+ * strategy, missing or undeclared parameter, one parameter as both `param`
+ * and `limitParam`, a `pageStart` under a strategy other than `page`, a
+ * `dataPath` that does not reach an array, an `endOfIteration` whose path
+ * does not resolve in the primary response to a field of its kind's type,
+ * malformed field — is reported with an `[oagen] Warning:` and ignored,
+ * leaving the detected metadata as is.
  */
 export interface PaginationHint {
   strategy?: PaginationStrategy | 'none';
   /** Query parameter that selects the page (cursor, offset, or page number). */
   param?: string;
-  /** Query parameter that sets the page size. */
+  /** Query parameter that sets the page size; not the one `param` names. */
   limitParam?: string;
   /**
-   * First page number the API expects (`page` strategy only). Defaults to the
-   * page parameter's integer `default`, else its `minimum`, else 1.
+   * First page number the API expects (`page` strategy only; set under
+   * another strategy, it makes the override unusable). Defaults to the page
+   * parameter's integer `default`, else its `minimum`, else 1.
    */
   pageStart?: number;
   /**
@@ -119,7 +123,12 @@ export interface PaginationHint {
    * `itemType`.
    */
   dataPath?: string;
-  /** Response field that ends the iteration. */
+  /**
+   * Response field that ends the iteration. Its `path` must resolve in the
+   * primary response to a field whose type fits its `kind` — a boolean for
+   * `hasMore`, an integer or number for `totalPages` and `totalCount` — or
+   * the override is unusable.
+   */
   endOfIteration?: PaginationEndOfIteration;
 }
 

@@ -1643,6 +1643,44 @@ export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject
 }
 
 /**
+ * The declarations one property name received from the members of an
+ * `allOf`, in the order first declared; see `declareProperty`.
+ */
+export interface PropertyDeclarations {
+  name: string;
+  /** The first always-applying declaration, with the component it is inherited from (`null` for the schema's own). */
+  unconditional?: { schema: SchemaObject; origin: MergedProperty['origin'] };
+  /** Each branch-only declaration — a `oneOf`/`anyOf` variant's — in order. */
+  conditional: SchemaObject[];
+}
+
+/**
+ * Record one declaration of `name` in `ledger`: the one precedence rule
+ * every `allOf` merge applies, whether the declaration arrives from a direct
+ * member, a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
+ * depth. The first always-applying declaration wins, whatever is declared
+ * before or after it; a branch-only declaration (`onBranch`) is only a
+ * fallback, kept in order for the reader to use when no member always
+ * declares the name — `mergeAllOfMembers` as the union of the distinct
+ * branch declarations, the component readers (`extractAllOfModel`,
+ * `extractDiscriminatedAllOfVariantModels`) as the first branch's. Names are
+ * matched by own name (a `Map`), so `constructor`, `toString` and
+ * `__proto__` are properties like any other.
+ */
+export function declareProperty(
+  ledger: Map<string, PropertyDeclarations>,
+  name: string,
+  schema: SchemaObject,
+  origin: MergedProperty['origin'],
+  onBranch: boolean,
+): void {
+  let entry = ledger.get(name);
+  if (!entry) ledger.set(name, (entry = { name, conditional: [] }));
+  if (onBranch) entry.conditional.push(schema);
+  else entry.unconditional ??= { schema, origin };
+}
+
+/**
  * Merge an inline `allOf` into one object shape, remembering where each
  * property comes from. Every site that types an inline `allOf` reads it
  * through this one function — a model field (of a component or of any
@@ -1701,15 +1739,7 @@ export function mergeAllOfMembers(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): MergedAllOf {
-  /** Every declaration of one property name, in the order first declared. */
-  interface Declarations {
-    name: string;
-    /** The first always-applying member's declaration, with the component it is inherited from. */
-    unconditional?: { schema: SchemaObject; origin: MergedProperty['origin'] };
-    /** Each variant's declaration, in order. */
-    conditional: SchemaObject[];
-  }
-  const declared = new Map<string, Declarations>();
+  const declared = new Map<string, PropertyDeclarations>();
   const required: string[] = [];
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
@@ -1736,11 +1766,7 @@ export function mergeAllOfMembers(
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (!value) continue;
-      let entry = declared.get(key);
-      if (!entry) declared.set(key, (entry = { name: key, conditional: [] }));
-      if (onBranch) entry.conditional.push(value);
-      else entry.unconditional ??= { schema: value, origin };
+      if (value) declareProperty(declared, key, value, origin, onBranch);
     }
     if (s.required && !onBranch) required.push(...s.required);
     for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);

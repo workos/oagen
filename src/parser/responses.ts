@@ -2,6 +2,7 @@ import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } fro
 import { toPascalCase, singularize } from '../utils/naming.js';
 import {
   detectEndOfIteration,
+  endOfIterationProblem,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
   resolveBareSchema,
@@ -53,6 +54,14 @@ export interface ResponseExtractionResult {
   inlineModels: Model[];
   /** Whether this response indicates a paginated list */
   isPaginated: boolean;
+  /**
+   * Set when the body is a list envelope detection recognized but did not
+   * unwrap because nothing pages it (`paginationDisabled`): it was read as
+   * any other body, a plain response model carrying every field. The caller
+   * warns about an envelope kept for want of a paging parameter; one kept by
+   * `strategy: 'none'` was asked for.
+   */
+  unpagedEnvelope?: boolean;
   /** Path to the data array within the response envelope (e.g., 'data') */
   dataPath?: string;
   /**
@@ -88,10 +97,13 @@ export interface ResponseExtractionResult {
 
 export interface ResponseClassificationOptions {
   /**
-   * The operation's pagination was switched off explicitly (`strategy:
-   * 'none'`). A list envelope is then not unwrapped: the body becomes a plain
-   * response model carrying every field, exactly as a non-list body does, so
-   * the wire shape survives without a `pagination` entry to describe it.
+   * Nothing will page the operation: its pagination was switched off
+   * explicitly (`strategy: 'none'`), or no query parameter it declares
+   * drives an iterator and no override names one. A list envelope is then
+   * not unwrapped: the body becomes a plain response model carrying every
+   * field, exactly as a non-list body does, so the wire shape survives
+   * without a `pagination` entry to describe it (`unpagedEnvelope` says it
+   * was an envelope).
    */
   paginationDisabled?: boolean;
   /**
@@ -212,26 +224,46 @@ export function classifyAndExtractResponse(
 /**
  * The field that ends an iteration of a body kept as a wrapper under an
  * explicit `dataPath`, read beside the array the path names — the one
- * reader for every kept wrapper, whatever wraps it. The body is resolved to
- * the object the path walks: a `$ref` is followed to its component and a
- * nullable wrapper of any spelling stripped, however the two alternate
- * (`resolveBareSchema`, the resolver the path walk uses for the array it
- * lands on); its properties are then merged across `allOf` branches, `$ref`
- * branches included, exactly as a recognized envelope's are
- * (`collectEnvelopeProperties`); and `detectEndOfIteration` reads them as
- * it reads an unwrapped envelope's, with the full path excluded, not its
- * root, so the array the path names is never a stop field while a stop
- * field beside a nested array (`pagination.has_more` next to
- * `pagination.items`) stays visible. `undefined` when nothing recognizable
- * is declared, or the body resolves to no object at all.
+ * reader for every kept wrapper, whatever wraps it. The wrapper's
+ * properties are collected exactly as a recognized envelope's are
+ * (`collectEnvelopeProperties`, which reads the body and every `allOf`
+ * member, however deep, through `resolveBareSchema` — the resolver the path
+ * walk uses — so a `$ref` body, a nullable wrapper around the body or
+ * around any member, and a `$ref` chain to one all reach the same object
+ * the path walked), and `detectEndOfIteration` reads them as it reads an
+ * unwrapped envelope's, with the full path excluded, not its root, so the
+ * array the path names is never a stop field while a stop field beside a
+ * nested array (`pagination.has_more` next to `pagination.items`) stays
+ * visible. `undefined` when nothing recognizable is declared, or the body
+ * resolves to no object at all.
  */
 function bodyEndOfIteration(
   schema: SchemaObject,
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration | undefined {
-  const { properties } = collectEnvelopeProperties(resolveBareSchema(schema, componentSchemas), componentSchemas);
+  const { properties } = collectEnvelopeProperties(schema, componentSchemas);
   return detectEndOfIteration(properties, dataPath, componentSchemas);
+}
+
+/**
+ * Why an explicit `endOfIteration` cannot be read from `schema`, or
+ * `undefined` when it can: the override's counterpart of
+ * `bodyEndOfIteration`, over the very property map that reader collects
+ * (`collectEnvelopeProperties`), so a field detection would read is one an
+ * override may name and a field it would not see is not there for an
+ * override either; `endOfIterationProblem` then walks the path and tests
+ * the type. `schema` is the body as written — a `$ref`, an `allOf`, a
+ * nullable wrapper — or `undefined` when the operation declares no body,
+ * which no path resolves in.
+ */
+export function bodyEndOfIterationProblem(
+  end: PaginationEndOfIteration,
+  schema: SchemaObject | undefined,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  const properties = schema && collectEnvelopeProperties(schema, componentSchemas).properties;
+  return endOfIterationProblem(end, properties, componentSchemas);
 }
 
 /**
@@ -262,29 +294,30 @@ function classifyBody(
   schema = foldSiblingProperties(schema);
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
-  if (!options.paginationDisabled) {
-    const envelope = detectListEnvelope(schema);
-    if (envelope.isEnvelope) {
-      const override = options.dataPathOverride;
-      if (override === undefined || override === envelope.dataPath) {
-        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
-      }
-      // The override names another array than the one the envelope would be
-      // unwrapped on: detection was wrong for this operation, so the envelope
-      // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
-      // field is read by the caller (`bodyEndOfIteration`), as every kept
-      // wrapper's is.
-      return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  const envelope = detectListEnvelope(schema);
+  if (envelope.isEnvelope && !options.paginationDisabled) {
+    const override = options.dataPathOverride;
+    if (override === undefined || override === envelope.dataPath) {
+      return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
     }
+    // The override names another array than the one the envelope would be
+    // unwrapped on: detection was wrong for this operation, so the envelope
+    // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
+    // field is read by the caller (`bodyEndOfIteration`), as every kept
+    // wrapper's is.
+    return extractDirectResource(schema, contextName, componentSchemas, options.settle);
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
-  if (isSingleResourceWrapper(schema)) {
-    return extractWrappedResource(schema, contextName, componentSchemas);
-  }
-
   // 4. Direct resource or plain inline object
-  return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  // An envelope that reaches here is one nothing pages (`paginationDisabled`):
+  // it is read exactly as any other body, and the result says it was an
+  // envelope, so the caller can warn about one kept for want of a paging
+  // parameter.
+  const body = isSingleResourceWrapper(schema)
+    ? extractWrappedResource(schema, contextName, componentSchemas)
+    : extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  return envelope.isEnvelope ? { ...body, unpagedEnvelope: true } : body;
 }
 
 interface ListEnvelopeResult {
@@ -576,18 +609,41 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
 }
 
 /**
- * Every property the envelope declares, merged across its `allOf` branches,
+ * Every property the envelope declares, merged across its `allOf` members,
  * with the `required` lists that go with them.
  *
- * A `$ref` branch is resolved against the component schemas so fields an
- * envelope inherits from a shared base (`trace_id` on every response, say)
- * are not silently dropped. A property declared by more than one branch keeps
- * both declarations' shape when both are inline objects — `pagination.next`
- * from one branch and `pagination.total` from another both belong to the
- * response — and otherwise takes the later declaration. (Envelope detection
- * reads the branches' own `properties`; a `oneOf`/`anyOf` branch declares
- * none, so it contributes nothing here. A body that is not an envelope is
- * merged by `mergeAllOfMembers`, which reads such a branch's variants.)
+ * Every node the walk meets — the body, then each `allOf` member, however
+ * deep — is read through `resolveBareSchema`, the resolver the explicit
+ * `dataPath` walk reads the document with: a `$ref` is followed to its
+ * component and a nullable wrapper of any spelling (a type list naming
+ * `null`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
+ * variant) is stripped, however the two alternate. So fields an envelope
+ * inherits from a shared base (`trace_id` on every response, say) are not
+ * silently dropped whether the member is written `$ref: Base`, `{ oneOf: [{
+ * $ref: Base }, { type: 'null' }] }`, a `$ref` to such a wrapper, or an
+ * `allOf` nested inside one — and a stop field declared in any of them is
+ * read. The one place the walk resolves a node, so the companions and the
+ * stop field are read from the same shape, at every level, that the path
+ * walk reaches the data array through. One `seen` runs through the whole
+ * walk: the `$ref` strings `resolveBareSchema` records as it follows them,
+ * handed to every call the walk makes, so a reference reached inside a
+ * wrapper is as seen as one written on the member; and, for an inline
+ * node, the schema object itself. No node is entered twice, under whatever
+ * wrapper or at whatever depth it reappears, so a component that reaches
+ * itself (`Base.allOf` holding `{ oneOf: [{ $ref: Base }, { type: 'null'
+ * }] }`, or `{ $ref: Base }` outright), two components that reach each
+ * other, and a document whose objects form a cycle are each read once and
+ * end the walk where they repeat. An `allOf` member's own `properties`
+ * beside its `allOf` are folded in as its first member
+ * (`foldSiblingProperties`, through `unwrapNullableSchema`). A property
+ * declared by more than one member keeps both declarations' shape when both
+ * are inline objects — `pagination.next` from one member and
+ * `pagination.total` from another both belong to the response — and
+ * otherwise takes the later declaration. (Envelope detection reads the
+ * members' own `properties`; a `oneOf`/`anyOf` member with more than one
+ * non-null variant declares none, so it contributes nothing here. A body
+ * that is not an envelope is merged by `mergeAllOfMembers`, which reads such
+ * a member's variants.)
  */
 function collectEnvelopeProperties(
   schema: SchemaObject,
@@ -596,23 +652,22 @@ function collectEnvelopeProperties(
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
   const seenRefs = new Set<string>();
+  const seenNodes = new WeakSet<SchemaObject>();
 
   const visit = (s: SchemaObject): void => {
-    if (s.$ref) {
-      if (seenRefs.has(s.$ref)) return;
-      seenRefs.add(s.$ref);
-      const refName = s.$ref.split('/').pop();
-      const resolved = refName ? componentSchemas?.[refName] : undefined;
-      if (resolved) visit(resolved);
-      return;
-    }
-    for (const sub of s.allOf ?? []) visit(sub);
-    for (const [key, prop] of Object.entries(s.properties ?? {})) {
+    if (seenNodes.has(s)) return;
+    seenNodes.add(s);
+    const bare = resolveBareSchema(s, componentSchemas, seenRefs);
+    // A reference the walk has followed already, or one nothing resolves:
+    // the walk ends on it, as the resolver did.
+    if (bare.$ref) return;
+    for (const sub of bare.allOf ?? []) visit(sub);
+    for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
       const existing = properties[key];
       properties[key] = existing ? mergePropertyDeclarations(existing, prop) : prop;
     }
-    if (s.required) required.push(...s.required);
+    if (bare.required) required.push(...bare.required);
   };
   visit(schema);
 

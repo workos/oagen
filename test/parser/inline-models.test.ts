@@ -27,6 +27,9 @@ import {
   type TypeRef,
 } from '../../src/ir/types.js';
 
+/** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
+const afterParam = [{ name: 'after', in: 'query', schema: { type: 'string' } }];
+
 // The two shapes from workos/oagen#187: an array whose `items.oneOf` lists
 // inline object variants, and a map whose `additionalProperties` value is an
 // inline object. Both are referenced by name from the field TypeRef and must
@@ -1766,13 +1769,14 @@ describe('inline response objects materialize every variant, item and value mode
     expect([...known].filter((name) => !referenced.has(name))).toEqual([]);
   }
 
-  const operation = (schema: Record<string, unknown>) => ({
+  const operation = (schema: Record<string, unknown>, parameters?: unknown[]) => ({
     openapi: '3.1.0',
     info,
     paths: {
       '/things': {
         get: {
           operationId: 'listThings',
+          ...(parameters && { parameters }),
           responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
         },
       },
@@ -1791,14 +1795,17 @@ describe('inline response objects materialize every variant, item and value mode
 
   it.each(cases)('$label, on the items of a list envelope', async ({ properties, fields, models }) => {
     const ir = await parseWithoutWarnings(
-      operation({
-        type: 'object',
-        properties: {
-          object: { type: 'string', const: 'list' },
-          data: { type: 'array', items: { type: 'object', properties } },
-          list_metadata: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } } },
+      operation(
+        {
+          type: 'object',
+          properties: {
+            object: { type: 'string', const: 'list' },
+            data: { type: 'array', items: { type: 'object', properties } },
+            list_metadata: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } } },
+          },
         },
-      }),
+        afterParam,
+      ),
     );
     const types = fieldTypesByModel(ir.models);
     expect(types['ListThingsItem']).toEqual(fields('ListThingsItem'));
@@ -2774,13 +2781,14 @@ describe('a response that is itself a oneOf materializes every variant the union
     }
   }
 
-  const operation = (operationId: string, schema: Record<string, unknown>) => ({
+  const operation = (operationId: string, schema: Record<string, unknown>, parameters?: unknown[]) => ({
     openapi: '3.1.0',
     info: { title: 'nullable response variants', version: '1' },
     paths: {
       '/things': {
         get: {
           operationId,
+          ...(parameters && { parameters }),
           responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
         },
       },
@@ -2803,14 +2811,21 @@ describe('a response that is itself a oneOf materializes every variant the union
 
   it('a list item whose union has a nullable second variant', async () => {
     const ir = await parseWithoutWarnings(
-      operation('listThings', {
-        type: 'object',
-        properties: {
-          object: { type: 'string', const: 'list' },
-          data: { type: 'array', items: obj({ id: { type: 'string' }, shape: { oneOf: [byRadius, nullableBySide] } }) },
-          list_metadata: obj({ before: { type: 'string' }, after: { type: 'string' } }),
+      operation(
+        'listThings',
+        {
+          type: 'object',
+          properties: {
+            object: { type: 'string', const: 'list' },
+            data: {
+              type: 'array',
+              items: obj({ id: { type: 'string' }, shape: { oneOf: [byRadius, nullableBySide] } }),
+            },
+            list_metadata: obj({ before: { type: 'string' }, after: { type: 'string' } }),
+          },
         },
-      }),
+        afterParam,
+      ),
     );
     const types = fieldTypesByModel(ir.models);
     expect(types['ListThingsItem']).toEqual({
@@ -2917,12 +2932,16 @@ describe('title-mapped unions: the extracted models follow the discriminator map
     paths: {},
     components: { schemas },
   });
-  const withGet = (operationId: string, schema: SchemaObject) => ({
+  const withGet = (operationId: string, schema: SchemaObject, parameters?: unknown[]) => ({
     openapi: '3.1.0',
     info,
     paths: {
       '/things': {
-        get: { operationId, responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } } },
+        get: {
+          operationId,
+          ...(parameters && { parameters }),
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
+        },
       },
     },
   });
@@ -2947,6 +2966,7 @@ describe('title-mapped unions: the extracted models follow the discriminator map
           data: { type: 'array', items: obj({ id: { type: 'string' }, shape: titled }) },
           list_metadata: obj({ before: { type: 'string' }, after: { type: 'string' } }),
         }),
+        afterParam,
       ),
     );
     const types = fieldTypesByModel(ir.models);
@@ -3131,6 +3151,7 @@ describe('sibling reservation reaches every context, including array items and m
         '/things': {
           get: {
             operationId: 'listThings',
+            parameters: afterParam,
             responses: {
               '200': {
                 description: 'ok',

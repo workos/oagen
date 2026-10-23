@@ -64,6 +64,7 @@ import { collectProperties, extractInlineModelsFromProperties, type InlineModelB
 import {
   detectPagination,
   derivePageStart,
+  describeUndetectedPaging,
   paginatedItemType,
   resolvePaginationOverride,
   resolveOverrideParams,
@@ -71,6 +72,7 @@ import {
   resolveDataPathItemType,
 } from './pagination.js';
 import {
+  bodyEndOfIterationProblem,
   classifyAndExtractResponse,
   composedWithoutFields,
   classifyResponseKey,
@@ -2618,29 +2620,47 @@ function buildOperation(
   const pageStartOf = (param: Parameter | undefined): number =>
     derivePageStart(param, param && querySchemas.get(param.name), componentSchemas);
 
+  // Whether an override was written at all, usable or not: an envelope that
+  // ends up with no iterator is warned about only when none was, since a
+  // rejected override has already been warned about by name.
+  const overrideGiven = op['x-pagination'] !== undefined || paginationHint !== undefined;
   // The explicit pagination override — config hint over `x-pagination` — is
   // validated before the response is classified: `strategy: 'none'` must keep
   // a list envelope from being unwrapped into a bare array, and an explicit
   // `dataPath` is resolved against the response while its schema is at hand.
   let paginationOverride = resolvePaginationOverride({ extension: op['x-pagination'], hint: paginationHint }, opLabel);
   const paginationDisabled = paginationOverride?.hint.strategy === 'none';
+  // The pagination the query parameters alone yield, read before the
+  // response is: `UNKNOWN_RESPONSE` stands in for the response, whose item
+  // type this read never uses.
+  const paginationFromParamsAlone =
+    detectPagination(UNKNOWN_RESPONSE, queryParams, undefined, { pageStartOf }) ?? undefined;
   // Whether the override can apply is decided here, before the response is
   // read: one that would be rejected (a `param` the operation does not
   // declare, no strategy from anywhere) must not keep an envelope as a
   // wrapper that detection then reads as the list. What it is checked
-  // against is the pagination the query parameters alone yield — the
-  // envelope fallback's invented `after` never makes an override usable.
+  // against is the pagination the query parameters alone yield — a
+  // parameter the operation does not declare never makes an override usable.
   if (paginationOverride && !paginationDisabled) {
-    const resolved = resolveOverrideParams(
-      detectPagination(UNKNOWN_RESPONSE, queryParams, undefined, { pageStartOf }) ?? undefined,
-      paginationOverride.hint,
-      queryParams,
-    );
+    const resolved = resolveOverrideParams(paginationFromParamsAlone, paginationOverride.hint, queryParams);
     if ('problem' in resolved) {
       console.warn(`[oagen] Warning: ${paginationOverride.source} on ${opLabel}${resolved.problem}`);
       paginationOverride = undefined;
     }
   }
+  // What drives the iterator, if anything: a query parameter the operation
+  // declares — the one detection found, or the one a usable override names
+  // (checked above). With neither there is nothing to page with, so a list
+  // envelope is not unwrapped for an iterator that never comes: it is kept as
+  // a plain response model, the wire shape, exactly as `strategy: 'none'`
+  // keeps it.
+  const iteratorSource: 'parameters' | 'override' | undefined = paginationDisabled
+    ? undefined
+    : paginationFromParamsAlone
+      ? 'parameters'
+      : paginationOverride
+        ? 'override'
+        : undefined;
   const {
     response,
     responseHeaders,
@@ -2660,11 +2680,15 @@ function buildOperation(
     envelopeFields,
     endOfIteration: responseEndOfIteration,
     overrideItemType,
+    overrideEndOfIterationProblem,
     envelopeCompanions,
+    unpagedEnvelope,
   } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, typing, {
-    disabled: paginationDisabled,
+    disabled: iteratorSource === undefined,
     dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
+    endOfIteration: paginationDisabled ? undefined : paginationOverride?.hint.endOfIteration,
     componentModels,
+    overrideOnly: iteratorSource === 'override',
   });
   const inlineModels = [...responseModels, ...reqBodyModels];
 
@@ -2690,40 +2714,70 @@ function buildOperation(
     paginationOverride = undefined;
   }
 
-  // Build structured pagination metadata from response classification and
-  // query param detection, then let the override correct or disable it.
-  const paginationFromParams = detectPagination(response, queryParams, responseDataPath, { pageStartOf });
-  let detectedPagination: PaginationMeta | undefined;
-  if (isPaginated) {
-    const itemType = responseItemType ?? paginatedItemType(response);
-    detectedPagination = {
-      strategy: paginationFromParams?.strategy ?? 'cursor',
-      param: paginationFromParams?.param ?? 'after',
-      limitParam: paginationFromParams?.limitParam,
-      ...(paginationFromParams?.pageStart !== undefined && { pageStart: paginationFromParams.pageStart }),
-      dataPath: responseDataPath ?? paginationFromParams?.dataPath,
-      ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
-      itemType,
-      envelopeFields,
-      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
-    };
-  } else if (paginationFromParams) {
-    // A stop field is also read from a body kept as a wrapper under an
-    // explicit `dataPath` — a `$ref`, an envelope detection would unwrap on
-    // another array, an inline body detection did not recognize (see
-    // `ResponseClassificationOptions.dataPathOverride`).
-    detectedPagination = {
-      ...paginationFromParams,
-      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
-    };
+  // An explicit `endOfIteration` the primary response cannot satisfy — a
+  // path that resolves to no field, or to one whose type does not fit the
+  // kind — would send an iterator reading a field that is not there, so the
+  // whole override falls back to detection the same way. One warning names
+  // the operation and the path; an override already dropped above is not
+  // reported twice.
+  if (paginationOverride && !paginationDisabled && overrideEndOfIterationProblem !== undefined) {
+    console.warn(
+      `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: ${overrideEndOfIterationProblem} — ignoring the override`,
+    );
+    paginationOverride = undefined;
   }
+
+  // Build structured pagination metadata from query param detection and
+  // response classification, then let the override correct or disable it.
+  const paginationFromParams = detectPagination(response, queryParams, responseDataPath, { pageStartOf });
+  // The list envelope the response was unwrapped on, whichever parameter
+  // drives the iterator: where the items are, their type, and the companions.
+  const envelope = isPaginated
+    ? {
+        dataPath: responseDataPath,
+        ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
+        itemType: responseItemType ?? paginatedItemType(response),
+        envelopeFields,
+      }
+    : undefined;
+  // An iterator is built around a parameter the operation declares, never an
+  // invented one: with none recognized, nothing is detected, and only an
+  // override can create the iterator — around the same envelope, which it
+  // receives below. An envelope nothing pages was kept as a plain response
+  // model above, so `isPaginated` never holds here without a parameter or a
+  // usable override. The stop field is read beside the unwrapped envelope,
+  // or beside a body kept as a wrapper under an explicit `dataPath` — a
+  // `$ref`, an envelope detection would unwrap on another array, an inline
+  // body detection did not recognize (see
+  // `ResponseClassificationOptions.dataPathOverride`).
+  const detectedPagination: PaginationMeta | undefined = paginationFromParams
+    ? {
+        ...paginationFromParams,
+        ...envelope,
+        ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
+      }
+    : undefined;
   const pagination = applyPaginationOverride(detectedPagination, paginationOverride, queryParams, response, opLabel, {
     overrideItemType,
     // Read from the response above, so an override that creates the iterator
-    // where detection found none still stops on it.
+    // where detection found none still iterates the envelope and stops on
+    // its stop field.
+    envelope,
     endOfIteration: responseEndOfIteration,
     pageStartOf,
   });
+  // One warning per operation whose list envelope nothing pages: the cause
+  // is a missing query parameter, and the fix is to declare it or to name a
+  // declared one through an override. An override that was written and
+  // rejected has been warned about by name already.
+  if (unpagedEnvelope && !overrideGiven) {
+    console.warn(
+      `[oagen] Warning: ${opLabel} returns a list envelope but no query parameter drives an iterator ` +
+        `(${describeUndetectedPaging(queryParams)}) — keeping the body as a plain response model with no ` +
+        'pagination; declare the parameter, or set x-pagination / operationHints pagination naming a query ' +
+        'parameter the operation declares',
+    );
+  }
 
   // Per-operation security requirements; undefined means "inherit ApiSpec.security"
   const security = extractSecurityRequirements(op.security, opLabel);
@@ -4937,12 +4991,32 @@ function resolveOverrideItemType(
 
 /** What the explicit pagination override asks of response extraction. */
 interface PaginationExtractionOptions {
-  /** `strategy: 'none'`: keep a list envelope as a plain response model instead of unwrapping it. */
+  /**
+   * Nothing pages the operation — `strategy: 'none'`, or no query parameter
+   * drives an iterator and no override names one: keep a list envelope as a
+   * plain response model instead of unwrapping it.
+   */
   disabled?: boolean;
   /** An explicit `dataPath` to resolve to the element type of the array it names. */
   dataPath?: string;
+  /**
+   * An explicit `endOfIteration` to check against the primary response
+   * (`bodyEndOfIterationProblem`): its path must land on a field whose type fits
+   * its kind, or the override is unusable.
+   */
+  endOfIteration?: PaginationEndOfIteration;
   /** Component models, so the IR walk can follow a `$ref` wrapper's fields. */
   componentModels?: Model[];
+  /**
+   * The override is the only source of an iterator: no query parameter
+   * yields one. A body its `dataPath` reaches no array in, or its
+   * `endOfIteration` resolves in to no field of the fitting type, is then
+   * kept as a plain response model too, since the override will be dropped
+   * (`buildOperation` warns) and nothing else pages the body. For the
+   * primary body that is exactly the case in which the override is dropped;
+   * a secondary 2xx body that cannot satisfy it is kept the same way.
+   */
+  overrideOnly?: boolean;
 }
 
 /**
@@ -5701,7 +5775,16 @@ function extractResponses(
   endOfIteration?: PaginationEndOfIteration;
   /** Element type of the array the override's `dataPath` names; unset when it does not resolve. */
   overrideItemType?: TypeRef;
+  /**
+   * Why the override's `endOfIteration` cannot be read from the primary
+   * response — a path that resolves to no field, or to one whose type does
+   * not fit its kind — in the words of `bodyEndOfIterationProblem`; unset when
+   * none was given or it can be.
+   */
+  overrideEndOfIterationProblem?: string;
   envelopeCompanions?: EnvelopeCompanion[];
+  /** The primary body is a list envelope kept as a plain response model because nothing pages it (`ResponseExtractionResult.unpagedEnvelope`). */
+  unpagedEnvelope?: boolean;
 } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = undescribedBodyType();
@@ -5718,6 +5801,7 @@ function extractResponses(
   let endOfIteration: PaginationEndOfIteration | undefined;
   let overrideItemType: TypeRef | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
+  let unpagedEnvelope: boolean | undefined;
 
   // An operation without a `responses` object declares no success response,
   // so `response` is `unknown` here as it is for one that declares only
@@ -5811,20 +5895,37 @@ function extractResponses(
       if (pick.type) extractedType = pick.type;
       if (bodySchema) {
         const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
-        // An explicit `dataPath` is handed to classification only when it
-        // reaches an array in this body; one that does not is left for the
-        // override's own warning, and detection stands.
+        // An explicit `dataPath` is handed to classification only when the
+        // override can apply to this body: the path reaches an array in it,
+        // and an explicit `endOfIteration` resolves in it to a field of the
+        // fitting type. An override that fails either is left for its own
+        // warning, and the body is read exactly as detection reads it.
+        const stopFieldUsable =
+          pagination.disabled ||
+          pagination.endOfIteration === undefined ||
+          bodyEndOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) === undefined;
         const dataPathOverride =
           pagination.disabled ||
           pagination.dataPath === undefined ||
+          !stopFieldUsable ||
           !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
             ? undefined
             : pagination.dataPath;
+        // When only the override can drive an iterator and this body cannot
+        // satisfy it — its `dataPath` reaches no array, or its `endOfIteration`
+        // resolves to no field of the fitting type — nothing will page the
+        // body: a list envelope in it is kept as a plain response model, as
+        // under `disabled`, rather than unwrapped for an iterator that never
+        // comes.
+        const paginationDisabled =
+          pagination.disabled === true ||
+          (pagination.overrideOnly === true &&
+            ((pagination.dataPath !== undefined && dataPathOverride === undefined) || !stopFieldUsable));
         // The primary body's array items are settled against the registry
         // (`typeInlineItems`); the dry run that reads a component response's
         // names (`bodyModelNames`) passes none and mints nothing into it.
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
-          paginationDisabled: pagination.disabled,
+          paginationDisabled,
           dataPathOverride,
           ...(ctx.registry && { settle: { registry: ctx.registry, operation: ctx.operationQualifier } }),
         });
@@ -5946,6 +6047,7 @@ function extractResponses(
     envelopeFields = primaryBody.envelopeFields;
     endOfIteration = primaryBody.endOfIteration;
     envelopeCompanions = primaryBody.envelopeCompanions;
+    unpagedEnvelope = primaryBody.unpagedEnvelope;
   }
 
   // Keep the models of every 2xx body: `successResponses` references each of
@@ -6016,6 +6118,15 @@ function extractResponses(
     }
   }
 
+  // An explicit `endOfIteration` is checked against the same body, over the
+  // property map its own stop field is read from: the path must land on a
+  // field of the primary response whose type fits the kind. Without a
+  // primary body there is no field for it to name.
+  const overrideEndOfIterationProblem =
+    pagination.disabled || pagination.endOfIteration === undefined
+      ? undefined
+      : bodyEndOfIterationProblem(pagination.endOfIteration, primaryBody && primarySchema, componentSchemas);
+
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
   return {
@@ -6037,7 +6148,9 @@ function extractResponses(
     envelopeFields,
     endOfIteration,
     overrideItemType,
+    overrideEndOfIterationProblem,
     envelopeCompanions,
+    unpagedEnvelope,
   };
 }
 

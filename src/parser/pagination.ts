@@ -29,7 +29,10 @@ const LIMIT_PARAMS = ['limit', 'page_size', 'per_page', 'size', 'count'];
  *    by the number of items received, starting at `pageStart`
  *
  * An offset or page parameter without a page-size parameter is not treated as
- * pagination. Returns null if no pattern is detected.
+ * pagination. Returns null if no pattern is detected — and then no iterator
+ * is built from the query parameters: an iterator is driven only by a
+ * parameter the operation declares, never by one guessed from the response
+ * (`describeUndetectedPaging` says what was missing).
  */
 export function detectPagination(
   response: TypeRef,
@@ -84,6 +87,27 @@ export function detectPagination(
   }
 
   return null;
+}
+
+/**
+ * Why `detectPagination` finds no strategy in `queryParams`, for the warning
+ * on an operation whose list envelope nothing pages: the recognized
+ * parameters it declares and what is missing beside them — an offset or page
+ * parameter without a page-size one, a page-size one on its own, or none of
+ * the names at all. Meaningful only when `detectPagination` returned null,
+ * so a cursor parameter, which alone makes an iterator, is never among the
+ * declared ones.
+ */
+export function describeUndetectedPaging(queryParams: Parameter[]): string {
+  const declared = (names: readonly string[]): string[] =>
+    queryParams.filter((p) => names.includes(p.name)).map((p) => `"${p.name}"`);
+  const selectors = [...declared(OFFSET_PARAMS), ...declared(PAGE_PARAMS)];
+  if (selectors.length > 0) {
+    return `${selectors.join(', ')} is declared without a page-size parameter: ${LIMIT_PARAMS.join(', ')}`;
+  }
+  const sizes = declared(LIMIT_PARAMS);
+  if (sizes.length > 0) return `${sizes.join(', ')} is declared without a cursor, offset or page parameter`;
+  return 'no cursor, offset or page query parameter is declared';
 }
 
 /** Decides the first page number for a page parameter; see `derivePageStart`. */
@@ -287,9 +311,48 @@ function classifyEndField(
         ? 'totalCount'
         : undefined;
   if (!kind) return undefined;
-  const resolved = resolveBareSchema(schema, componentSchemas);
-  const fits = kind === 'hasMore' ? hasType(resolved, 'boolean') : isNumeric(resolved);
-  return fits ? kind : undefined;
+  return endFieldFits(kind, resolveBareSchema(schema, componentSchemas)) ? kind : undefined;
+}
+
+/**
+ * Whether a stop field's bare schema (`resolveBareSchema`) has the type its
+ * kind is tested against: a `boolean` for `hasMore`, an `integer` or
+ * `number` for `totalPages` and `totalCount`, under a type list too. The one
+ * test for a field detection names and for one an override names.
+ */
+function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObject): boolean {
+  return kind === 'hasMore' ? hasType(schema, 'boolean') : isNumeric(schema);
+}
+
+/**
+ * Why an explicit `endOfIteration` cannot be read from a body whose
+ * properties are `properties`, or `undefined` when it can. `properties` is
+ * the map a detected stop field is read from — the body's own and every
+ * `allOf` member's, through `$ref`s and nullable wrappers, as
+ * `detectEndOfIteration` receives it — so an override and detection look at
+ * one map: a field detection would read is one an override may name, and a
+ * field it would not see is not there for an override either. `end.path` is
+ * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
+ * through `$ref`s, `allOf` members and nullable wrappers at every further
+ * segment), and the field it lands on must fit `end.kind` by the test
+ * detection applies to a field it names (`endFieldFits`), under
+ * `resolveBareSchema` as a detected one is. With no `properties` — an
+ * operation whose primary response declares no body — the path resolves to
+ * nothing.
+ *
+ * The text is the reason alone; the caller names the override's source and
+ * the operation, and says what it does about it.
+ */
+export function endOfIterationProblem(
+  end: PaginationEndOfIteration,
+  properties: Record<string, SchemaObject | undefined> | undefined,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  const target = properties && resolveSchemaPath({ properties }, end.path, componentSchemas);
+  if (!target) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
+  if (endFieldFits(end.kind, resolveBareSchema(target, componentSchemas))) return undefined;
+  const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';
+  return `endOfIteration path "${end.path}" is not ${expected} field, as kind "${end.kind}" requires`;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -460,9 +523,16 @@ export function resolvePaginationOverride(
  * operation's query parameters by the strategy's own names (`page` for
  * `page`, `cursor` or `after` for `cursor`, ...), so a strategy the override
  * names is driven by the parameter that fits it rather than by one detection
- * guessed (the envelope fallback's `after`). `extras.overrideItemType` is the element type an explicit
+ * found for another strategy. `extras.overrideItemType` is the element type an explicit
  * `dataPath` resolved to; without it the detected item type (or the response
- * itself) stands. `extras.endOfIteration` is the stop field read from the
+ * itself) stands. `extras.envelope` is the list envelope the response was
+ * unwrapped on — `dataPath`, `dataDescription`, `itemType`, `envelopeFields`
+ * as detection read them — whichever parameter drives the iterator: it is
+ * read when `detected` is unset, so an override that creates the iterator
+ * where the query parameters yielded none (`{ strategy: 'cursor', param:
+ * 'c' }` on `{ data, has_more }`) still describes that envelope; when a
+ * parameter was recognized, `detected` carries the same values and is read
+ * first. `extras.endOfIteration` is the stop field read from the
  * response, which belongs to the iterator whether detection built one or the
  * override creates it from scratch (no paging parameter recognized, a
  * wrapper kept under an explicit `dataPath`): the override's own
@@ -471,9 +541,14 @@ export function resolvePaginationOverride(
  * parameter in use (default: `derivePageStart` on the IR parameter alone).
  *
  * Returns `detected` unchanged when there is no override or it is unusable —
- * no strategy or no `param` from any source, a resolved `param`/`limitParam`
- * the operation does not declare as a query parameter — after an `[oagen]
- * Warning:` naming the problem. `strategy: 'none'` yields `undefined`.
+ * no strategy or no `param` from any source, a `pageStart` under a strategy
+ * other than `page`, a resolved `param`/`limitParam` the operation does not
+ * declare as a query parameter, one parameter resolved as both — after an
+ * `[oagen] Warning:` naming the problem (`resolveOverrideParams`). An
+ * explicit `endOfIteration` is checked against the primary response before
+ * this is reached (`endOfIterationProblem`, asked by `extractResponses`), so
+ * one that arrives here resolves and fits. `strategy: 'none'` yields
+ * `undefined`.
  */
 export function applyPaginationOverride(
   detected: PaginationMeta | undefined,
@@ -483,6 +558,7 @@ export function applyPaginationOverride(
   opLabel: string,
   extras: {
     overrideItemType?: TypeRef;
+    envelope?: Pick<PaginationMeta, 'dataPath' | 'dataDescription' | 'itemType' | 'envelopeFields'>;
     endOfIteration?: PaginationEndOfIteration;
     pageStartOf?: PageStartResolver;
   } = {},
@@ -500,10 +576,14 @@ export function applyPaginationOverride(
   }
   const { strategy, param, limitParam } = resolved;
 
-  const dataPath = merged.dataPath ?? detected?.dataPath;
+  // What detection read from the response: the detected iterator's own
+  // values, else the envelope unwrapped for an iterator only the override
+  // creates.
+  const list = detected ?? extras.envelope;
+  const dataPath = merged.dataPath ?? list?.dataPath;
   // The data array's description belongs to the array detection unwrapped;
   // it survives an override that keeps that array.
-  const dataDescription = dataPath === detected?.dataPath ? detected?.dataDescription : undefined;
+  const dataDescription = dataPath === list?.dataPath ? list?.dataDescription : undefined;
   const endOfIteration = merged.endOfIteration ?? detected?.endOfIteration ?? extras.endOfIteration;
   // The page base belongs to the page parameter actually in use, which the
   // override may have swapped, so it is derived from that parameter rather
@@ -518,8 +598,8 @@ export function applyPaginationOverride(
     ...(pageStart !== undefined && { pageStart }),
     ...(dataPath !== undefined && { dataPath }),
     ...(dataDescription !== undefined && { dataDescription }),
-    itemType: extras.overrideItemType ?? detected?.itemType ?? (response.kind === 'array' ? response.items : response),
-    ...(detected?.envelopeFields && { envelopeFields: detected.envelopeFields }),
+    itemType: extras.overrideItemType ?? list?.itemType ?? (response.kind === 'array' ? response.items : response),
+    ...(list?.envelopeFields && { envelopeFields: list.envelopeFields }),
     ...(endOfIteration && { endOfIteration }),
   };
 }
@@ -527,9 +607,13 @@ export function applyPaginationOverride(
 /**
  * The strategy, `param` and `limitParam` an override resolves to against
  * what was detected, or the reason it cannot apply (the text of the warning
- * `applyPaginationOverride` emits). Shared with `buildOperation`, which asks
- * before classification whether an override will be usable, so an override
- * that will be rejected never changes how the response is read.
+ * `applyPaginationOverride` emits): no strategy from any source, a
+ * `pageStart` under a strategy other than `page`, no `param` from any
+ * source, a resolved `param` or `limitParam` the operation does not declare
+ * as a query parameter, or one query parameter resolved as both. Shared with
+ * `buildOperation`, which asks before classification whether an override
+ * will be usable, so an override that will be rejected never changes how
+ * the response is read.
  */
 export function resolveOverrideParams(
   detected: PaginationMeta | undefined,
@@ -538,6 +622,14 @@ export function resolveOverrideParams(
 ): { strategy: PaginationStrategy; param: string; limitParam?: string } | { problem: string } {
   const strategy = merged.strategy === 'none' ? undefined : (merged.strategy ?? detected?.strategy);
   if (!strategy) return { problem: ' sets no strategy and none was detected — ignoring the override' };
+  // A first page number means nothing to an iterator that does not count
+  // pages, so one set for another strategy is a contradiction, not a field
+  // to drop quietly.
+  if (merged.pageStart !== undefined && strategy !== 'page') {
+    return {
+      problem: `: pageStart ${merged.pageStart} applies to the "page" strategy only, not to "${strategy}" — ignoring the override`,
+    };
+  }
   const param = merged.param ?? declaredParamFor(strategy, queryParams) ?? detected?.param;
   if (!param) {
     return {
@@ -546,8 +638,8 @@ export function resolveOverrideParams(
   }
   const limitParam = merged.limitParam ?? detected?.limitParam;
   // The resolved values are checked, not only the explicit ones: a `param`
-  // detection invented (the envelope fallback's `after`) is as undeclared as
-  // a misspelled one.
+  // carried over from detection for another strategy is as undeclared as a
+  // misspelled one when the operation does not declare it.
   for (const [key, name] of [
     ['param', param],
     ['limitParam', limitParam],
@@ -555,6 +647,13 @@ export function resolveOverrideParams(
     if (name !== undefined && !queryParams.some((p) => p.name === name)) {
       return { problem: `: ${key} "${name}" is not a query parameter of the operation — ignoring the override` };
     }
+  }
+  // The two are checked against each other as resolved, so `{ param:
+  // 'limit' }` next to a detected `limitParam: 'limit'` is caught as surely
+  // as an override that names the same parameter twice: one parameter
+  // cannot carry both the page and the page size.
+  if (param === limitParam) {
+    return { problem: `: param and limitParam both name "${param}" — ignoring the override` };
   }
   return { strategy, param, ...(limitParam !== undefined && { limitParam }) };
 }
@@ -573,10 +672,14 @@ function declaredParamFor(strategy: PaginationStrategy, queryParams: Parameter[]
 }
 
 /**
- * Check one override object. Returns the typed hint with only the keys the
- * author set, or `undefined` after a warning when any field is malformed. An
- * unknown key is reported and skipped without invalidating the rest, and a
- * key set to `undefined` counts as absent.
+ * Check one override object's shape. Returns the typed hint with only the
+ * keys the author set, or `undefined` after a warning when any field is
+ * malformed. An unknown key is reported and skipped without invalidating the
+ * rest, and a key set to `undefined` counts as absent. What the fields say
+ * about the operation — whether the parameters are declared, the `dataPath`
+ * reaches an array, the `endOfIteration` resolves to a field of the fitting
+ * type — is checked later, against the operation (`resolveOverrideParams`,
+ * `endOfIterationProblem`).
  */
 export function validatePaginationHint(raw: unknown, source: string, opLabel: string): PaginationHint | undefined {
   const where = `${source} on ${opLabel}`;
@@ -631,6 +734,7 @@ export function validatePaginationHint(raw: unknown, source: string, opLabel: st
   return out;
 }
 
+/** The shape alone: a known `kind` and a non-empty `path`. Whether the path resolves is `endOfIterationProblem`'s question. */
 function validateEndOfIteration(value: unknown): PaginationEndOfIteration | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const { kind, path } = value as { kind?: unknown; path?: unknown };

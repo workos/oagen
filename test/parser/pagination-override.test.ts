@@ -312,15 +312,26 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     });
 
     it('sets the end-of-iteration field and data path explicitly', async () => {
+      // `more` is a name detection does not know, declared where the override
+      // points (#310: a path the response lacks is rejected, not kept).
+      const more = envelope({
+        pagination: {
+          type: 'object',
+          properties: { page: { type: 'integer' }, totalPages: { type: 'integer' }, more: { type: 'boolean' } },
+          required: ['page', 'totalPages', 'more'],
+        },
+      });
       const op = onlyOperation(
         await parseJson(
           petsSpec({
+            responses: jsonResponse(more),
             'x-pagination': { dataPath: 'pets', endOfIteration: { kind: 'hasMore', path: 'pagination.more' } },
           }),
         ),
       );
       expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'pagination.more' });
       expect(op.pagination?.strategy).toBe('page');
+      expect(warn).not.toHaveBeenCalled();
     });
 
     it('warns and falls back to detection on an unknown strategy', async () => {
@@ -908,22 +919,20 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     // Only a custom query parameter, so no paging parameter is recognized,
     // and the explicit `dataPath` keeps the body as a wrapper: the stop field
     // read from the wrapper belongs to the iterator the override creates.
-    const custom = {
-      parameters: [query('p')],
-      responses: jsonResponse({
-        type: 'object',
-        properties: {
-          data: { type: 'array', items: { type: 'string' } },
-          result: {
-            type: 'object',
-            properties: {
-              items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
-            },
+    const customBody = {
+      type: 'object',
+      properties: {
+        data: { type: 'array', items: { type: 'string' } },
+        result: {
+          type: 'object',
+          properties: {
+            items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
           },
-          total: { type: 'integer' },
         },
-      }),
+        total: { type: 'integer' },
+      },
     };
+    const custom = { parameters: [query('p')], responses: jsonResponse(customBody) };
     const hint: PaginationHint = { strategy: 'page', param: 'p', dataPath: 'result.items' };
 
     it("keeps the response's stop field", async () => {
@@ -946,12 +955,311 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       );
       expect(viaHint.pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
 
+      // The wrapper declares the `more` the override names (#310: a path the
+      // response lacks is rejected, not kept), under a name detection does
+      // not read, so `total` is still what detection alone would pick.
+      const withMore = jsonResponse({
+        ...customBody,
+        properties: { ...customBody.properties, more: { type: 'boolean' } },
+      });
       const own = onlyOperation(
         await parseJson(
-          petsSpec({ ...custom, 'x-pagination': { ...hint, endOfIteration: { kind: 'hasMore', path: 'more' } } }),
+          petsSpec({
+            ...custom,
+            responses: withMore,
+            'x-pagination': { ...hint, endOfIteration: { kind: 'hasMore', path: 'more' } },
+          }),
         ),
       );
       expect(own.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'more' });
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('an override the operation cannot satisfy (#310)', () => {
+    // The issue's operation: `page` and `limit`, returning `{ data: string[], total: integer }`.
+    const totalEnvelope = {
+      type: 'object',
+      properties: { data: { type: 'array', items: { type: 'string' } }, total: { type: 'integer' } },
+      required: ['data', 'total'],
+    };
+    const issueSpec = (
+      extension: unknown,
+      params: string[] = ['page', 'limit'],
+      responses: unknown = jsonResponse(totalEnvelope),
+      components?: Record<string, unknown>,
+    ) =>
+      petsSpec(
+        {
+          parameters: params.map((name) => query(name)),
+          responses,
+          ...(extension !== undefined && { 'x-pagination': extension }),
+        },
+        components,
+      );
+    /** The IR with `extension`, beside the IR detection alone yields for the same operation (which warns about nothing). */
+    const parseBeside = async (extension: unknown, params?: string[], responses?: unknown) => {
+      const bare = await parseJson(issueSpec(undefined, params, responses));
+      expect(warn).not.toHaveBeenCalled();
+      const overridden = await parseJson(issueSpec(extension, params, responses));
+      return { bare, overridden };
+    };
+    /** The one warning a rejected override leaves, naming its source, the operation and the problem. */
+    const rejected = (problem: string, source = 'x-pagination') => {
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(`[oagen] Warning: ${source} on listPets: ${problem} — ignoring the override`);
+    };
+    /** Every model reference resolves, and every model is a component or referenced from an operation or a field. */
+    const expectSound = (ir: ApiSpec, componentNames: string[]) => {
+      const names = new Set(ir.models.map((m) => m.name));
+      const referenced = new Set<string>();
+      for (const op of ir.services.flatMap((s) => s.operations)) {
+        const refs: Array<TypeRef | undefined> = [
+          op.response,
+          op.requestBody,
+          op.pagination?.itemType,
+          ...(op.pagination?.envelopeFields ?? []).map((f) => f.type),
+          ...(op.successResponses ?? []).map((r) => r.type),
+          ...op.errors.map((e) => e.type),
+          ...[...op.pathParams, ...op.queryParams, ...op.headerParams].map((p) => p.type),
+        ];
+        for (const ref of refs) if (ref) for (const name of modelNamesIn(ref)) referenced.add(name);
+      }
+      for (const model of ir.models) {
+        for (const field of model.fields) for (const name of modelNamesIn(field.type)) referenced.add(name);
+      }
+      expect([...referenced].filter((name) => !names.has(name))).toEqual([]);
+      expect(
+        ir.models.map((m) => m.name).filter((name) => !componentNames.includes(name) && !referenced.has(name)),
+      ).toEqual([]);
+    };
+
+    it('warns once and falls back to detection when the endOfIteration path resolves to no field (the issue)', async () => {
+      const { bare, overridden } = await parseBeside({ endOfIteration: { kind: 'hasMore', path: 'nope.missing' } });
+      rejected('endOfIteration path "nope.missing" does not resolve to a field in the response');
+      // The detected stop field, not the override's, and nothing else of the override.
+      expect(onlyOperation(bare).pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+      expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
+      expect(overridden.models).toEqual(bare.models);
+    });
+
+    it.each([
+      [
+        { kind: 'hasMore', path: 'total' },
+        'endOfIteration path "total" is not a boolean field, as kind "hasMore" requires',
+      ],
+      [
+        { kind: 'totalCount', path: 'data' },
+        'endOfIteration path "data" is not an integer or number field, as kind "totalCount" requires',
+      ],
+      [
+        { kind: 'totalPages', path: 'data' },
+        'endOfIteration path "data" is not an integer or number field, as kind "totalPages" requires',
+      ],
+    ])('warns and falls back when the field %j does not fit its kind (the issue)', async (endOfIteration, problem) => {
+      const { bare, overridden } = await parseBeside({ endOfIteration });
+      rejected(problem);
+      expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
+    });
+
+    it('keeps an endOfIteration that lands on a field of the fitting type, at any depth and through the wrappers detection reads through', async () => {
+      // `meta.page.last`: a nullable `$ref` companion, an `allOf` member, a
+      // `$ref` field, a nullable `oneOf` boolean. `pages` is a type list;
+      // neither name is one detection knows, so `total` is its own pick.
+      const components = {
+        schemas: {
+          Flag: { oneOf: [{ type: 'boolean' }, { type: 'null' }] },
+          PageInfo: { type: 'object', properties: { last: { $ref: '#/components/schemas/Flag' } } },
+          Meta: { allOf: [{ type: 'object', properties: { page: { $ref: '#/components/schemas/PageInfo' } } }] },
+        },
+      };
+      const body = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          meta: { oneOf: [{ $ref: '#/components/schemas/Meta' }, { type: 'null' }] },
+          pages: { type: ['integer', 'null'] },
+          total: { type: 'integer' },
+        },
+      };
+      for (const endOfIteration of [
+        { kind: 'hasMore', path: 'meta.page.last' },
+        { kind: 'totalPages', path: 'pages' },
+        { kind: 'totalCount', path: 'total' },
+      ] as const) {
+        const ir = await parseJson(issueSpec({ endOfIteration }, undefined, jsonResponse(body), components));
+        expect(onlyOperation(ir).pagination?.endOfIteration).toEqual(endOfIteration);
+        expect(warn).not.toHaveBeenCalled();
+        expectSound(ir, Object.keys(components.schemas));
+      }
+    });
+
+    it('checks the stop field against the primary response, not another 2xx body', async () => {
+      const hasMore = { ...totalEnvelope, properties: { ...totalEnvelope.properties, more: { type: 'boolean' } } };
+      const ok = (schema: unknown) => ({ description: 'ok', content: { 'application/json': { schema } } });
+      // `more` only on the 201: the 200 is primary and lacks it.
+      const { bare, overridden } = await parseBeside({ endOfIteration: { kind: 'hasMore', path: 'more' } }, undefined, {
+        '200': ok(totalEnvelope),
+        '201': ok(hasMore),
+      });
+      rejected('endOfIteration path "more" does not resolve to a field in the response');
+      expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
+      warn.mockClear();
+      // `more` on the primary alone is enough.
+      const op = onlyOperation(
+        await parseJson(
+          issueSpec({ endOfIteration: { kind: 'hasMore', path: 'more' } }, undefined, {
+            '200': ok(hasMore),
+            '201': ok(totalEnvelope),
+          }),
+        ),
+      );
+      expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'more' });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('rejects a stop field when the primary response declares no body', async () => {
+      const op = onlyOperation(
+        await parseJson(
+          issueSpec({ endOfIteration: { kind: 'totalCount', path: 'total' } }, undefined, {
+            '200': { description: 'ok' },
+          }),
+        ),
+      );
+      rejected('endOfIteration path "total" does not resolve to a field in the response');
+      // The parameters alone still make the iterator, as without the override.
+      expect(op.pagination).toEqual({
+        strategy: 'page',
+        param: 'page',
+        limitParam: 'limit',
+        pageStart: 1,
+        itemType: { kind: 'primitive', type: 'unknown' },
+      });
+    });
+
+    it('warns and falls back when pageStart is set for a strategy other than page (the issue)', async () => {
+      const { bare, overridden } = await parseBeside({ pageStart: 5 }, ['offset', 'limit']);
+      rejected('pageStart 5 applies to the "page" strategy only, not to "offset"');
+      expect(onlyOperation(bare).pagination).toMatchObject({ strategy: 'offset', param: 'offset' });
+      expect(onlyOperation(bare).pagination).not.toHaveProperty('pageStart');
+      expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
+      warn.mockClear();
+      // The strategy the override itself names counts the same way.
+      const own = onlyOperation(await parseJson(issueSpec({ strategy: 'offset', pageStart: 0 })));
+      rejected('pageStart 0 applies to the "page" strategy only, not to "offset"');
+      expect(own.pagination).toMatchObject({ strategy: 'page', param: 'page', pageStart: 1 });
+    });
+
+    it('warns and falls back when param and limitParam resolve to one query parameter (the issue)', async () => {
+      const { bare, overridden } = await parseBeside({ param: 'limit' });
+      rejected('param and limitParam both name "limit"');
+      expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
+      warn.mockClear();
+      // Whichever side the override restates, and when it names both.
+      for (const extension of [{ limitParam: 'page' }, { param: 'page', limitParam: 'page' }]) {
+        const op = onlyOperation(await parseJson(issueSpec(extension)));
+        rejected('param and limitParam both name "page"');
+        expect(op.pagination).toEqual(onlyOperation(bare).pagination);
+        warn.mockClear();
+      }
+    });
+
+    it("reports the problem under the config hint's name, and drops both sources together", async () => {
+      const bad: PaginationHint = { endOfIteration: { kind: 'hasMore', path: 'nope' } };
+      const viaHint = onlyOperation(
+        await parseJson(issueSpec(undefined), { operationHints: { 'GET /pets': { pagination: bad } } }),
+      );
+      rejected('endOfIteration path "nope" does not resolve to a field in the response', 'operationHints pagination');
+      expect(viaHint.pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+      warn.mockClear();
+      // The merged override is one override: the extension's strategy goes with the hint's stop field.
+      const both = onlyOperation(
+        await parseJson(issueSpec({ strategy: 'offset' }), { operationHints: { 'GET /pets': { pagination: bad } } }),
+      );
+      rejected(
+        'endOfIteration path "nope" does not resolve to a field in the response',
+        'x-pagination / operationHints pagination',
+      );
+      expect(both.pagination?.strategy).toBe('page');
+    });
+
+    it('leaves the response exactly as detection reads it when the stop field rejects an override that selects another array', async () => {
+      // Without the rejection, `dataPath: 'result.items'` would keep the
+      // envelope as a wrapper; with it, the body is unwrapped on `data` as
+      // detection does, and the IR is the one parsed without the override.
+      const nested = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          result: {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+            },
+          },
+          total: { type: 'integer' },
+        },
+      };
+      const { bare, overridden } = await parseBeside(
+        { dataPath: 'result.items', endOfIteration: { kind: 'hasMore', path: 'nope' } },
+        undefined,
+        jsonResponse(nested),
+      );
+      rejected('endOfIteration path "nope" does not resolve to a field in the response');
+      expect(onlyOperation(bare).pagination?.dataPath).toBe('data');
+      expect(overridden.services).toEqual(bare.services);
+      expect(overridden.models).toEqual(bare.models);
+      expectSound(overridden, []);
+    });
+
+    it('reports one problem per override: a dataPath that reaches no array, before the stop field', async () => {
+      const { bare, overridden } = await parseBeside({
+        dataPath: 'nope',
+        endOfIteration: { kind: 'hasMore', path: 'nope' },
+      });
+      rejected('dataPath "nope" does not resolve to an array in the response');
+      expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
+    });
+
+    it('keeps an envelope only the override could have paged as a plain model when its stop field is rejected (#309)', async () => {
+      // `p` is no name detection knows, so the override is the only source of
+      // an iterator. Rejected for its stop field, it leaves the envelope as
+      // nothing pages it — the wire shape, with the rejection as the one
+      // warning — exactly as a `dataPath` that reaches no array does, never an
+      // unwrapped envelope without an iterator.
+      const cases: Array<[Record<string, unknown>, string]> = [
+        [
+          { strategy: 'page', param: 'p', endOfIteration: { kind: 'hasMore', path: 'nope' } },
+          'endOfIteration path "nope" does not resolve to a field in the response',
+        ],
+        [
+          { strategy: 'page', param: 'p', dataPath: 'data', endOfIteration: { kind: 'hasMore', path: 'total' } },
+          'endOfIteration path "total" is not a boolean field, as kind "hasMore" requires',
+        ],
+      ];
+      for (const [extension, problem] of cases) {
+        const ir = await parseJson(issueSpec(extension, ['p']));
+        const op = onlyOperation(ir);
+        rejected(problem);
+        expect(op.pagination).toBeUndefined();
+        expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+        expect(ir.models.find((m) => m.name === 'ListPetsResponse')?.fields.map((f) => f.name)).toEqual([
+          'data',
+          'total',
+        ]);
+        expectSound(ir, []);
+        warn.mockClear();
+      }
+    });
+
+    it('checks only the shape under strategy none: there is no iterator for the other fields to serve', async () => {
+      const op = onlyOperation(
+        await parseJson(
+          issueSpec({ strategy: 'none', pageStart: 3, endOfIteration: { kind: 'hasMore', path: 'nope' } }),
+        ),
+      );
+      expect(op.pagination).toBeUndefined();
+      expect(op.response.kind).toBe('model');
       expect(warn).not.toHaveBeenCalled();
     });
   });
@@ -1135,9 +1443,23 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       );
       expect(viaHint.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
 
+      // The component declares the `meta.total` the override names beside
+      // the `has_more` detection reads (#310: a path the wrapper lacks is
+      // rejected, not kept), so the override's own choice is visible.
+      const PetListWithMeta = {
+        ...PetList,
+        properties: {
+          ...PetList.properties,
+          meta: { type: 'object', properties: { total: { type: 'integer' } } },
+        },
+      };
       const own = onlyOperation(
         await parseJson(
-          listOp(PetListRef, { dataPath: 'data', endOfIteration: { kind: 'totalCount', path: 'meta.total' } }),
+          listOp(
+            { $ref: '#/components/schemas/PetListWithMeta' },
+            { dataPath: 'data', endOfIteration: { kind: 'totalCount', path: 'meta.total' } },
+            { PetListWithMeta },
+          ),
         ),
       );
       expect(own.pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'meta.total' });
@@ -1160,6 +1482,118 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(op.pagination?.endOfIteration).toBeUndefined();
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it('reads it inside a nullable allOf member: a $ref, an inline object, a nested allOf, a $ref chain (Greptile)', async () => {
+      // The member that carries the stop field is nullable in every spelling
+      // the dataPath walk looks through, so the reader must look through it
+      // too; `data` always comes from the plain member beside it.
+      const Base = { type: 'object', properties: { has_more: { type: 'boolean' } } };
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const baseRef = { $ref: '#/components/schemas/Base' };
+      const NullableLink = nullOf(baseRef);
+      const Hop = { $ref: '#/components/schemas/NullableLink' };
+      const members: Record<string, unknown> = {
+        nullableRef: nullOf(baseRef),
+        nullableInline: nullOf({ type: 'object', properties: { has_more: { type: 'boolean' } } }),
+        nullableTypeList: { type: ['object', 'null'], properties: { has_more: { type: 'boolean' } } },
+        nestedAllOf: nullOf({ allOf: [baseRef, { type: 'object', properties: { page: { type: 'integer' } } }] }),
+        refChain: { $ref: '#/components/schemas/Hop' },
+      };
+      const expected = {
+        dataPath: 'data',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+      };
+      for (const [label, member] of Object.entries(members)) {
+        const PetPage = { allOf: [member, { type: 'object', properties: { data: petArray } }] };
+        const schemas = { Base, NullableLink, Hop, PetPage };
+        // Greptile's case: the wrapper is a referenced component.
+        const referenced = onlyOperation(
+          await parseJson(listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, schemas)),
+        );
+        expect(referenced.pagination, `${label} ($ref wrapper)`).toMatchObject(expected);
+        // The same wrapper written inline is not a recognized envelope — the
+        // nullable member declares no properties of its own — and is read alike.
+        const inline = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+        expect(inline.pagination, `${label} (inline wrapper)`).toMatchObject(expected);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("ends the walk where a component reaches itself through a nullable allOf member (Greptile's cycle)", async () => {
+      // `Base.allOf` holds a nullable reference back to `Base`; beside it
+      // `{ data, has_more }` makes the body a recognized envelope, so the
+      // cycle is met with and without an override, and as a kept wrapper.
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const baseRef = { $ref: '#/components/schemas/Base' };
+      const Base = { allOf: [nullOf(baseRef)] };
+      const PetPage = {
+        allOf: [nullOf(baseRef), { type: 'object', properties: { data: petArray, has_more: { type: 'boolean' } } }],
+      };
+      const schemas = { Base, PetPage };
+      const unwrapped = {
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+        envelopeFields: ['has_more'],
+      };
+      const detected = onlyOperation(
+        await parseJson(
+          petsSpec(
+            { parameters: [query('page'), query('limit')], responses: jsonResponse(PetPage) },
+            { schemas: { Pet, ...schemas } },
+          ),
+        ),
+      );
+      expect(projection(detected)).toEqual(unwrapped);
+      const restated = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+      expect(projection(restated)).toEqual(unwrapped);
+      const kept = onlyOperation(
+        await parseJson(listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, schemas)),
+      );
+      expect(kept.response).toEqual({ kind: 'model', name: 'PetPage' });
+      expect(projection(kept)).toEqual({
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads the stop field once through a direct self-reference, a two-schema cycle, and an inline object that loops (Greptile)', async () => {
+      // The stop field lives in the cyclic component; the wrapper beside
+      // `data` is kept under the override, written as a `$ref` and inline.
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const hasMore = { type: 'object', properties: { has_more: { type: 'boolean' } } };
+      const cycles: Record<string, Record<string, unknown>> = {
+        directSelf: { Base: { allOf: [ref('Base'), hasMore] } },
+        nullableSelf: { Base: { allOf: [nullOf(ref('Base')), hasMore] } },
+        twoSchemas: {
+          Base: { allOf: [nullOf(ref('Other')), hasMore] },
+          Other: { allOf: [nullOf(ref('Base')), { type: 'object', properties: { page: { type: 'integer' } } }] },
+        },
+        inlineObject: {
+          Base: { type: 'object', properties: { has_more: { type: 'boolean' } }, allOf: [nullOf(ref('Base'))] },
+        },
+      };
+      const expected = {
+        dataPath: 'data',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+      };
+      for (const [label, components] of Object.entries(cycles)) {
+        const PetPage = { allOf: [nullOf(ref('Base')), { type: 'object', properties: { data: petArray } }] };
+        const schemas = { ...components, PetPage };
+        const referenced = onlyOperation(await parseJson(listOp(ref('PetPage'), { dataPath: 'data' }, schemas)));
+        expect(referenced.pagination, `${label} ($ref wrapper)`).toMatchObject(expected);
+        const inline = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+        expect(inline.pagination, `${label} (inline wrapper)`).toMatchObject(expected);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   describe('operationHints[...].pagination from ParseOptions', () => {
@@ -1171,20 +1605,34 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     });
 
     it('wins over x-pagination field by field', async () => {
+      // The companion declares the `total` the hint names beside the
+      // `totalPages` detection prefers (#310: a path the response lacks is
+      // rejected, not kept), so the hint's choice is visible.
+      const withTotal = envelope({
+        pagination: {
+          type: 'object',
+          properties: { page: { type: 'integer' }, totalPages: { type: 'integer' }, total: { type: 'integer' } },
+          required: ['page', 'totalPages', 'total'],
+        },
+      });
       const op = onlyOperation(
-        await parseJson(petsSpec({ 'x-pagination': { strategy: 'offset', dataPath: 'pets' } }), {
-          operationHints: {
-            'GET /pets': {
-              pagination: { strategy: 'page', endOfIteration: { kind: 'totalCount', path: 'pagination.total' } },
+        await parseJson(
+          petsSpec({ responses: jsonResponse(withTotal), 'x-pagination': { strategy: 'offset', dataPath: 'pets' } }),
+          {
+            operationHints: {
+              'GET /pets': {
+                pagination: { strategy: 'page', endOfIteration: { kind: 'totalCount', path: 'pagination.total' } },
+              },
             },
           },
-        }),
+        ),
       );
       expect(op.pagination).toMatchObject({
         strategy: 'page',
         dataPath: 'pets',
         endOfIteration: { kind: 'totalCount', path: 'pagination.total' },
       });
+      expect(warn).not.toHaveBeenCalled();
     });
 
     it('ignores hints for other operations and hints without a pagination entry', async () => {
