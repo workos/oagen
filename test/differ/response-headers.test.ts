@@ -202,8 +202,10 @@ describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecate
       responseStatusCodeChanged: true,
       oldResponseStatusCode: 201,
       newResponseStatusCode: 200,
-      classification: 'breaking',
+      // The 201 is still declared: the status move alone is additive (review).
+      classification: 'additive',
     });
+    expect(diffSpecs(lone201, with200).summary).toMatchObject({ breaking: 0, additive: 1 });
     // The other way round, the 200 that is gone is reported by its own code.
     expect(diffSpecs(with200, lone201).changes[0]).toMatchObject({
       responseHeaderChanges: [
@@ -212,6 +214,29 @@ describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecate
       responseStatusCodeChanged: true,
       oldResponseStatusCode: 200,
       newResponseStatusCode: 201,
+      classification: 'breaking',
+    });
+  });
+
+  it('reports the headers of an operation that lost its only 2xx under that 2xx, not nowhere (review)', async () => {
+    const traced = { description: 'OK', headers: { 'X-Trace': { schema: { type: 'string' } } } };
+    const lone200 = await parseSpec(await writeSpec('lone-200.json', documentWith({ '200': traced })));
+    const only404 = await parseSpec(await writeSpec('only-404.json', documentWith({ '404': { description: 'Gone' } })));
+    // The new operation declares no 2xx, so its primary carries no code; the
+    // removal is located at the old entry, which does.
+    expect(diffSpecs(lone200, only404).changes[0]).toMatchObject({
+      errorsChanged: true,
+      responseStatusCodeChanged: false,
+      responseHeaderChanges: [
+        { kind: 'header-removed', headerName: 'X-Trace', statusCode: 200, classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+    // An added header is located at the new entry, which carries the code.
+    expect(diffSpecs(only404, lone200).changes[0]).toMatchObject({
+      responseHeaderChanges: [
+        { kind: 'header-added', headerName: 'X-Trace', statusCode: 200, classification: 'additive' },
+      ],
     });
   });
 });
@@ -233,13 +258,15 @@ describe('diffOperations — a lone 2xx pairs by its status code (Greptile round
     const change = modified(lone201, with200);
     expect(change.responseHeaderChanges).toEqual([]);
     expect(change.responseContentTypeChanges).toEqual([]);
-    // What is reported is the primary moving to the added 200.
+    // What is reported is the primary moving to the added 200, additive: the
+    // 201 is still declared, and whether a bare status move breaks callers is
+    // left to a separate issue.
     expect(change).toMatchObject({
       responseHeadersChanged: false,
       responseStatusCodeChanged: true,
       oldResponseStatusCode: 201,
       newResponseStatusCode: 200,
-      classification: 'breaking',
+      classification: 'additive',
     });
   });
 
@@ -264,7 +291,7 @@ describe('diffOperations — a lone 2xx pairs by its status code (Greptile round
       responseStatusCodeChanged: true,
       oldResponseStatusCode: 201,
       newResponseStatusCode: 200,
-      classification: 'breaking',
+      classification: 'additive',
     });
     // A header that changes along with the code is reported under the new code.
     const lone200More = listPets([header('Location', { required: true }), header('X-Total')], {
@@ -285,6 +312,20 @@ describe('diffOperations — a lone 2xx pairs by its status code (Greptile round
     expect(change).toMatchObject({ responseChanged: true, responseStatusCodeChanged: false });
     expect(change).not.toHaveProperty('oldResponseStatusCode');
     expect(change).not.toHaveProperty('newResponseStatusCode');
+    // The lost 201's header is reported under the 201, the old entry's code
+    // (the new primary carries none), and so are its media types.
+    expect(change.responseHeaderChanges).toEqual([
+      { kind: 'header-removed', headerName: 'Location', statusCode: 201, classification: 'breaking' },
+    ]);
+    const html = listPets([header('Location', { required: true })], {
+      response: string,
+      responseStatusCode: 201,
+      responseContentTypes: ['text/html'],
+      responseContents: [{ contentType: 'text/html', type: string }],
+    });
+    expect(modified(html, none).responseContentTypeChanges).toMatchObject([
+      { statusCode: 201, added: [], removed: ['text/html'], classification: 'breaking' },
+    ]);
     expect(diffOperations('Pets', [lone201], [lone201])).toEqual([]);
   });
 

@@ -793,6 +793,20 @@ export interface Parameter {
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
   /**
+   * The media type the parameter's value is serialized in: the `content`
+   * key its schema was read from, as written (`application/json;
+   * charset=utf-8`). Present exactly when the parameter is declared with
+   * `content` and the map is read (see `type`) — a schema-less `text/plain`
+   * entry included; absent for a `schema` parameter, and for a `content`
+   * map none of whose media types is read, whose string value is sent as
+   * written. An emitter that serializes parameters by `style` and `explode`
+   * must instead serialize such a value in this media type: JSON-encode an
+   * `application/json` or `+json` value, send a `text/plain` value as text.
+   * `oagen diff` compares it by essence and reports a change as a breaking
+   * `param-content-type-changed`.
+   */
+  contentType?: string;
+  /**
    * Validation keywords from the parameter's schema. When that schema is a
    * `$ref`, the target's keywords are merged underneath the parameter's own
    * — the per-value fallback `default` and `example` use — so a parameter
