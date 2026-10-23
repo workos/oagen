@@ -635,7 +635,8 @@ export interface PaginationMeta {
   /**
    * Every property the list envelope carries besides the data array, in
    * document order: the pagination companion (`list_metadata`, `pagination`,
-   * `has_more`, …) and any discriminant such as `object: "list"`. Together
+   * `has_more`, …, recognized in any spelling — `pageInfo` as much as
+   * `page_info`) and any discriminant such as `object: "list"`. Together
    * with `dataPath` and `itemType` this is the envelope's full shape, so an
    * emitter can type what the endpoint returns and read the page details it
    * needs for the next request without parsing the document itself.

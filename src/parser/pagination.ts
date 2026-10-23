@@ -9,6 +9,7 @@ import type {
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
 import { resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
+import { toSnakeCase } from '../utils/naming.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -188,9 +189,11 @@ const END_KIND_PRIORITY: ReadonlyArray<PaginationEndOfIteration['kind']> = ['has
 
 /**
  * Substrings that mark an envelope companion as pagination metadata (`meta`,
- * `pagination`, `page_info`, `cursor`, ...). List-envelope detection reads
- * them to recognize an envelope, and `detectEndOfIteration` reads them to
- * decide which object companions to look inside for a stop field.
+ * `pagination`, `page_info`, `cursor`, ...), written in snake_case: the
+ * spelling `looksLikePaginationMetadata` matches a companion's name in,
+ * whatever case or separators the document uses. List-envelope detection
+ * reads them to recognize an envelope, and `detectEndOfIteration` reads them
+ * to decide which object companions to look inside for a stop field.
  */
 export const PAGINATION_METADATA_PATTERNS: readonly string[] = [
   'meta',
@@ -205,10 +208,20 @@ export const PAGINATION_METADATA_PATTERNS: readonly string[] = [
   'offset',
 ];
 
-/** Whether a companion's name says it carries pagination metadata. */
+/**
+ * Whether a companion's name says it carries pagination metadata: its
+ * snake_case spelling (`toSnakeCase`, which splits the name into words as
+ * `toPascalCase` does) contains one of `PAGINATION_METADATA_PATTERNS`. The
+ * name is read by its words, so case and separators do not matter —
+ * `page_info`, `pageInfo`, `PageInfo` and `page-info` are all `page_info` —
+ * while a pattern never straddles a word boundary: `nameTag` is `name_tag`,
+ * which does not contain `meta`. The one recognizer for list-envelope
+ * detection and the nested stop-field scan, so the two cannot disagree
+ * about which companions are pagination metadata.
+ */
 export function looksLikePaginationMetadata(name: string): boolean {
-  const lower = name.toLowerCase();
-  return PAGINATION_METADATA_PATTERNS.some((pattern) => lower.includes(pattern));
+  const spelled = toSnakeCase(name);
+  return PAGINATION_METADATA_PATTERNS.some((pattern) => spelled.includes(pattern));
 }
 
 /**
@@ -218,11 +231,13 @@ export function looksLikePaginationMetadata(name: string): boolean {
  *
  * Top-level fields are considered first, then the fields one level down
  * inside each object companion whose name says it is pagination metadata
- * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ...; an
+ * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ..., in
+ * any spelling — `pageInfo` and `PageInfo` as much as `page_info`; an
  * inline object, a `$ref` to a component, an `allOf` of those, or a nullable
  * wrapper around one), so a `stats.total` beside `pagination.page` is not
- * taken for the list's size. The path follows the `dataPath` convention: `has_more` or
- * `pagination.totalPages`. When
+ * taken for the list's size. The path follows the `dataPath` convention —
+ * `has_more` or `pagination.totalPages` — and spells each segment as the
+ * document does (`pageInfo.hasNextPage`). When
  * several candidates exist, a `hasMore` boolean wins over a `totalPages`
  * integer, which wins over a `totalCount` integer; within one kind the first
  * in scan order wins. A candidate whose type does not fit its kind (a string
