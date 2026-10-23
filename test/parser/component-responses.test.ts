@@ -1495,3 +1495,140 @@ describe("a component response's other media types and headers (issue #302)", ()
     expectSound(spec);
   });
 });
+
+describe('a component list envelope is reserved under both readings (#309 review)', () => {
+  // `bodyModelNames` used to classify the body unwrapped only, so an
+  // operation that keeps the envelope (no paging parameter) minted names the
+  // reservation never saw: `NotePageResponseData` beside a schema of that name
+  // was renamed late instead of the stem stepping, and the one item schema
+  // took one name per reading with nothing keeping them together.
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  const notePage = {
+    description: 'A page of notes',
+    content: {
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' } } } },
+            has_more: { type: 'boolean' },
+          },
+        },
+      },
+    },
+  };
+  const after = [{ name: 'after', in: 'query', schema: { type: 'string' } }];
+  const returnsNotePage = (operationId: string, parameters?: unknown[]) => ({
+    get: {
+      operationId,
+      ...(parameters && { parameters }),
+      responses: { '200': { $ref: '#/components/responses/NotePage' } },
+    },
+  });
+
+  async function parseNotes(
+    paths: Record<string, unknown>,
+    schemas: Record<string, unknown> = {},
+  ): Promise<{ spec: ApiSpec; warnings: string[] }> {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      dir = mkdtempSync(join(tmpdir(), 'oagen-309-'));
+      const specPath = join(dir, 'spec.json');
+      writeFileSync(
+        specPath,
+        JSON.stringify({
+          openapi: '3.1.0',
+          info: { title: 'notes', version: '1' },
+          paths,
+          components: { responses: { NotePage: notePage }, schemas },
+        }),
+      );
+      const spec = await parseSpec(specPath);
+      validateModelRefs(spec);
+      return { spec, warnings: warn.mock.calls.map((call) => String(call[0])) };
+    } finally {
+      warn.mockRestore();
+    }
+  }
+
+  const fieldsOf = (spec: ApiSpec, name: string) =>
+    spec.models.find((m) => m.name === name)?.fields.map((f) => [f.name, f.type]);
+  const opsByName = (spec: ApiSpec) => new Map(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+  const unpagedWarning = expect.stringContaining('listNotes returns a list envelope but no query parameter');
+
+  it('steps the stem when the kept reading clashes with a component schema, instead of renaming late', async () => {
+    const { spec, warnings } = await parseNotes(
+      { '/notes': returnsNotePage('listNotes') },
+      { NotePageResponseData: { type: 'object', properties: { other: { type: 'string' } } } },
+    );
+    const op = opsByName(spec).get('listNotes')!;
+    expect(op.pagination).toBeUndefined();
+    expect(op.response).toEqual({ kind: 'model', name: 'NotePageResponse2' });
+    expect(fieldsOf(spec, 'NotePageResponse2')).toEqual([
+      ['data', { kind: 'array', items: { kind: 'model', name: 'NotePageResponse2Data' } }],
+      ['has_more', { kind: 'primitive', type: 'boolean' }],
+    ]);
+    expect(fieldsOf(spec, 'NotePageResponse2Data')).toEqual([['title', { kind: 'primitive', type: 'string' }]]);
+    // The component schema keeps its name and its shape.
+    expect(fieldsOf(spec, 'NotePageResponseData')).toEqual([['other', { kind: 'primitive', type: 'string' }]]);
+    expect(spec.models.map((m) => m.name).sort()).toEqual(
+      ['NotePageResponse2', 'NotePageResponse2Data', 'NotePageResponseData'].sort(),
+    );
+    expect(warnings).toEqual([unpagedWarning]);
+  });
+
+  it('keeps both readings of one body on names the reservation saw, when two operations read it differently', async () => {
+    const { spec, warnings } = await parseNotes({
+      '/notes': returnsNotePage('listNotes'),
+      '/notes/recent': returnsNotePage('listRecentNotes', after),
+    });
+    const ops = opsByName(spec);
+    expect(ops.get('listNotes')!.response).toEqual({ kind: 'model', name: 'NotePageResponse' });
+    expect(ops.get('listNotes')!.pagination).toBeUndefined();
+    expect(ops.get('listRecentNotes')!.response).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'NotePageItem' },
+    });
+    expect(ops.get('listRecentNotes')!.pagination).toMatchObject({
+      strategy: 'cursor',
+      param: 'after',
+      itemType: { kind: 'model', name: 'NotePageItem' },
+      endOfIteration: { kind: 'hasMore', path: 'has_more' },
+    });
+    expect(fieldsOf(spec, 'NotePageResponse')).toEqual([
+      ['data', { kind: 'array', items: { kind: 'model', name: 'NotePageResponseData' } }],
+      ['has_more', { kind: 'primitive', type: 'boolean' }],
+    ]);
+    expect(fieldsOf(spec, 'NotePageResponseData')).toEqual([['title', { kind: 'primitive', type: 'string' }]]);
+    expect(fieldsOf(spec, 'NotePageItem')).toEqual([['title', { kind: 'primitive', type: 'string' }]]);
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['NotePageItem', 'NotePageResponse', 'NotePageResponseData']);
+    expect(warnings).toEqual([unpagedWarning]);
+  });
+
+  it('moves both readings together when the unwrapped one clashes with a component schema', async () => {
+    const { spec, warnings } = await parseNotes(
+      { '/notes': returnsNotePage('listNotes'), '/notes/recent': returnsNotePage('listRecentNotes', after) },
+      { NotePageItem: { type: 'object', properties: { other: { type: 'string' } } } },
+    );
+    const ops = opsByName(spec);
+    expect(ops.get('listNotes')!.response).toEqual({ kind: 'model', name: 'NotePageResponse2' });
+    expect(ops.get('listRecentNotes')!.response).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'NotePageResponse2Item' },
+    });
+    expect(fieldsOf(spec, 'NotePageResponse2')).toEqual([
+      ['data', { kind: 'array', items: { kind: 'model', name: 'NotePageResponse2Data' } }],
+      ['has_more', { kind: 'primitive', type: 'boolean' }],
+    ]);
+    expect(fieldsOf(spec, 'NotePageItem')).toEqual([['other', { kind: 'primitive', type: 'string' }]]);
+    expect(spec.models.map((m) => m.name).sort()).toEqual(
+      ['NotePageItem', 'NotePageResponse2', 'NotePageResponse2Data', 'NotePageResponse2Item'].sort(),
+    );
+    expect(warnings).toEqual([unpagedWarning]);
+  });
+});

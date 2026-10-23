@@ -197,9 +197,10 @@ export interface VariantChange {
    * union's entries never carry it). For `discriminator-changed`:
    * `discriminator added` / `discriminator removed`, `property changed from
    * 'kind' to 'type'`, or `mapping changed for 'dog'` naming every key
-   * retargeted, added for a variant the old union already had (or for none),
-   * or removed while its variant stays. For `composition-changed`:
-   * `composition changed from 'anyOf' to 'oneOf'`.
+   * retargeted, added for a model the old union already dispatched to under
+   * any wrapper (an alias: `kitty: Cat` beside a kept `Cat`, bare or as
+   * `nullable<Cat>`) or for no variant, or removed while its model stays. For
+   * `composition-changed`: `composition changed from 'anyOf' to 'oneOf'`.
    */
   details?: string;
 }
