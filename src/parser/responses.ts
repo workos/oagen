@@ -295,29 +295,35 @@ function classifyBody(
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
   const envelope = detectListEnvelope(schema);
-  if (envelope.isEnvelope && !options.paginationDisabled) {
+  if (envelope.isEnvelope) {
     const override = options.dataPathOverride;
-    if (override === undefined || override === envelope.dataPath) {
+    if (!options.paginationDisabled && (override === undefined || override === envelope.dataPath)) {
       return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
     }
-    // The override names another array than the one the envelope would be
-    // unwrapped on: detection was wrong for this operation, so the envelope
-    // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
-    // field is read by the caller (`bodyEndOfIteration`), as every kept
-    // wrapper's is.
-    return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+    // A recognized envelope that is not unwrapped is kept as the wire shape,
+    // one model carrying every field, whichever reason keeps it: nothing
+    // pages the operation (`paginationDisabled` — `strategy: 'none'`, or no
+    // declared query parameter and no usable override), or an explicit
+    // `dataPath` names another array than the one it would be unwrapped on
+    // (detection was wrong for this operation; its stop field is read by the
+    // caller, `bodyEndOfIteration`). It never takes the single-resource
+    // reading below: an envelope with one required companion carrying a
+    // constant `type`/`object` (`{ data, pagination: { type: 'pagination',
+    // total } }` with `required: ['pagination']`) fits that shape, and
+    // unwrapping it would make the companion the whole response and drop
+    // `data`. `unpagedEnvelope` tells the caller which reason kept it, so an
+    // envelope kept for want of a paging parameter is warned about.
+    const kept = extractDirectResource(schema, contextName, componentSchemas, options.settle);
+    return options.paginationDisabled ? { ...kept, unpagedEnvelope: true } : kept;
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
+  if (isSingleResourceWrapper(schema)) {
+    return extractWrappedResource(schema, contextName, componentSchemas);
+  }
+
   // 4. Direct resource or plain inline object
-  // An envelope that reaches here is one nothing pages (`paginationDisabled`):
-  // it is read exactly as any other body, and the result says it was an
-  // envelope, so the caller can warn about one kept for want of a paging
-  // parameter.
-  const body = isSingleResourceWrapper(schema)
-    ? extractWrappedResource(schema, contextName, componentSchemas)
-    : extractDirectResource(schema, contextName, componentSchemas, options.settle);
-  return envelope.isEnvelope ? { ...body, unpagedEnvelope: true } : body;
+  return extractDirectResource(schema, contextName, componentSchemas, options.settle);
 }
 
 interface ListEnvelopeResult {
