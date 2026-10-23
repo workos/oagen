@@ -182,7 +182,25 @@ export interface VariantChange {
    * the new composition keyword for `composition-changed`.
    */
   variant: string;
+  /**
+   * `variant-added` is additive and `variant-removed` breaking, from either
+   * side of the wire. `discriminator-changed` and `composition-changed` are
+   * breaking. A mapping entry that comes with an added variant or goes with a
+   * removed one is part of that variant's entry (see `details`), not a
+   * `discriminator-changed` of its own.
+   */
   classification: 'additive' | 'breaking';
+  /**
+   * For `variant-added` / `variant-removed`: present when discriminator
+   * mapping keys came or went with the variant, reading `mapping added for
+   * 'bird'` / `mapping removed for 'dog'`; absent otherwise (an undiscriminated
+   * union's entries never carry it). For `discriminator-changed`:
+   * `discriminator added` / `discriminator removed`, `property changed from
+   * 'kind' to 'type'`, or `mapping changed for 'dog'` naming every key
+   * retargeted, added for a variant the old union already had (or for none),
+   * or removed while its variant stays. For `composition-changed`:
+   * `composition changed from 'anyOf' to 'oneOf'`.
+   */
   details?: string;
 }
 
