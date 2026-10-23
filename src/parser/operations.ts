@@ -81,6 +81,7 @@ import {
   type InlineModelRegistry,
   type InlineModelOwner,
   type SiblingSites,
+  createSiblingSites,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -3941,7 +3942,7 @@ function resolveDeferredInlineTypes(
   for (const item of deferred) {
     const bareName = `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
     let siblings = siblingsByBareName.get(bareName);
-    if (!siblings) siblingsByBareName.set(bareName, (siblings = []));
+    if (!siblings) siblingsByBareName.set(bareName, (siblings = createSiblingSites()));
     const minted = models.length;
     const type = materializeDeferredType(item, registry, models, siblings);
     for (const target of item.targets) target.type = type;
