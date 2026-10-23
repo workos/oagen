@@ -278,6 +278,16 @@ export interface SchemaExtractionOptions {
    * title-derived names).
    */
   schemaNameTransform?: SchemaNameTransform;
+  /**
+   * The whole OpenAPI document the schemas come from, read once up front for
+   * the rules that look at every inline schema of a root at a time: a
+   * title-mapped union variant keeps its bare title only when no variant of
+   * another shape takes the same title under the same root
+   * (`markContestedTitles`). Without it, the component schemas are the only
+   * root, so a title a request body, response, header, parameter or webhook
+   * payload repeats with another shape is not seen.
+   */
+  document?: unknown;
 }
 
 export interface SchemaObject {
@@ -708,7 +718,13 @@ export function extractSchemas(
 ): ExtractedSchemas {
   const enums: Enum[] = [];
 
-  if (!schemas) return { models: [], enums };
+  if (!schemas) {
+    // No components, so no name transform is activated for this document;
+    // the titles are resolved here as they will be when the operations are
+    // typed, without one.
+    markContestedTitles(options?.document);
+    return { models: [], enums };
+  }
 
   // Record the raw component keys first so every resolveSchemaName() call
   // below (including the collision probe) can tell a real component key from
@@ -753,6 +769,13 @@ export function extractSchemas(
   } else {
     activeSchemaNameTransform = null;
   }
+
+  // Before any field is typed: which title-mapped variants must not keep
+  // their title because another shape takes it under the same root. Decided
+  // with the name transform active, since the titles are compared by the
+  // names they resolve to. The component schemas are read as one root; every
+  // other inline schema of the document is a root of its own.
+  markContestedTitles(options?.document ?? { components: { schemas } });
 
   // Pre-compute the set of resolved names whose component schema is an enum so
   // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
@@ -842,6 +865,7 @@ export function clearSchemaNameTransform(): void {
   activeNullableUnionSchemaNames = new Set();
   activeComponentSchemaKeys = new Set();
   activeNamedUnionMemo = null;
+  markContestedTitles(undefined);
 }
 
 /**
@@ -1344,10 +1368,17 @@ export function nameInlineVariant(
  * shapes differ, both unions fall back to their context-qualified names
  * (`CircleDrawingShape`, `CircleDrawingMarker`) and neither keeps the bare
  * `Circle`; when they are identical, both keep `Circle` and one model is
- * emitted. `elementContextName` never lets a context-free name drive an
- * items/values step-aside, which no context could satisfy.
- * `nameInlineVariantEntries` reports which names are context-free; a
- * fallen-back title name is context-dependent.
+ * emitted. The same holds at any depth of one root, not only between
+ * siblings: a title that two unions anywhere under the same root — a
+ * component schema, a request body, a response, a header, a webhook payload
+ * — give different shapes is contested (`markContestedTitles`, decided
+ * before any union is named), and a contested variant takes its
+ * context-qualified name exactly as a reserved one does
+ * (`CircleDrawingShape` beside `CircleDrawingMarkerShape`), wherever in the
+ * root it sits and whichever is declared first. `elementContextName` never
+ * lets a context-free name drive an items/values step-aside, which no
+ * context could satisfy. `nameInlineVariantEntries` reports which names are
+ * context-free; a fallen-back title name is context-dependent.
  *
  * This is the list-level entry point every site uses: `schemaToTypeRef` (via
  * `nameInlineObjectVariants`), `extractNestedSchema`,
@@ -1387,28 +1418,26 @@ export function nameInlineVariantEntries(
   const nonNullVariants = (union.oneOf ?? union.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
   const inlineObjectVariants = nonNullVariants.filter((v) => isInlineObjectSchema(v));
   const discriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
-  const titleMapped =
-    union.oneOf !== undefined && !union.discriminator && titleMappedDiscriminatorProperty(nonNullVariants) !== null;
+  const titles = titleMappedVariantNames(union);
   const emitted: string[] = [];
   const entries = new Map<SchemaObject, InlineVariantName>();
   for (const variant of inlineObjectVariants) {
     let name: string | null = null;
     let contextFree = false;
-    if (titleMapped) {
-      const titled = resolveVariantModelName(variant);
-      if (titled !== null) {
-        if (titled !== base && !emitted.includes(titled) && !reserved.has(titled)) {
-          name = titled;
-          contextFree = true;
-        } else {
-          // The title is taken (by a sibling's model, by a sibling's variant
-          // of a different shape, or by an earlier variant of this union):
-          // the variant takes a context-qualified name instead — its title
-          // as a prefix on the base (`CircleDrawingMarker`), else a
-          // distinguishing property, else the counter — and the mapping,
-          // read from this map, follows.
-          name = nameUndiscriminatedVariant(variant, inlineObjectVariants, base, emitted, reserved);
-        }
+    const titled = titles.get(variant);
+    if (titled !== undefined) {
+      if (titled !== base && !emitted.includes(titled) && !reserved.has(titled) && !isContestedTitle(variant)) {
+        name = titled;
+        contextFree = true;
+      } else {
+        // The title is taken (by a sibling's model, by a sibling's variant
+        // of a different shape, by an earlier variant of this union, or by a
+        // variant of another shape anywhere under the same root —
+        // `isContestedTitle`): the variant takes a context-qualified name
+        // instead — its title as a prefix on the base
+        // (`CircleDrawingMarker`), else a distinguishing property, else the
+        // counter — and the mapping, read from this map, follows.
+        name = nameUndiscriminatedVariant(variant, inlineObjectVariants, base, emitted, reserved);
       }
     }
     name ??= nameInlineVariant(variant, inlineObjectVariants, base, emitted, discriminator, reserved, baseTaken);
@@ -1416,6 +1445,32 @@ export function nameInlineVariantEntries(
     entries.set(variant, { name, contextFree });
   }
   return entries;
+}
+
+/**
+ * The inline object variants of a title-mapped union — a `oneOf` with no
+ * explicit `discriminator:` whose every non-null variant carries a `$ref` or
+ * a `title` and pins the same const property
+ * (`titleMappedDiscriminatorProperty`) — each with the name its title
+ * resolves to (`resolveVariantModelName`: the title run through the
+ * project's schema-name transform, like a component name). Empty for any
+ * other union, so a caller can read "is title-mapped" off the map's size.
+ * `nameInlineVariantEntries` names such a variant from this map, and
+ * `markContestedTitles` reads the same map to find the variants that give
+ * one title two shapes under one root, so the two cannot disagree on which
+ * variants a title names.
+ */
+export function titleMappedVariantNames(union: SchemaObject): ReadonlyMap<SchemaObject, string> {
+  const names = new Map<SchemaObject, string>();
+  if (union.oneOf === undefined || union.discriminator) return names;
+  const nonNullVariants = union.oneOf.filter((v) => !isNullVariantSchema(v));
+  if (titleMappedDiscriminatorProperty(nonNullVariants) === null) return names;
+  for (const variant of nonNullVariants) {
+    if (!isInlineObjectSchema(variant)) continue;
+    const titled = resolveVariantModelName(variant);
+    if (titled !== null) names.set(variant, titled);
+  }
+  return names;
 }
 
 /**
@@ -3643,7 +3698,9 @@ import {
   elementContextName,
   extractInlineModelsFromProperties,
   firstFreeElementContext,
+  isContestedTitle,
   mapValueSchema,
+  markContestedTitles,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,

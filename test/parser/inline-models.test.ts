@@ -10,9 +10,21 @@ import {
   extractInlineModelsFromProperties,
   extractInlineModelsFromSchemas,
   firstFreeElementContext,
+  isContestedTitle,
+  markContestedTitles,
   mintedInlineNameEntries,
 } from '../../src/parser/inline-models.js';
-import { walkTypeRef, type Model } from '../../src/ir/types.js';
+import {
+  collectModelRefs,
+  collectResponseBodyTypes,
+  collectResponseHeaders,
+  collectWebhookTypeRefs,
+  walkTypeRef,
+  type ApiSpec,
+  type Model,
+  type Operation,
+  type TypeRef,
+} from '../../src/ir/types.js';
 
 // The two shapes from workos/oagen#187: an array whose `items.oneOf` lists
 // inline object variants, and a map whose `additionalProperties` value is an
@@ -3592,5 +3604,1093 @@ describe('a title-named model is shared only between variants of the identical s
       { name: 'Circle', contextFree: true },
       { name: 'CircleDrawingShape', contextFree: false },
     ]);
+  });
+});
+
+describe('a title two unions give different shapes at different depths of one root (#267)', () => {
+  const num = { kind: 'primitive', type: 'number' };
+  const model = (name: string) => ({ kind: 'model', name });
+  const n: SchemaObject = { type: 'number' };
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const circle = (fields: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { const: 'circle' }, ...fields }, { title: 'Circle' });
+  const square = (fields: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { const: 'square' }, ...fields }, { title: 'Square' });
+  // The issue's two unions: `Circle` and `Square` both differ between them.
+  const byRadius = (): SchemaObject => ({ oneOf: [circle({ radius: n }), square({ side: n })] });
+  const byDiameter = (): SchemaObject => ({ oneOf: [circle({ diameter: n }), square({ len: n })] });
+  // `Circle` identical, `Square` different.
+  const byArea = (): SchemaObject => ({ oneOf: [circle({ radius: n }), square({ area: n })] });
+  /** The issue's schema: a `shape` union beside a `marker` object holding a second `shape` union. */
+  const nested = (top: SchemaObject, inner: SchemaObject): SchemaObject =>
+    obj({ shape: top, marker: obj({ shape: inner }) });
+  const unionOf = (first: string, second: string) => ({
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: [model(first), model(second)],
+    discriminator: { property: 'kind', mapping: { circle: first, square: second } },
+  });
+  const kind = (value: string) => ({ kind: { kind: 'literal', value } });
+  const doc = (body: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'depth', version: '1' },
+    ...body,
+  });
+  const modelNames = (ir: ApiSpec): string[] => ir.models.map((m) => m.name).sort();
+
+  /** Every type reference an operation carries, at every site a model can be reached from. */
+  function operationTypeRefs(op: Operation): TypeRef[] {
+    const params = [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])];
+    return [
+      op.response,
+      ...(op.requestBody ? [op.requestBody] : []),
+      ...(op.successResponses ?? []).map((r) => r.type),
+      ...op.errors.flatMap((e) => (e.type ? [e.type] : [])),
+      ...collectResponseBodyTypes(op).map((r) => r.type),
+      ...collectResponseHeaders(op).map((h) => h.type),
+      ...(op.pagination ? [op.pagination.itemType, ...(op.pagination.envelopeFields ?? []).map((f) => f.type)] : []),
+      ...params.map((p) => p.type),
+    ];
+  }
+
+  /** Every model reference resolves, and every model but `roots` is referenced from somewhere. */
+  function expectConsistent(ir: ApiSpec, roots: string[]): void {
+    const referenced = new Set<string>();
+    const refs: TypeRef[] = [
+      ...ir.models.flatMap((m) => m.fields.map((f) => f.type)),
+      ...ir.services.flatMap((s) => s.operations.flatMap(operationTypeRefs)),
+      ...(ir.webhooks ?? []).flatMap(collectWebhookTypeRefs),
+    ];
+    for (const ref of refs) {
+      for (const name of collectModelRefs(ref)) referenced.add(name);
+      for (const target of mappingTargets(ref)) referenced.add(target);
+    }
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name)).sort()).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name)).sort()).toEqual([]);
+  }
+
+  /** Every discriminator mapping target of every union anywhere in a type reference. */
+  function mappingTargets(ref: TypeRef, out: string[] = []): string[] {
+    switch (ref.kind) {
+      case 'union':
+        out.push(...Object.values(ref.discriminator?.mapping ?? {}));
+        for (const variant of ref.variants) mappingTargets(variant, out);
+        break;
+      case 'array':
+        mappingTargets(ref.items, out);
+        break;
+      case 'nullable':
+        mappingTargets(ref.inner, out);
+        break;
+      case 'map':
+        mappingTargets(ref.valueType, out);
+        if (ref.keyType) mappingTargets(ref.keyType, out);
+        break;
+      default:
+        break;
+    }
+    return out;
+  }
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<ApiSpec> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+
+  /** What the root model and the models under it look like once neither title is kept. */
+  function expectBothQualified(ir: ApiSpec, root: string): void {
+    const types = fieldTypesByModel(ir.models);
+    expect(types[root]).toEqual({
+      shape: unionOf(`Circle${root}Shape`, `Square${root}Shape`),
+      marker: model(`${root}Marker`),
+    });
+    expect(types[`${root}Marker`]).toEqual({
+      shape: unionOf(`Circle${root}MarkerShape`, `Square${root}MarkerShape`),
+    });
+    expect(types[`Circle${root}Shape`]).toEqual({ ...kind('circle'), radius: num });
+    expect(types[`Square${root}Shape`]).toEqual({ ...kind('square'), side: num });
+    expect(types[`Circle${root}MarkerShape`]).toEqual({ ...kind('circle'), diameter: num });
+    expect(types[`Square${root}MarkerShape`]).toEqual({ ...kind('square'), len: num });
+    expect(ir.models.some((m) => m.name === 'Circle' || m.name === 'Square')).toBe(false);
+    expectConsistent(ir, [root]);
+  }
+
+  it('the reported case: a default response whose `shape` and `marker.shape` both title a Circle and a Square of different shapes', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {
+          '/drawings': {
+            get: {
+              operationId: 'getDrawing',
+              responses: {
+                '204': { description: 'ok' },
+                default: {
+                  description: 'err',
+                  content: { 'application/json': { schema: nested(byRadius(), byDiameter()) } },
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    // Neither union keeps the bare title: the `{ kind, diameter }` variant is
+    // extracted under its own name and the deeper mapping dispatches to it.
+    expectBothQualified(ir, 'GetDrawingDefaultResponse');
+    expect(modelNames(ir)).toEqual([
+      'CircleGetDrawingDefaultResponseMarkerShape',
+      'CircleGetDrawingDefaultResponseShape',
+      'GetDrawingDefaultResponse',
+      'GetDrawingDefaultResponseMarker',
+      'SquareGetDrawingDefaultResponseMarkerShape',
+      'SquareGetDrawingDefaultResponseShape',
+    ]);
+    const op = ir.services[0]!.operations[0]!;
+    expect(op.defaultResponse?.type).toEqual(model('GetDrawingDefaultResponse'));
+  });
+
+  const op = (operationId: string, body: Record<string, unknown>) => ({
+    paths: { '/drawings': { get: { operationId, ...body } } },
+  });
+  const json = (schema: SchemaObject) => ({ content: { 'application/json': { schema } } });
+
+  it.each<{ label: string; spec: Record<string, unknown>; root: string }>([
+    {
+      label: 'a component schema',
+      spec: doc({ paths: {}, components: { schemas: { Drawing: nested(byRadius(), byDiameter()) } } }),
+      root: 'Drawing',
+    },
+    {
+      label: 'a request body',
+      spec: doc({
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: json(nested(byRadius(), byDiameter())),
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      }),
+      root: 'CreateDrawingRequest',
+    },
+    {
+      label: 'a 2xx response',
+      spec: doc(
+        op('getDrawing', { responses: { '200': { description: 'ok', ...json(nested(byRadius(), byDiameter())) } } }),
+      ),
+      root: 'GetDrawingResponse',
+    },
+    {
+      label: 'an error response',
+      spec: doc(
+        op('getDrawing', {
+          responses: {
+            '204': { description: 'ok' },
+            '404': { description: 'gone', ...json(nested(byRadius(), byDiameter())) },
+          },
+        }),
+      ),
+      root: 'GetDrawingError404',
+    },
+    {
+      label: 'a range response',
+      spec: doc(
+        op('getDrawing', {
+          responses: {
+            '204': { description: 'ok' },
+            '4XX': { description: 'bad', ...json(nested(byRadius(), byDiameter())) },
+          },
+        }),
+      ),
+      root: 'GetDrawingClientErrorResponse',
+    },
+    {
+      label: 'a response header',
+      spec: doc(
+        op('getDrawing', {
+          responses: {
+            '204': { description: 'ok', headers: { 'X-Meta': { schema: nested(byRadius(), byDiameter()) } } },
+          },
+        }),
+      ),
+      root: 'DrawingsXMeta',
+    },
+    {
+      label: 'a secondary media type',
+      spec: doc(
+        op('getDrawing', {
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { type: 'string' } },
+                'application/vnd.drawing+json': { schema: nested(byRadius(), byDiameter()) },
+              },
+            },
+          },
+        }),
+      ),
+      root: 'GetDrawingApplicationVndDrawingJsonResponse',
+    },
+    {
+      label: 'a webhook payload',
+      spec: doc({
+        paths: {},
+        webhooks: {
+          drawingCreated: {
+            post: {
+              operationId: 'drawingCreated',
+              requestBody: json(nested(byRadius(), byDiameter())),
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      }),
+      root: 'DrawingCreatedPayload',
+    },
+    {
+      label: 'a request body under components/requestBodies',
+      spec: doc({
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: { $ref: '#/components/requestBodies/Drawing' },
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+        components: { requestBodies: { Drawing: json(nested(byRadius(), byDiameter())) } },
+      }),
+      root: 'CreateDrawingRequest',
+    },
+    {
+      label: 'a response under components/responses',
+      spec: doc({
+        paths: {
+          '/drawings': {
+            get: { operationId: 'getDrawing', responses: { '200': { $ref: '#/components/responses/Drawing' } } },
+          },
+        },
+        components: { responses: { Drawing: { description: 'ok', ...json(nested(byRadius(), byDiameter())) } } },
+      }),
+      // A body from `components/responses` is named after the component.
+      root: 'DrawingResponse',
+    },
+    {
+      // A header name is a name, not a specification extension (Greptile round 2).
+      label: 'a response header named `x-meta`',
+      spec: doc(
+        op('getDrawing', {
+          responses: {
+            '204': { description: 'ok', headers: { 'x-meta': { schema: nested(byRadius(), byDiameter()) } } },
+          },
+        }),
+      ),
+      root: 'DrawingsXMeta',
+    },
+    {
+      label: 'a media type named `x-custom/json`',
+      spec: doc(
+        op('getDrawing', {
+          responses: {
+            '200': { description: 'ok', content: { 'x-custom/json': { schema: nested(byRadius(), byDiameter()) } } },
+          },
+        }),
+      ),
+      root: 'GetDrawingResponse',
+    },
+    {
+      label: 'a component schema named `x-thing`',
+      spec: doc({ paths: {}, components: { schemas: { 'x-thing': nested(byRadius(), byDiameter()) } } }),
+      root: 'XThing',
+    },
+    {
+      label: 'a path `/x-ray`',
+      spec: doc({
+        paths: {
+          '/x-ray': {
+            get: {
+              operationId: 'getXRay',
+              responses: { '200': { description: 'ok', ...json(nested(byRadius(), byDiameter())) } },
+            },
+          },
+        },
+      }),
+      root: 'GetXRayResponse',
+    },
+  ])('the same under $label', async ({ spec, root }) => {
+    expectBothQualified(await parseWithoutWarnings(spec), root);
+  });
+
+  it('is decided by shape, not by depth or declaration order', async () => {
+    // The deeper union first in the document, and the shallower one holding
+    // the `{ diameter }` shape: the same names, swapped with the shapes.
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {},
+        components: { schemas: { Drawing: obj({ marker: obj({ shape: byRadius() }), shape: byDiameter() }) } },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      marker: model('DrawingMarker'),
+      shape: unionOf('CircleDrawingShape', 'SquareDrawingShape'),
+    });
+    expect(types['DrawingMarker']).toEqual({ shape: unionOf('CircleDrawingMarkerShape', 'SquareDrawingMarkerShape') });
+    expect(types['CircleDrawingShape']).toEqual({ ...kind('circle'), diameter: num });
+    expect(types['CircleDrawingMarkerShape']).toEqual({ ...kind('circle'), radius: num });
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('reaches any depth: three levels down, through array items and map values', async () => {
+    const arr = (items: SchemaObject): SchemaObject => ({ type: 'array', items });
+    const map = (values: SchemaObject): SchemaObject => ({ type: 'object', additionalProperties: values });
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {},
+        components: {
+          schemas: {
+            Drawing: obj({
+              shapes: arr(byRadius()),
+              layers: map(obj({ marker: obj({ shapes: arr(byDiameter()) }) })),
+            }),
+          },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shapes: { kind: 'array', items: unionOf('CircleDrawingShape', 'SquareDrawingShape') },
+      layers: { kind: 'map', valueType: model('DrawingLayer') },
+    });
+    expect(types['DrawingLayer']).toEqual({ marker: model('DrawingLayerMarker') });
+    expect(types['DrawingLayerMarker']).toEqual({
+      shapes: { kind: 'array', items: unionOf('CircleDrawingLayerMarkerShape', 'SquareDrawingLayerMarkerShape') },
+    });
+    expect(types['CircleDrawingShape']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['CircleDrawingLayerMarkerShape']).toEqual({ ...kind('circle'), diameter: num });
+    expect(modelNames(ir)).toEqual([
+      'CircleDrawingLayerMarkerShape',
+      'CircleDrawingShape',
+      'Drawing',
+      'DrawingLayer',
+      'DrawingLayerMarker',
+      'SquareDrawingLayerMarkerShape',
+      'SquareDrawingShape',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('qualifies only the title that differs: an identical Circle is still shared under its bare title', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({ paths: {}, components: { schemas: { Drawing: nested(byRadius(), byArea()) } } }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shape: unionOf('Circle', 'SquareDrawingShape'),
+      marker: model('DrawingMarker'),
+    });
+    expect(types['DrawingMarker']).toEqual({ shape: unionOf('Circle', 'SquareDrawingMarkerShape') });
+    expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['SquareDrawingShape']).toEqual({ ...kind('square'), side: num });
+    expect(types['SquareDrawingMarkerShape']).toEqual({ ...kind('square'), area: num });
+    expect(modelNames(ir)).toEqual([
+      'Circle',
+      'Drawing',
+      'DrawingMarker',
+      'SquareDrawingMarkerShape',
+      'SquareDrawingShape',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('shares one model when the two depths give the title the identical shape', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({ paths: {}, components: { schemas: { Drawing: nested(byRadius(), byRadius()) } } }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({ shape: unionOf('Circle', 'Square'), marker: model('DrawingMarker') });
+    expect(types['DrawingMarker']).toEqual({ shape: unionOf('Circle', 'Square') });
+    expect(modelNames(ir)).toEqual(['Circle', 'Drawing', 'DrawingMarker', 'Square']);
+    expectConsistent(ir, ['Drawing']);
+  });
+
+  it('reads every component schema as one root, since their inline models are collected together', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {},
+        components: {
+          schemas: {
+            A: obj({ shape: byRadius() }),
+            B: obj({ marker: obj({ shape: byDiameter() }) }),
+          },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['A']).toEqual({ shape: unionOf('CircleAShape', 'SquareAShape') });
+    expect(types['BMarker']).toEqual({ shape: unionOf('CircleBMarkerShape', 'SquareBMarkerShape') });
+    expect(types['CircleAShape']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['CircleBMarkerShape']).toEqual({ ...kind('circle'), diameter: num });
+    expectConsistent(ir, ['A', 'B']);
+  });
+
+  it('contests a title between a named union component and a field union nested in another component', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {},
+        components: {
+          schemas: {
+            Shape: byRadius(),
+            Drawing: obj({ marker: obj({ shape: byDiameter() }) }),
+          },
+        },
+      }),
+    );
+    const shape = ir.models.find((m) => m.name === 'Shape')!;
+    expect(shape.variants).toEqual([model('CircleShape'), model('SquareShape')]);
+    expect(shape.discriminator).toEqual({
+      property: 'kind',
+      mapping: { circle: 'CircleShape', square: 'SquareShape' },
+    });
+    const types = fieldTypesByModel(ir.models);
+    expect(types['DrawingMarker']).toEqual({ shape: unionOf('CircleDrawingMarkerShape', 'SquareDrawingMarkerShape') });
+    expect(types['CircleShape']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['CircleDrawingMarkerShape']).toEqual({ ...kind('circle'), diameter: num });
+    expect(ir.models.some((m) => m.name === 'Circle')).toBe(false);
+  });
+
+  it('leaves a title two roots give different shapes to the merge passes, as before', async () => {
+    // A request body and a `default` body are separate roots: the body keeps
+    // `Circle`, and the fallback's variants, nested below its top level where
+    // no reservation reaches, are renamed under the fallback's root by the
+    // shape registry (`materializeInlineSchema`), exactly as before.
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: json(obj({ shape: byRadius() })),
+              responses: {
+                '204': { description: 'ok' },
+                default: { description: 'err', ...json(obj({ shape: byDiameter() })) },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types['CreateDrawingRequest']).toEqual({ shape: unionOf('Circle', 'Square') });
+    expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['CreateDrawingDefaultResponse']).toEqual({
+      shape: unionOf('CreateDrawingDefaultResponseCircle', 'CreateDrawingDefaultResponseSquare'),
+    });
+    expect(types['CreateDrawingDefaultResponseCircle']).toEqual({ ...kind('circle'), diameter: num });
+    expectConsistent(ir, ['CreateDrawingRequest', 'CreateDrawingDefaultResponse']);
+  });
+
+  describe('markContestedTitles', () => {
+    const variantsOf = (union: SchemaObject): SchemaObject[] => union.oneOf!;
+
+    it('marks every variant of a title given two shapes under one root, and none of a title given one', () => {
+      const top = byRadius();
+      const inner = byArea();
+      markContestedTitles({ components: { schemas: { Drawing: nested(top, inner) } } });
+      // `Square` differs (side vs area); `Circle` is identical.
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([false, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([false, true]);
+    });
+
+    it('reads the component schemas as one root and every other schema as its own', () => {
+      const a = byRadius();
+      const b = byDiameter();
+      const body = byRadius();
+      const fallback = byDiameter();
+      markContestedTitles({
+        paths: {
+          '/d': {
+            post: {
+              requestBody: { content: { 'application/json': { schema: obj({ shape: body }) } } },
+              responses: { default: { content: { 'application/json': { schema: obj({ shape: fallback }) } } } },
+            },
+          },
+        },
+        components: { schemas: { A: obj({ shape: a }), B: obj({ marker: obj({ shape: b }) }) } },
+      });
+      expect(variantsOf(a).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(b).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(body).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(fallback).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('follows schema keywords only: a property named `schema` is not a root, and `example` and `x-` are not walked', () => {
+      const own = byRadius();
+      const underProperty = byDiameter();
+      const inExample = byDiameter();
+      const inExtension = byDiameter();
+      markContestedTitles({
+        paths: {
+          '/d': {
+            get: {
+              responses: {
+                '200': {
+                  content: {
+                    'application/json': {
+                      schema: obj({ shape: own, schema: obj({ shape: underProperty }) }),
+                      example: { schema: obj({ shape: inExample }) },
+                    },
+                  },
+                },
+              },
+              'x-extra': { schema: obj({ shape: inExtension }) },
+            },
+          },
+        },
+      });
+      // `schema` under `properties` is part of the same root, so its union
+      // contests the titles with `own`; the example's and the extension's do not.
+      expect(variantsOf(own).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(underProperty).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inExample).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(inExtension).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('does not descend into a `$ref`, and ignores a union that is not title-mapped', () => {
+      const component = byRadius();
+      const untitled: SchemaObject = {
+        oneOf: [obj({ kind: { const: 'circle' }, diameter: n }), obj({ kind: { const: 'square' }, len: n })],
+      };
+      markContestedTitles({
+        paths: {
+          '/d': {
+            get: {
+              responses: {
+                '200': {
+                  content: {
+                    'application/json': {
+                      schema: obj({ shape: { $ref: '#/components/schemas/Shape' }, other: untitled }),
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        components: { schemas: { Shape: component } },
+      });
+      expect(variantsOf(component).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(untitled).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it("replaces the previous document's marks", () => {
+      const top = byRadius();
+      markContestedTitles({ components: { schemas: { Drawing: nested(top, byDiameter()) } } });
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
+      markContestedTitles(undefined);
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('reads a union object two roots share under each root, whichever root comes first (Greptile)', () => {
+      // One union object as the request body's `shape` and the response's,
+      // beside a deeper `marker.shape` of other shapes in the response only.
+      // The response root contests the titles, so the shared variants are
+      // marked — not hidden because the body root read the object first.
+      for (const responseFirst of [false, true]) {
+        const shared = byRadius();
+        const deeper = byDiameter();
+        const requestBody = { content: { 'application/json': { schema: obj({ shape: shared }) } } };
+        const responses = {
+          '200': {
+            content: { 'application/json': { schema: obj({ shape: shared, marker: obj({ shape: deeper }) }) } },
+          },
+        };
+        markContestedTitles({
+          paths: { '/d': { post: responseFirst ? { responses, requestBody } : { requestBody, responses } } },
+        });
+        expect(variantsOf(shared).map(isContestedTitle)).toEqual([true, true]);
+        expect(variantsOf(deeper).map(isContestedTitle)).toEqual([true, true]);
+      }
+    });
+
+    it('a shared union object no root contests stays uncontested', () => {
+      const shared = byRadius();
+      const alike = byRadius();
+      markContestedTitles({
+        paths: {
+          '/d': {
+            post: {
+              requestBody: { content: { 'application/json': { schema: obj({ shape: shared }) } } },
+              responses: {
+                '200': {
+                  content: {
+                    'application/json': { schema: obj({ shape: shared, marker: obj({ shape: alike }) }) },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(variantsOf(shared).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(alike).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('reads only the first variant of a union to carry a title: a later one never keeps it anyway', () => {
+      // One union giving `Circle` two shapes: the second falls back through
+      // `emitted` whatever the document holds, so it claims nothing and the
+      // first keeps `Circle` — the rule `nameInlineVariantEntries` has always
+      // applied within a union.
+      const twice: SchemaObject = { oneOf: [circle({ radius: n }), circle({ diameter: n })] };
+      markContestedTitles({ components: { schemas: { Drawing: obj({ shape: twice }) } } });
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([false, false]);
+      // A second union whose `Circle` has the later variant's shape contests
+      // the first variant's, not the later one's.
+      const other = byDiameter();
+      markContestedTitles({
+        components: { schemas: { Drawing: obj({ shape: twice, marker: obj({ shape: other }) }) } },
+      });
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([true, false]);
+      expect(variantsOf(other).map(isContestedTitle)).toEqual([true, false]);
+    });
+
+    it("reads one claim set across a union's nested unions, array items and map values, which its own reservations order", () => {
+      // Two nested unions under one outer union give `Circle` two shapes:
+      // `nonObjectVariantContexts` reserves the earlier kept title for the
+      // later variant, so the later one claims nothing here and the earlier
+      // keeps `Circle` (the base's `(A | B) | (AHolderShape | C)` rule). The
+      // same through an array variant's items, a map variant's values and a
+      // lone `allOf` member; a nested union under an object variant's
+      // property is a group of its own.
+      const first = byRadius();
+      const later = byDiameter();
+      const inItems = byDiameter();
+      const inValues = byDiameter();
+      const inAllOf = byDiameter();
+      const underProperty = byDiameter();
+      markContestedTitles({
+        components: {
+          schemas: {
+            Holder: obj({
+              shape: {
+                oneOf: [
+                  obj({ message: n }),
+                  first,
+                  later,
+                  { type: 'array', items: inItems },
+                  { type: 'object', additionalProperties: inValues },
+                  { allOf: [inAllOf] },
+                  obj({ nested: underProperty }),
+                ],
+              },
+            }),
+          },
+        },
+      });
+      expect(variantsOf(first).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(underProperty).map(isContestedTitle)).toEqual([true, true]);
+      for (const union of [later, inItems, inValues, inAllOf]) {
+        expect(variantsOf(union).map(isContestedTitle)).toEqual([false, false]);
+      }
+      // Without the property's union, nothing contests the group's claim.
+      const alone = byRadius();
+      const alongside = byDiameter();
+      markContestedTitles({
+        components: { schemas: { Holder: obj({ shape: { oneOf: [obj({ message: n }), alone, alongside] } }) } },
+      });
+      expect(variantsOf(alone).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(alongside).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('ends on a schema that refers back to itself, within a root and across the document', () => {
+      // A root whose property is the root itself, with a conflict further
+      // down; a component that contains itself; a path item whose
+      // operation's callback leads back to the path item; and an encoding
+      // header whose content leads back to the media type it sits in.
+      const top = byRadius();
+      const inner = byDiameter();
+      const root = obj({ shape: top, marker: obj({ shape: inner }) });
+      root.properties!['self'] = root;
+      const node: SchemaObject = obj({ shape: byRadius() });
+      node.properties!['child'] = node;
+      const mediaType: Record<string, unknown> = { schema: root, encoding: { part: { headers: {} } } };
+      (mediaType['encoding'] as Record<string, Record<string, Record<string, unknown>>>)['part']!['headers']![
+        'x-loop'
+      ] = { content: { 'application/json': mediaType } };
+      const pathItem: Record<string, unknown> = {
+        get: { responses: { '200': { content: { 'application/json': mediaType } } }, callbacks: { back: {} } },
+      };
+      ((pathItem['get'] as Record<string, unknown>)['callbacks'] as Record<string, Record<string, unknown>>)['back']![
+        '{$request.body#/url}'
+      ] = pathItem;
+      const document = {
+        paths: { '/d': pathItem },
+        components: { schemas: { Node: node }, pathItems: { loop: pathItem } },
+      };
+      markContestedTitles(document);
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(node.properties!['shape']!).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it.each<{ label: string; document: (schema: SchemaObject) => Record<string, unknown> }>([
+      {
+        label: 'a response header named `x-meta`',
+        document: (schema) => ({
+          paths: { '/d': { get: { responses: { '200': { headers: { 'x-meta': { schema } } } } } } },
+        }),
+      },
+      {
+        label: 'a path `/x-ray`',
+        document: (schema) => ({
+          paths: { '/x-ray': { get: { responses: { '200': { content: { 'application/json': { schema } } } } } } },
+        }),
+      },
+      {
+        label: 'a `paths` key starting with `x-`',
+        document: (schema) => ({
+          paths: { 'x-path': { get: { responses: { '200': { content: { 'application/json': { schema } } } } } } },
+        }),
+      },
+      {
+        label: 'a media type named `x-custom/json`',
+        document: (schema) => ({
+          paths: { '/d': { get: { responses: { '200': { content: { 'x-custom/json': { schema } } } } } } },
+        }),
+      },
+      {
+        label: 'a request body media type named `x-custom/json`',
+        document: (schema) => ({
+          paths: { '/d': { post: { requestBody: { content: { 'x-custom/json': { schema } } } } } },
+        }),
+      },
+      {
+        label: 'a parameter named `x-id`, through its `schema` and its `content`',
+        document: (schema) => ({
+          paths: {
+            '/d': {
+              parameters: [{ name: 'x-id', in: 'query', schema }],
+              get: { parameters: [{ name: 'x-filter', in: 'query', content: { 'x-custom/json': { schema } } }] },
+            },
+          },
+        }),
+      },
+      {
+        label: 'a webhook named `x-event`',
+        document: (schema) => ({
+          webhooks: { 'x-event': { post: { requestBody: { content: { 'application/json': { schema } } } } } },
+        }),
+      },
+      {
+        label: 'a `components.responses` entry named `x-resp`',
+        document: (schema) => ({
+          components: { responses: { 'x-resp': { content: { 'application/json': { schema } } } } },
+        }),
+      },
+      {
+        label: 'a `components.parameters` entry named `x-param`',
+        document: (schema) => ({ components: { parameters: { 'x-param': { name: 'p', in: 'query', schema } } } }),
+      },
+      {
+        label: 'a `components.requestBodies` entry named `x-body`',
+        document: (schema) => ({
+          components: { requestBodies: { 'x-body': { content: { 'application/json': { schema } } } } },
+        }),
+      },
+      {
+        label: 'a `components.headers` entry named `x-hdr`',
+        document: (schema) => ({ components: { headers: { 'x-hdr': { schema } } } }),
+      },
+      {
+        label: 'a `components.pathItems` entry named `x-item`',
+        document: (schema) => ({
+          components: {
+            pathItems: { 'x-item': { get: { responses: { '200': { content: { 'application/json': { schema } } } } } } },
+          },
+        }),
+      },
+      {
+        label: 'an operation callback named `x-cb`',
+        document: (schema) => ({
+          paths: {
+            '/d': {
+              get: {
+                callbacks: {
+                  'x-cb': {
+                    '{$request.body#/url}': { post: { requestBody: { content: { 'application/json': { schema } } } } },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      },
+      {
+        label: 'a `components.callbacks` entry named `x-cb`',
+        document: (schema) => ({
+          components: {
+            callbacks: {
+              'x-cb': {
+                '{$request.body#/url}': { post: { requestBody: { content: { 'application/json': { schema } } } } },
+              },
+            },
+          },
+        }),
+      },
+      {
+        label: 'an encoding property named `x-part` with a header named `x-hdr`',
+        document: (schema) => ({
+          paths: {
+            '/d': {
+              post: {
+                requestBody: {
+                  content: {
+                    'multipart/form-data': {
+                      schema: { type: 'object' },
+                      encoding: { 'x-part': { headers: { 'x-hdr': { schema } } } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      },
+    ])('reads a name that starts with `x-` as a name: $label (Greptile round 2)', ({ document }) => {
+      const top = byRadius();
+      const inner = byDiameter();
+      markContestedTitles(document(nested(top, inner)));
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
+    });
+
+    it('reads a property named `x-id` and a component named `x-thing` as names, in the components root', () => {
+      const top = byRadius();
+      const inner = byDiameter();
+      markContestedTitles({
+        components: { schemas: { Drawing: obj({ 'x-id': obj({ shape: top }) }), 'x-thing': obj({ shape: inner }) } },
+      });
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
+    });
+
+    it('steps over an `x-` key only in a Responses Object and a Callback Object, where it is an extension', () => {
+      // A contested pair under each extension: marked only if the extension
+      // is read. The status-code and expression entries beside them are.
+      const read = [byRadius(), byDiameter()] as const;
+      const inResponsesExtension = [byRadius(), byDiameter()] as const;
+      const inCallbackExtension = [byRadius(), byDiameter()] as const;
+      const underCallback = [byRadius(), byDiameter()] as const;
+      const body = (pair: readonly [SchemaObject, SchemaObject]) => ({
+        content: { 'application/json': { schema: nested(pair[0], pair[1]) } },
+      });
+      markContestedTitles({
+        paths: {
+          '/d': {
+            get: {
+              responses: { '200': body(read), 'x-ext': body(inResponsesExtension) },
+              callbacks: {
+                cb: {
+                  'x-ext': { post: { requestBody: body(inCallbackExtension) } },
+                  '{$request.body#/url}': { post: { requestBody: body(underCallback) } },
+                },
+              },
+            },
+          },
+        },
+      });
+      for (const union of [...read, ...underCallback]) {
+        expect(variantsOf(union).map(isContestedTitle)).toEqual([true, true]);
+      }
+      for (const union of [...inResponsesExtension, ...inCallbackExtension]) {
+        expect(variantsOf(union).map(isContestedTitle)).toEqual([false, false]);
+      }
+    });
+  });
+
+  it('qualifies a union object `transformSpec` shares between a request body and a response (Greptile)', async () => {
+    const spec = doc({
+      paths: {
+        '/drawings': {
+          post: {
+            operationId: 'createDrawing',
+            requestBody: json(obj({ shape: byRadius() })),
+            responses: { '200': { description: 'ok', ...json(nested(byRadius(), byDiameter())) } },
+          },
+        },
+      },
+    });
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-inline-models-'));
+    const specFile = path.join(tmpDir, 'spec.json');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
+      const ir = await parseSpec(specFile, {
+        transformSpec: (document) => {
+          // The response's `shape` becomes the very object the body's is.
+          type Node = Record<string, unknown>;
+          const operation = ((document['paths'] as Node)['/drawings'] as Node)['post'] as Node;
+          const schemaOf = (owner: Node): SchemaObject =>
+            ((owner['content'] as Node)['application/json'] as Node)['schema'] as SchemaObject;
+          const body = schemaOf(operation['requestBody'] as Node);
+          const response = schemaOf((operation['responses'] as Node)['200'] as Node);
+          response.properties!['shape'] = body.properties!['shape'];
+          return document;
+        },
+      });
+      expect(warnSpy).not.toHaveBeenCalled();
+      const types = fieldTypesByModel(ir.models);
+      // Contested in the response root, so the shared union is qualified
+      // under both roots; the deeper union is qualified with it.
+      expect(types['CreateDrawingRequest']).toEqual({
+        shape: unionOf('CircleCreateDrawingRequestShape', 'SquareCreateDrawingRequestShape'),
+      });
+      expect(types['CreateDrawingResponse']).toEqual({
+        shape: unionOf('CircleCreateDrawingResponseShape', 'SquareCreateDrawingResponseShape'),
+        marker: model('CreateDrawingResponseMarker'),
+      });
+      expect(types['CreateDrawingResponseMarker']).toEqual({
+        shape: unionOf('CircleCreateDrawingResponseMarkerShape', 'SquareCreateDrawingResponseMarkerShape'),
+      });
+      expect(types['CircleCreateDrawingRequestShape']).toEqual({ ...kind('circle'), radius: num });
+      expect(types['CircleCreateDrawingResponseShape']).toEqual({ ...kind('circle'), radius: num });
+      expect(types['CircleCreateDrawingResponseMarkerShape']).toEqual({ ...kind('circle'), diameter: num });
+      expect(ir.models.some((m) => m.name === 'Circle' || m.name === 'Square')).toBe(false);
+      expectConsistent(ir, ['CreateDrawingRequest', 'CreateDrawingResponse']);
+    } finally {
+      warnSpy.mockRestore();
+      await fs.rm(tmpDir, { recursive: true });
+    }
+  });
+
+  describe('the extractor never drops a variant of another shape silently', () => {
+    it('shares the model when the name is already taken by the identical shape, without a warning', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const results: Model[] = [];
+        extractInlineModelsFromProperties({ properties: { shape: byRadius() } }, results, 'Drawing');
+        extractInlineModelsFromProperties({ properties: { shape: byRadius() } }, results, 'Marker');
+        expect(results.map((m) => m.name)).toEqual(['Circle', 'Square']);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('keeps the first model and warns when the name is already taken by another shape', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const results: Model[] = [];
+        extractInlineModelsFromProperties({ properties: { shape: byRadius() } }, results, 'Drawing');
+        extractInlineModelsFromProperties({ properties: { shape: byDiameter() } }, results, 'Marker');
+        expect(results.map((m) => m.name)).toEqual(['Circle', 'Square']);
+        expect(results[0]!.fields.map((f) => f.name)).toEqual(['kind', 'radius']);
+        expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+          '[oagen] Warning: Inline model "Circle" is minted twice with different shapes under Marker (fields: kind, radius | kind, diameter) — keeping the first; the second union\'s reference resolves to it',
+          '[oagen] Warning: Inline model "Square" is minted twice with different shapes under Marker (fields: kind, side | kind, len) — keeping the first; the second union\'s reference resolves to it',
+        ]);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('warns when the name is taken by an ordinary model of another shape', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const results: Model[] = [{ name: 'Circle', description: undefined, fields: [] }];
+        extractInlineModelsFromProperties({ properties: { shape: byRadius() } }, results, 'Drawing');
+        expect(results.map((m) => m.name)).toEqual(['Circle', 'Square']);
+        expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+          '[oagen] Warning: Inline model "Circle" is minted twice with different shapes under Drawing (fields: (no fields) | kind, radius) — keeping the first; the second union\'s reference resolves to it',
+        ]);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // An ordinary object `Drawing.circle` and a variant titled `Drawing circle`
+    // under `Drawing.marker.shape` both name `DrawingCircle` (Greptile round 3).
+    const circleObject = (fields: Record<string, SchemaObject>): SchemaObject =>
+      obj({ kind: { const: 'circle' }, ...fields });
+    const titledDrawingCircle = (fields: Record<string, SchemaObject>): SchemaObject => ({
+      oneOf: [obj({ kind: { const: 'circle' }, ...fields }, { title: 'Drawing circle' }), square({ side: n })],
+    });
+
+    it('shares an ordinary model of the identical shape silently, however it was built (Greptile round 3)', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const results: Model[] = [];
+        extractInlineModelsFromProperties({ properties: { circle: circleObject({ radius: n }) } }, results, 'Drawing');
+        extractInlineModelsFromProperties(
+          { properties: { marker: obj({ shape: titledDrawingCircle({ radius: n }) }) } },
+          results,
+          'Drawing',
+        );
+        expect(results.map((m) => m.name)).toEqual(['DrawingCircle', 'DrawingMarker', 'Square']);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('through parseSpec: one `DrawingCircle` and no warning for the identical shape, in either order', async () => {
+      for (const properties of [
+        { circle: circleObject({ radius: n }), marker: obj({ shape: titledDrawingCircle({ radius: n }) }) },
+        { marker: obj({ shape: titledDrawingCircle({ radius: n }) }), circle: circleObject({ radius: n }) },
+      ]) {
+        const ir = await parseWithoutWarnings(
+          doc({ paths: {}, components: { schemas: { Drawing: obj(properties) } } }),
+        );
+        const types = fieldTypesByModel(ir.models);
+        expect(types['Drawing']).toEqual({ circle: model('DrawingCircle'), marker: model('DrawingMarker') });
+        expect(types['DrawingMarker']).toEqual({ shape: unionOf('DrawingCircle', 'Square') });
+        expect(types['DrawingCircle']).toEqual({ ...kind('circle'), radius: num });
+        expect(modelNames(ir)).toEqual(['Drawing', 'DrawingCircle', 'DrawingMarker', 'Square']);
+        expectConsistent(ir, ['Drawing']);
+      }
+    });
+
+    it('through parseSpec: the warning, and the first model kept, when the ordinary shape differs', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const ir = await parseTempSpec(
+          doc({
+            paths: {},
+            components: {
+              schemas: {
+                Drawing: obj({
+                  circle: circleObject({ radius: n }),
+                  marker: obj({ shape: titledDrawingCircle({ diameter: n }) }),
+                }),
+              },
+            },
+          }),
+        );
+        expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+          '[oagen] Warning: Inline model "DrawingCircle" is minted twice with different shapes under DrawingMarker (fields: kind, radius | kind, diameter) — keeping the first; the second union\'s reference resolves to it',
+        ]);
+        const types = fieldTypesByModel(ir.models);
+        expect(types['DrawingCircle']).toEqual({ ...kind('circle'), radius: num });
+        expect(types['DrawingMarker']).toEqual({ shape: unionOf('DrawingCircle', 'Square') });
+        expect(modelNames(ir)).toEqual(['Drawing', 'DrawingCircle', 'DrawingMarker', 'Square']);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 });
