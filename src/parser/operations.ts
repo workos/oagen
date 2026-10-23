@@ -69,9 +69,9 @@ import {
   resolveOverrideParams,
   applyPaginationOverride,
   resolveDataPathItemType,
-  endOfIterationProblem,
 } from './pagination.js';
 import {
+  bodyEndOfIterationProblem,
   classifyAndExtractResponse,
   composedWithoutFields,
   classifyResponseKey,
@@ -4959,7 +4959,7 @@ interface PaginationExtractionOptions {
   dataPath?: string;
   /**
    * An explicit `endOfIteration` to check against the primary response
-   * (`endOfIterationProblem`): its path must land on a field whose type fits
+   * (`bodyEndOfIterationProblem`): its path must land on a field whose type fits
    * its kind, or the override is unusable.
    */
   endOfIteration?: PaginationEndOfIteration;
@@ -5726,7 +5726,7 @@ function extractResponses(
   /**
    * Why the override's `endOfIteration` cannot be read from the primary
    * response — a path that resolves to no field, or to one whose type does
-   * not fit its kind — in the words of `endOfIterationProblem`; unset when
+   * not fit its kind — in the words of `bodyEndOfIterationProblem`; unset when
    * none was given or it can be.
    */
   overrideEndOfIterationProblem?: string;
@@ -5848,7 +5848,7 @@ function extractResponses(
         const stopFieldUsable =
           pagination.disabled ||
           pagination.endOfIteration === undefined ||
-          endOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) === undefined;
+          bodyEndOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) === undefined;
         const dataPathOverride =
           pagination.disabled ||
           pagination.dataPath === undefined ||
@@ -6052,13 +6052,14 @@ function extractResponses(
     }
   }
 
-  // An explicit `endOfIteration` is checked against the same body: the path
-  // must land on a field of the primary response whose type fits the kind.
-  // Without a primary body there is no field for it to name.
+  // An explicit `endOfIteration` is checked against the same body, over the
+  // property map its own stop field is read from: the path must land on a
+  // field of the primary response whose type fits the kind. Without a
+  // primary body there is no field for it to name.
   const overrideEndOfIterationProblem =
     pagination.disabled || pagination.endOfIteration === undefined
       ? undefined
-      : endOfIterationProblem(pagination.endOfIteration, primaryBody && primarySchema, componentSchemas);
+      : bodyEndOfIterationProblem(pagination.endOfIteration, primaryBody && primarySchema, componentSchemas);
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 

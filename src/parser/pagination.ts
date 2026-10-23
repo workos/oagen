@@ -286,24 +286,30 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
 }
 
 /**
- * Why an explicit `endOfIteration` cannot be read from a response body, or
- * `undefined` when it can. `end.path` must land on a property of `schema`,
- * walked exactly as an explicit `dataPath` is (`resolveSchemaPath`: through
- * `$ref`s, `allOf` members and nullable wrappers at every segment), and the
- * property's bare schema (`resolveBareSchema`, the resolver a detected stop
- * field goes through) must fit `end.kind` by the test detection applies to
- * a field it names (`endFieldFits`). With no `schema` — an operation whose
- * primary response declares no body — the path resolves to nothing.
+ * Why an explicit `endOfIteration` cannot be read from a body whose
+ * properties are `properties`, or `undefined` when it can. `properties` is
+ * the map a detected stop field is read from — the body's own and every
+ * `allOf` member's, through `$ref`s and nullable wrappers, as
+ * `detectEndOfIteration` receives it — so an override and detection look at
+ * one map: a field detection would read is one an override may name, and a
+ * field it would not see is not there for an override either. `end.path` is
+ * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
+ * through `$ref`s, `allOf` members and nullable wrappers at every further
+ * segment), and the field it lands on must fit `end.kind` by the test
+ * detection applies to a field it names (`endFieldFits`), under
+ * `resolveBareSchema` as a detected one is. With no `properties` — an
+ * operation whose primary response declares no body — the path resolves to
+ * nothing.
  *
  * The text is the reason alone; the caller names the override's source and
  * the operation, and says what it does about it.
  */
 export function endOfIterationProblem(
   end: PaginationEndOfIteration,
-  schema: SchemaObject | undefined,
+  properties: Record<string, SchemaObject | undefined> | undefined,
   componentSchemas?: Record<string, SchemaObject>,
 ): string | undefined {
-  const target = schema && resolveSchemaPath(schema, end.path, componentSchemas);
+  const target = properties && resolveSchemaPath({ properties }, end.path, componentSchemas);
   if (!target) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
   if (endFieldFits(end.kind, resolveBareSchema(target, componentSchemas))) return undefined;
   const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';

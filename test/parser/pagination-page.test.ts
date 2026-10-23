@@ -13,7 +13,7 @@ import {
   END_OF_ITERATION_FIELDS,
 } from '../../src/parser/pagination.js';
 import type { PaginationOverrides } from '../../src/parser/pagination.js';
-import { resolveDataPathFromSchema } from '../../src/parser/responses.js';
+import { bodyEndOfIterationProblem, resolveDataPathFromSchema } from '../../src/parser/responses.js';
 import type { Model, Parameter, PaginationMeta, TypeRef } from '../../src/ir/types.js';
 import { walkTypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
@@ -803,29 +803,33 @@ describe('validatePaginationHint', () => {
   });
 });
 
-describe('endOfIterationProblem', () => {
+describe('bodyEndOfIterationProblem — an explicit stop field, read where a detected one is', () => {
   // `meta.page.last`: a nullable `$ref` companion, an `allOf` member, a `$ref`
-  // field, a nullable `oneOf` boolean. `pages` is a type list.
+  // field, a nullable `oneOf` boolean. `pages` is a type list. The body is a
+  // `$ref` whose component composes the properties with an `allOf`, so the
+  // root is read as the envelope reader reads it.
   const components: Record<string, SchemaObject> = {
     Flag: { oneOf: [{ type: 'boolean' }, { type: 'null' }] },
     PageInfo: { type: 'object', properties: { last: { $ref: '#/components/schemas/Flag' } } },
     Meta: { allOf: [{ type: 'object', properties: { page: { $ref: '#/components/schemas/PageInfo' } } }] },
-  };
-  const body: SchemaObject = {
-    type: 'object',
-    properties: {
-      data: { type: 'array', items: { type: 'string' } },
-      meta: { oneOf: [{ $ref: '#/components/schemas/Meta' }, { type: 'null' }] },
-      pages: { type: ['integer', 'null'] },
-      total: { type: 'integer' },
-      label: { type: 'string' },
+    Counts: { type: 'object', properties: { pages: { type: ['integer', 'null'] }, total: { type: 'integer' } } },
+    Body: {
+      allOf: [
+        { $ref: '#/components/schemas/Counts' },
+        {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { type: 'string' } },
+            meta: { oneOf: [{ $ref: '#/components/schemas/Meta' }, { type: 'null' }] },
+            label: { type: 'string' },
+          },
+        },
+      ],
     },
   };
-  const problem = (
-    kind: 'hasMore' | 'totalPages' | 'totalCount',
-    path: string,
-    schema: SchemaObject | undefined = body,
-  ) => endOfIterationProblem({ kind, path }, schema, components);
+  const body: SchemaObject = { $ref: '#/components/schemas/Body' };
+  const problem = (kind: 'hasMore' | 'totalPages' | 'totalCount', path: string) =>
+    bodyEndOfIterationProblem({ kind, path }, body, components);
 
   it('accepts a path that lands on a field of the fitting type, through $refs, allOf members and nullable wrappers', () => {
     expect(problem('hasMore', 'meta.page.last')).toBeUndefined();
@@ -839,6 +843,9 @@ describe('endOfIterationProblem', () => {
     expect(problem('hasMore', 'nope.missing')).toBe(missing('nope.missing'));
     expect(problem('hasMore', 'meta.page.nope')).toBe(missing('meta.page.nope'));
     expect(problem('hasMore', 'total.count')).toBe(missing('total.count'));
+    expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'total' }, undefined, components)).toBe(
+      missing('total'),
+    );
     expect(endOfIterationProblem({ kind: 'totalCount', path: 'total' }, undefined, components)).toBe(missing('total'));
   });
 
@@ -857,7 +864,7 @@ describe('endOfIterationProblem', () => {
     );
   });
 
-  it('agrees with detection about which fields can end an iteration', () => {
+  it('agrees with detection about which fields can end an iteration, over the one property map both read', () => {
     // A string `has_more` is no stop field to detection, and no stop field to an override either.
     const properties: Record<string, SchemaObject> = {
       data: { type: 'array', items: { type: 'string' } },
@@ -865,10 +872,15 @@ describe('endOfIterationProblem', () => {
       total: { type: 'integer' },
     };
     expect(detectEndOfIteration(properties, 'data')).toEqual({ kind: 'totalCount', path: 'total' });
-    const schema: SchemaObject = { type: 'object', properties };
-    expect(endOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, schema)).toBe(
+    expect(endOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, properties)).toBe(
       'endOfIteration path "has_more" is not a boolean field, as kind "hasMore" requires',
     );
-    expect(endOfIterationProblem({ kind: 'totalCount', path: 'total' }, schema)).toBeUndefined();
+    expect(endOfIterationProblem({ kind: 'totalCount', path: 'total' }, properties)).toBeUndefined();
+    // The same answers from the body the map was collected from.
+    const schema: SchemaObject = { type: 'object', properties };
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, schema)).toBe(
+      'endOfIteration path "has_more" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'total' }, schema)).toBeUndefined();
   });
 });

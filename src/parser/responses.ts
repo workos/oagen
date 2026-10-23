@@ -2,6 +2,7 @@ import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } fro
 import { toPascalCase, singularize } from '../utils/naming.js';
 import {
   detectEndOfIteration,
+  endOfIterationProblem,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
   resolveBareSchema,
@@ -232,6 +233,26 @@ function bodyEndOfIteration(
 ): PaginationEndOfIteration | undefined {
   const { properties } = collectEnvelopeProperties(schema, componentSchemas);
   return detectEndOfIteration(properties, dataPath, componentSchemas);
+}
+
+/**
+ * Why an explicit `endOfIteration` cannot be read from `schema`, or
+ * `undefined` when it can: the override's counterpart of
+ * `bodyEndOfIteration`, over the very property map that reader collects
+ * (`collectEnvelopeProperties`), so a field detection would read is one an
+ * override may name and a field it would not see is not there for an
+ * override either; `endOfIterationProblem` then walks the path and tests
+ * the type. `schema` is the body as written — a `$ref`, an `allOf`, a
+ * nullable wrapper — or `undefined` when the operation declares no body,
+ * which no path resolves in.
+ */
+export function bodyEndOfIterationProblem(
+  end: PaginationEndOfIteration,
+  schema: SchemaObject | undefined,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  const properties = schema && collectEnvelopeProperties(schema, componentSchemas).properties;
+  return endOfIterationProblem(end, properties, componentSchemas);
 }
 
 /**
