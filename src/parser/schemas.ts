@@ -1156,6 +1156,12 @@ function collectNestedInlineModels(
           models.push(m);
           modelNames.add(m.name);
           queue.push(m); // re-scan for deeper nesting
+          // Remembered by the field it was read from, so the field's site
+          // can claim it by origin rather than by name when the field
+          // extractor's copy of the same schema is settled
+          // (`fieldInlineModelBundles`): `Foo.barThing` and `FooBar.thing`
+          // both spell `FooBarThing`, and only one of them is lifted.
+          recordLiftedFieldModel(parentModelName, fieldName, m);
         }
       }
     },
@@ -2306,14 +2312,49 @@ function buildSyntheticEnumRef(
   rawExternalDocs: unknown,
   rawDescription: unknown,
 ): TypeRef {
+  return inlineEnumRef(inlineEnumName(contextName, parentModelName), members, rawExternalDocs, rawDescription);
+}
+
+/**
+ * The name `schemaToTypeRef` gives an inline enum typed under `contextName`
+ * (`GetPetError404`; `status` → `Status`): qualified by `parentModelName`
+ * with its list-item markers stripped (`DirectoryListItem` + `State` →
+ * `DirectoryState`) unless the name already starts with it (`Connection` +
+ * `ConnectionType` → `ConnectionType`), then passed through the active
+ * `schemaNameTransform` as a component's name is, so a project's rename map
+ * (`RadarAction` → `RadarListAction` in `oagen.config.ts`) reaches inline
+ * enums too. One rule for every inline enum: an `enum:` list, a `oneOf` of
+ * consts (`buildSyntheticEnumRef`), and the name a deferred body that is an
+ * enum is reserved under before it is typed (`inlineEnumSchemaName`).
+ */
+export function inlineEnumName(contextName: string | undefined, parentModelName: string | undefined): string {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
   const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
-  // Run the same `schemaNameTransform` we apply to component-schema names so
-  // a project-level rename map (e.g. `RadarAction` → `RadarListAction` in
-  // `oagen.config.ts`) catches inline parameter enums too.
-  const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-  return inlineEnumRef(finalName, members, rawExternalDocs, rawDescription);
+  return activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
+}
+
+/**
+ * The enum name `schemaToTypeRef` types `schema` under — an inline `enum:`
+ * list of two or more non-null members, under any nullable wrapper, or an
+ * array of one, which is lifted under the array's own name — or undefined
+ * when it types the schema as something else: a single-member list is a
+ * literal, a `oneOf` of consts a union read on its own. Lets a pass reserve
+ * the enum's name before the schema is typed (`extractOperations`).
+ */
+export function inlineEnumSchemaName(
+  schema: SchemaObject,
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): string | undefined {
+  const inner = unwrapNullableSchema(schema);
+  const kind = classifyInlineSchema(inner);
+  if (kind === 'array') {
+    const items = inner.items;
+    return items && !Array.isArray(items) ? inlineEnumSchemaName(items, contextName, parentModelName) : undefined;
+  }
+  if (kind !== 'enum' || nonNullEnumValues(inner.enum).length < 2) return undefined;
+  return inlineEnumName(contextName, parentModelName);
 }
 
 /**
@@ -3570,8 +3611,10 @@ function readComponentAllOf(
 }
 
 /**
- * The schema that types a property a component declares: the first
- * always-applying declaration (`declareProperty`), else the first branch's.
+ * The schema that types a property a component declares: the always-applying
+ * declaration `declareProperty` settles on — the first that declares a type,
+ * a typeless one only annotating it (`combineDeclarations`) — else the first
+ * branch's.
  * A component flattens a union's branches as written; the union of distinct
  * branch declarations `mergeAllOfMembers` builds for an inline `allOf` is not
  * built here, since no pass would materialize its inline variants under a
@@ -3591,8 +3634,10 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
  * typed under the component's own name with one sibling set
  * (`collectProperties`), from the one declaration
- * `declaredComponentProperty` picks: the first always-applying declaration,
- * the component's own first, whatever a `oneOf`/`anyOf` variant declares
+ * `declaredComponentProperty` picks: the always-applying declaration
+ * `declareProperty` settles on — the first that declares a type, the
+ * component's own first, a typeless one only annotating it — whatever a
+ * `oneOf`/`anyOf` variant declares
  * before or after it and at whatever depth — the precedence
  * `declareProperty` gives `mergeAllOfMembers` too — and `required` is the
  * union of every always-applying member's list and the component's own; a
@@ -4115,6 +4160,18 @@ export function schemaToTypeRef(
   // that cannot take them reported, and then one classification decides
   // which keyword types the schema — the same one the inline-model
   // extractors dispatch on, so the models they build are the ones referenced.
+  // A schema no branch below types is `unknown` — decided by
+  // `typesAsUnknown`, the one answer a reader that must know before typing
+  // asks (`bodyIsTyped`, for the primary response) — with a warning for a
+  // shape the parser does not read; an empty `{}` describes nothing on
+  // purpose and is not reported.
+  if (typesAsUnknown(schema)) {
+    if (contextName && !describesNothing(schema)) {
+      console.warn(`[oagen] Warning: Unknown schema shape treated as unknown (context: ${contextName})`);
+    }
+    return { kind: 'primitive', type: 'unknown' };
+  }
+
   warnOnUncarriedProperties(schema, contextName, parentModelName);
   schema = foldSiblingProperties(schema);
   const inlineKind = classifyInlineSchema(schema);
@@ -4373,23 +4430,20 @@ export function schemaToTypeRef(
 
   // Handle enum
   if (inlineKind === 'enum') {
-    const baseName = toPascalCase(contextName ?? 'UnknownEnum');
-    // Strip ListItem/ByExternalId markers from parent name so enum names are clean:
-    // e.g., DirectoryListItem + State → Directory + State = DirectoryState
-    const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
-    // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
-    const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
-    // Run `schemaNameTransform` so project-level rename maps in
-    // `oagen.config.ts` reach inline parameter/field enums too — without
-    // this, `RadarAction` (built from path param `action` on the Radar
-    // service) couldn't be redirected to `RadarListAction` from config.
-    const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-    // The schema's `description` and link and each value's
-    // `x-enum-descriptions` / `x-enumDescriptions` entry are recorded against
-    // the ref so the lifted `Enum` carries them (`collectInlineEnumFromRef`);
-    // the nullable unwraps above spread the schema, so a wrapped enum's text
-    // and link reach here too.
-    const enumRef = inlineEnumRef(finalName, enumListMembers(schema) ?? [], schema.externalDocs, schema.description);
+    // Named by the one rule every inline enum follows (`inlineEnumName`):
+    // qualified by the parent with its list-item markers stripped, no
+    // redundant prefix, the project's `schemaNameTransform` applied. The
+    // schema's `description` and link and each value's `x-enum-descriptions`
+    // / `x-enumDescriptions` entry are recorded against the ref so the lifted
+    // `Enum` carries them (`collectInlineEnumFromRef`); the nullable unwraps
+    // above spread the schema, so a wrapped enum's text and link reach here
+    // too.
+    const enumRef = inlineEnumRef(
+      inlineEnumName(contextName, parentModelName),
+      enumListMembers(schema) ?? [],
+      schema.externalDocs,
+      schema.description,
+    );
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 
@@ -4460,24 +4514,31 @@ export function schemaToTypeRef(
   }
 
   // Handle primitives
-  const primitiveMap: Record<string, 'string' | 'integer' | 'number' | 'boolean'> = {
-    string: 'string',
-    integer: 'integer',
-    number: 'number',
-    boolean: 'boolean',
-  };
-
   const typeStr = Array.isArray(schema.type) ? schema.type[0] : schema.type;
-  if (typeStr && primitiveMap[typeStr]) {
+  if (typeStr && PRIMITIVE_TYPES[typeStr]) {
     return {
       kind: 'primitive',
-      type: primitiveMap[typeStr],
+      type: PRIMITIVE_TYPES[typeStr],
       ...(schema.format ? { format: schema.format } : {}),
     };
   }
 
-  // Empty schema {} → unknown
-  if (
+  // Unreachable: every shape no branch above types was answered at the top
+  // (`typesAsUnknown` holds exactly for those).
+  return { kind: 'primitive', type: 'unknown' };
+}
+
+/** The `type` keywords `schemaToTypeRef` reads as a primitive, and the primitive each becomes. */
+const PRIMITIVE_TYPES: Record<string, 'string' | 'integer' | 'number' | 'boolean'> = {
+  string: 'string',
+  integer: 'integer',
+  number: 'number',
+  boolean: 'boolean',
+};
+
+/** An empty schema — `{}`, or one with annotations only: none of the keywords that type a schema. */
+function describesNothing(schema: SchemaObject): boolean {
+  return (
     !schema.type &&
     !schema.$ref &&
     !schema.oneOf &&
@@ -4486,15 +4547,42 @@ export function schemaToTypeRef(
     !schema.enum &&
     !schema.properties &&
     !schema.items
-  ) {
-    return { kind: 'primitive', type: 'unknown' };
-  }
+  );
+}
 
-  // Fallback: treat unknown schemas as unknown
-  if (contextName) {
-    console.warn(`[oagen] Warning: Unknown schema shape treated as unknown (context: ${contextName})`);
+/**
+ * Whether `schemaToTypeRef` types `schema` as the bare `unknown` primitive,
+ * decided without typing it — the one answer, which `schemaToTypeRef`
+ * itself returns on, so a reader that must know before a body is typed
+ * (`bodyIsTyped`, choosing the primary response) never disagrees with the
+ * type it then gets. It holds for a schema no branch of `schemaToTypeRef`
+ * types: no `$ref`; no type list except one naming a single type without
+ * `null` (an empty list is `nullable<unknown>`, `null` beside one type is
+ * nullable, several types are a union); no `nullable: true` beside a
+ * `type`; then, once sibling properties are folded into a typing
+ * composition (`foldSiblingProperties`), a classification of `other`
+ * (`classifyInlineSchema`: no composition, union, `const`, `enum`, array,
+ * object or map) with no primitive `type` — `{}`, `{ nullable: true }`, a
+ * `type` no rule knows, `type: 'array'` without `items`, a bare
+ * `additionalProperties` without `type: 'object'` — or a lone `allOf`
+ * member read as the schema itself (`readInlineAllOf`: `'unwrapped'`)
+ * that is such a schema. Warns about nothing.
+ */
+export function typesAsUnknown(schema: SchemaObject): boolean {
+  if (schema.$ref) return false;
+  if (Array.isArray(schema.type)) {
+    const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
+    if (nonNullTypes.length !== 1 || schema.type.includes('null')) return false;
   }
-  return { kind: 'primitive', type: 'unknown' };
+  if (schema.nullable && schema.type) return false;
+  const folded = foldSiblingProperties(schema);
+  const kind = classifyInlineSchema(folded);
+  if (kind === 'allOf' && folded.allOf) {
+    return readInlineAllOf(folded.allOf, folded) === 'unwrapped' && typesAsUnknown(folded.allOf[0]);
+  }
+  if (kind !== 'other') return false;
+  const typeStr = Array.isArray(folded.type) ? folded.type[0] : folded.type;
+  return !(typeStr && PRIMITIVE_TYPES[typeStr]);
 }
 
 import {
@@ -4517,6 +4605,7 @@ import {
   modelFingerprint,
   type PropertyDeclarations,
   qualifyInlineModelName,
+  recordLiftedFieldModel,
   reservedInlineNames,
   resetInheritedModelRefs,
   schemaShapeKey,
