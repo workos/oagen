@@ -1160,6 +1160,43 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(op.pagination?.endOfIteration).toBeUndefined();
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it('reads it inside a nullable allOf member: a $ref, an inline object, a nested allOf, a $ref chain (Greptile)', async () => {
+      // The member that carries the stop field is nullable in every spelling
+      // the dataPath walk looks through, so the reader must look through it
+      // too; `data` always comes from the plain member beside it.
+      const Base = { type: 'object', properties: { has_more: { type: 'boolean' } } };
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const baseRef = { $ref: '#/components/schemas/Base' };
+      const NullableLink = nullOf(baseRef);
+      const Hop = { $ref: '#/components/schemas/NullableLink' };
+      const members: Record<string, unknown> = {
+        nullableRef: nullOf(baseRef),
+        nullableInline: nullOf({ type: 'object', properties: { has_more: { type: 'boolean' } } }),
+        nullableTypeList: { type: ['object', 'null'], properties: { has_more: { type: 'boolean' } } },
+        nestedAllOf: nullOf({ allOf: [baseRef, { type: 'object', properties: { page: { type: 'integer' } } }] }),
+        refChain: { $ref: '#/components/schemas/Hop' },
+      };
+      const expected = {
+        dataPath: 'data',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+      };
+      for (const [label, member] of Object.entries(members)) {
+        const PetPage = { allOf: [member, { type: 'object', properties: { data: petArray } }] };
+        const schemas = { Base, NullableLink, Hop, PetPage };
+        // Greptile's case: the wrapper is a referenced component.
+        const referenced = onlyOperation(
+          await parseJson(listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, schemas)),
+        );
+        expect(referenced.pagination, `${label} ($ref wrapper)`).toMatchObject(expected);
+        // The same wrapper written inline is not a recognized envelope — the
+        // nullable member declares no properties of its own — and is read alike.
+        const inline = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+        expect(inline.pagination, `${label} (inline wrapper)`).toMatchObject(expected);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   describe('operationHints[...].pagination from ParseOptions', () => {
