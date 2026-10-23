@@ -786,3 +786,129 @@ describe('plural path names (issue #268)', () => {
     ]);
   });
 });
+
+/**
+ * Custom-method paths (issue #269): an action written after a colon on the
+ * segment it acts on, `/pets/{petId}:adopt`, is named exactly like the same
+ * action written with a slash. Every reading of the path splits the segment
+ * the same way, so the verb never lands inside a `By<Param>` qualifier.
+ */
+describe('custom-method paths (issue #269)', () => {
+  const json = {
+    responses: { '200': { description: 'ok', content: { 'application/json': { schema: { type: 'string' } } } } },
+  };
+  const jsonItem = (name: string) => ({ ...json, ...idParam(name) });
+
+  it('names the issue repro: a custom method on an item is the verb plus its singular parent', () => {
+    const result = names({
+      '/v1/pets/{petId}:adopt': { post: jsonItem('petId') },
+      '/v1/pets/{petId}:archive': { post: jsonItem('petId') },
+      '/v1/pets/{petId}/feed': { post: jsonItem('petId') },
+    });
+    expect(result).toMatchInlineSnapshot(`
+      [
+        "feedPet                      POST   /v1/pets/{petId}/feed",
+        "adoptPet                     POST   /v1/pets/{petId}:adopt",
+        "archivePet                   POST   /v1/pets/{petId}:archive",
+      ]
+    `);
+  });
+
+  it('names a tagged custom method on an item the same way, keeping the service segment as the parent', () => {
+    expect(names({ '/pets/{petId}:adopt': { post: { ...jsonItem('petId'), tags: ['pets'] } } })).toEqual([
+      'adoptPet                     POST   /pets/{petId}:adopt',
+    ]);
+  });
+
+  it('names the service from the collection a custom method is written on, and reads it like the slash form', () => {
+    const paths = { '/v1/pets:batchGet': { post: json }, '/v1/pets': { get: json } };
+    const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
+    expect(services.map((s) => s.name)).toEqual(['Pets']);
+    expect(names(paths)).toEqual([
+      'list                         GET    /v1/pets',
+      'createBatchGet               POST   /v1/pets:batchGet',
+    ]);
+  });
+
+  it('qualifies by the parameter alone, never by the verb written after it', () => {
+    expect(names({ '/pets/{petId}:history': { get: jsonItem('petId') }, '/pets/history': { get: json } })).toEqual([
+      'listHistory                  GET    /pets/history',
+      'listHistoryByPetId           GET    /pets/{petId}:history',
+    ]);
+  });
+
+  it('reads a custom method and its slash form as the same words', () => {
+    expect(
+      names({ '/pets/{petId}:adopt': { post: jsonItem('petId') }, '/pets/{petId}/adopt': { post: jsonItem('petId') } }),
+    ).toEqual([
+      'adoptPet                     POST   /pets/{petId}/adopt',
+      'adoptPet2                    POST   /pets/{petId}:adopt',
+    ]);
+  });
+
+  /** One entry per service, `name: METHOD /path` per operation, as the issue prints it. */
+  const services = (paths: Record<string, Partial<Record<Method, unknown>>>) =>
+    extractOperations(paths as Parameters<typeof extractOperations>[0]).services.map(({ name, operations }) => ({
+      name,
+      operations: operations.map((op) => `${op.name}: ${op.httpMethod.toUpperCase()} ${op.path}`),
+    }));
+
+  it('keeps a tagged service whole when some of its paths carry a custom method', () => {
+    const vet = (...params: string[]) => ({
+      ...json,
+      tags: ['vets'],
+      parameters: params.map((name) => ({ name, in: 'path' as const, required: true, schema: { type: 'string' } })),
+    });
+    expect(
+      services({
+        '/vets:bulkCertify': { post: vet() },
+        '/vets/{id}': { get: vet('id') },
+        '/vets/{id}:certify': { post: vet('id') },
+      }),
+    ).toEqual([
+      {
+        name: 'Vets',
+        operations: [
+          'createBulkCertify: POST /vets:bulkCertify',
+          'get: GET /vets/{id}',
+          'certifyVet: POST /vets/{id}:certify',
+        ],
+      },
+    ]);
+  });
+
+  it('never names a service from the verb of a custom method', () => {
+    // `/v1/{name}:cancel` stays in `V1` beside `/v1/{name}`: the verb is not
+    // a resource. The slash-written `/v1/{name}/cancel` names `Cancel`, as it
+    // always did.
+    expect(
+      services({
+        '/v1/operations': { get: json },
+        '/v1/{name}': { get: jsonItem('name') },
+        '/v1/{name}:cancel': { post: jsonItem('name') },
+        '/v1/{name}:wait': { post: jsonItem('name') },
+      }),
+    ).toEqual([
+      { name: 'Operations', operations: ['list: GET /v1/operations'] },
+      {
+        name: 'V1',
+        operations: ['get: GET /v1/{name}', 'cancel: POST /v1/{name}:cancel', 'wait: POST /v1/{name}:wait'],
+      },
+    ]);
+    expect(
+      services({ '/v1/{name}': { get: jsonItem('name') }, '/v1/{name}/cancel': { post: jsonItem('name') } }),
+    ).toEqual([
+      { name: 'V1', operations: ['get: GET /v1/{name}'] },
+      { name: 'Cancel', operations: ['cancel: POST /v1/{name}/cancel'] },
+    ]);
+  });
+
+  it('reads a custom method on the API root as part of the root, and names no service from its verb', () => {
+    // `/api/v1:reset` contributes `api/v1` to the document root exactly as
+    // `/api/v1/notes` does, so `Notes` is not pushed into `V1`.
+    expect(services({ '/api/v1:reset': { post: json }, '/api/v1/notes': { get: json } })).toEqual([
+      { name: 'Api', operations: ['createReset: POST /api/v1:reset'] },
+      { name: 'Notes', operations: ['list: GET /api/v1/notes'] },
+    ]);
+  });
+});

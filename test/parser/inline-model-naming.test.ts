@@ -404,6 +404,109 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps the plain name on POST /pets/{id}/adopt and hashes the custom method POST /pets/{id}:adopt (issue #269)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
+    const colon = { post: { ...fooBar.post, parameters: idParam } };
+    const slash = { post: { ...fooSlashBar.post, parameters: idParam } };
+
+    // A custom method flattens to the prefix of its slash form.
+    expect(derivePathBasedName('/pets/{id}:adopt', 'post', 'Request')).toBe('PetsByIdAdoptPostRequest');
+    expect(derivePathBasedName('/pets/{id}:adopt', 'post', 'Request')).toBe(
+      derivePathBasedName('/pets/{id}/adopt', 'post', 'Request'),
+    );
+
+    const names = await namesInBothOrders([
+      ['/pets/{id}:adopt', colon],
+      ['/pets/{id}/adopt', slash],
+    ]);
+    expect(names).toMatchInlineSnapshot(`
+      {
+        "/pets/{id}/adopt": [
+          "PetsByIdAdoptPostRequest",
+          "PetsByIdAdoptPostResponse",
+        ],
+        "/pets/{id}:adopt": [
+          "PetsByIdAdopt535CffPostRequest",
+          "PetsByIdAdopt535CffPostResponse",
+        ],
+      }
+    `);
+    expect(names['/pets/{id}/adopt']).toEqual(['PetsByIdAdoptPostRequest', 'PetsByIdAdoptPostResponse']);
+    expect(names['/pets/{id}:adopt'][0]).not.toBe('PetsByIdAdoptPostRequest');
+    expect(names['/pets/{id}:adopt'][1]).not.toBe('PetsByIdAdoptPostResponse');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps the plain name on the slash form whatever the verb spelling: camelCase and kebab-case custom methods are hashed (issue #269)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
+    const colon = { post: { ...fooBar.post, parameters: idParam } };
+    const slash = { post: { ...fooSlashBar.post, parameters: idParam } };
+
+    const camel = await namesInBothOrders([
+      ['/pets/{id}:batchAdopt', colon],
+      ['/pets/{id}/batchAdopt', slash],
+    ]);
+    expect(camel).toMatchInlineSnapshot(`
+      {
+        "/pets/{id}/batchAdopt": [
+          "PetsByIdBatchAdoptPostRequest",
+          "PetsByIdBatchAdoptPostResponse",
+        ],
+        "/pets/{id}:batchAdopt": [
+          "PetsByIdBatchAdoptAaf2CdPostRequest",
+          "PetsByIdBatchAdoptAaf2CdPostResponse",
+        ],
+      }
+    `);
+    expect(camel['/pets/{id}/batchAdopt']).toEqual(['PetsByIdBatchAdoptPostRequest', 'PetsByIdBatchAdoptPostResponse']);
+
+    const kebab = await namesInBothOrders([
+      ['/pets/{id}:send-invite', colon],
+      ['/pets/{id}/send-invite', slash],
+    ]);
+    expect(kebab['/pets/{id}/send-invite']).toEqual([
+      'PetsByIdSendInvitePostRequest',
+      'PetsByIdSendInvitePostResponse',
+    ]);
+    expect(kebab['/pets/{id}:send-invite'][0]).not.toBe('PetsByIdSendInvitePostRequest');
+    expect(kebab['/pets/{id}:send-invite'][1]).not.toBe('PetsByIdSendInvitePostResponse');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('still hashes both GET /tags/{tag}.json and GET /tags/{tag}/json: a parameter segment is never irregular, so a path without a colon scores as before', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const tagParam = [{ name: 'tag', in: 'path', required: true, schema: { type: 'string' } }];
+    const dotted = {
+      get: { parameters: tagParam, responses: { '200': jsonResponse(inlineObject({ a: { type: 'string' } })) } },
+    };
+    const slashed = {
+      get: { parameters: tagParam, responses: { '200': jsonResponse(inlineObject({ b: { type: 'string' } })) } },
+    };
+
+    const names = await namesInBothOrders([
+      ['/tags/{tag}.json', dotted],
+      ['/tags/{tag}/json', slashed],
+    ]);
+    expect(names).toMatchInlineSnapshot(`
+      {
+        "/tags/{tag}.json": [
+          undefined,
+          "TagsByTagJson745B90GetResponse",
+        ],
+        "/tags/{tag}/json": [
+          undefined,
+          "TagsByTagJsonC32564GetResponse",
+        ],
+      }
+    `);
+    for (const path of ['/tags/{tag}.json', '/tags/{tag}/json']) {
+      expect(names[path][1]).not.toBe('TagsByTagJsonGetResponse');
+    }
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('only disambiguates the colliding method: GET /foo-bar keeps its plain name next to the POST collision', async () => {
     const { ops } = await parseInline(
       api({

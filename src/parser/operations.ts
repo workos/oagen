@@ -19,7 +19,7 @@ import type {
   ExternalDocs,
   ServerEntry,
 } from '../ir/types.js';
-import type { OperationHint } from '../ir/operation-hints.js';
+import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { serverListsEqual } from '../ir/server-url.js';
 import { createHash } from 'node:crypto';
 import {
@@ -539,8 +539,7 @@ export function extractOperations(
   for (const [serviceName, operations] of serviceMap) {
     const pathGroups = new Map<string, Operation[]>();
     for (const op of operations) {
-      const segments = op.path.split('/').filter(Boolean);
-      const firstSeg = segments[serviceSegmentIndex(segments, rootLengthOf(op))] ?? '';
+      const firstSeg = pathSegments(op.path)[serviceSegmentIndex(op.path, rootLengthOf(op))] ?? '';
       const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
       const group = pathGroups.get(groupKey) ?? [];
       group.push(op);
@@ -740,7 +739,7 @@ function documentApiRoot(paths: Record<string, PathItem>): string[] {
       return Boolean(op) && !op?.tags?.[0];
     });
     if (!hasUntaggedOperation) continue;
-    const segments = path.split('/').filter(Boolean);
+    const segments = pathSegments(path);
     const own = segments.slice(0, pathRootLength(segments));
     if (own.length > 0) contributions.push(own);
   }
@@ -781,27 +780,35 @@ function sharedPrefixLength(a: readonly string[], b: readonly string[]): number 
  * untagged, so what they share always ends on a marker.
  */
 function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   return sharedPrefixLength(apiRoot, segments.slice(0, pathRootLength(segments)));
 }
 
 /**
- * Index of the segment a path-named service takes its name from. Under an
- * API root it is the first literal segment after the root, so `/v1/notes` and
- * `/v1/{teamId}/notes` both name `Notes`; when nothing literal follows the
- * root, the first segment, so `/api` and `/api/{id}` name `Api` as they
- * always did rather than `Default`. The fallback operation name skips the
- * same segment (see inferResourceFromPath), so it is never echoed as
- * `Api.getApi`.
+ * Index of the segment a path-named service takes its name from, among the
+ * segments readPath reads. Under an API root it is the first literal segment
+ * after the root, so `/v1/notes` and `/v1/{teamId}/notes` both name `Notes`;
+ * when nothing literal follows the root, the first segment, so `/api` and
+ * `/api/{id}` name `Api` as they always did rather than `Default`. The
+ * fallback operation name skips the same segment (see inferResourceFromPath),
+ * so it is never echoed as `Api.getApi`.
+ *
+ * The verb of a custom method is not a resource and never names a service:
+ * `/v1/{name}:cancel` stays in `V1` beside `/v1/{name}`, and `/api/v1:reset`
+ * lands in `Api`, where the slash-written `/v1/{name}/cancel` names
+ * `Cancel`. The resource it is written on is still found first when there is
+ * one, so `/v1/pets:batchGet` names `Pets` like `/v1/pets`.
  *
  * Without a root (`apiRootLength` of 0: a root-less document, a path outside
  * the root, or a tagged operation) it is always the first segment, parameter
  * or not, so every such operation is named exactly as before this rule
  * existed: an untagged `/{tenant}/users` stays `Default.listUsers`.
  */
-function serviceSegmentIndex(segments: readonly string[], apiRootLength: number): number {
+function serviceSegmentIndex(path: string, apiRootLength: number): number {
   if (apiRootLength === 0) return 0;
-  const index = segments.findIndex((segment, i) => i >= apiRootLength && !segment.startsWith('{'));
+  const index = readPath(path).findIndex(
+    (segment, i) => i >= apiRootLength && !segment.text.startsWith('{') && !segment.customMethod,
+  );
   return index === -1 ? 0 : index;
 }
 
@@ -815,6 +822,8 @@ function serviceSegmentIndex(segments: readonly string[], apiRootLength: number)
  * When nothing literal follows the root — the path is the root itself, or
  * only parameters come next — the first segment names the service as it
  * always did, so `/api` and `/api/{id}` land in `Api` rather than in `Default`.
+ * The verb of a custom method is read past (see serviceSegmentIndex), so
+ * `/v1/{name}:cancel` lands in `V1` as well.
  */
 function inferServiceName(path: string, tag: string | undefined, apiRootLength: number): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
@@ -822,8 +831,7 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   if (tag) {
     return toPascalCase(tag);
   }
-  const segments = path.split('/').filter(Boolean);
-  const first = segments[serviceSegmentIndex(segments, apiRootLength)] ?? 'Default';
+  const first = pathSegments(path)[serviceSegmentIndex(path, apiRootLength)] ?? 'Default';
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
@@ -925,7 +933,7 @@ function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: num
  * unless `inferPostAction` recognised it as an action first.
  */
 function inferVerb(method: HttpMethod, path: string): string {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const hasTrailingParam = segments.length > 0 && segments[segments.length - 1].startsWith('{');
 
   switch (method) {
@@ -987,7 +995,7 @@ function pathSegmentNoun(segments: readonly string[], index: number): string {
  * for `/accounts/users/{id}`), for pluralFallbackName.
  */
 function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = true): string | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   if (segments.length <= 1) return null;
 
   // Find the last meaningful (non-param) segment past the API root, so a
@@ -1004,7 +1012,7 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
   const resourceSegment = segments[resourceIndex];
   // Skip the service name (the segment the service was named from) — it
   // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
-  if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
+  if (resourceSegment === segments[serviceSegmentIndex(path, apiRootLength)]) return null;
 
   return toPascalCase(singularItem ? pathSegmentNoun(segments, resourceIndex) : resourceSegment);
 }
@@ -1032,9 +1040,15 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
  * (`/pets/search` looks like `/accounts/users/auth_factors`). A singleton
  * noun after the parameter (`/users/{id}/avatar`) is misread as a verb; give
  * it an `operationId`.
+ *
+ * A custom method written after a colon is read as the segment it is written
+ * on followed by the verb (see pathSegments): `/pets/{petId}:adopt` is
+ * `{petId}` then `adopt`, so it is the action `adoptPet` exactly as
+ * `/pets/{petId}/adopt` is; `/pets:search` is read as `/pets/search` and
+ * stays a `create`.
  */
 function inferPostAction(path: string, apiRootLength = 0): { verb: string; resource: string | null } | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   if (segments.length < 2) return null;
   const last = segments[segments.length - 1];
   if (last.startsWith('{') || !segments[segments.length - 2].startsWith('{')) return null;
@@ -1218,7 +1232,7 @@ function disambiguateOperationNames(
       // the one place a root word belongs in a name. A root-less path — outside
       // the root, or tagged — is named as if the document had none and takes
       // no part; it keeps the plain name in the numeric pass instead.
-      const roots = group.map((op) => op.path.split('/').filter(Boolean).slice(0, apiRootLengthOf(op)));
+      const roots = group.map((op) => pathSegments(op.path).slice(0, apiRootLengthOf(op)));
       const rooted = roots.filter((root) => root.length > 0);
       if (rooted.length === 0) return;
       let shared = rooted[0];
@@ -1400,17 +1414,18 @@ function sameNoun(a: string, b: string): boolean {
  */
 function qualifierPath(op: Operation, apiRootLength: number): string {
   if (op.httpMethod !== 'post' || !inferPostAction(op.path, apiRootLength)) return op.path;
-  return '/' + op.path.split('/').filter(Boolean).slice(0, -1).join('/');
+  return '/' + pathSegments(op.path).slice(0, -1).join('/');
 }
 
 /**
  * The path parameters in path order, each as the PascalCase word that
  * `By<Param>` spells it with. Mirrors derivePathModelBaseName's spelling of a
- * parameter segment, so `{team_id}` and `{teamId}` read alike.
+ * parameter segment, so `{team_id}` and `{teamId}` read alike. A parameter
+ * that carries a custom method (`{petId}:adopt`) is the parameter alone,
+ * `PetId`, since pathSegments has split the verb off.
  */
 function pathParamWords(path: string): string[] {
-  return path
-    .split('/')
+  return pathSegments(path)
     .filter((segment) => segment.startsWith('{'))
     .map((segment) => toPascalCase(segment.replace(/[{}]/g, '')));
 }
@@ -1445,10 +1460,10 @@ function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string 
  * (`/api/v1/{id}`).
  */
 function inferServiceNoun(path: string, apiRootLength: number): string | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   let last = segments.length - 1;
   while (last >= apiRootLength && segments[last].startsWith('{')) last--;
-  if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
+  if (last < apiRootLength || last !== serviceSegmentIndex(path, apiRootLength)) return null;
   return toPascalCase(pathSegmentNoun(segments, last));
 }
 
@@ -1475,7 +1490,7 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
  * singularises: `/messages/sms/{smsId}/attachments` contributes "Sm".
  */
 function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true): string | null {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const nouns: string[] = [];
   for (let i = apiRootLength; i < segments.length; i++) {
     if (!segments[i].startsWith('{')) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
@@ -3038,7 +3053,9 @@ function extractResponseHeaders(
  *
  * This tells the common path shapes apart (list vs. item, sibling and nested
  * sub-resources) but is not unique by construction: `/foo-bar` and `/foo/bar`,
- * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/` all flatten to the
+ * `/notes/by-id` and `/notes/{id}`, `/notes` and `/notes/`, and a custom
+ * method beside its slash form, `/pets/{id}:adopt` and `/pets/{id}/adopt`
+ * (pathSegments reads the first as `{id}` then `adopt`), all flatten to the
  * same words. `resolvePathModelBaseNames` detects such collisions: the path
  * spelled most plainly keeps the plain name and every other one gets a
  * `disambiguator` derived from its raw path.
@@ -3049,7 +3066,7 @@ function extractResponseHeaders(
  * spells them.
  */
 export function derivePathModelBaseName(path: string, method: HttpMethod, disambiguator = ''): string {
-  const segments = path.split('/').filter(Boolean);
+  const segments = pathSegments(path);
   const parts = segments.map((segment) =>
     segment.startsWith('{') ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
   );
@@ -3200,7 +3217,7 @@ function resolvePathModelBaseNames(
  */
 function canonicalPath(rawPaths: Iterable<string>): string | undefined {
   let best: string | undefined;
-  let bestScore: [number, number] | undefined;
+  let bestScore: PathDeviation | undefined;
   let tied = false;
   for (const path of rawPaths) {
     const score = pathDeviation(path);
@@ -3216,23 +3233,35 @@ function canonicalPath(rawPaths: Iterable<string>): string | undefined {
   return tied ? undefined : best;
 }
 
+/** See pathDeviation. */
+type PathDeviation = [trailingSlash: number, customMethods: number, irregularSegments: number];
+
 /**
  * How far a raw path's spelling is from the plain prefix it flattens to:
- * `[trailing slash, literal segments with any character outside a-z0-9]`,
- * compared lexicographically. `/notes` scores [0, 0] and `/notes/` [1, 0];
- * `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
+ * `[trailing slash, custom methods written after a colon, literal segments
+ * with any character outside a-z0-9]`, compared lexicographically. `/notes`
+ * scores [0, 0, 0] and `/notes/` [1, 0, 0]; `/notes/{id}` scores [0, 0, 0]
+ * and `/notes/by-id` [0, 0, 1]. A custom method is counted on its own rather
+ * than as an irregular segment, so the slash form wins whatever the verb's
+ * spelling: `/pets/{id}:adopt` scores [0, 1, 0] against `/pets/{id}/adopt`
+ * at [0, 0, 0], and `/pets/{id}:batchAdopt` [0, 1, 1] against
+ * `/pets/{id}/batchAdopt` at [0, 0, 1]. A parameter segment is never
+ * irregular, whatever follows its braces, so a path without a colon scores
+ * as it did before custom methods were read: `/tags/{tag}.json` and
+ * `/tags/{tag}/json` still tie.
  */
-function pathDeviation(rawPath: string): [number, number] {
+function pathDeviation(rawPath: string): PathDeviation {
   const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
-  const irregularSegments = rawPath
-    .split('/')
-    .filter(Boolean)
-    .filter((segment) => !segment.startsWith('{') && /[^a-z0-9]/.test(segment)).length;
-  return [trailingSlash, irregularSegments];
+  const segments = readPath(rawPath);
+  const customMethods = segments.filter((segment) => segment.customMethod).length;
+  const irregularSegments = segments.filter(
+    (segment) => !segment.text.startsWith('{') && /[^a-z0-9]/.test(segment.text),
+  ).length;
+  return [trailingSlash, customMethods, irregularSegments];
 }
 
-function compareDeviation(a: [number, number], b: [number, number]): number {
-  return a[0] - b[0] || a[1] - b[1];
+function compareDeviation(a: PathDeviation, b: PathDeviation): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
 /** The first six hex characters of the SHA-1 of a raw path. */
