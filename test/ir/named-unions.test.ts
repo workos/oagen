@@ -142,4 +142,25 @@ describe('package exports', () => {
     };
     expect(change.kind).toBe('variant-added');
   });
+
+  it('exposes the extension types an emitter author imports (issue #352)', async () => {
+    const pkg = await import('../../src/index.js');
+    expect(typeof pkg.parseSpec).toBe('function');
+    // `Extensions`, `ExtensionsChanged` and `ExtensionsNode` are type-only
+    // exports; a value typed with each compiles against the package entry.
+    const extensions: import('../../src/index.js').Extensions = { 'x-since': '1.2.0', 'x-idempotent': true };
+    const node: import('../../src/index.js').ExtensionsNode = { node: 'model', modelName: 'Pet' };
+    const change: import('../../src/index.js').ExtensionsChanged = {
+      kind: 'extensions-changed',
+      ...node,
+      newExtensions: extensions,
+      classification: 'additive',
+    };
+    const operation: Pick<import('../../src/index.js').Operation, 'extensions'> = { extensions };
+    const model: Pick<import('../../src/index.js').Model, 'extensions'> = { extensions };
+    const field: Pick<import('../../src/index.js').Field, 'extensions'> = { extensions };
+    const anEnum: Pick<import('../../src/index.js').Enum, 'extensions'> = { extensions };
+    expect(change.kind).toBe('extensions-changed');
+    expect([operation, model, field, anEnum].every((n) => n.extensions === extensions)).toBe(true);
+  });
 });

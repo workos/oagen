@@ -1106,10 +1106,13 @@ export interface Field {
    * keys written beside a `$ref` (legal in OAS 3.1) are the field's, a bare
    * `$ref` yields none — the referenced model, union or enum carries its
    * own — unless it names an array component, whose keys the field then
-   * carries as it carries that component's `description`. A property an
-   * `allOf` declares more than once carries the keys every declaration
-   * agrees on, value for value. Present only when at least one key
-   * remains. Not shape: two fields that differ only here are one shape.
+   * carries as it carries that component's `description`. A property
+   * several `allOf` members always declare is typed by the first typing
+   * declaration, keys included (a typeless one fills in what it leaves
+   * unset); a property only variants declare carries exactly the keys
+   * every declaration as written agrees on, value for value, whether or
+   * not the declarations share one shape. Present only when at least one
+   * key remains. Not shape: two fields that differ only here are one shape.
    */
   extensions?: Extensions;
 }
