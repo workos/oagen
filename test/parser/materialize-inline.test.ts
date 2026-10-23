@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import type { Model } from '../../src/ir/types.js';
+import type { Model, TypeRef } from '../../src/ir/types.js';
 import {
+  createSiblingSites,
   materializeInlineSchema,
   modelFingerprint,
   type InlineModelRegistry,
+  type SettledSite,
+  type SiblingSites,
+  type SiblingStems,
 } from '../../src/parser/materialize-inline.js';
 
 const num = { kind: 'primitive' as const, type: 'number' as const };
@@ -74,5 +78,446 @@ describe('materializeInlineSchema — settling a clash no stem can move', () => 
     expect(type).toEqual({ kind: 'model', name: 'Body2' });
     expect(names(models)).toEqual(['Body2']);
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('materializeInlineSchema — the stems earlier sites of the same bare name settled on (issue #280)', () => {
+  const str = { kind: 'primitive' as const, type: 'string' as const };
+  const shape = { type: 'object', properties: { name: { type: 'string' } } };
+  const otherShape = { type: 'object', properties: { code: { type: 'string' } } };
+  const model = (name: string, field: string, type: TypeRef = str): Model => ({
+    name,
+    fields: [{ name: field, type, required: false }],
+  });
+  const entry = (m: Model, operation?: string): [string, { fingerprint: string; operation?: string }] => [
+    m.name,
+    { fingerprint: modelFingerprint(m), operation },
+  ];
+  /** The content stem of a status code: the bare name, then the code, then numbered. */
+  const byCode =
+    (code: number) =>
+    (index: number): string =>
+      index === 0 ? 'Body' : index === 1 ? `Body${code}` : `Body${index}`;
+  /** A registry in which `Body` has another shape and `Body200` is the model of `shape` an earlier site settled on. */
+  const registryWithSettled = (): InlineModelRegistry =>
+    new Map([entry(model('Body', 'other', num)), entry(model('Body200', 'name'), 'Op')]);
+  const settled = (stem: string, renames: Array<readonly [string, string]> = []): SettledSite => ({ stem, renames });
+  /** A settlement container holding `entries`, as the caller creates it. */
+  const sites = (...entries: SettledSite[]): SiblingSites => ({ settled: [...entries] });
+
+  it('shares the model an earlier site settled on, under that stem, before trying its own', () => {
+    const registry = registryWithSettled();
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites(settled('Body200'));
+
+    const type = materializeInlineSchema(shape, { stem: byCode(201), siblings, registry, models });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body200' });
+    expect(models).toEqual([]);
+    expect(registry.has('Body201')).toBe(false);
+    expect(siblings.settled).toEqual([settled('Body200')]);
+  });
+
+  it("steps past a sibling's stem whose model has another shape to its own candidate, and records that", () => {
+    const registry = registryWithSettled();
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites(settled('Body200'));
+
+    const type = materializeInlineSchema(otherShape, { stem: byCode(201), siblings, registry, models });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body201' });
+    expect(names(models)).toEqual(['Body201']);
+    expect(siblings.settled).toEqual([settled('Body200'), settled('Body201')]);
+  });
+
+  it('records the bare stem when it is free, and a later site shares under it without trying it twice', () => {
+    const registry: InlineModelRegistry = new Map();
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites();
+
+    expect(materializeInlineSchema(shape, { stem: byCode(200), siblings, registry, models })).toEqual({
+      kind: 'model',
+      name: 'Body',
+    });
+    expect(siblings.settled).toEqual([settled('Body')]);
+    expect(materializeInlineSchema(shape, { stem: byCode(201), siblings, registry, models })).toEqual({
+      kind: 'model',
+      name: 'Body',
+    });
+    expect(names(models)).toEqual(['Body']);
+    expect(siblings.settled).toEqual([settled('Body')]);
+  });
+
+  it('shares the nested models too, since they are named from the shared stem', () => {
+    const nested = {
+      type: 'object',
+      properties: { owner: { type: 'object', properties: { id: { type: 'string' } } } },
+    };
+    const registry: InlineModelRegistry = new Map([entry(model('Body', 'other', num))]);
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites();
+
+    expect(materializeInlineSchema(nested, { stem: byCode(200), siblings, registry, models })).toEqual({
+      kind: 'model',
+      name: 'Body200',
+    });
+    expect(names(models)).toEqual(['Body200', 'Body200Owner']);
+    expect(materializeInlineSchema(nested, { stem: byCode(201), siblings, registry, models })).toEqual({
+      kind: 'model',
+      name: 'Body200',
+    });
+    expect(names(models)).toEqual(['Body200', 'Body200Owner']);
+    expect(siblings.settled).toEqual([settled('Body200')]);
+  });
+
+  it('tries every sibling stem in order, so a site shares whichever earlier site has its shape', () => {
+    const registry: InlineModelRegistry = new Map([entry(model('Body', 'other', num))]);
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites();
+    const site = (code: number, schema: Record<string, unknown>) =>
+      materializeInlineSchema(schema, { stem: byCode(code), siblings, registry, models });
+
+    expect(site(200, shape)).toEqual({ kind: 'model', name: 'Body200' });
+    expect(site(202, otherShape)).toEqual({ kind: 'model', name: 'Body202' });
+    expect(site(203, otherShape)).toEqual({ kind: 'model', name: 'Body202' });
+    expect(site(204, shape)).toEqual({ kind: 'model', name: 'Body200' });
+    expect(names(models)).toEqual(['Body200', 'Body202']);
+    expect(siblings.settled).toEqual([settled('Body200'), settled('Body202')]);
+  });
+
+  it('leaves out an own candidate a sibling settled on, so no stem is tried twice in a row', () => {
+    // `Body2` is both the sibling's stem and this site's second own candidate.
+    const registry: InlineModelRegistry = new Map([
+      entry(model('Body', 'other', num)),
+      entry(model('Body2', 'code'), 'Op'),
+    ]);
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites(settled('Body2'));
+
+    const type = materializeInlineSchema(shape, { stem, siblings, registry, models });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body3' });
+    expect(names(models)).toEqual(['Body3']);
+    expect(siblings.settled).toEqual([settled('Body2'), settled('Body3')]);
+  });
+
+  it('records the stem the root moved to when renaming a nested variant changed its shape, with every rename', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A registered `Body` exactly as the extractor builds it, whose `shape`
+    // points at `Circle` — the component of another shape: the trial's `Body`
+    // matches it until its own `Circle` is renamed under the root.
+    const minted: Model[] = [];
+    materializeInlineSchema(body, { stem, registry: new Map(), models: minted });
+    const registry = registryWithCircle();
+    registry.set('Body', { fingerprint: modelFingerprint(minted.find((m) => m.name === 'Body')!) });
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites();
+
+    const type = materializeInlineSchema(body, { stem, siblings, registry, models });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body2' });
+    expect(names(models)).toEqual(['Body2', 'Body2Circle', 'Square']);
+    expect(siblings.settled).toEqual([
+      settled('Body2', [
+        ['Circle', 'BodyCircle'],
+        ['Body', 'Body2'],
+        ['BodyCircle', 'Body2Circle'],
+      ]),
+    ]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('records the rename made under the stem the fixed point settled on when the root never moved', () => {
+    // The registered `Body` differs from the trial's from the first trial on,
+    // so the trials step to `Body2` before the fixed point: the settled trial
+    // is the one under `Body2`, and `Circle` is renamed under that root.
+    const registry = registryWithCircle();
+    registry.set('Body', { fingerprint: modelFingerprint(model('Body', 'other', num)) });
+    const models: Model[] = [];
+    const siblings: SiblingSites = sites();
+
+    const type = materializeInlineSchema(body, { stem, siblings, registry, models });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body2' });
+    expect(names(models)).toEqual(['Body2', 'Body2Circle', 'Square']);
+    expect(siblings.settled).toEqual([settled('Body2', [['Circle', 'Body2Circle']])]);
+  });
+
+  it('records nothing and tries only its own candidates when no sibling record is given', () => {
+    const registry = registryWithSettled();
+    const models: Model[] = [];
+
+    const type = materializeInlineSchema(shape, { stem: byCode(201), registry, models });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body201' });
+    expect(names(models)).toEqual(['Body201']);
+  });
+
+  it('reads the earlier string form of `siblings` as settlements without renames, to the same result', () => {
+    const stems: SiblingStems = ['Body200'];
+    const container: SiblingSites = sites(settled('Body200'));
+    const run = (schema: Record<string, unknown>, siblings: SiblingSites | SiblingStems) => {
+      const models: Model[] = [];
+      const type = materializeInlineSchema(schema, {
+        stem: byCode(201),
+        siblings,
+        registry: registryWithSettled(),
+        models,
+      });
+      return { type, names: names(models) };
+    };
+
+    // The identical shape shares `Body200`; another shape steps to `Body201` — as with `SiblingSites`.
+    expect(run(shape, stems)).toEqual(run(shape, container));
+    expect(run(shape, stems)).toEqual({ type: { kind: 'model', name: 'Body200' }, names: [] });
+    expect(run(otherShape, stems)).toEqual(run(otherShape, container));
+    expect(run(otherShape, stems)).toEqual({ type: { kind: 'model', name: 'Body201' }, names: ['Body201'] });
+    // The string form is read, never written back: the settlement goes to a private container.
+    expect(stems).toEqual(['Body200']);
+    expect(container.settled).toEqual([settled('Body200'), settled('Body201')]);
+  });
+
+  it('never writes to the string form: an empty array stays empty, a frozen one works (Greptile re-review)', () => {
+    const empty: SiblingStems = [];
+    const frozenEmpty: SiblingStems = Object.freeze([] as string[]);
+    const frozen: SiblingStems = Object.freeze(['Body200']);
+    const run = (siblings: SiblingStems, registry: InlineModelRegistry) => {
+      const models: Model[] = [];
+      const type = materializeInlineSchema(shape, { stem: byCode(201), siblings, registry, models });
+      return { type, names: names(models) };
+    };
+
+    expect(run(empty, new Map())).toEqual({ type: { kind: 'model', name: 'Body' }, names: ['Body'] });
+    expect(empty).toEqual([]);
+    expect(run(frozenEmpty, new Map())).toEqual({ type: { kind: 'model', name: 'Body' }, names: ['Body'] });
+    expect(frozenEmpty).toEqual([]);
+    expect(run(frozen, registryWithSettled())).toEqual({ type: { kind: 'model', name: 'Body200' }, names: [] });
+    expect(frozen).toEqual(['Body200']);
+    // Read-only in type as well: a push on `SiblingStems` does not compile.
+    const pushes = (stems: SiblingStems): void => {
+      // @ts-expect-error — `SiblingStems` is `readonly string[]`
+      stems.push('Body');
+    };
+    expect(pushes).toBeTypeOf('function');
+  });
+
+  it('accepts a bare list of settlements as the settled list itself, and reads an empty array as read-only (Greptile re-review)', () => {
+    // The form between the string form and the container: a non-empty list
+    // of settlement objects is the mutable settled list, appended to in place.
+    const list: SettledSite[] = [settled('Body200')];
+    const sharedInto: Model[] = [];
+    expect(
+      materializeInlineSchema(shape, {
+        stem: byCode(201),
+        siblings: list,
+        registry: registryWithSettled(),
+        models: sharedInto,
+      }),
+    ).toEqual({ kind: 'model', name: 'Body200' });
+    expect(sharedInto).toEqual([]);
+    expect(list).toEqual([settled('Body200')]);
+    const minted: Model[] = [];
+    expect(
+      materializeInlineSchema(otherShape, {
+        stem: byCode(201),
+        siblings: list,
+        registry: registryWithSettled(),
+        models: minted,
+      }),
+    ).toEqual({ kind: 'model', name: 'Body201' });
+    expect(names(minted)).toEqual(['Body201']);
+    expect(list).toEqual([settled('Body200'), settled('Body201')]);
+
+    // An empty array has no element to tell the forms apart, so it is read-only whatever it was typed as.
+    const empty: SettledSite[] = [];
+    const frozenEmpty: SettledSite[] = Object.freeze([] as SettledSite[]) as SettledSite[];
+    for (const given of [empty, frozenEmpty]) {
+      const models: Model[] = [];
+      expect(
+        materializeInlineSchema(shape, { stem: byCode(200), siblings: given, registry: new Map(), models }),
+      ).toEqual({
+        kind: 'model',
+        name: 'Body',
+      });
+      expect(names(models)).toEqual(['Body']);
+      expect(given).toEqual([]);
+    }
+  });
+
+  it('createSiblingSites seeds a container from the string form, and the container is what a call records into', () => {
+    const container = createSiblingSites(['Body200']);
+    expect(container.settled).toEqual([settled('Body200')]);
+    const models: Model[] = [];
+
+    const type = materializeInlineSchema(otherShape, {
+      stem: byCode(201),
+      siblings: container,
+      registry: registryWithSettled(),
+      models,
+    });
+
+    expect(type).toEqual({ kind: 'model', name: 'Body201' });
+    expect(container.settled).toEqual([settled('Body200'), settled('Body201')]);
+    expect(createSiblingSites().settled).toEqual([]);
+  });
+
+  describe('a site whose nested variant was renamed under the root (Greptile)', () => {
+    it('is shared by an identical later site, which replays the rename and mints nothing', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const registry = registryWithCircle();
+      const models: Model[] = [];
+      const siblings: SiblingSites = sites();
+
+      expect(materializeInlineSchema(body, { stem: byCode(200), siblings, registry, models })).toEqual({
+        kind: 'model',
+        name: 'Body',
+      });
+      expect(names(models)).toEqual(['Body', 'BodyCircle', 'Square']);
+      expect(siblings.settled).toEqual([settled('Body', [['Circle', 'BodyCircle']])]);
+
+      const type = materializeInlineSchema(body, { stem: byCode(201), siblings, registry, models });
+
+      expect(type).toEqual({ kind: 'model', name: 'Body' });
+      expect(names(models)).toEqual(['Body', 'BodyCircle', 'Square']);
+      expect(fieldTypes(models, 'Body').shape).toMatchObject({
+        variants: [
+          { kind: 'model', name: 'BodyCircle' },
+          { kind: 'model', name: 'Square' },
+        ],
+      });
+      expect(siblings.settled).toEqual([settled('Body', [['Circle', 'BodyCircle']])]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('is shared the same way when it settled past the bare stem', () => {
+      const registry = registryWithCircle();
+      registry.set('Body', { fingerprint: modelFingerprint(model('Body', 'other', num)) });
+      const models: Model[] = [];
+      const siblings: SiblingSites = sites();
+
+      expect(materializeInlineSchema(body, { stem: byCode(200), siblings, registry, models })).toEqual({
+        kind: 'model',
+        name: 'Body200',
+      });
+      expect(names(models)).toEqual(['Body200', 'Body200Circle', 'Square']);
+      expect(materializeInlineSchema(body, { stem: byCode(201), siblings, registry, models })).toEqual({
+        kind: 'model',
+        name: 'Body200',
+      });
+      expect(names(models)).toEqual(['Body200', 'Body200Circle', 'Square']);
+      expect(siblings.settled).toEqual([settled('Body200', [['Circle', 'Body200Circle']])]);
+    });
+
+    it('is not shared by a later site whose renamed variant has another shape, which settles on its own', () => {
+      const registry = registryWithCircle();
+      const models: Model[] = [];
+      const siblings: SiblingSites = sites();
+      const other = {
+        ...body,
+        properties: {
+          shape: {
+            oneOf: [
+              titled('Circle', 'circle', { diameter: { type: 'string' } }),
+              titled('Square', 'square', { side: { type: 'number' } }),
+            ],
+          },
+        },
+      };
+
+      materializeInlineSchema(body, { stem: byCode(200), siblings, registry, models });
+      const type = materializeInlineSchema(other, { stem: byCode(201), siblings, registry, models });
+
+      expect(type).toEqual({ kind: 'model', name: 'Body201' });
+      expect(names(models)).toEqual(['Body', 'Body201', 'Body201Circle', 'BodyCircle', 'Square']);
+      expect(fieldTypes(models, 'Body201Circle')).toMatchObject({ diameter: { kind: 'primitive', type: 'string' } });
+      expect(siblings.settled.map((site) => site.stem)).toEqual(['Body', 'Body201']);
+    });
+
+    it('skips a replayed rename that does not apply: no model to move, or the name moved to in use', () => {
+      const registry: InlineModelRegistry = new Map();
+      const models: Model[] = [];
+      // A sibling record claiming renames this schema gives nothing to move,
+      // and one whose target the schema's own `body_circle` property mints.
+      const siblings: SiblingSites = sites(
+        settled('Body', [
+          ['Circle', 'BodyCircle'],
+          ['Nothing', 'BodyNothing'],
+        ]),
+      );
+      const withOwnCircle = {
+        type: 'object',
+        properties: { body_circle: { type: 'object', properties: { r: { type: 'number' } } }, ...body.properties },
+      };
+
+      const type = materializeInlineSchema(withOwnCircle, { stem: byCode(200), siblings, registry, models });
+
+      expect(type).toEqual({ kind: 'model', name: 'Body' });
+      expect(names(models)).toEqual(['Body', 'BodyCircle', 'Circle', 'Square']);
+      expect(fieldTypes(models, 'BodyCircle')).toMatchObject({ r: num });
+      expect(fieldTypes(models, 'Body').shape).toMatchObject({ variants: [{ kind: 'model', name: 'Circle' }, {}] });
+    });
+
+    it('skips a replayed rename the later site cannot take safely — its inline Circle beside a $ref to component Circle — instead of failing (Greptile round 2)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // The component `Circle` as the extractor builds it from a titled variant,
+      // so the later site's inline `Circle` of that very shape can share it.
+      const seed: Model[] = [];
+      materializeInlineSchema(
+        {
+          type: 'object',
+          properties: {
+            shape: {
+              oneOf: [
+                titled('Circle', 'circle', { radius: { type: 'number' } }),
+                titled('Square', 'square', { side: { type: 'number' } }),
+              ],
+            },
+          },
+        },
+        { stem: () => 'Seed', registry: new Map(), models: seed },
+      );
+      const registry: InlineModelRegistry = new Map([
+        ['Circle', { fingerprint: modelFingerprint(seed.find((m) => m.name === 'Circle')!) }],
+      ]);
+      const models: Model[] = [];
+      const siblings: SiblingSites = sites();
+      // The 201: `Circle` of the component's shape, beside a `$ref` to it.
+      const later = {
+        type: 'object',
+        properties: {
+          shape: {
+            oneOf: [
+              titled('Circle', 'circle', { radius: { type: 'number' } }),
+              titled('Square', 'square', { side: { type: 'number' } }),
+            ],
+          },
+          original: { $ref: '#/components/schemas/Circle' },
+        },
+      };
+
+      expect(materializeInlineSchema(body, { stem: byCode(200), siblings, registry, models })).toEqual({
+        kind: 'model',
+        name: 'Body',
+      });
+      expect(siblings.settled).toEqual([settled('Body', [['Circle', 'BodyCircle']])]);
+      const type = materializeInlineSchema(later, { stem: byCode(201), siblings, registry, models });
+
+      // The replay of `Circle → BodyCircle` would rewrite the `$ref` too, so it
+      // is skipped: the inline `Circle` shares the component, the root differs
+      // from the 200's and takes the 201's own name, nothing is renamed.
+      expect(type).toEqual({ kind: 'model', name: 'Body201' });
+      expect(names(models)).toEqual(['Body', 'Body201', 'BodyCircle', 'Square']);
+      expect(fieldTypes(models, 'Body201')).toMatchObject({
+        shape: {
+          variants: [
+            { kind: 'model', name: 'Circle' },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+        original: { kind: 'model', name: 'Circle' },
+      });
+      expect(siblings.settled).toEqual([settled('Body', [['Circle', 'BodyCircle']]), settled('Body201')]);
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });
