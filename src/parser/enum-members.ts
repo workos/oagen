@@ -20,29 +20,61 @@ export interface EnumMember {
 
 /**
  * What an inline enum ref carries besides its `values`, for the pass that
- * lifts it to a top-level `Enum`: each member's documentation and the link
- * its schema declared. A side table rather than keys on the ref: the ref is
- * the field's or parameter's *type*, which the sameness passes compare by
- * serialization, and documentation is not shape — it sits beside the type on
- * the `Field`, not inside it. Per-value deprecation is shape, though, so
- * every pass that serializes a ref to compare shapes reads it back through
- * `shapeWithEnumFlags`. Keyed by identity because every pass between
- * building a ref and lifting it mutates refs in place (renames, nullable
- * wraps) and none clones them; an unreachable ref drops out on its own.
+ * lifts it to a top-level `Enum`: each member's documentation, and the
+ * `description` and link its schema declared. A side table rather than keys
+ * on the ref: the ref is the field's or parameter's *type*, which the
+ * sameness passes compare by serialization, and documentation is not shape
+ * — it sits beside the type on the `Field`, not inside it. Per-value
+ * deprecation is shape, though, so every pass that serializes a ref to
+ * compare shapes reads it back through `shapeWithEnumFlags`. Keyed by
+ * identity because every pass between building a ref and lifting it mutates
+ * refs in place (renames, nullable wraps) and none clones them; an
+ * unreachable ref drops out on its own.
  */
 interface InlineEnumMeta {
   members: EnumMember[];
+  description?: string;
   externalDocs?: ExternalDocs;
 }
 
 const inlineEnumMeta = new WeakMap<EnumRef, InlineEnumMeta>();
 
-/** Build an inline `EnumRef` from its members, recording their documentation and the schema's link (if usable) for the lift pass. */
-export function inlineEnumRef(name: string, members: readonly EnumMember[], rawExternalDocs: unknown): EnumRef {
+/** `raw` when it is a string with non-whitespace content, kept verbatim; `undefined` otherwise. */
+function textWithContent(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : undefined;
+}
+
+/**
+ * Build an inline `EnumRef` from its members, recording for the lift pass
+ * their documentation and what the schema declares for the enum as a whole:
+ * its `description` (`rawDescription`, kept when it is a string with
+ * non-whitespace content, as `Model.description` is) and its link
+ * (`rawExternalDocs`, when usable). The schema is the one that declares the
+ * members — the `enum:` list or the `oneOf`/`anyOf` of consts — as the
+ * caller hands it over: `schemaToTypeRef` passes a collapsed nullable or
+ * single-member `allOf` wrapper's text and link onto its branch first
+ * (`withWrapperDocs`), so both are read by one rule.
+ */
+export function inlineEnumRef(
+  name: string,
+  members: readonly EnumMember[],
+  rawExternalDocs: unknown,
+  rawDescription?: unknown,
+): EnumRef {
   const ref: EnumRef = { kind: 'enum', name, values: members.map((member) => member.value) };
+  const description = textWithContent(rawDescription);
   const externalDocs = readExternalDocs(rawExternalDocs);
-  inlineEnumMeta.set(ref, { members: [...members], ...(externalDocs ? { externalDocs } : {}) });
+  inlineEnumMeta.set(ref, {
+    members: [...members],
+    ...(description !== undefined ? { description } : {}),
+    ...(externalDocs ? { externalDocs } : {}),
+  });
   return ref;
+}
+
+/** The `description` recorded for an inline enum ref by `inlineEnumRef`; none for a ref built any other way, or from a schema whose text has no content. */
+export function inlineEnumDescriptionOf(ref: EnumRef): string | undefined {
+  return inlineEnumMeta.get(ref)?.description;
 }
 
 /** The link recorded for an inline enum ref by `inlineEnumRef`; none for a ref built any other way. */
@@ -50,7 +82,7 @@ export function inlineEnumExternalDocsOf(ref: EnumRef): ExternalDocs | undefined
   return inlineEnumMeta.get(ref)?.externalDocs;
 }
 
-/** Give `to`, a copy of `from`, the members and link recorded for `from`: a copy made any other way is a bare name to every pass that reads them (`cloneTypeRef`). */
+/** Give `to`, a copy of `from`, the members, description and link recorded for `from`: a copy made any other way is a bare name to every pass that reads them (`cloneTypeRef`). */
 export function copyInlineEnumMeta(from: EnumRef, to: EnumRef): void {
   const meta = inlineEnumMeta.get(from);
   if (meta) inlineEnumMeta.set(to, { ...meta, members: [...meta.members] });
@@ -96,8 +128,8 @@ export function enumValuesOf(ref: EnumRef): EnumValue[] {
  * the same values are shared under one name only when they also deprecate
  * the same ones, so a field whose schema does not deprecate a value never
  * resolves to an enum that marks it. `description` is documentation, not
- * shape, and does not count: the first lifted copy's text wins, as its link
- * does.
+ * shape, and does not count — a value's, and the enum's own alike: the first
+ * lifted copy's text wins, as its link does.
  */
 export function enumValueShapeKey(value: Pick<EnumValue, 'value' | 'deprecated'>): string {
   return JSON.stringify([value.value, value.deprecated === true]);
