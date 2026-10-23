@@ -112,7 +112,7 @@ export {
   resolveServerUrl,
   serverListsEqual,
   serverUrlPlaceholders,
-  serversBeyondDefault,
+  serversOrDefault,
 } from './ir/server-url.js';
 
 // Parameter identity: location + name, a header's name case-folded

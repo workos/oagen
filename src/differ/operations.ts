@@ -18,9 +18,12 @@ import {
   mediaTypeBodies,
   pairByName,
   pairMediaTypeBodies,
+  reparameterizedBodies,
+  respelling,
   retypedBodies,
   type MediaTypeBody,
 } from './media-types.js';
+import type { DocumentShapes } from './shapes.js';
 import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange, ResponseHeaderChange } from './types.js';
 import { locatedParams, paramKey } from './params.js';
 import {
@@ -59,6 +62,7 @@ export function diffOperations(
   newOps: Operation[],
   documentServers?: DocumentServers,
   documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
 ): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldOps.map((o) => [o.name, o]));
@@ -102,14 +106,15 @@ export function diffOperations(
     const requestBodyRequiredChanged =
       bothCarryBody && (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
     // The wire format the SDK serializes the body as, read through the
-    // function `diffWebhooks` reads a payload's encoding with.
-    const encoding = bothCarryBody ? requestBodyEncodingShift(oldOp, newOp) : undefined;
+    // function `diffWebhooks` reads a payload's encoding with, which
+    // compares only while both sides carry a body, likewise.
+    const encoding = requestBodyEncodingShift(oldOp, newOp);
     const requestBodyEncodingChanged = encoding !== undefined;
     // The media types callers may send the body as, only while both sides
     // declare a body, likewise; judged from the caller's side, which sends
     // it. A body moving from JSON to a form media type sets this beside the
     // encoding flag: the JSON media type is removed and the form one added.
-    const requestBodyContentTypeChange = diffRequestBodyContentTypes(oldOp, newOp, 'caller');
+    const requestBodyContentTypeChange = diffRequestBodyContentTypes(oldOp, newOp, 'caller', shapes);
     const requestBodyContentTypesChanged = requestBodyContentTypeChange !== undefined;
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
@@ -130,7 +135,7 @@ export function diffOperations(
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
-    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp);
+    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp, shapes);
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
     // The headers each response entry declares, which an SDK may expose as
     // typed accessors on a response wrapper (#296).
@@ -219,15 +224,17 @@ export function diffOperations(
       const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
       // requestBodyEncoding: an SDK built for the old spec keeps sending the
       // representation that spec's body was read from. Breaking when the new
-      // spec no longer accepts it — that media type gone, or its type
+      // spec no longer accepts it — that media type gone, or its shape
       // changed; additive when it still does, as when a media type the
       // parser prefers is added beside it (`application/json` beside a kept
       // `application/x-www-form-urlencoded`). A body without media-type
       // lists reads as breaking.
-      const requestBodyEncodingBreaking = requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp);
+      const requestBodyEncodingBreaking =
+        requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp, 'caller', shapes);
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
-      // that changed shape, breaks them; one they can newly ask for does not.
+      // that changed shape, breaks them; one they can newly ask for, or one
+      // that only changed a parameter, does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
       // A header the SDK exposed that is gone, retyped or no longer always
       // sent breaks the code that read it; one added, respelled, deprecated
@@ -586,24 +593,30 @@ function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseH
 
 /**
  * Per response entry both specs have, the media types the new spec added,
- * removed, or retyped. Media types are compared by essence
+ * removed, retyped or reparameterized. Media types are compared by essence
  * (`pairMediaTypeBodies`), as the parser types them, so a key that only
- * changed case, whitespace or parameters is the same media type, and each is
- * reported as written in the spec that declares it. A retype is left out
- * only when another comparison reports that very body: the entry's own body
- * on both sides, for two primaries (`responseChanged`) or two errors of one
- * code (`errorsChanged`) — never for a primary paired with an alternate 2xx.
+ * changed case, whitespace or `charset` is the same media type, and each is
+ * reported as written in the spec that declares it; a pair whose other
+ * parameters differ is reparameterized, which is additive. A retype is a
+ * body whose shape changed (`retypedBodies`), left out only when another
+ * comparison reports that very body: the entry's own body on both sides,
+ * for two primaries (`responseChanged`) or two errors of one code
+ * (`errorsChanged`) — never for a primary paired with an alternate 2xx.
  * Entries pair by status code (`pairContentEntries`), a lone 2xx by its
  * `responseStatusCode`; two lone primaries of different codes pair with each
  * other, and only a lone 2xx that carries no code (a hand-built IR) pairs by
- * the media types it offers, else with the other spec's primary. An error only one spec has is
- * not a media-type change — a code that came or went is the errors diff's
- * business — and neither is a 2xx the new spec adds, but a 2xx the old spec
- * declared and the new does not has no other diff to report it, so its
- * media types are reported as removed: the formats callers could ask for
- * under that code are gone.
+ * the media types it offers, else with the other spec's primary. An error
+ * only one spec has is not a media-type change — a code that came or went
+ * is the errors diff's business — and neither is a 2xx the new spec adds,
+ * but a 2xx the old spec declared and the new does not has no other diff to
+ * report it, so its media types are reported as removed: the formats
+ * callers could ask for under that code are gone.
  */
-function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
+function diffResponseContentTypes(
+  oldOp: Operation,
+  newOp: Operation,
+  shapes?: DocumentShapes,
+): ResponseContentTypesChange[] {
   const oldEntries = contentEntries(oldOp);
   const newEntries = contentEntries(newOp);
   const pairs = pairContentEntries(oldEntries, newEntries);
@@ -613,15 +626,17 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
     const old = pairs.get(entry);
     if (!old) continue;
     paired.add(old);
-    const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies);
-    const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere);
-    if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
+    const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies, shapes);
+    const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
+    const reparameterized = reparameterizedBodies(bodies);
+    if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) continue;
     changes.push({
       ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
       ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
       added: added.map((body) => body.mediaType),
       removed: removed.map((body) => body.mediaType),
       retyped: retyped.map(([, after]) => after.mediaType),
+      reparameterized: reparameterized.map(respelling),
       classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
     });
   }
@@ -634,6 +649,7 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
       added: [],
       removed: old.bodies.map((body) => body.mediaType),
       retyped: [],
+      reparameterized: [],
       classification: 'breaking',
     });
   }

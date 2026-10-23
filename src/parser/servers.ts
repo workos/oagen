@@ -31,7 +31,7 @@ export interface ExtractedServers {
  * — while one that declares none has `servers` absent and `baseUrl: ''`. The
  * two mean the same thing, and everywhere server lists are compared they are
  * read as one: `isDefaultServerList` for `Operation.servers`,
- * `serversBeyondDefault` and `baseUrlBeyondDefault` in the differ, all in
+ * `serversOrDefault` and `baseUrlBeyondDefault` in the differ, all in
  * `ir/server-url.ts` (#291).
  */
 export function extractServers(rawServers: unknown): ExtractedServers {
