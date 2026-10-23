@@ -628,10 +628,7 @@ export function extractOperations(
   // repoints every response, header and array that shares it along with
   // the site's own references.
   inlineModelBundles.push(...deferredTypes.bundles);
-  attachSharedRefs(
-    inlineModelBundles,
-    new Set(registeredModels.map((model) => model.name)),
-  );
+  attachSharedRefs(inlineModelBundles, new Set(registeredModels.map((model) => model.name)));
 
   // The API root each operation's path sits under, for every step below: none
   // for a tagged operation, whose service is its tag.
