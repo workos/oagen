@@ -711,7 +711,7 @@ describe('a response header declared with `content`', () => {
   });
 
   it('lifts an inline enum declared under a header content entry like one under a parameter', () => {
-    const { services, inlineModels } = extractOperations(
+    const { services, inlineModels, ownedErrorBodies } = extractOperations(
       document({
         '/documents': getOp(
           'listDocuments',
@@ -725,7 +725,7 @@ describe('a response header declared with `content`', () => {
       }).paths as never,
     );
     const enums: Enum[] = [];
-    collectInlineEnumsFromOperations(services, enums, inlineModels);
+    collectInlineEnumsFromOperations(services, enums, ownedErrorBodies, inlineModels);
 
     const [op] = services[0].operations;
     expect(op.queryParams[0].type).toEqual({ kind: 'enum', name: 'DocumentsPolicy', values: ['calm', 'busy'] });

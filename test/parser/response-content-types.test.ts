@@ -687,7 +687,8 @@ describe('response content types', () => {
       ];
       const enums: Enum[] = [];
 
-      collectInlineEnumsFromOperations(services, enums);
+      // Built by hand, with no error body, so the operations own none.
+      collectInlineEnumsFromOperations(services, enums, new Set());
 
       expect(enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
         ['Mode', ['a', 'b']],
