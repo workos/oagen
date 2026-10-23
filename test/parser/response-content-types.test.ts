@@ -687,7 +687,7 @@ describe('response content types', () => {
       ];
       const enums: Enum[] = [];
 
-      // Built by hand, with no error body, so the operations own none.
+      // Built by hand, with no component response, so no site is shared.
       collectInlineEnumsFromOperations(services, enums, new Set());
 
       expect(enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
@@ -2357,7 +2357,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       content: { 'application/json': { schema } },
     });
 
-    it('takes the models only it referenced with it, with the one warning (the issue repro)', async () => {
+    it('steps a 201 body of another shape to its status code, its nested models with it (the issue repro, #309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2365,20 +2365,23 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }']);
+      // The 201 declared `{ owner }`, not `{ id }`: it keeps that shape under
+      // `CreatePetResponse201`, with `CreatePetResponse201Owner` moved with it,
+      // instead of resolving to the 200's model.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { owner }',
+        'CreatePetResponse201Owner { id }',
+      ]);
       expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
         'CreatePetResponse',
-        'CreatePetResponse',
+        'CreatePetResponse201',
       ]);
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining(
-          'Inline model "CreatePetResponse" from the 201 response has different fields than the 200 response\'s',
-        ),
-      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
-    it('keeps a nested model the primary body holds under the same name, and compares the replaced copy of it', async () => {
+    it('steps a 201 body whose nested model differs from the one the primary holds under that name (#309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2389,18 +2392,24 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { owner }', 'CreatePetResponseOwner { id }']);
-      // Both roots read `owner` as the model named `CreatePetResponseOwner`, so their shapes agree and the 201's
-      // root is shared silently; its `owner` is reached through that root, so its copy is compared and warned about.
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining(
-          'Inline model "CreatePetResponseOwner" from the 201 response has different fields than the 200 response\'s',
-        ),
+      // Both roots read `owner` as `CreatePetResponseOwner`, so the roots alone
+      // would share; the 201's `owner` differs, so the whole 201 body steps —
+      // root and nested model together — and each status code keeps its shape.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { owner }',
+        'CreatePetResponseOwner { id }',
+        'CreatePetResponse201 { owner }',
+        'CreatePetResponse201Owner { name }',
       ]);
+      expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+        'CreatePetResponse',
+        'CreatePetResponse201',
+      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
-    it('shares a nested model the replaced copy and the primary hold alike, warning for the root only', async () => {
+    it('shares a nested model the stepped copy and the primary hold alike, stepping the root only (#309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2411,10 +2420,18 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { owner }', 'CreatePetResponseOwner { id }']);
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining('Inline model "CreatePetResponse" from the 201 response'),
+      // The 201's root differs (`extra`) and steps; its `owner` is the shape
+      // the 200 already holds under `CreatePetResponseOwner`, so it is shared.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { owner }',
+        'CreatePetResponseOwner { id }',
+        'CreatePetResponse201 { owner, extra }',
       ]);
+      expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+        'CreatePetResponse',
+        'CreatePetResponse201',
+      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
@@ -2434,24 +2451,25 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      // The first variant takes the bare `CreatePetResponse` and is replaced by the 200's, its `owner` with it;
-      // the second variant and the item model under it are reached from the 201 entry's union and kept.
+      // The first variant takes the bare `CreatePetResponse` with another shape than the 200's, so the
+      // whole 201 body steps to its status code (#309): both variants, the `owner` and the item model under
+      // `tags` move together, and the union references the moved names.
       expect(modelsOf(spec)).toEqual([
         'CreatePetResponse { id }',
-        'CreatePetResponseWithTags { tags }',
-        'CreatePetResponseWithTagsTags { label }',
+        'CreatePetResponse201 { owner }',
+        'CreatePetResponse201Owner { id }',
+        'CreatePetResponse201WithTags { tags }',
+        'CreatePetResponse201WithTagsTags { label }',
       ]);
       expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
         kind: 'union',
         compositionKind: 'oneOf',
         variants: [
-          { kind: 'model', name: 'CreatePetResponse' },
-          { kind: 'model', name: 'CreatePetResponseWithTags' },
+          { kind: 'model', name: 'CreatePetResponse201' },
+          { kind: 'model', name: 'CreatePetResponse201WithTags' },
         ],
       });
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining('Inline model "CreatePetResponse" from the 201 response'),
-      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
