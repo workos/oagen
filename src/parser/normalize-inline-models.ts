@@ -273,9 +273,12 @@ function keepLargestByName(models: Model[]): Model[] {
  *   (`ownerSharesWith`: `modelAdmits` — the same fields and types, the owner
  *   no stricter on requiredness or nullability, everything else identical —
  *   or an identical shape for a copy the SDK sends): the copy is dropped and
- *   its references, which already carry the name, resolve to the owner. An
- *   owner is never replaced, whatever the copy's field count, so every
- *   `$ref` to a component keeps the shape the document declares;
+ *   its references, which already carry the name, resolve to the owner, and
+ *   its site joins the owner's (`foldOnto`), so a later rename of an owner
+ *   that has a site — a field model, a lifted twin — repoints them with the
+ *   owner's own. An owner is never replaced, whatever the copy's field
+ *   count, so every `$ref` to a component keeps the shape the document
+ *   declares;
  * - otherwise takes a name of its own (`renameInlineCopy`), with a note. Two
  *   contenders of one name without an owner are left to the pass's own choice
  *   (`keepLargestByName`).
@@ -472,7 +475,7 @@ function settleSharedNames(
             `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
           );
         }
-        folded.set(copy, owner);
+        foldOnto(copy, owner, bundleOf, folded);
         continue;
       }
       if (!!copy.deprecated !== nameDeprecated) continue;
@@ -510,7 +513,7 @@ function settleSharedNames(
         console.warn(
           `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
         );
-        folded.set(copy, preferredDefinition(live));
+        foldOnto(copy, preferredDefinition(live), bundleOf, folded);
         continue;
       }
       disagreeing.push(copy);
@@ -555,7 +558,7 @@ function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, 
   naming.reserved.add(renamed);
   naming.minted?.add(renamed);
   copy.name = renamed;
-  repointSite(bundle, name, renamed);
+  repointSite(bundle, name, renamed, copy);
   return renamed;
 }
 
@@ -565,14 +568,58 @@ function renameInlineCopy(copy: Model, name: string, bundle: InlineModelBundle, 
  * then the references in the models minted beside it, which never include
  * what another site's field lent them — every reference kind alike, a
  * union's discriminator mapping following its variant
- * (`renameTypeRefModels`, `renameModelRefs`). A site that copies references
- * later is told (`InlineModelBundle.renamed`).
+ * (`renameTypeRefModels`, `renameModelRefs`); then, for `model` — the model
+ * of the site leaving `name` — the sites of the copies that folded onto it
+ * (`InlineModelBundle.carried`, read by the model's identity), whose
+ * references under `name` are references to it. A site that copies
+ * references later is told (`InlineModelBundle.renamed`).
  */
-function repointSite(bundle: InlineModelBundle, name: string, renamed: string): void {
+function repointSite(bundle: InlineModelBundle, name: string, renamed: string, model: Model): void {
   const renames = new Map([[name, renamed]]);
   for (const root of bundle.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
-  for (const model of bundle.models) renameModelRefs(model, renames, inlineRefAdmit(false));
+  for (const m of bundle.models) renameModelRefs(m, renames, inlineRefAdmit(false));
+  for (const entry of bundle.carried ?? []) {
+    if (entry.owner !== model) continue;
+    for (const root of entry.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
+    for (const m of entry.models) renameModelRefs(m, renames, inlineRefAdmit(false));
+  }
   bundle.renamed?.(name, renamed);
+}
+
+/**
+ * Fold `copy` onto `winner` — the definition that replaces it under the
+ * shared name: a component or a model the document declares, the live twin
+ * of a deprecated copy, or the leader of its cluster — and carry its site
+ * into the winner's (`InlineModelBundle.carried`), keyed to the winner. The
+ * copy's references name the winner from now on, so when the winner is
+ * renamed through its own site, the references in the copy's roots and in
+ * the models minted beside it that carry the winner's name are repointed
+ * with the winner's own (`repointSite`): a field model folded onto while an
+ * operation's enum of its name is not yet known still carries the
+ * operation's response with it when the field merge moves it off the
+ * enum's name. The carried site is read by the winner's identity, never by
+ * name: a rename of another model of the winner's site leaves it alone,
+ * since a model of the copy's site under that name is the copy's site's
+ * own, decided on its own (a parent decided after its children, say, which
+ * may keep the name the winner's site's model leaves). A site carried onto
+ * the copy earlier is carried on to the winner. A winner without a site — a
+ * component — is never renamed, so nothing is carried.
+ */
+function foldOnto(
+  copy: Model,
+  winner: Model,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+): void {
+  folded.set(copy, winner);
+  const site = bundleOf.get(copy);
+  const into = bundleOf.get(winner);
+  if (!site || !into || site === into) return;
+  const carried = (into.carried ??= []);
+  carried.push({ owner: winner, roots: site.roots, models: site.models.filter((m) => m !== copy) });
+  for (const entry of site.carried ?? []) {
+    if (entry.owner === copy) carried.push({ owner: winner, roots: entry.roots, models: entry.models });
+  }
 }
 
 /**
@@ -618,8 +665,8 @@ function renameClusters(
         leader = copy;
         continue;
       }
-      repointSite(bundle, name, renamed);
-      folded.set(copy, leader);
+      repointSite(bundle, name, renamed, copy);
+      foldOnto(copy, leader, bundleOf, folded);
     }
     if (renamed !== undefined) {
       const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
