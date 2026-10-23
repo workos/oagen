@@ -89,8 +89,16 @@ import { extractServerList } from './servers.js';
 import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { warnOnIgnoredCallbacks } from './callbacks.js';
+import { resolvePathItemRef } from './path-item-refs.js';
 
 export interface PathItem {
+  /**
+   * A reference to another Path Item, which OpenAPI 3.1 lets a `paths` entry
+   * be written as (`$ref: '#/components/pathItems/Pets'`). Resolved by
+   * `resolvePathItems` before anything else is read from the entry, so no
+   * item the passes of `extractOperations` read carries one.
+   */
+  $ref?: string;
   /**
    * The Path Item's own `summary`, which OpenAPI applies to every operation
    * on it; read for an operation that declares none (`resolveOperationDocs`).
@@ -371,6 +379,33 @@ export interface ResponseObject {
 
 export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
+/**
+ * The `paths` map with every entry resolved to the Path Item it denotes —
+ * the entry itself, or the `components/pathItems` item its `$ref` leads to
+ * (OpenAPI 3.1) — in document order, through `resolvePathItemRef`, the
+ * resolver a `webhooks` entry goes through too. Resolved once, before any
+ * pass reads the map, so the model-name reservation
+ * (`resolvePathModelBaseNames`), the API root (`documentApiRoot`) and the
+ * operation loop all see the same items, and a referenced item's
+ * operations, `parameters`, `servers`, `summary` and `description` are read
+ * exactly as an inline item's. An entry the resolver rejects — not an
+ * object, a non-string `$ref`, a ref outside `components/pathItems`, a
+ * dangling ref, a cycle — is warned about once, naming the path, and left
+ * out. Two paths that `$ref` one entry map to one object, read once per
+ * path.
+ */
+function resolvePathItems(
+  paths: Record<string, PathItem>,
+  componentPathItems: Record<string, Record<string, unknown>> | undefined,
+): Record<string, PathItem> {
+  const resolved: Record<string, PathItem> = {};
+  for (const [path, raw] of Object.entries(paths)) {
+    const pathItem = resolvePathItemRef(raw, componentPathItems, { kind: 'path', key: path });
+    if (pathItem) resolved[path] = pathItem as PathItem;
+  }
+  return resolved;
+}
+
 export interface OperationExtractionResult {
   services: Service[];
   inlineModels: Model[];
@@ -408,8 +443,14 @@ export function extractOperations(
   operationHints?: Record<string, OperationHint>,
   /** The component enums, whose names no deferred model may take (`reserveEnumNamesInPlay`). */
   componentEnums?: readonly Enum[],
+  componentPathItems?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
+
+  // Every pass below reads the resolved map: each entry as itself, or as the
+  // `components/pathItems` item its `$ref` leads to, with an entry that
+  // resolves to nothing left out after one warning (see resolvePathItems).
+  const resolvedPaths = resolvePathItems(paths, componentPathItems);
 
   // OAS 3.0 ignores properties beside a `$ref`; 3.1 lets a sibling
   // `description` override the referenced response's. Unknown is read as 3.1.
@@ -430,7 +471,7 @@ export function extractOperations(
     [...componentResponseNaming].map(([componentName, naming]) => [componentName, naming.name]),
   );
   const pathModelBaseNames = resolvePathModelBaseNames(
-    paths,
+    resolvedPaths,
     componentModels,
     componentRequestBodies,
     componentResponseNaming,
@@ -439,7 +480,7 @@ export function extractOperations(
   // services apart no better than nothing, so untagged operations skip it
   // when their service and fallback name are taken from the path (see
   // documentApiRoot). Tagged operations are named exactly as before.
-  const apiRoot = documentApiRoot(paths);
+  const apiRoot = documentApiRoot(resolvedPaths);
 
   const serviceMap = new Map<string, Operation[]>();
   const inlineModels: Model[] = [];
@@ -467,7 +508,7 @@ export function extractOperations(
   const operationOf = new Map<Model, string>();
   const qualifierOf = new Map<Operation, string>();
 
-  for (const [path, pathItem] of Object.entries(paths)) {
+  for (const [path, pathItem] of Object.entries(resolvedPaths)) {
     const pathLevelParams = pathItem.parameters ?? [];
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,
