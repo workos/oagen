@@ -154,12 +154,34 @@ interface ExampleObject {
   $ref?: string;
 }
 
-export interface ParameterObject {
+/**
+ * The Media Type Object a Parameter Object's or Header Object's `content`
+ * map holds under a media type: the schema that types the value and the
+ * examples beside it. `encoding` is not read.
+ */
+export interface ParameterMediaTypeObject {
+  schema?: SchemaObject;
+  example?: unknown;
+  /** Media-type-level examples: a map of Example Objects, as the parameter's own `examples` is. */
+  examples?: Record<string, ExampleObject>;
+}
+
+/**
+ * What a Parameter Object or Header Object types its value with: a
+ * `schema`, or a `content` map in its place — per OAS one or the other,
+ * never both, and the map holds one entry. `parameterTyping` resolves the
+ * schema either way.
+ */
+export interface SchemaOrContent {
+  schema?: SchemaObject;
+  content?: Record<string, ParameterMediaTypeObject>;
+}
+
+export interface ParameterObject extends SchemaOrContent {
   name: string;
   in: 'path' | 'query' | 'header' | 'cookie';
   required?: boolean;
   description?: string;
-  schema?: SchemaObject;
   deprecated?: boolean;
   example?: unknown;
   /** Parameter-level examples: a map of Example Objects, not a JSON Schema list. */
@@ -271,14 +293,14 @@ export function resolveRequestBodyRef(
 
 /**
  * A Header Object as it appears in a Response Object's `headers` map. Per OAS
- * it carries either `schema` or a single-entry `content` map, never both.
+ * it carries either `schema` or a single-entry `content` map, never both;
+ * the schema that types it is resolved as a parameter's is
+ * (`parameterTyping`).
  */
-interface HeaderObject {
+interface HeaderObject extends SchemaOrContent {
   description?: string;
   required?: boolean;
   deprecated?: boolean;
-  schema?: SchemaObject;
-  content?: Record<string, { schema?: SchemaObject }>;
 }
 
 /**
@@ -2010,6 +2032,14 @@ function buildOperation(
   const allParams = [...paramsByIdentity.values()];
 
   const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key');
+  // Reported here, once per parameter the operation types: `extractParams`
+  // runs per location, and the passes that re-read a parameter's schema
+  // stay silent. The idempotency header is not typed (see `extract` below),
+  // so a `content` map on it is not reported.
+  for (const param of allParams) {
+    if (param.in === 'header' && foldHeaderName(param.name) === 'idempotency-key') continue;
+    warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${opLabel}`);
+  }
 
   // A parameter the spec declares both as `in: query` and as a request-body
   // property is one value with two wire locations. On a body-carrying method
@@ -2102,10 +2132,13 @@ function buildOperation(
   // Set exactly when a body is, so the two fields can be read together.
   const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
 
-  // The page parameter's first value is read from its schema as written, so a
+  // The page parameter's first value is read from its schema as written —
+  // `schema`, else the picked `content` entry's (`parameterTyping`) — so a
   // `default`/`minimum` behind `allOf: [{ $ref }]` or a nullable wrapper —
   // which the IR parameter's own `default` does not carry — still counts.
-  const querySchemas = new Map(wireParams.filter((p) => p.in === 'query').map((p) => [p.name, p.schema]));
+  const querySchemas = new Map(
+    wireParams.filter((p) => p.in === 'query').map((p) => [p.name, parameterSchema(p)] as const),
+  );
   const pageStartOf = (param: Parameter | undefined): number =>
     derivePageStart(param, param && querySchemas.get(param.name), componentSchemas);
 
@@ -2397,6 +2430,112 @@ export function extractTags(tags: unknown): string[] | undefined {
   return kept.length > 0 ? kept : undefined;
 }
 
+/**
+ * The media types a parameter's or response header's `content` map is read
+ * from, in the order the pick tries them (`selectParameterContent`). Each is
+ * matched by essence — `type/subtype` with parameters stripped and case
+ * folded (`mediaTypeEssence`), so `application/json; charset=utf-8` and
+ * `APPLICATION/JSON` read as `application/json` — and a `+json` media type
+ * is JSON. A JSON entry is read only when it declares a schema; a
+ * `text/plain` entry is read with or without one, a text value the document
+ * does not describe being a string. Any other media type is not read.
+ */
+const PARAMETER_CONTENT_MEDIA_TYPES: ReadonlyArray<{
+  matches: (essence: string) => boolean;
+  schemaRequired: boolean;
+}> = [
+  { matches: (essence) => essence === 'application/json', schemaRequired: true },
+  { matches: (essence) => essence.endsWith('+json'), schemaRequired: true },
+  { matches: (essence) => essence === 'text/plain', schemaRequired: false },
+];
+
+/** The `content` entry a parameter or response header is read from: the key as written and its Media Type Object. */
+export interface SelectedParameterContent {
+  /** The `content` key the entry was read from, exactly as written (`application/json; charset=utf-8`). */
+  contentType: string;
+  media: ParameterMediaTypeObject;
+}
+
+/**
+ * Pick the `content` entry a parameter or response header is typed from, by
+ * media type essence in the fixed order of `PARAMETER_CONTENT_MEDIA_TYPES`:
+ * `application/json`, then a `+json` media type — each only with a schema —
+ * then `text/plain`. Within one tier the first matching key in document
+ * order wins. OAS allows the map one entry, so the order decides only for a
+ * document that declares more. `undefined` when there is no map, or none of
+ * its media types is read; `warnUnreadParameterContent` reports the latter.
+ */
+export function selectParameterContent(
+  content: Record<string, ParameterMediaTypeObject> | undefined,
+): SelectedParameterContent | undefined {
+  if (!content) return undefined;
+  const entries = Object.entries(content);
+  for (const { matches, schemaRequired } of PARAMETER_CONTENT_MEDIA_TYPES) {
+    const match = entries.find(
+      ([contentType, media]) => matches(mediaTypeEssence(contentType)) && (!schemaRequired || media?.schema),
+    );
+    if (match) return { contentType: match[0], media: match[1] ?? {} };
+  }
+  return undefined;
+}
+
+/** What types a parameter or response header: its schema, and the Media Type Object the schema was read from under `content`. */
+export interface ParameterTyping {
+  /** Absent when the declaration types nothing: the value is a string. */
+  schema?: SchemaObject;
+  /** The picked `content` entry, only when the declaration has no `schema` and the map is read. */
+  media?: ParameterMediaTypeObject;
+}
+
+/**
+ * The schema that types a parameter or response header: the declaration's
+ * `schema` when it has one, else the schema of the `content` entry
+ * `selectParameterContent` picks, with that entry's Media Type Object
+ * beside it for the examples it may carry. `schema` is absent — and the
+ * value a string — when the declaration has neither, when the picked
+ * `text/plain` entry declares no schema, or when nothing in the map is read.
+ * A `schema` beside a `content` map wins and the map is not consulted.
+ * Every pass that asks what a parameter's schema is reads it through this
+ * one resolution: the typing (`extractParams`), the model deferral
+ * (`deferParameterModels`), the page-start read, a webhook's parameter mint
+ * and a response header's typing (`extractResponseHeaders`) — so a
+ * parameter declared either way is typed, and mints, by one rule.
+ */
+export function parameterTyping(declaration: SchemaOrContent): ParameterTyping {
+  if (declaration.schema) return { schema: declaration.schema };
+  const picked = selectParameterContent(declaration.content);
+  return picked ? { schema: picked.media.schema, media: picked.media } : {};
+}
+
+/** The schema `parameterTyping` resolves, alone. */
+export function parameterSchema(declaration: SchemaOrContent): SchemaObject | undefined {
+  return parameterTyping(declaration).schema;
+}
+
+/**
+ * Warn that a parameter's or response header's `content` map is not read:
+ * it declares no `schema`, at least one media type, and
+ * `selectParameterContent` picks none, so the value is typed as a string.
+ * Called once per site — for each operation parameter where the operation's
+ * parameters are resolved (`buildOperation`), for each webhook parameter
+ * where the webhook's entry is built (the mint itself runs twice), and for
+ * each response header as it is typed — while `extractParams` and the
+ * passes that re-read the schema stay silent. An empty map declares nothing
+ * and is not reported; a map beside a `schema` is not consulted and not
+ * reported either.
+ */
+export function warnUnreadParameterContent(declaration: SchemaOrContent, subject: string): void {
+  if (declaration.schema) return;
+  const declared = Object.keys(declaration.content ?? {});
+  if (declared.length === 0 || selectParameterContent(declaration.content)) return;
+  console.warn(
+    `[oagen] Warning: ${subject} is typed as a string: none of its content media types (${declared.join(', ')}) ` +
+      `is read. A parameter or response header declared with content is read from application/json or a +json ` +
+      `media type when the entry declares a schema, and from text/plain with or without one, parameters and ` +
+      `case aside.`,
+  );
+}
+
 export function extractParams(
   params: ParameterObject[],
   location: 'path' | 'query' | 'header' | 'cookie',
@@ -2408,46 +2547,53 @@ export function extractParams(
   return params
     .filter((p) => p.in === location)
     .map((p) => {
-      const refTarget = resolveComponentSchemaRef(p.schema, componentSchemas);
-      // Each level is resolved on its own — the parameter's declaration, its
-      // inline schema, then the component the schema refs — so a schema-level
-      // `example` can't mask the parameter's own `examples` map, and an
-      // explicit `null` at any level is kept rather than fallen through.
+      // The schema that types the parameter — `schema`, else the picked
+      // `content` entry's (`parameterTyping`) — and that entry's Media Type
+      // Object for the examples it may carry. Every read below goes through
+      // `schema`, so a parameter declared either way is typed by one rule.
+      const { schema, media } = parameterTyping(p);
+      const refTarget = resolveComponentSchemaRef(schema, componentSchemas);
+      const exampleContext = `parameter "${p.name}" in ${opLabel ?? location}`;
+      // Each level is resolved on its own — the parameter's declaration, the
+      // Media Type Object its schema was read from (when it was), the schema,
+      // then the component the schema refs — so a schema-level `example`
+      // can't mask the parameter's own `examples` map, and an explicit `null`
+      // at any level is kept rather than fallen through.
       const { example, examples } = resolveExamples([
-        {
-          example: p.example,
-          examples: exampleObjectValues(
-            p.examples,
-            componentExamples,
-            `parameter "${p.name}" in ${opLabel ?? location}`,
-          ),
-        },
-        { example: p.schema?.example, examples: nonEmptyExamples(p.schema?.examples) },
+        { example: p.example, examples: exampleObjectValues(p.examples, componentExamples, exampleContext) },
+        ...(media
+          ? [
+              {
+                example: media.example,
+                examples: exampleObjectValues(media.examples, componentExamples, exampleContext),
+              },
+            ]
+          : []),
+        { example: schema?.example, examples: nonEmptyExamples(schema?.examples) },
         { example: refTarget?.example, examples: nonEmptyExamples(refTarget?.examples) },
       ]);
       // Like default/example, fall back per value: the `$ref` target's keywords
       // sit under the parameter's own, so `{ $ref: Limit, minimum: 5 }` narrows
       // one bound without discarding the target's others. The alias also becomes
       // a fieldless model, but a parameter should be readable on its own.
-      const own = p.schema ? extractConstraints(p.schema) : undefined;
+      const own = schema ? extractConstraints(schema) : undefined;
       const inherited = refTarget ? extractConstraints(refTarget) : undefined;
       const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
       // The schema's link, else the `$ref` target's — the same fallback chain
       // `description` and `deprecated` follow, with an unusable entry at one
       // level falling through to the next as an empty description does. A
       // Parameter Object declares no `externalDocs` of its own.
-      const externalDocs = readExternalDocs(p.schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
+      const externalDocs = readExternalDocs(schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
       return {
         name: p.name,
-        type: p.schema
-          ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+        type: schema
+          ? schemaToTypeRef(schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
-        description: firstDescription(p.description, p.schema?.description, refTarget?.description),
-        deprecated:
-          p.deprecated === true || p.schema?.deprecated === true || refTarget?.deprecated === true || undefined,
+        description: firstDescription(p.description, schema?.description, refTarget?.description),
+        deprecated: p.deprecated === true || schema?.deprecated === true || refTarget?.deprecated === true || undefined,
         ...(externalDocs ? { externalDocs } : {}),
-        default: p.schema?.default ?? refTarget?.default,
+        default: schema?.default ?? refTarget?.default,
         example,
         ...(examples ? { examples } : {}),
         style: p.style as Parameter['style'],
@@ -3542,10 +3688,13 @@ function deferParameterModels(
   const parentName = ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined;
   raw.forEach((param, index) => {
     const target = typed[index];
-    if (!param.schema || !target) return;
+    // The schema `extractParams` typed the parameter from: `schema`, else the
+    // picked `content` entry's (`parameterTyping`).
+    const schema = parameterSchema(param);
+    if (!schema || !target) return;
     const trial: Model[] = [];
     extractInlineModelsFromProperties(
-      { properties: { [param.name]: param.schema } },
+      { properties: { [param.name]: schema } },
       trial,
       parentName,
       ctx.componentSchemas,
@@ -3553,7 +3702,7 @@ function deferParameterModels(
     if (trial.length === 0) return;
     ctx.deferred.push({
       kind: 'param',
-      schema: param.schema,
+      schema,
       name: param.name,
       statusCode: location,
       operationQualifier: ctx.operationQualifier,
@@ -3612,10 +3761,13 @@ function extractResponseHeaders(
     const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel);
     if (!header) continue;
 
-    // A Header Object declares `schema` or a single-entry `content` map; with
-    // `content`, the first (only) media type's schema types the header.
-    const contentSchema = header.content ? Object.values(header.content)[0]?.schema : undefined;
-    const schema = header.schema ?? contentSchema;
+    // A Header Object declares `schema` or a single-entry `content` map; the
+    // schema that types the header is resolved as a parameter's is
+    // (`parameterTyping`): `schema`, else the picked `content` entry's. A map
+    // none of whose media types is read leaves the header a string, with a
+    // warning — once, here, as the header is typed.
+    const schema = parameterSchema(header);
+    warnUnreadParameterContent(header, `Response header "${name}" (${statusCode}) in ${operationLabel}`);
     const entry: ResponseHeader = {
       name,
       type: { kind: 'primitive', type: 'string' },

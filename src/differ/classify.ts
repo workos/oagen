@@ -1,5 +1,5 @@
 import type { ModelDirection } from './direction.js';
-import type { FieldChange, ParamChange, RequestBodyEncoding } from './types.js';
+import type { FieldChange, ParamChange, RequestBodyEncoding, ResponseHeaderChange } from './types.js';
 
 /**
  * Whether an IR node is deprecated. The parser only ever writes `true` and
@@ -56,6 +56,8 @@ export interface ParameterNameShift {
  * requiredness, hence additive at the IR layer — an emitter that derives an
  * identifier from the name as written may still rename it, which its own
  * compat check reports, as it does for `param-format-changed` (#295).
+ * A response header pairs on `foldHeaderName` the same way, so its
+ * respelling is read through this function too (`header-name-changed`).
  */
 export function parameterNameShift(
   oldParam: { name: string },
@@ -183,6 +185,53 @@ export function classifyFieldChange(
       // same type and requiredness, whichever way the flag went. The caller
       // attaches `details` saying which way (see `deprecationDetails`).
       return { kind, fieldName, classification: 'additive' };
+  }
+}
+
+/**
+ * Classify a change to a header a response declares, from the reader's side:
+ * the SDK reads the header off the response and never sends it, so the rules
+ * are the ones `diffWebhookParams` applies to a webhook's parameters, not
+ * `classifyParamChange`'s request-side ones.
+ *
+ * - added: additive, required or not — the server simply starts sending it.
+ * - removed: breaking — an accessor the SDK exposed has nothing to read.
+ * - type changed: breaking; format-only changes are additive, as elsewhere.
+ * - optional → required: additive (now always present);
+ *   required → optional: breaking (code that assumed presence breaks).
+ * - name respelled (case only, since that is all a pair can differ by):
+ *   additive — an emitter may derive an identifier from the name as written.
+ * - deprecated flipped: additive either way — the header is still sent with
+ *   the same type and requiredness.
+ *
+ * `isRequired` is read for `header-required-changed` only: the new side's
+ * flag. The caller attaches the `details` and sides the kind carries.
+ */
+export function classifyResponseHeaderChange(
+  kind: ResponseHeaderChange['kind'],
+  headerName: string,
+  isRequired?: boolean,
+): ResponseHeaderChange {
+  switch (kind) {
+    case 'header-added':
+      return { kind, headerName, classification: 'additive' };
+    case 'header-removed':
+      return { kind, headerName, classification: 'breaking' };
+    case 'header-type-changed':
+      return { kind, headerName, classification: 'breaking' };
+    case 'header-format-changed':
+      return { kind, headerName, classification: 'additive' };
+    case 'header-required-changed':
+      return {
+        kind,
+        headerName,
+        classification: isRequired ? 'additive' : 'breaking',
+        details: isRequired ? 'optional → required' : 'required → optional',
+      };
+    case 'header-name-changed':
+      return { kind, headerName, classification: 'additive' };
+    case 'header-deprecated-changed':
+      return { kind, headerName, classification: 'additive' };
   }
 }
 
