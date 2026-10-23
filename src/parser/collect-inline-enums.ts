@@ -2,6 +2,7 @@ import type { Enum, EnumValue, Model, Operation, ResponseHeader, Service, TypeRe
 import {
   walkTypeRef,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectModelRefs,
   collectWebhookTypeRefs,
@@ -19,8 +20,11 @@ import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
  * promoted (`…Status2`), collision-aware like the operation pass below and the
  * way header and webhook enums are, so the field never points at the other
  * values. A taken name with the same members — values and per-value
- * deprecation (`sameEnumShape`) — is shared. The distinct name is also never
- * one of `models`' (see `distinctEnumName`).
+ * deprecation (`sameEnumShape`) — is shared. A name a model owns is a clash
+ * too, and the distinct name is never one of `models`' (see
+ * `distinctEnumName`): a component field's enum named like a model
+ * (`Pet.kind` beside a `PetKind` object) is left on its ref by
+ * `extractSchemas` and promoted here as `PetKind2`.
  */
 export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): void {
   const enumNames = new Set(enums.map((e) => e.name));
@@ -35,9 +39,9 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
 /**
  * Collect inline enum definitions from operation parameters (query, path,
  * header, cookie), list-envelope companion fields, response headers, the
- * request body, every success body, error bodies, and secondary and fallback
- * response bodies, and promote them to top-level enums so emitters can
- * generate typed enum files.
+ * request body, every success body, error bodies, secondary and fallback
+ * response bodies, and secondary request bodies, and promote them to
+ * top-level enums so emitters can generate typed enum files.
  *
  * Every kind is collected collision-aware (`collectDistinctEnums`): a
  * parameter enum is named from the service and parameter name alone, so a
@@ -148,6 +152,13 @@ export function collectInlineEnumsFromOperations(
       for (const { type } of collectResponseBodyTypes(op)) {
         collectThroughModels(type, errorBodies.has(type) ? 'Body' : undefined);
       }
+      // A request body declared only for a secondary media type (`text/csv`
+      // next to `application/json`) is typed like one, with its name already
+      // operation-qualified (`ReplaceWidgetTextCsvRequest`), so its inline
+      // enums are promoted the same way.
+      for (const { type } of collectRequestBodyTypes(op)) {
+        collectThroughModels(type, undefined);
+      }
     }
   }
 }
@@ -204,9 +215,10 @@ function errorBodyTypes(op: Operation): ReadonlySet<TypeRef> {
  * Header lists to walk, each with the status-code qualifier that keeps a
  * colliding enum name apart. When `successResponses` exists the primary list
  * is the same array as its entry there, so the entries are walked with their
- * own codes instead of `responseHeaders`; a lone 2xx or 3xx response carries
- * no status code in the IR (`successResponses` is set only for more than one),
- * so its headers get no qualifier.
+ * own codes instead of `responseHeaders`; a lone 2xx or 3xx response is not
+ * listed in `successResponses` (set only for more than one), so its headers
+ * get no qualifier — its `responseStatusCode` is deliberately not used here,
+ * as qualifying by it would rename every enum such a header declares.
  */
 function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[]; qualifier?: string }> {
   const groups: Array<{ headers: ResponseHeader[]; qualifier?: string }> = [];
@@ -263,17 +275,16 @@ function requestAndSuccessBodies(op: Operation): Array<{ type: TypeRef; qualifie
  * named like the header, or a webhook parameter named like a component enum,
  * collides the same way. When the name is already taken by a different
  * member set — other values, or the same values with a different one
- * deprecated (`sameEnumShape`) — the ref is renamed to a distinct name
- * before it is promoted. A taken name with the same members is shared, as
- * before; the first lifted copy's value descriptions and link are the
- * enum's. A name no enum holds yet but a model does (`modelNames`) — a
- * parameter's object named like a parameter enum typed later in the
- * document (`PetsKind`), a component model named like the `kind` enum a
- * parameter model's field mints (`PetsOwnerKind`) — is renamed the same way,
- * so the IR never declares a model and an enum under one name. A name both
- * a component model and a component enum hold is the document's own clash:
- * an enum with the component enum's members shares it as it always has.
- * `modelNames` are also the names the distinct name must step around.
+ * deprecated (`sameEnumShape`) — or by a model, the ref is renamed to a
+ * distinct name before it is promoted: an enum and a model under one name
+ * reach an emitter as one public symbol, so the name is checked against the
+ * union of every model name (`modelNames`, every model of the document) and
+ * every enum name (`enums`) before any minted enum keeps it, on every path
+ * that promotes one — a field, a parameter, a response header, an error or
+ * secondary body, a webhook parameter or payload. A taken name with the same
+ * members is shared, as before; the first lifted copy's value descriptions
+ * and link are the enum's. A component enum declared under a component
+ * model's name is the document's own clash and is left as declared.
  */
 function collectDistinctEnums(
   ref: TypeRef,
@@ -287,8 +298,9 @@ function collectDistinctEnums(
       if (!ref.values) return;
       const values = enumValuesOf(ref);
       const existing = enums.find((e) => e.name === ref.name);
-      const taken = existing ? !sameEnumShape(existing.values, values) : modelNames.has(ref.name);
-      if (taken) {
+      const ownedByOtherMembers = existing !== undefined && !sameEnumShape(existing.values, values);
+      const ownedByModel = existing === undefined && modelNames.has(ref.name);
+      if (ownedByOtherMembers || ownedByModel) {
         ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
       }
       collectInlineEnumFromRef(ref, enums, enumNames);
@@ -303,15 +315,13 @@ function collectDistinctEnums(
  * (`DocumentsXPolicy429`), then numeric suffixes (`DocumentsXPolicy2`,
  * `DocumentsXPolicy3`, ...). Deterministic for a given spec, since it depends
  * only on declaration order. The collectors
- * run after every model is named, and the passes that mint models — the
- * deferred inline pass (`reserveEnumNamesInPlay` in operations.ts) and the
- * merge passes (`reservedTypeNames`) — mint against every enum name an
- * `EnumRef` carries, but not against the names chosen here, so this is the
- * side that steps around the other: a model a merge pass qualified to
- * `GetLegacyWidgetWidget2`, because a component enum owns
- * `GetLegacyWidgetWidget`, sends a query enum of that name with other
- * members on to `GetLegacyWidgetWidget3`, and the IR never declares a model
- * and an enum under one name.
+ * run after every model is named, and the merge passes mint against every
+ * enum name an `EnumRef` carries (`reservedTypeNames`) — but not against the
+ * names chosen here, so this is the side that steps around the other: a
+ * model a merge pass qualified to `GetLegacyWidgetWidget2`, because a
+ * component enum owns `GetLegacyWidgetWidget`, sends a query enum of that
+ * name with other members on to `GetLegacyWidgetWidget3`, and no enum
+ * promoted by a collector takes a model's name.
  */
 function distinctEnumName(
   base: string,

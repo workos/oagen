@@ -2066,6 +2066,288 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expectSound(spec, [PLAIN]);
   });
 
+  it('shares a body whose nested titled variant was renamed under its root, the 201 replaying the rename (Greptile)', async () => {
+    // A component `Circle` of another shape owns the title; the 200's body
+    // renames its nested `Circle` to `…ResponseCircle` (no stem reaches a
+    // variant below the top level). The identical 201 body replays that
+    // rename before comparing, so it shares every model rather than
+    // settling on `…Response201` with a `…Response201Circle` of its own.
+    const warn = silence();
+    const withShape = obj({ shape: shapes({ radius: str }) });
+    const spec = await parseDocument(
+      document(
+        createPet({
+          '200': withVendor(withShape),
+          '201': withVendor(withShape, 'created'),
+          '202': withVendor(withShape, 'accepted'),
+        }),
+        { Circle: obj({ other: str }) },
+      ),
+    );
+
+    // One copy, not three: the 201 and the 202 both replay the rename and share.
+    expect(modelsOf(spec).sort()).toEqual([
+      'Circle { other }',
+      `${PLAIN} { shape }`,
+      `${PLAIN}Circle { kind, radius }`,
+      'CreatePetResponse { id }',
+      'Square { kind, side }',
+    ]);
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN, PLAIN]);
+    expect(spec.models.find((m) => m.name === PLAIN)?.fields[0].type).toMatchObject({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: `${PLAIN}Circle` },
+        { kind: 'model', name: 'Square' },
+      ],
+    });
+    expectSound(spec, ['Circle']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  describe("a later body that cannot take an earlier site's rename (Greptile round 2)", () => {
+    it("parses when the 201's inline Circle matches component model Circle and the body also $refs it", async () => {
+      // The 200's inline `Circle` differs from the component, so its rename
+      // (`Circle` → `…ResponseCircle`) is recorded. Replaying it on the 201
+      // would rewrite the 201's `$ref` to the component too, so it is skipped:
+      // the 201's inline `Circle` shares the component, and its root — of
+      // another shape than the 200's — takes its own status code.
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withVendor(obj({ shape: shapes({ diameter: str }) })),
+            '201': withVendor(
+              obj({ shape: shapes({ radius: str }), original: { $ref: '#/components/schemas/Circle' } }),
+              'created',
+            ),
+          }),
+          { Circle: titled('Circle', 'circle', { radius: str }) },
+        ),
+      );
+
+      expect(modelsOf(spec).sort()).toEqual([
+        'Circle { kind, radius }',
+        `${PLAIN} { shape }`,
+        `${PLAIN}201 { shape, original }`,
+        `${PLAIN}Circle { kind, diameter }`,
+        'CreatePetResponse { id }',
+        'Square { kind, side }',
+      ]);
+      const later = spec.models.find((m) => m.name === `${PLAIN}201`)!;
+      expect(later.fields.map((f) => f.type)).toMatchObject([
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: 'Circle' },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+        { kind: 'model', name: 'Circle' },
+      ]);
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+        PLAIN,
+        `${PLAIN}201`,
+      ]);
+      expectSound(spec, ['Circle']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('renames and shares past a $ref to component enum Circle, which no model rename can reach', async () => {
+      // `Circle` is an enum component: the inline titled `Circle` clashes with
+      // the reserved enum name and is renamed under the root; the `$ref` beside
+      // it is typed as an enum reference, which the rename never touches, so
+      // neither the 200's rename nor the 201's replay of it is blocked.
+      const warn = silence();
+      const withRef = obj({ shape: shapes({ diameter: str }), kind_ref: { $ref: '#/components/schemas/Circle' } });
+      const spec = await parseDocument(
+        document(createPet({ '200': withVendor(withRef), '201': withVendor(withRef, 'created') }), {
+          Circle: { type: 'string', enum: ['a', 'b'] },
+        }),
+      );
+
+      expect(spec.enums.map((e) => e.name)).toEqual(['Circle']);
+      expect(modelsOf(spec).sort()).toEqual([
+        `${PLAIN} { shape, kind_ref }`,
+        `${PLAIN}Circle { kind, diameter }`,
+        'CreatePetResponse { id }',
+        'Square { kind, side }',
+      ]);
+      expect(spec.models.find((m) => m.name === PLAIN)?.fields.map((f) => f.type)).toMatchObject([
+        {
+          kind: 'union',
+          variants: [
+            { kind: 'model', name: `${PLAIN}Circle` },
+            { kind: 'model', name: 'Square' },
+          ],
+        },
+        { kind: 'enum', name: 'Circle' },
+      ]);
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN]);
+      expectSound(spec, []);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('what the author checked (review on d40a45e)', () => {
+    it('keeps a deprecated 201 body apart from the identical live 200 body', async () => {
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withVendor(obj({ name: str })),
+            '201': withVendor(obj({ name: str }, { deprecated: true }), 'created'),
+          }),
+        ),
+      );
+
+      expect(spec.models.map((m) => `${m.name}${m.deprecated ? ' (deprecated)' : ''}`)).toEqual([
+        'CreatePetResponse',
+        PLAIN,
+        `${PLAIN}201 (deprecated)`,
+      ]);
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+        PLAIN,
+        `${PLAIN}201`,
+      ]);
+      expectSound(spec, []);
+    });
+
+    it('names identical secondary error bodies on a 404 and a 409 per status code, stepping past a component by `Body`', async () => {
+      // workos/oagen#304: a secondary error body is `<Op>Error<code><MediaType>`,
+      // its status code always in the name, so the 404's and the 409's are
+      // two models as their JSON bodies are — the 409 never shares the
+      // 404's — and a taken name steps by `Body` as `<Op>Error<code>` does.
+      const ERROR = 'CreatePetError404ApplicationVndPetJson';
+      const errorResponse = (description: string) => ({
+        description,
+        content: {
+          'application/json': { schema: obj({ code: str }) },
+          'application/vnd.pet+json': { schema: obj({ reason: str }) },
+        },
+      });
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': { description: 'ok', content: { 'application/json': { schema: obj({ id: str }) } } },
+            '404': errorResponse('missing'),
+            '409': errorResponse('taken'),
+          }),
+          { [ERROR]: obj({ other: str }) },
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual([
+        `${ERROR} { other }`,
+        'CreatePetResponse { id }',
+        'CreatePetError404 { code }',
+        `${ERROR}Body { reason }`,
+        'CreatePetError409 { code }',
+        'CreatePetError409ApplicationVndPetJson { reason }',
+      ]);
+      expect(
+        findOp(spec, 'createPet').errors.map(
+          ({ statusCode, contents }) =>
+            `${statusCode}: ${contents!.map(({ contentType, type }) => `${contentType} → ${name(type)}`).join(', ')}`,
+        ),
+      ).toEqual([
+        `404: application/json → CreatePetError404, application/vnd.pet+json → ${ERROR}Body`,
+        '409: application/json → CreatePetError409, application/vnd.pet+json → CreatePetError409ApplicationVndPetJson',
+      ]);
+      expectSound(spec, [ERROR]);
+    });
+  });
+
+  describe('beside the parameter-based names of side-by-side spellings (#330 round 2)', () => {
+    // A secondary body's bare name comes from its media type's essence, plus
+    // its own parameters only when another key of that essence sits beside
+    // it (`mediaTypeNameFragment`). The sibling record is keyed by that bare
+    // name, so which keys share across status codes follows from which keys
+    // derive one name.
+    const YAML = 'CreatePetApplicationYamlResponse';
+    const YAML_CHARSET = 'CreatePetApplicationYamlCharsetUtf8Response';
+    const withYaml = (keys: Record<string, unknown>, description = 'ok') => ({
+      description,
+      content: { 'application/json': { schema: obj({ id: str }) }, ...keys },
+    });
+    const yamlEntries = (op: Operation) =>
+      op.successResponses!.map(
+        ({ contents, statusCode }) =>
+          `${statusCode}: ${contents!
+            .filter((c) => c.contentType !== 'application/json')
+            .map(({ contentType, type }) => `${contentType} → ${name(type)}`)
+            .join(', ')}`,
+      );
+
+    it('shares across status codes under a key respelled without parameters, since both derive one bare name', async () => {
+      // `application/yaml; charset=utf-8` is the only YAML key of the 200, so
+      // its parameters are not in the name; the 201's `application/yaml`
+      // derives the same `…ApplicationYamlResponse`, which a component owns
+      // with another shape — the 201 tries the `…Response200` the 200 took.
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withYaml({ 'application/yaml; charset=utf-8': { schema: obj({ name: str }) } }),
+            '201': withYaml({ 'application/yaml': { schema: obj({ name: str }) } }, 'created'),
+          }),
+          { [YAML]: obj({ other: str }) },
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual([`${YAML} { other }`, 'CreatePetResponse { id }', `${YAML}200 { name }`]);
+      expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
+        `200: application/yaml; charset=utf-8 → ${YAML}200`,
+        `201: application/yaml → ${YAML}200`,
+      ]);
+      expectSound(spec, [YAML]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('shares one model between two keys of one response that differ only in case and shape alike', async () => {
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': withYaml({
+              'application/yaml': { schema: obj({ name: str }) },
+              'Application/YAML': { schema: obj({ name: str }) },
+            }),
+          }),
+        ),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${YAML} { name }`]);
+      expect(
+        findOp(spec, 'createPet')
+          .responseContents!.slice(1)
+          .map((c) => name(c.type)),
+      ).toEqual([YAML, YAML]);
+      expectSound(spec, []);
+    });
+
+    it('never shares between two spellings told apart by their parameters, but shares each across status codes', async () => {
+      // Side by side, `application/yaml` and `application/yaml; charset=utf-8`
+      // derive two names, so their identical bodies are two models on the 200;
+      // the 201 declares the same two keys, and each shares the 200's model
+      // of its own name — two models in all, not four.
+      const warn = silence();
+      const keys = () => ({
+        'application/yaml': { schema: obj({ name: str }) },
+        'application/yaml; charset=utf-8': { schema: obj({ name: str }) },
+      });
+      const spec = await parseDocument(
+        document(createPet({ '200': withYaml(keys()), '201': withYaml(keys(), 'created') })),
+      );
+
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${YAML} { name }`, `${YAML_CHARSET} { name }`]);
+      expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
+        `200: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
+        `201: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
+      ]);
+      expectSound(spec, []);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
   describe('a replaced application/json body', () => {
     const json = (schema: unknown, description = 'ok') => ({
       description,

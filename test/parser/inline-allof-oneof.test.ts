@@ -11,6 +11,7 @@ import {
   isInlineAllOfMember,
   mergeAllOfMembers,
   mintedInlineNameEntries,
+  readInlineAllOf,
 } from '../../src/parser/inline-models.js';
 import {
   collectModelRefs,
@@ -921,5 +922,477 @@ describe('round 1: recursive components, shared schemas, conflicting variant dec
     expect(fieldsOf(models['CreatePetRequestShape'])).toEqual(['radius?: number']);
     expect(fieldsOf(models['CreatePetRequestShapeWithSide'])).toEqual(['side?: number']);
     expectSound(ir, []);
+  });
+});
+
+describe('round 2: keywords the declarations of a combined property agree on', () => {
+  const createPet = (variants: SchemaObject[]) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: jsonBody({
+            allOf: [
+              { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+              { oneOf: variants },
+            ],
+          }),
+          responses: { '204': { description: 'done' } },
+        },
+      },
+    },
+  });
+
+  it('lifts the flags, documentation and limits every declaration shares onto the combined field', async () => {
+    const shared = { readOnly: true, description: 'The kind', deprecated: true, default: 'cat', maxLength: 3 };
+    const ir = await parseWithoutWarnings(
+      createPet([
+        {
+          properties: {
+            kind: { type: 'string', const: 'cat', ...shared },
+            secret: { type: 'string', const: 'a', writeOnly: true, example: 'a' },
+          },
+        },
+        {
+          properties: {
+            kind: { type: 'string', const: 'dog', ...shared },
+            secret: { type: 'integer', const: 1, writeOnly: true, example: 'a' },
+          },
+        },
+      ]),
+    );
+    const request = modelsByName(ir)['CreatePetRequest']!;
+    const kind = request.fields.find((f) => f.name === 'kind');
+    // An enum of both consts — and read-only, deprecated, documented, defaulted
+    // and limited as both declarations say, not a bare union of them.
+    expect(kind).toMatchObject({
+      type: { kind: 'enum', name: 'CreatePetRequestKind' },
+      required: false,
+      readOnly: true,
+      deprecated: true,
+      description: 'The kind',
+      default: 'cat',
+      constraints: { maxLength: 3 },
+    });
+    expect(kind?.writeOnly).toBeUndefined();
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestKind')?.values.map((v) => v.value)).toEqual(['cat', 'dog']);
+    expect(request.fields.find((f) => f.name === 'secret')).toMatchObject({
+      type: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'literal', value: 'a' },
+          { kind: 'literal', value: 1 },
+        ],
+      },
+      writeOnly: true,
+      example: 'a',
+    });
+    expectSound(ir, []);
+  });
+
+  it('keeps a field read-only when both declarations say so but differ in type, with no const to make an enum', async () => {
+    // Review on #338: `value` declared `readOnly: true` as a string in one
+    // variant and as an integer in the other becomes a bare `oneOf` of the
+    // two primitives; the flag both declare must sit on the combined field,
+    // which is what the request builder reads, not only inside the branches.
+    const ir = await parseWithoutWarnings(
+      createPet([
+        { properties: { value: { type: 'string', readOnly: true } } },
+        { properties: { value: { type: 'integer', readOnly: true } } },
+      ]),
+    );
+    const value = modelsByName(ir)['CreatePetRequest']!.fields.find((f) => f.name === 'value');
+    expect(value).toMatchObject({
+      type: {
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'primitive', type: 'string' },
+          { kind: 'primitive', type: 'integer' },
+        ],
+      },
+      required: false,
+      readOnly: true,
+    });
+    expect(value?.writeOnly).toBeUndefined();
+    expectSound(ir, []);
+  });
+
+  it('leaves off a keyword the declarations disagree on, or only some declare', async () => {
+    const ir = await parseWithoutWarnings(
+      createPet([
+        {
+          properties: {
+            mode: { type: 'string', const: 'x', readOnly: true },
+            note: { type: 'string', const: 'p', description: 'first' },
+            level: { type: 'integer', const: 1, deprecated: true, minimum: 1 },
+            hidden: { type: 'string', const: 'h1', writeOnly: true },
+          },
+        },
+        {
+          properties: {
+            mode: { type: 'string', const: 'y' },
+            note: { type: 'string', const: 'q', description: 'second' },
+            level: { type: 'integer', const: 2, deprecated: false, minimum: 2 },
+            hidden: { type: 'string', const: 'h2', writeOnly: false },
+          },
+        },
+      ]),
+    );
+    const request = modelsByName(ir)['CreatePetRequest']!;
+    const field = (name: string) => request.fields.find((f) => f.name === name)!;
+    expect(field('mode')).toMatchObject({ type: { kind: 'enum', name: 'CreatePetRequestMode' } });
+    expect(field('mode').readOnly).toBeUndefined();
+    expect(field('note').description).toBeUndefined();
+    expect(field('level').deprecated).toBeUndefined();
+    expect(field('level').constraints).toBeUndefined();
+    expect(field('hidden').writeOnly).toBeUndefined();
+    expectSound(ir, []);
+  });
+
+  it('moves a null admission any declaration makes, in either spelling, onto the combined field', async () => {
+    const ir = await parseWithoutWarnings(
+      createPet([
+        {
+          properties: {
+            tag: { type: ['string', 'null'], const: 'a' },
+            half: { type: ['string', 'null'], const: 'a' },
+          },
+        },
+        {
+          properties: {
+            tag: { type: 'string', nullable: true, const: 'b' },
+            half: { type: 'string', const: 'b' },
+          },
+        },
+      ]),
+    );
+    const request = modelsByName(ir)['CreatePetRequest']!;
+    const typeOf = (name: string) => request.fields.find((f) => f.name === name)?.type;
+    // Both admit null: a nullable enum of both consts.
+    expect(typeOf('tag')).toMatchObject({ kind: 'nullable', inner: { kind: 'enum', name: 'CreatePetRequestTag' } });
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestTag')?.values.map((v) => v.value)).toEqual(['a', 'b']);
+    // One admits null: the union admits it too — the enum the consts collapse
+    // to would otherwise lose the `null` that branch allows.
+    expect(typeOf('half')).toMatchObject({ kind: 'nullable', inner: { kind: 'enum', name: 'CreatePetRequestHalf' } });
+    expect(ir.enums.find((e) => e.name === 'CreatePetRequestHalf')?.values.map((v) => v.value)).toEqual(['a', 'b']);
+    expectSound(ir, []);
+  });
+
+  it('keeps every declaration as written inside the combined schema', () => {
+    const cat: SchemaObject = { type: 'string', const: 'cat', readOnly: true, description: 'Kind' };
+    const dog: SchemaObject = { type: 'string', const: 'dog', readOnly: true, description: 'Kind' };
+    const merged = mergeAllOfMembers(
+      { allOf: [{ oneOf: [{ properties: { kind: cat } }, { properties: { kind: dog } }] }] },
+      undefined,
+    );
+    expect(merged.properties).toEqual([
+      { name: 'kind', origin: null, schema: { readOnly: true, description: 'Kind', oneOf: [cat, dog] } },
+    ]);
+  });
+});
+
+describe('properties are matched by own name', () => {
+  it('keeps a property named constructor, toString or __proto__ through the merge, from a member or a variant', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({
+              allOf: [
+                { type: 'object', properties: { constructor: { type: 'string' } }, required: ['constructor'] },
+                {
+                  oneOf: [
+                    { properties: { toString: { type: 'string' } } },
+                    // A computed key: the plain `__proto__: …` spelling would set the literal's prototype.
+                    { properties: { ['__proto__']: { type: 'object', properties: { x: { type: 'string' } } } } },
+                  ],
+                },
+              ],
+            }),
+            responses: { '204': { description: 'done' } },
+          },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['CreatePetRequest'])).toEqual([
+      'constructor: string',
+      'toString?: string',
+      '__proto__?: CreatePetRequestProto',
+    ]);
+    expect(fieldsOf(models['CreatePetRequestProto'])).toEqual(['x?: string']);
+    expectSound(ir, []);
+  });
+});
+
+describe('round 3: a model is built exactly when the reading names one', () => {
+  const emptyObject: SchemaObject = { type: 'object', properties: {} };
+  /** The reported shape: a union member whose only variant is an empty object, beside a documentation-only member. */
+  const emptyUnionPlusDoc: SchemaObject = { allOf: [{ oneOf: [emptyObject] }, { description: 'Pet' }] };
+  const base: SchemaObject = { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] };
+
+  it('builds the empty model an allOf with only an empty properties: {} names, at every depth', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({
+              type: 'object',
+              properties: {
+                // The empty object as the sole variant: the base's fields only.
+                sole: { allOf: [base, { oneOf: [emptyObject] }] },
+                // Beside a `$ref` variant, which is not flattened: the base's fields only.
+                besideRef: { allOf: [base, { oneOf: [{ $ref: '#/components/schemas/Owner' }, emptyObject] }] },
+                // Nested two deep: the inner empty model is built too.
+                outer: { allOf: [{ oneOf: [{ properties: { inner: emptyUnionPlusDoc } }] }, { description: 'Outer' }] },
+              },
+            }),
+            responses: { '200': jsonResponse(emptyUnionPlusDoc) },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Owner: { type: 'object', properties: { ownerId: { type: 'string' } } },
+          Holder: { type: 'object', properties: { pet: emptyUnionPlusDoc } },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['Holder'])).toEqual(['pet?: HolderPet']);
+    // Built with no fields; the `description` is a member's own, not the wrapper's, so the model carries none.
+    expect(models['HolderPet']).toMatchObject({ fields: [], description: undefined });
+    expect(fieldsOf(models['CreatePetRequest'])).toEqual([
+      'sole?: CreatePetRequestSole',
+      'besideRef?: CreatePetRequestBesideRef',
+      'outer?: CreatePetRequestOuter',
+    ]);
+    expect(fieldsOf(models['CreatePetRequestSole'])).toEqual(['name: string']);
+    expect(fieldsOf(models['CreatePetRequestBesideRef'])).toEqual(['name: string']);
+    expect(fieldsOf(models['CreatePetRequestOuter'])).toEqual(['inner?: CreatePetRequestOuterInner']);
+    expect(models['CreatePetRequestOuterInner']?.fields).toEqual([]);
+    expect(opsOf(ir)['createPet']?.response).toEqual(model('CreatePetResponse'));
+    expect(models['CreatePetResponse']?.fields).toEqual([]);
+    expectSound(ir, ['Holder', 'Owner']);
+  });
+
+  /** A discriminated component whose `node.created` variant carries `data`. */
+  const eventWithData = (data: SchemaObject): SchemaObject => ({
+    allOf: [
+      { type: 'object', properties: { id: { type: 'string' }, event: { type: 'string' } }, required: ['id', 'event'] },
+      {
+        oneOf: [
+          {
+            type: 'object',
+            properties: { event: { type: 'string', const: 'node.created' }, data },
+            required: ['event', 'data'],
+          },
+          {
+            type: 'object',
+            properties: {
+              event: { type: 'string', const: 'node.deleted' },
+              data: { type: 'object', properties: { id: { type: 'string' } } },
+            },
+            required: ['event', 'data'],
+          },
+        ],
+      },
+    ],
+  });
+  const withEvent = (schemas: Record<string, SchemaObject>, data: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/events': {
+        get: { operationId: 'getEvent', responses: { '200': jsonResponse({ $ref: '#/components/schemas/Event' }) } },
+      },
+    },
+    components: { schemas: { ...schemas, Event: eventWithData(data) } },
+  });
+  const baseComponent: Record<string, SchemaObject> = {
+    Base: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, required: ['a'] },
+  };
+
+  it('mints nothing under a discriminated variant for an allOf of $ref members only', async () => {
+    for (const data of [
+      { allOf: [{ $ref: '#/components/schemas/Base' }] },
+      { allOf: [{ $ref: '#/components/schemas/Base' }, { description: 'documented' }] },
+    ] as SchemaObject[]) {
+      const ir = await parseWithoutWarnings(withEvent(baseComponent, data));
+      const models = modelsByName(ir);
+      expect(fieldsOf(models['NodeCreated'])).toEqual(['id: string', 'event: literal', 'data: Base']);
+      expect(models['NodeCreatedData']).toBeUndefined();
+      expectSound(ir, ['Base', 'Event']);
+    }
+  });
+
+  it('leaves a declared component named like the nested field untouched when the field is a plain reference', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent(
+        { ...baseComponent, NodeCreatedData: { type: 'object', properties: { only: { type: 'string' } } } },
+        { allOf: [{ $ref: '#/components/schemas/Base' }] },
+      ),
+    );
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['NodeCreated'])).toEqual(['id: string', 'event: literal', 'data: Base']);
+    // Fewer fields than `Base`: an unused merged copy would have replaced it.
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual(['only?: string']);
+    expectSound(ir, ['Base', 'Event', 'NodeCreatedData']);
+  });
+
+  it('still mints the merged model for a $ref augmented by an inline object, and unwraps a lone inline member', async () => {
+    const augmented = await parseWithoutWarnings(
+      withEvent(baseComponent, {
+        allOf: [{ $ref: '#/components/schemas/Base' }, { properties: { x: { type: 'string' } } }],
+      }),
+    );
+    expect(fieldsOf(modelsByName(augmented)['NodeCreated'])).toEqual([
+      'id: string',
+      'event: literal',
+      'data: NodeCreatedData',
+    ]);
+    expect(fieldsOf(modelsByName(augmented)['NodeCreatedData'])).toEqual(['a: string', 'b?: string', 'x?: string']);
+    expectSound(augmented, ['Base', 'Event']);
+
+    const lone = await parseWithoutWarnings(
+      withEvent(baseComponent, { allOf: [{ type: 'object', properties: { y: { type: 'string' } }, required: ['y'] }] }),
+    );
+    expect(fieldsOf(modelsByName(lone)['NodeCreated'])).toEqual([
+      'id: string',
+      'event: literal',
+      'data: NodeCreatedData',
+    ]);
+    expect(fieldsOf(modelsByName(lone)['NodeCreatedData'])).toEqual(['y: string']);
+    expectSound(lone, ['Base', 'Event']);
+  });
+
+  it('readInlineAllOf is the one reading', () => {
+    const ref: SchemaObject = { $ref: '#/components/schemas/Base' };
+    expect(readInlineAllOf([ref])).toBe('reference');
+    expect(readInlineAllOf([ref, { description: 'doc' }])).toBe('reference');
+    expect(readInlineAllOf([ref, { type: 'object' }])).toBe('merged');
+    expect(readInlineAllOf([ref, { oneOf: [emptyObject] }])).toBe('merged');
+    expect(readInlineAllOf([base])).toBe('unwrapped');
+    expect(readInlineAllOf([{ oneOf: [emptyObject] }, { description: 'Pet' }])).toBe('merged');
+    expect(readInlineAllOf([{ minProperties: 1 }, { description: 'doc' }])).toBe('reference');
+    expect(schemaToTypeRef({ allOf: [ref, { description: 'doc' }] }, 'pet', 'Holder')).toEqual(model('Base'));
+    expect(schemaToTypeRef(emptyUnionPlusDoc, 'pet', 'Holder')).toEqual(model('HolderPet'));
+    const results: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { pet: emptyUnionPlusDoc } }, results, 'Holder', {});
+    expect(results.map((m) => [m.name, m.fields.length])).toEqual([['HolderPet', 0]]);
+  });
+});
+
+describe('round 4: every shape under a discriminated variant is built as the field extractor builds it', () => {
+  /** The reported shape: a `$ref` augmented by a `oneOf` member, as array items or map values. */
+  const refPlusVariant: SchemaObject = {
+    allOf: [{ $ref: '#/components/schemas/Base' }, { oneOf: [{ properties: { x: { type: 'string' } } }] }],
+  };
+  const eventWithData = (data: SchemaObject): SchemaObject => ({
+    allOf: [
+      { type: 'object', properties: { id: { type: 'string' }, event: { type: 'string' } }, required: ['id', 'event'] },
+      {
+        oneOf: [
+          {
+            type: 'object',
+            properties: { event: { type: 'string', const: 'node.created' }, data },
+            required: ['event', 'data'],
+          },
+          {
+            type: 'object',
+            properties: {
+              event: { type: 'string', const: 'node.deleted' },
+              data: { type: 'object', properties: { id: { type: 'string' } } },
+            },
+            required: ['event', 'data'],
+          },
+        ],
+      },
+    ],
+  });
+  const withEvent = (data: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/events': {
+        get: { operationId: 'getEvent', responses: { '200': jsonResponse({ $ref: '#/components/schemas/Event' }) } },
+      },
+    },
+    components: {
+      schemas: {
+        Base: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+        Event: eventWithData(data),
+      },
+    },
+  });
+
+  it('builds the merged model array items and map values reference, nested two deep', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent({
+        type: 'object',
+        properties: {
+          items: { type: 'array', items: refPlusVariant },
+          byKey: { type: 'object', additionalProperties: refPlusVariant },
+          deeper: {
+            type: 'object',
+            properties: { items: { type: 'array', items: refPlusVariant } },
+          },
+        },
+      }),
+    );
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual([
+      'items?: array',
+      'byKey?: map',
+      'deeper?: NodeCreatedDataDeeper',
+    ]);
+    const typeOf = (name: string) => models['NodeCreatedData']?.fields.find((f) => f.name === name)?.type;
+    expect(typeOf('items')).toEqual({ kind: 'array', items: model('NodeCreatedDataItem') });
+    expect(typeOf('byKey')).toEqual({ kind: 'map', valueType: model('NodeCreatedDataByKey') });
+    expect(fieldsOf(models['NodeCreatedDataItem'])).toEqual(['a: string', 'x?: string']);
+    expect(fieldsOf(models['NodeCreatedDataByKey'])).toEqual(['a: string', 'x?: string']);
+    expect(fieldsOf(models['NodeCreatedDataDeeper'])).toEqual(['items?: array']);
+    expect(fieldsOf(models['NodeCreatedDataDeeperItem'])).toEqual(['a: string', 'x?: string']);
+    expectSound(ir, ['Base', 'Event']);
+  });
+
+  it('builds the merged model a union variant and an untyped nested object reference', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent({
+        type: 'object',
+        properties: {
+          owner: { oneOf: [{ type: 'string' }, refPlusVariant] },
+          // No `type`: still an inline object, as `schemaToTypeRef` types it.
+          plain: { properties: { y: { type: 'string' } } },
+          nullableItems: { type: ['array', 'null'], items: { oneOf: [refPlusVariant, { type: 'null' }] } },
+        },
+      }),
+    );
+    const models = modelsByName(ir);
+    const typeOf = (name: string) => models['NodeCreatedData']?.fields.find((f) => f.name === name)?.type;
+    expect(typeOf('owner')).toEqual({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [str, model('NodeCreatedDataOwner')],
+    });
+    expect(fieldsOf(models['NodeCreatedDataOwner'])).toEqual(['a: string', 'x?: string']);
+    expect(typeOf('plain')).toEqual(model('NodeCreatedDataPlain'));
+    expect(fieldsOf(models['NodeCreatedDataPlain'])).toEqual(['y?: string']);
+    expect(typeOf('nullableItems')).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'nullable', inner: model('NodeCreatedDataNullableItem') } },
+    });
+    expect(fieldsOf(models['NodeCreatedDataNullableItem'])).toEqual(['a: string', 'x?: string']);
+    expectSound(ir, ['Base', 'Event']);
   });
 });

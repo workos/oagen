@@ -145,9 +145,12 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `requestBody?` — `TypeRef` of the request body, read from one `content` entry by media type essence (parameters and case aside): `application/json`, else a `+json` media type, else `multipart/form-data`, else `application/x-www-form-urlencoded` (each only with a schema), else `application/octet-stream`, else `text/plain`; absent, with a parser warning, when none of the declared media types is read
   - `requestBodyEncoding?` — `json` (`application/json` and any `+json` media type) | `form-data` | `form-urlencoded` | `binary` | `text`; selects the Content-Type and serialization; set exactly when `requestBody` is
   - `requestBodyRequired?` — whether the caller must send the body; present exactly when `requestBody` is
+  - `requestBodyContentType?` — the essence of the media type `requestBody` was read from (`application/merge-patch+json`; `application/json` for `application/json; charset=utf-8`); send it as the `Content-Type`, producing parameters such as a multipart boundary yourself; set exactly when `requestBody` is
+  - `requestBodyContentTypes?`, `requestBodyContents?` — every media type the request body declares, as written and in document order, with a `TypeRef` per media type (the entry `requestBody` was read from shares its `TypeRef`); present only when the body declares at least one, so a body argument or serializer per media type can be offered
   - `response` — `TypeRef` of the primary response: the lowest 2xx with a typed body, else the lowest declared 2xx/3xx (`unknown` when the operation declares neither)
   - `responseHeaders?` — `ResponseHeader[]` the primary response declares
   - `responseDescription?` — the primary response's `description`, for a `@returns`-style tag
+  - `responseStatusCode?` — the status code of the primary response (`200`, `201`, a lone `302`), present exactly when the operation declares at least one 2xx or 3xx response
   - `responseContentTypes?`, `responseContents?` — the media types the primary response declares, as written and in document order, with a `TypeRef` per media type (the entry `response` was read from shares its `TypeRef`); present only when it declares at least one, so an `Accept` header or a per-format decoder can be offered
   - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`, `contentTypes?`, `contents?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
   - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; the two lists only when they say something `type` does not)
@@ -159,7 +162,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
   - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
-- Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `default?`, `example?`, `examples?`, `style?`, `explode?`, `constraints?`
+- Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `default?`, `example?`, `examples?`, `style?`, `explode?`, `contentType?` (the `content` key a `content`-declared parameter is serialized under, e.g. `application/json`: serialize the value in that media type instead of by `style`/`explode`), `constraints?`
   - `type` may reference a model the parser created for an inline object parameter (`style: deepObject` → `PetsFilter`), or an array, map or union of such, exactly as a response header's does; render it as that model and serialize it per `style`/`explode`
 - Output: One file per service/resource
 - Handle:

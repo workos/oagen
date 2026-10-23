@@ -497,12 +497,28 @@ describe('response keys OpenAPI does not define', () => {
 
     it('decides by the whole key: every key that is not three digits in 100–599 is warned about and ignored', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      // Each of these parses to a number under `parseInt`, or starts with a digit.
-      const keys = ['000', '099', '0200', '200 ', ' 200', '2e2', '0XX', '6xx', '5XXX', '20X', '4X'];
-      const { op, inlineModels } = extractPets({
-        '200': ok,
-        ...Object.fromEntries(keys.map((key) => [key, inlineBody(key)])),
-      });
+      // Each of these parses to a number under `parseInt`, or starts with a
+      // digit; `200a`, `0200` and `200 ` once added a second `200` to
+      // `successResponses`, `999`, `2001` and `20` once reached the branches.
+      const keys = [
+        '000',
+        '099',
+        '0200',
+        '200a',
+        '200 ',
+        ' 200',
+        '2e2',
+        '20',
+        '999',
+        '2001',
+        '0XX',
+        '6xx',
+        '5XXX',
+        '20X',
+        '4X',
+      ];
+      const responses = { '200': ok, ...Object.fromEntries(keys.map((key) => [key, inlineBody(key)])) };
+      const { op, inlineModels } = extractPets(responses);
 
       expect(op.response).toEqual(model('Pet'));
       expect(op.successResponses).toBeUndefined();
@@ -510,7 +526,13 @@ describe('response keys OpenAPI does not define', () => {
       expect(Object.keys(op)).not.toContain('defaultResponse');
       expect(Object.keys(op)).not.toContain('rangeResponses');
       expect(inlineModels).toEqual([]);
-      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual(keys.map(ignored));
+      // One warning per key, in the order the parser reads the Responses
+      // Object (`Object.entries`: integer-like keys such as `20` first).
+      const expected = Object.keys(responses)
+        .filter((key) => key !== '200')
+        .map(ignored);
+      expect(expected).toHaveLength(keys.length);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual(expected);
     });
 
     it('still reads an explicit 1xx code as a status code: not carried, and not warned about', () => {

@@ -178,6 +178,8 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       [undefined, undefined, 'Pets', undefined, 'Pets', 'Pets'],
       [undefined, undefined, undefined, 'Every pet.', undefined, 'Every pet.'],
       [undefined, 'Pets', 'Pets', undefined, 'Pets', 'Pets'],
+      // A path item summary identical to its own description is not repeated.
+      [undefined, undefined, 'Pets', 'Pets', 'Pets', 'Pets'],
       [undefined, undefined, '', '   ', undefined, undefined],
       [undefined, undefined, undefined, undefined, undefined, undefined],
     ])(
@@ -248,6 +250,24 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       });
     });
 
+    it('treats text that is not a string as absent at either level', () => {
+      const paths: Record<string, unknown> = {
+        '/pets': {
+          summary: 42,
+          description: 'Every pet in the store.',
+          get: { operationId: 'listPets', summary: ['List pets'], description: null, responses },
+        },
+      };
+      const ops = operationsOf(paths as Parameters<typeof extractOperations>[0]);
+      // Neither level has a string summary; the operation's null description
+      // falls through to the path item's string.
+      expect(ops.listPets).toEqual({
+        summary: undefined,
+        description: 'Every pet in the store.',
+        keys: ['description'],
+      });
+    });
+
     it('does not repeat a path item summary identical to the operation description', () => {
       const ops = operationsOf({
         '/pets': { summary: 'Pets', get: { operationId: 'listPets', description: 'Pets', responses } },
@@ -311,6 +331,56 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       expect(warn.mock.calls.map((call: unknown[]) => String(call[0]))).toEqual([
         '[oagen] Warning: Webhook "petAdopted" has fields beside its $ref ("summary") that are not read: the referenced path item is taken whole.',
       ]);
+    });
+
+    it('follows a $ref chain to the component, and two keys sharing one component each carry its text over one payload model', () => {
+      const { webhooks, inlineModels } = extractWebhooks(
+        { a: { $ref: '#/components/pathItems/A' }, b: { $ref: '#/components/pathItems/A' } },
+        {
+          pathItems: {
+            A: { $ref: '#/components/pathItems/B' },
+            B: {
+              summary: 'Pet adopted',
+              description: 'Sent when a pet is adopted.',
+              post: {
+                operationId: 'shared',
+                requestBody: {
+                  content: {
+                    'application/json': { schema: { type: 'object', properties: { petId: { type: 'string' } } } },
+                  },
+                },
+                responses,
+              },
+            },
+          },
+        },
+      );
+      const expected = [
+        'Pet adopted',
+        'Pet adopted\n\nSent when a pet is adopted.',
+        { kind: 'model', name: 'SharedPayload' },
+      ];
+      expect(webhooks.map((hook) => [hook.name, hook.summary, hook.description, hook.requestBody])).toEqual([
+        ['a', ...expected],
+        ['b', ...expected],
+      ]);
+      expect(inlineModels.map((m) => m.name)).toEqual(['SharedPayload']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('treats text that is not a string as absent at either level', () => {
+      const hooks = webhooksOf({
+        petAdopted: {
+          summary: 42,
+          description: 'Sent when a pet is adopted.',
+          post: { summary: null, description: { text: 'Adopted' }, responses },
+        },
+      });
+      expect(hooks['post petAdopted']).toEqual({
+        summary: undefined,
+        description: 'Sent when a pet is adopted.',
+        keys: ['description'],
+      });
     });
 
     it('omits both keys when neither the operation nor the path item has text with content', () => {

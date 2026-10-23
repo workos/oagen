@@ -244,7 +244,7 @@ describe('an error body under a secondary media type', () => {
     expectSound(spec);
   });
 
-  it('keeps its parameters, vendor suffix and nested objects, and the primary +json body its `<Op>Error<code>`', async () => {
+  it('keeps its vendor suffix and nested objects, and the primary +json body its `<Op>Error<code>`', async () => {
     const spec = await parseWithoutWarnings(
       doc(
         getNote({
@@ -261,11 +261,14 @@ describe('an error body under a secondary media type', () => {
     const [error] = only(spec).errors;
 
     expect(typeName(error.type)).toBe('GetNoteError500');
+    // The media type's fragment is its essence's (`mediaTypeNameFragment`):
+    // the parameters are left out when no other key of that essence sits
+    // beside it.
     expect(contentsOf(error)).toEqual([
       'application/problem+json: GetNoteError500',
-      'application/vnd.note+json; version=2: GetNoteError500ApplicationVndNoteJsonVersion2',
+      'application/vnd.note+json; version=2: GetNoteError500ApplicationVndNoteJson',
     ]);
-    expect(fieldsOf(spec, 'GetNoteError500ApplicationVndNoteJsonVersion2Detail')).toEqual(['field']);
+    expect(fieldsOf(spec, 'GetNoteError500ApplicationVndNoteJsonDetail')).toEqual(['field']);
     expectSound(spec);
   });
 

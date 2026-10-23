@@ -121,20 +121,152 @@ describe('diffSpecs — response media types are compared by essence (issue #279
 });
 
 describe('diffOperations — response media types are compared by essence (issue #279)', () => {
-  it('ignores whitespace around the essence and every parameter, as the parser does when it types the body', () => {
-    // `charset` does not change what a text body is, and `application/pdf;
-    // version=2.0` is typed exactly as `application/pdf`: the essence is the
-    // whole comparison, so no parameter is reported on its own.
+  it('ignores whitespace around the essence, `charset`, parameter case and parameter order', () => {
+    // `charset` does not change what a text body is, and whitespace, the
+    // case of a parameter name and the order of parameters are spelling.
     const old = card([
       ['text/html', string],
-      ['application/pdf', binary],
+      ['application/pdf; version=1.7; profile=print', binary],
     ]);
     const next = card([
       [' text/html ; charset=utf-8', string],
-      ['application/pdf; version=2.0', binary],
+      ['application/pdf; Profile="print" ;version=1.7', binary],
     ]);
     expect(diffOperations('Pets', [old], [next])).toEqual([]);
     expect(diffOperations('Pets', [next], [old])).toEqual([]);
+  });
+
+  it('reports a parameter other than charset that changed as reparameterized, additive: it may select another representation', () => {
+    const old = card([
+      ['text/html', string],
+      ['application/pdf; version=1.7', binary],
+    ]);
+    const next = card([
+      ['text/html', string],
+      ['application/pdf; version=2.0', binary],
+    ]);
+    expect(diffOperations('Pets', [old], [next])).toMatchObject([
+      {
+        responseChanged: false,
+        responseContentTypesChanged: true,
+        responseContentTypeChanges: [
+          {
+            added: [],
+            removed: [],
+            retyped: [],
+            reparameterized: [{ from: 'application/pdf; version=1.7', to: 'application/pdf; version=2.0' }],
+            classification: 'additive',
+          },
+        ],
+        classification: 'additive',
+      },
+    ]);
+    // A parameter gained or dropped is a change of parameters too, as is a
+    // `profile` on a JSON-LD body; `charset` beside it still does not count.
+    const ld = card([['application/ld+json; profile="http://example.com/a"', report]], {
+      name: 'getGraph',
+      response: report,
+    });
+    const ldB = card([['application/ld+json; charset=utf-8; profile="http://example.com/b"', report]], {
+      name: 'getGraph',
+      response: report,
+    });
+    expect(diffOperations('Graphs', [ld], [ldB])[0]).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [
+            {
+              from: 'application/ld+json; profile="http://example.com/a"',
+              to: 'application/ld+json; charset=utf-8; profile="http://example.com/b"',
+            },
+          ],
+          classification: 'additive',
+        },
+      ],
+      classification: 'additive',
+    });
+    // A `;` inside the quoted profile is part of it, not a parameter boundary (Greptile round 4).
+    const quoted = (profile: string): Operation =>
+      card([[`application/ld+json; profile="${profile}"`, report]], { name: 'getGraph', response: report });
+    expect(
+      diffOperations(
+        'Graphs',
+        [quoted('https://example.com/a;charset=one;z')],
+        [quoted('https://example.com/a;charset=two;z')],
+      )[0],
+    ).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [
+            {
+              from: 'application/ld+json; profile="https://example.com/a;charset=one;z"',
+              to: 'application/ld+json; profile="https://example.com/a;charset=two;z"',
+            },
+          ],
+          classification: 'additive',
+        },
+      ],
+    });
+    expect(diffOperations('Graphs', [quoted('https://example.com/a;b')], [quoted('https://example.com/a;b')])).toEqual(
+      [],
+    );
+    // One parameter whose value holds `; ` is not the two parameters it spells (Greptile round 5).
+    const titled = (spelling: string): Operation =>
+      card([[`text/plain; ${spelling}`, string]], { name: 'getNote', response: string });
+    expect(
+      diffOperations('Notes', [titled('title="report; version=2"')], [titled('title=report; version=2')])[0],
+    ).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [
+            { from: 'text/plain; title="report; version=2"', to: 'text/plain; title=report; version=2' },
+          ],
+          classification: 'additive',
+        },
+      ],
+    });
+    expect(
+      diffOperations(
+        'Pets',
+        [old],
+        [
+          card([
+            ['text/html', string],
+            ['application/pdf', binary],
+          ]),
+        ],
+      )[0],
+    ).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          reparameterized: [{ from: 'application/pdf; version=1.7', to: 'application/pdf' }],
+          classification: 'additive',
+        },
+      ],
+    });
+  });
+
+  it('reports a pair that changed a parameter and its shape as both reparameterized and retyped, breaking', () => {
+    const old = card([
+      ['text/html; level=1', string],
+      ['application/pdf', binary],
+    ]);
+    const next = card([
+      ['text/html; level=2', { kind: 'model', name: 'CardPage' }],
+      ['application/pdf', binary],
+    ]);
+    expect(diffOperations('Pets', [old], [next])[0]).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          added: [],
+          removed: [],
+          retyped: ['text/html; level=2'],
+          reparameterized: [{ from: 'text/html; level=1', to: 'text/html; level=2' }],
+          classification: 'breaking',
+        },
+      ],
+      classification: 'breaking',
+    });
   });
 
   it('still reports a media type whose essence changed, suffix and subtype included', () => {
@@ -285,5 +417,398 @@ describe('diffOperations — response media types are compared by essence (issue
       ],
     });
     expect(diffOperations('Pets', [lone], [withAdded200])).toEqual([]);
+  });
+});
+
+describe('parser to differ — a secondary inline body under a respelled key (Greptile round 1)', () => {
+  /** `getReport`: a `Report` JSON primary plus one secondary YAML inline object, under the given key and schema. */
+  const report = (yamlKey: string, yamlProperties: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'Reports', version: '1' },
+    paths: {
+      '/report': {
+        get: {
+          operationId: 'getReport',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+                [yamlKey]: { schema: { type: 'object', properties: yamlProperties } },
+              },
+            },
+          },
+        },
+      },
+    },
+    components: { schemas: { Report: { type: 'object', properties: { id: { type: 'string' } } } } },
+  });
+  const diffDocuments = async (before: Record<string, unknown>, after: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-279-yaml-'));
+    try {
+      const oldPath = join(dir, 'old.json');
+      const newPath = join(dir, 'new.json');
+      writeFileSync(oldPath, JSON.stringify(before));
+      writeFileSync(newPath, JSON.stringify(after));
+      return diffSpecs(await parseSpec(oldPath), await parseSpec(newPath));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const title = { title: { type: 'string' } };
+
+  it('reports no change when only the key respells itself: the model is named from the essence on both sides', async () => {
+    const { changes, summary } = await diffDocuments(
+      report('application/yaml', title),
+      report('application/yaml; charset=utf-8', title),
+    );
+    expect(changes).toEqual([]);
+    expect(summary.breaking).toBe(0);
+  });
+
+  it('still reports a schema change under a respelled key: the model is modified, and the body is not retyped', async () => {
+    const { changes } = await diffDocuments(
+      report('application/yaml', title),
+      report('application/yaml; charset=utf-8', { ...title, summary: { type: 'string' } }),
+    );
+    // The model keeps its name, so the differ sees one modified model — not
+    // a model removed and another added, and not a retyped media type.
+    expect(changes.map((c) => c.kind)).toEqual(['model-modified']);
+    expect(changes[0]).toMatchObject({
+      kind: 'model-modified',
+      name: 'GetReportApplicationYamlResponse',
+      classification: 'additive',
+    });
+  });
+
+  it('reports a body retyped under a respelled key when its type really changed', async () => {
+    const before = report('application/yaml', title);
+    const after = report('application/yaml; charset=utf-8', title);
+    // The YAML body now points at the component instead of an inline object.
+    after.paths['/report'].get.responses['200'].content['application/yaml; charset=utf-8'] = {
+      schema: { $ref: '#/components/schemas/Report' },
+    } as never;
+    const { changes } = await diffDocuments(before, after);
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-removed', 'operation-modified']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        { added: [], removed: [], retyped: ['application/yaml; charset=utf-8'], classification: 'breaking' },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  it('reports no change when two spellings of one essence only swap places: each keeps the model its parameters name (Greptile round 2)', async () => {
+    const twoYaml = (keys: [string, string]) => {
+      const bodies: Record<string, unknown> = {
+        'application/yaml': { schema: { type: 'object', properties: title } },
+        'application/yaml; charset=utf-8': { schema: { type: 'object', properties: { summary: { type: 'string' } } } },
+      };
+      const content: Record<string, unknown> = {
+        'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      };
+      for (const key of keys) content[key] = bodies[key];
+      const doc = report('application/yaml', title);
+      doc.paths['/report'].get.responses['200'].content = content as never;
+      return doc;
+    };
+    const { changes } = await diffDocuments(
+      twoYaml(['application/yaml', 'application/yaml; charset=utf-8']),
+      twoYaml(['application/yaml; charset=utf-8', 'application/yaml']),
+    );
+    expect(changes).toEqual([]);
+  });
+
+  /** Two YAML keys beside the JSON primary, `version=1` and `version=2`, with the given shapes under `version=<v>`. */
+  const versioned = (v: number, properties: Record<string, unknown>) => {
+    const doc = report('application/yaml', title);
+    doc.paths['/report'].get.responses['200'].content = {
+      'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      [`application/yaml; version=${v}`]: { schema: { type: 'object', properties } },
+      'application/yaml; version=2': { schema: { type: 'object', properties: { summary: { type: 'string' } } } },
+    } as never;
+    return doc;
+  };
+
+  it('reports the renamed model and the reparameterized key, not a retype, when a parameter edit on a sibling-distinguished key leaves the schema as it was (Greptile round 3)', async () => {
+    const { changes, summary } = await diffDocuments(versioned(1, title), versioned(3, title));
+    // The model the parser mints for the key is renamed with it; the differ reads
+    // both through to the same fields, so the body is not retyped and the rename
+    // is the models diff's business. The parameter edit itself stays visible,
+    // additive.
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed', 'operation-modified']);
+    expect(changes).toContainEqual({
+      kind: 'model-removed',
+      name: 'GetReportApplicationYamlVersion1Response',
+      classification: 'breaking',
+    });
+    expect(changes).toContainEqual({
+      kind: 'model-added',
+      name: 'GetReportApplicationYamlVersion3Response',
+      classification: 'additive',
+    });
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        {
+          added: [],
+          removed: [],
+          retyped: [],
+          reparameterized: [{ from: 'application/yaml; version=1', to: 'application/yaml; version=3' }],
+          classification: 'additive',
+        },
+      ],
+      classification: 'additive',
+    });
+    expect(summary.breaking).toBe(1);
+  });
+
+  it('still reports a schema change under a parameter-edited sibling-distinguished key as retyped, breaking', async () => {
+    const { changes } = await diffDocuments(
+      versioned(1, title),
+      versioned(3, { ...title, pages: { type: 'integer' } }),
+    );
+    expect(changes.map((c) => c.kind).sort()).toEqual(['model-added', 'model-removed', 'operation-modified']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseChanged: false,
+      responseContentTypeChanges: [
+        {
+          added: [],
+          removed: [],
+          retyped: ['application/yaml; version=3'],
+          reparameterized: [{ from: 'application/yaml; version=1', to: 'application/yaml; version=3' }],
+          classification: 'breaking',
+        },
+      ],
+      classification: 'breaking',
+    });
+  });
+
+  /** Two YAML keys beside the JSON primary, in the given order, each with its own shape. */
+  const yamlKeys = (keys: Array<[string, Record<string, unknown>]>) => {
+    const doc = report('application/yaml', title);
+    doc.paths['/report'].get.responses['200'].content = {
+      'application/json': { schema: { $ref: '#/components/schemas/Report' } },
+      ...Object.fromEntries(keys.map(([key, properties]) => [key, { schema: { type: 'object', properties } }])),
+    } as never;
+    return doc;
+  };
+  const summary = { summary: { type: 'string' } };
+
+  it('pairs keys of one essence by their parameters before document order, so respelling and reversing them is no change (Greptile round 6)', async () => {
+    const { changes } = await diffDocuments(
+      yamlKeys([
+        ['application/yaml; version=1', title],
+        ['application/yaml; version=2', summary],
+      ]),
+      yamlKeys([
+        ['Application/YAML; version=2', summary],
+        ['Application/YAML; version=1', title],
+      ]),
+    );
+    expect(changes).toEqual([]);
+  });
+
+  it('pairs keys of one essence by their shape before document order, so two parameter edits each find their body', async () => {
+    // `version=1` (title) becomes `version=4` and `version=2` (summary) becomes
+    // `version=3`, swapped in order: neither the spelling nor the parameters
+    // match, but each new key has exactly one old body of its shape.
+    const { changes } = await diffDocuments(
+      yamlKeys([
+        ['application/yaml; version=1', title],
+        ['application/yaml; version=2', summary],
+      ]),
+      yamlKeys([
+        ['application/yaml; version=3', summary],
+        ['application/yaml; version=4', title],
+      ]),
+    );
+    expect(
+      changes
+        .filter((c) => c.kind === 'model-removed')
+        .map((c) => (c as { name: string }).name)
+        .sort(),
+    ).toEqual(['GetReportApplicationYamlVersion1Response', 'GetReportApplicationYamlVersion2Response']);
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      responseContentTypeChanges: [
+        {
+          added: [],
+          removed: [],
+          retyped: [],
+          reparameterized: [
+            { from: 'application/yaml; version=2', to: 'application/yaml; version=3' },
+            { from: 'application/yaml; version=1', to: 'application/yaml; version=4' },
+          ],
+          classification: 'additive',
+        },
+      ],
+      classification: 'additive',
+    });
+  });
+});
+
+describe('parser to differ — a secondary inline body on a default or range response (issue author review)', () => {
+  /** `listNotes`: a JSON `200` plus a `default` and a `4XX` whose problem body comes beside a secondary YAML inline object. */
+  const notes = (yamlKeys: Record<string, Record<string, unknown>>) => {
+    const fallback = {
+      description: 'problem',
+      content: {
+        'application/problem+json': { schema: { $ref: '#/components/schemas/Problem' } },
+        ...Object.fromEntries(
+          Object.entries(yamlKeys).map(([key, properties]) => [key, { schema: { type: 'object', properties } }]),
+        ),
+      },
+    };
+    return {
+      openapi: '3.1.0',
+      info: { title: 'Notes', version: '1' },
+      paths: {
+        '/notes': {
+          get: {
+            operationId: 'listNotes',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Note' } } },
+              },
+              '4XX': fallback,
+              default: fallback,
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Note: { type: 'object', properties: { id: { type: 'string' } } },
+          Problem: { type: 'object', properties: { detail: { type: 'string' } } },
+        },
+      },
+    };
+  };
+  const diffDocuments = async (before: Record<string, unknown>, after: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-279-fallback-'));
+    try {
+      const oldPath = join(dir, 'old.json');
+      const newPath = join(dir, 'new.json');
+      writeFileSync(oldPath, JSON.stringify(before));
+      writeFileSync(newPath, JSON.stringify(after));
+      return diffSpecs(await parseSpec(oldPath), await parseSpec(newPath));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const title = { title: { type: 'string' } };
+
+  it('reports no change when the YAML key only gains a charset: the model is named from the essence on both sides', async () => {
+    const { changes } = await diffDocuments(
+      notes({ 'application/yaml': title }),
+      notes({ 'application/yaml; charset=utf-8': title }),
+    );
+    expect(changes).toEqual([]);
+  });
+
+  it('reports a parameter edit on a sibling-distinguished YAML key as the renamed models plus reparameterized, additive, on both fallbacks', async () => {
+    const { changes } = await diffDocuments(
+      notes({ 'application/yaml; version=1': title, 'application/yaml; version=2': { summary: { type: 'string' } } }),
+      notes({ 'application/yaml; version=3': title, 'application/yaml; version=2': { summary: { type: 'string' } } }),
+    );
+    expect(changes.map((c) => c.kind).sort()).toEqual([
+      'model-added',
+      'model-added',
+      'model-removed',
+      'model-removed',
+      'operation-modified',
+    ]);
+    expect(
+      changes
+        .filter((c) => c.kind === 'model-removed')
+        .map((c) => (c as { name: string }).name)
+        .sort(),
+    ).toEqual([
+      // A `4XX` secondary body is an error body, `<Op>Error4Xx<MediaType>` (workos/oagen#304).
+      'ListNotesDefaultApplicationYamlVersion1Response',
+      'ListNotesError4XxApplicationYamlVersion1',
+    ]);
+    const respelled = { from: 'application/yaml; version=1', to: 'application/yaml; version=3' };
+    expect(changes.find((c) => c.kind === 'operation-modified')).toMatchObject({
+      fallbackResponsesChanged: false,
+      responseContentTypeChanges: [
+        {
+          fallback: 'default',
+          added: [],
+          removed: [],
+          retyped: [],
+          reparameterized: [respelled],
+          classification: 'additive',
+        },
+        {
+          fallback: '4XX',
+          added: [],
+          removed: [],
+          retyped: [],
+          reparameterized: [respelled],
+          classification: 'additive',
+        },
+      ],
+      classification: 'additive',
+    });
+  });
+});
+
+describe('pairing a lone 2xx: the entry spelled as it is wins over one that only matches by essence (Greptile round 2)', () => {
+  const reportModel: TypeRef = { kind: 'model', name: 'Report' };
+  const oldYaml: TypeRef = { kind: 'model', name: 'OldYaml' };
+  const newYaml: TypeRef = { kind: 'model', name: 'NewYaml' };
+  /** A lone `201`: JSON `Report` and `application/yaml` → `OldYaml`. */
+  const lone201 = card(
+    [
+      ['application/json', reportModel],
+      ['application/yaml', oldYaml],
+    ],
+    { name: 'getReport', response: reportModel },
+  );
+  /** That `201` unchanged, beside a `200` with the same JSON body and `application/yaml; version=2` → `NewYaml`. */
+  const added200 = (): Operation => {
+    const two = contents([
+      ['application/json', reportModel],
+      ['application/yaml; version=2', newYaml],
+    ]);
+    const one = contents([
+      ['application/json', reportModel],
+      ['application/yaml', oldYaml],
+    ]);
+    return card([], {
+      name: 'getReport',
+      response: reportModel,
+      responseContentTypes: two.map((c) => c.contentType),
+      responseContents: two,
+      successResponses: [
+        { statusCode: 200, type: reportModel, contentTypes: two.map((c) => c.contentType), contents: two },
+        { statusCode: 201, type: reportModel, contentTypes: one.map((c) => c.contentType), contents: one },
+      ],
+    });
+  };
+
+  it('pairs the lone 201 with the unchanged 201, not with the added 200 that matches it by essence', () => {
+    expect(diffOperations('Reports', [lone201], [added200()])).toEqual([]);
+  });
+
+  it('pairs a new lone 201 with the old 201 and reports the removed 200 with its formats, not a retype', () => {
+    expect(diffOperations('Reports', [added200()], [lone201])).toMatchObject([
+      {
+        responseChanged: false,
+        responseContentTypeChanges: [
+          {
+            statusCode: 200,
+            added: [],
+            removed: ['application/json', 'application/yaml; version=2'],
+            retyped: [],
+            classification: 'breaking',
+          },
+        ],
+        classification: 'breaking',
+      },
+    ]);
   });
 });
