@@ -19,7 +19,9 @@ import {
   inheritedModelRefsOf,
   isInheritedModelRef,
   modelAdmits,
+  modelShares,
   recordFieldModelRename,
+  shapeFingerprint,
   typeShapeKey,
   type FieldInlineModelGroup,
   type InlineModelBundle,
@@ -200,19 +202,26 @@ function keepLargestByName(models: Model[]): Model[] {
  *   themselves are settled by document order (first declared, or the one with
  *   more fields), as they always were; a deprecated copy never inherits that
  *   tie and is qualified instead, so its name is the same in every order;
- * - otherwise takes a name of its own (`renameInlineCopy`). An owner is never
- *   renamed and never takes a contender's flag, in either direction: a live
- *   inline copy never folds onto a deprecated component, and a deprecated one
- *   never onto a live component, whatever their shapes.
+ * - folds onto a live owner, with the same warning, when the owner shares
+ *   its name with it (`ownerSharesWith`, the flag read apart from the shape
+ *   by `flagAdmits`): the copy is dropped and its references resolve to the
+ *   owner, the deprecated schema's own field, parameter or envelope field
+ *   still carrying the flag (a request body or response has no flag of its
+ *   own to carry it). An owner is never renamed and never takes a
+ *   contender's flag; a deprecated owner shares its name with no live copy,
+ *   whatever their shapes, so a live inline copy never folds onto a
+ *   deprecated component;
+ * - otherwise takes a name of its own (`renameInlineCopy`).
  *
  * A contender whose flag agrees with an owner's
  *
- * - folds onto the owner when the owner admits it (`modelAdmits`: the same
- *   fields and types, the owner no stricter on requiredness or nullability,
- *   everything else identical): the copy is dropped and its references,
- *   which already carry the name, resolve to the owner. An owner is never
- *   replaced, whatever the copy's field count, so every `$ref` to a component
- *   keeps the shape the document declares;
+ * - folds onto the owner when the owner shares its name with it
+ *   (`ownerSharesWith`: `modelAdmits` — the same fields and types, the owner
+ *   no stricter on requiredness or nullability, everything else identical —
+ *   or an identical shape for a copy the SDK sends): the copy is dropped and
+ *   its references, which already carry the name, resolve to the owner. An
+ *   owner is never replaced, whatever the copy's field count, so every
+ *   `$ref` to a component keeps the shape the document declares;
  * - otherwise takes a name of its own (`renameInlineCopy`), with a note. Two
  *   contenders of one name without an owner are left to the pass's own choice
  *   (`keepLargestByName`).
@@ -377,7 +386,7 @@ function settleSharedNames(
       continue;
     }
     let nameDeprecated: boolean;
-    /** The live contenders a deprecated copy may fold onto; empty under an owner, which is never folded onto. */
+    /** The live contenders a deprecated copy may fold onto; empty under an owner, which every copy is measured against instead (`ownerSharesWith`). */
     let live: Model[] = [];
     if (owner) {
       nameDeprecated = !!owner.deprecated;
@@ -411,18 +420,31 @@ function settleSharedNames(
       if (live.length === 0 || holders.length === group.length) continue;
     }
 
-    // The copies that agree with the name's flag and that the owner does
-    // not share, clustered by shape in document order: identical copies
-    // that must leave the owner's name share one model under it, as they
-    // would share the bare name without the owner (`keepLargestByName`).
+    // Under an owner, every copy is measured against it first: one the
+    // owner shares its name with (`ownerSharesWith`, the flag read by
+    // `flagAdmits`) is folded onto it — a deprecated copy onto a live owner
+    // with the warning two inline copies get, since the shared name keeps
+    // the live definition; a deprecated owner shares with no live copy. The
+    // copies that agree with the name's flag and that the owner does not
+    // share are clustered by shape in document order: identical copies that
+    // must leave the owner's name share one model under it, as they would
+    // share the bare name without the owner (`keepLargestByName`). A copy
+    // whose flag disagrees and that the owner does not share is renamed
+    // below.
     const clashing = new Map<string, Model[]>();
     for (const copy of group) {
-      if (!!copy.deprecated !== nameDeprecated || !owner) continue;
+      if (!owner) continue;
       const bundle = naming && bundleOf.get(copy);
       if (ownerSharesWith(owner, copy, bundle)) {
+        if (!!copy.deprecated !== nameDeprecated) {
+          console.warn(
+            `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+          );
+        }
         folded.set(copy, owner);
         continue;
       }
+      if (!!copy.deprecated !== nameDeprecated) continue;
       const shape = modelFingerprint(copy);
       clashing.set(shape, [...(clashing.get(shape) ?? []), copy]);
     }
@@ -434,13 +456,13 @@ function settleSharedNames(
     );
 
     for (const copy of group) {
-      if (!!copy.deprecated === nameDeprecated) continue;
-      // A deprecated copy folds only when every live copy of the name is its
-      // twin but for the flag: then whichever live definition the shared name
-      // carries, the copy is interchangeable with it. Live copies that
-      // disagree among themselves (requiredness, say) are settled by document
-      // order, as always; a deprecated copy must not inherit that order, so it
-      // is qualified whenever they disagree.
+      if (!!copy.deprecated === nameDeprecated || folded.has(copy)) continue;
+      // Without an owner, a deprecated copy folds only when every live copy
+      // of the name is its twin but for the flag: then whichever live
+      // definition the shared name carries, the copy is interchangeable with
+      // it. Live copies that disagree among themselves (requiredness, say)
+      // are settled by document order, as always; a deprecated copy must not
+      // inherit that order, so it is qualified whenever they disagree.
       if (live.length > 0 && live.every((l) => differOnlyByDeprecation(l, copy))) {
         console.warn(
           `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
@@ -466,15 +488,17 @@ function settleSharedNames(
 }
 
 /**
- * Whether `owner`, a component, shares its name with `copy`: when it admits
- * the shape (`modelAdmits`) — or, for a copy the SDK sends (`bundle.sent`:
- * a request body, a parameter), only when the shapes are identical, since a
- * caller typed against a looser component could leave out what the
- * operation requires. The same question `ownerShares` answers for the
- * shape registry.
+ * Whether `owner`, a component, shares its name with `copy` (`modelShares`):
+ * when it admits the shape (`modelAdmits`) — or, for a copy the SDK sends
+ * (`bundle.sent`: a request body, a parameter), only when the shapes are
+ * identical, since a caller typed against a looser component could leave
+ * out what the operation requires — the flag read apart from the shape
+ * either way (`flagAdmits`: a live owner shares with a deprecated copy, a
+ * deprecated owner only with a deprecated one). The same question
+ * `ownerShares` answers for the shape registry.
  */
 function ownerSharesWith(owner: Model, copy: Model, bundle: InlineModelBundle | undefined): boolean {
-  return bundle?.sent ? modelFingerprint(owner) === modelFingerprint(copy) : modelAdmits(owner, copy);
+  return modelShares(owner, copy, !!bundle?.sent);
 }
 
 /**
@@ -575,8 +599,7 @@ function mintQualifiedName(name: string, qualifier: string, reserved: ReadonlySe
  */
 function differOnlyByDeprecation(a: Model, b: Model): boolean {
   if (!!a.deprecated === !!b.deprecated) return false;
-  const shape = (m: Model): string => modelFingerprint({ ...m, deprecated: undefined });
-  return shape(a) === shape(b);
+  return shapeFingerprint(a) === shapeFingerprint(b);
 }
 
 /**
@@ -667,10 +690,12 @@ export function mergeInlineResponseModels(
  * the first merge step, run as soon as both are extracted and before any
  * operation or webhook is read (see `parseSpec`): a field object, array
  * item or union variant named like a component shares the name when the
- * component admits it and is dropped, the field resolving to the component;
- * one the component does not admit, or whose flag differs, takes its
- * qualified name now (`PetOwner2`), its field and every `allOf` copy of it
- * repointed (`settleSharedNames`). Settling the fields first means every
+ * component admits it — a deprecated one beside a live component included,
+ * the field keeping the flag — and is dropped, the field resolving to the
+ * component; one the component does not admit, a live one beside a
+ * deprecated component included, takes its qualified name now
+ * (`PetOwner2`), its field and every `allOf` copy of it repointed
+ * (`settleSharedNames`). Settling the fields first means every
  * later comparison with a component — the shape registry's, the response
  * merge's — reads the component's children by their final names, so a body
  * that `$ref`s a component `GetPetResponseOwner` is never admitted by a
@@ -1030,7 +1055,10 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
     // union, a nested object, or any model spelled that way — must be
     // admitted by the model it collapses onto (`modelAdmits`, both read
     // under the fold), since the child's references then resolve to it and
-    // a field the child adds would be lost. One refused child refuses the
+    // a field the child adds would be lost; a deprecated child collapses
+    // onto a live holder, as a deprecated `<Name>Json` folds onto a live
+    // `<Name>`, and a live child never onto a deprecated one
+    // (`flagAdmits`). One refused child refuses the
     // whole fold before any of it is applied: a variant of another shape is
     // a different variant even when the fold would give it the base's name,
     // so a child the base dispatches to is refused as the union rules are;

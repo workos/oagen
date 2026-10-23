@@ -362,7 +362,7 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
     for (const c of copies) expect(c.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
 
-  it('folds onto a component only when the flag agrees', () => {
+  it('folds onto a component when the component’s flag admits the copy’s: a live component takes a deprecated copy, never the reverse', () => {
     const live: Model = { name: 'Pagination', fields: next() };
     const deprecated: Model = { name: 'Pagination', deprecated: true, fields: next() };
 
@@ -375,13 +375,42 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
 
     expect(onto(live, undefined)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
     expect(onto(deprecated, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
-    expect(onto(live, true)).toEqual({
-      ref: { kind: 'model', name: 'ListAPagination' },
-      models: [['ListAPagination', true]],
-    });
+    // Issue #312: the copy's own flag is not part of the shape beside a
+    // component; the envelope field keeps it.
+    expect(onto(live, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
     expect(onto(deprecated, undefined)).toEqual({
       ref: { kind: 'model', name: 'ListAPagination' },
       models: [['ListAPagination', undefined]],
     });
+  });
+
+  it('still keeps a deprecated copy apart from a live component when a model nested in it is deprecated too', () => {
+    const cursor = (op: string): Model => ({ name: `${op}PaginationCursor`, fields: next() });
+    const nestedField = (name: string): Model['fields'] => [
+      { name: 'cursor', type: { kind: 'model', name }, required: false },
+    ];
+    const component: Model = { name: 'Pagination', fields: nestedField('PaginationCursor') };
+    const nestedComponent: Model = { name: 'PaginationCursor', fields: next() };
+
+    // Only the companion's own flag is read apart; a deprecated nested model
+    // beside a live `PaginationCursor` keeps the whole copy apart, since no
+    // field of the component's side would carry that flag.
+    const nested = cursor('ListA');
+    nested.deprecated = true;
+    const c = companion('ListA', 'Pagination', nestedField(nested.name), [nested]);
+    c.models[0].deprecated = true;
+    const models = resolveEnvelopeCompanionNames([c], [component, nestedComponent]);
+    expect(c.field.type).toEqual({ kind: 'model', name: 'ListAPagination' });
+    expect(models.map((m) => [m.name, m.deprecated])).toEqual([
+      ['ListAPagination', true],
+      ['ListAPaginationCursor', true],
+    ]);
+
+    // With the nested model live, the deprecated companion folds onto the component.
+    const liveNested = cursor('ListB');
+    const d = companion('ListB', 'Pagination', nestedField(liveNested.name), [liveNested]);
+    d.models[0].deprecated = true;
+    expect(resolveEnvelopeCompanionNames([d], [component, nestedComponent])).toEqual([]);
+    expect(d.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
 });

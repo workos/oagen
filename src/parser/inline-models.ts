@@ -308,6 +308,8 @@ export function schemaShapeKey(schema: SchemaObject): string {
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
 /** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+/** `MODEL_IDENTITY_KEYS` and the model's own `deprecated`, which the admit predicates read on its own (`flagAdmits`) rather than as part of the shape. */
+const MODEL_ADMIT_KEYS: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, 'deprecated']);
 
 /**
  * Shape of a model, independent of field order, name and documentation:
@@ -337,12 +339,28 @@ function fieldShapeKey(field: Field): string {
 }
 
 /**
- * A model's shape beside its fields: its limits, type parameters,
- * `deprecated`, variants (through `readShape`) and dispatch rules, the
- * mapping's targets read under `options.modelName` as the variants are.
+ * `modelFingerprint` read without the model's own `deprecated`: the shape a
+ * deprecated copy and a live one of one schema share. What a shape the SDK
+ * sends must agree with a declared model on (`modelShares`), and what the
+ * merge passes compare two inline copies of one name by when only the flag
+ * tells them apart (`differOnlyByDeprecation`).
  */
-function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
-  const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
+export function shapeFingerprint(model: Model): string {
+  return modelFingerprint({ ...model, deprecated: undefined });
+}
+
+/**
+ * A model's shape beside its fields: its limits, type parameters,
+ * `deprecated` (unless `omit` leaves it out, as `modelAdmits` does), variants
+ * (through `readShape`) and dispatch rules, the mapping's targets read under
+ * `options.modelName` as the variants are.
+ */
+function modelShapeKey(
+  model: Model,
+  options: ShapeReadOptions = {},
+  omit: ReadonlySet<string> = MODEL_IDENTITY_KEYS,
+): string {
+  const rest = omitKeys(model, omit);
   if (model.variants) rest.variants = model.variants.map((variant) => readShape(variant, options));
   if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.modelName);
   return stableStringify(rest);
@@ -383,34 +401,71 @@ export interface ShapeReadOptions {
  * optional on `owner`, and a field type `candidate` leaves non-null may be
  * `nullable<…>` on `owner`. Only the field type's own nullable wrapper is
  * read that way; a wrapper deeper down (an array's items) must agree. The
- * models' own limits, type parameters, variants, dispatch rules and
- * `deprecated` must agree, and a model reference is compared by name — the
- * name it carries, or the one `options.modelName` reads it under: a nested
- * inline model keeps its name, so a parent whose child was renamed is not
- * admitted by one whose child was not. An identical shape is admitted.
+ * models' own limits, type parameters, variants and dispatch rules must
+ * agree, and a model reference is compared by name — the name it carries, or
+ * the one `options.modelName` reads it under: a nested inline model keeps its
+ * name, so a parent whose child was renamed is not admitted by one whose
+ * child was not. The models' own `deprecated` is read apart from the shape
+ * (`flagAdmits`): a live `owner` admits a deprecated `candidate` — the flag
+ * stays on the field, parameter or envelope field that wrote the candidate's
+ * schema, not on a second model of the same shape — and a deprecated `owner`
+ * admits only a deprecated one, so no live reference comes to resolve to a
+ * deprecated model by folding. An identical shape is admitted.
  *
  * The one rule by which an inline model folds onto a model the document
  * declares — a component schema, or a model a component's field minted — in
  * the merge passes (`settleSharedNames`) and in the shape registry of
- * `materializeInlineSchema` (`ownerShares`), and by which the `…Json` fold
- * (`collapseJsonSuffixModels`) collapses a `<Name>Json…` child onto the
- * `<Name>…` model that already holds its folded name, every reference read
- * under the fold; two inline models share a name on an identical fingerprint
- * only. A shape the SDK sends — a request body, a parameter — is the
- * callers' exception (`ownerShares`, `settleSharedNames`): it shares a
+ * `materializeInlineSchema` (`ownerShares`), both through `modelShares`, and
+ * by which the `…Json` fold (`collapseJsonSuffixModels`) collapses a
+ * `<Name>Json…` child onto the `<Name>…` model that already holds its folded
+ * name, every reference read under the fold; two inline models share a name
+ * on an identical fingerprint only. A shape the SDK sends — a request body,
+ * a parameter — is the callers' exception (`modelShares`): it shares a
  * component on an identical shape only, since typed as a looser component a
  * caller could leave out what the operation requires. The list-envelope pass
  * compares its companions by a structural rule of its own, since a
- * companion's nested models are named per operation.
+ * companion's nested models are named per operation; it reads the flag by
+ * `flagAdmits` as well.
  */
 export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOptions = {}): boolean {
+  if (!flagAdmits(owner, candidate)) return false;
   if (owner.fields.length !== candidate.fields.length) return false;
   const ownerFields = new Map(owner.fields.map((field) => [field.name, field]));
   for (const field of candidate.fields) {
     const own = ownerFields.get(field.name);
     if (!own || !fieldAdmits(own, field, options)) return false;
   }
-  return modelShapeKey(owner, options) === modelShapeKey(candidate, options);
+  return modelShapeKey(owner, options, MODEL_ADMIT_KEYS) === modelShapeKey(candidate, options, MODEL_ADMIT_KEYS);
+}
+
+/**
+ * Whether `owner`'s own `deprecated` admits `candidate`'s: a live `owner`
+ * admits a candidate of either flag, and a deprecated `owner` only a
+ * deprecated one. The flag is not part of the shape a fold compares: a
+ * deprecated inline schema identical to a live model it is named like shares
+ * that model, its flag carried by the site that wrote the schema (a
+ * `Field`, a `Parameter`, an envelope field) rather than by a second model
+ * of the same shape, while a live site never resolves to a deprecated model
+ * through a fold. Read by `modelAdmits` and `modelShares`, and by the
+ * list-envelope pass for a companion beside a component.
+ */
+export function flagAdmits(owner: Model, candidate: Model): boolean {
+  return !owner.deprecated || !!candidate.deprecated;
+}
+
+/**
+ * Whether `owner`, a model the document declares — a component schema, or a
+ * model a component's field minted — shares its name with `candidate`, an
+ * inline model: when it admits the shape (`modelAdmits`), or, for a shape
+ * the SDK sends (`sent`: a request body, a parameter), when the two are
+ * identical but for the model's own `deprecated` (`shapeFingerprint`), which
+ * is read as `modelAdmits` reads it (`flagAdmits`). The one question the
+ * merge passes (`settleSharedNames`) and the shape registry (`ownerShares`)
+ * ask of a declared model.
+ */
+export function modelShares(owner: Model, candidate: Model, sent = false): boolean {
+  if (!sent) return modelAdmits(owner, candidate);
+  return flagAdmits(owner, candidate) && shapeFingerprint(owner) === shapeFingerprint(candidate);
 }
 
 /**
