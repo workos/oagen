@@ -53,6 +53,14 @@ export interface ResponseExtractionResult {
   inlineModels: Model[];
   /** Whether this response indicates a paginated list */
   isPaginated: boolean;
+  /**
+   * Set when the body is a list envelope detection recognized but did not
+   * unwrap because nothing pages it (`paginationDisabled`): it was read as
+   * any other body, a plain response model carrying every field. The caller
+   * warns about an envelope kept for want of a paging parameter; one kept by
+   * `strategy: 'none'` was asked for.
+   */
+  unpagedEnvelope?: boolean;
   /** Path to the data array within the response envelope (e.g., 'data') */
   dataPath?: string;
   /**
@@ -88,10 +96,13 @@ export interface ResponseExtractionResult {
 
 export interface ResponseClassificationOptions {
   /**
-   * The operation's pagination was switched off explicitly (`strategy:
-   * 'none'`). A list envelope is then not unwrapped: the body becomes a plain
-   * response model carrying every field, exactly as a non-list body does, so
-   * the wire shape survives without a `pagination` entry to describe it.
+   * Nothing will page the operation: its pagination was switched off
+   * explicitly (`strategy: 'none'`), or no query parameter it declares
+   * drives an iterator and no override names one. A list envelope is then
+   * not unwrapped: the body becomes a plain response model carrying every
+   * field, exactly as a non-list body does, so the wire shape survives
+   * without a `pagination` entry to describe it (`unpagedEnvelope` says it
+   * was an envelope).
    */
   paginationDisabled?: boolean;
   /**
@@ -262,29 +273,30 @@ function classifyBody(
   schema = foldSiblingProperties(schema);
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
-  if (!options.paginationDisabled) {
-    const envelope = detectListEnvelope(schema);
-    if (envelope.isEnvelope) {
-      const override = options.dataPathOverride;
-      if (override === undefined || override === envelope.dataPath) {
-        return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
-      }
-      // The override names another array than the one the envelope would be
-      // unwrapped on: detection was wrong for this operation, so the envelope
-      // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
-      // field is read by the caller (`bodyEndOfIteration`), as every kept
-      // wrapper's is.
-      return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  const envelope = detectListEnvelope(schema);
+  if (envelope.isEnvelope && !options.paginationDisabled) {
+    const override = options.dataPathOverride;
+    if (override === undefined || override === envelope.dataPath) {
+      return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
     }
+    // The override names another array than the one the envelope would be
+    // unwrapped on: detection was wrong for this operation, so the envelope
+    // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
+    // field is read by the caller (`bodyEndOfIteration`), as every kept
+    // wrapper's is.
+    return extractDirectResource(schema, contextName, componentSchemas, options.settle);
   }
 
   // 3. Check for single-resource wrapper ({ resource_name: { object: "...", ... } })
-  if (isSingleResourceWrapper(schema)) {
-    return extractWrappedResource(schema, contextName, componentSchemas);
-  }
-
   // 4. Direct resource or plain inline object
-  return extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  // An envelope that reaches here is one nothing pages (`paginationDisabled`):
+  // it is read exactly as any other body, and the result says it was an
+  // envelope, so the caller can warn about one kept for want of a paging
+  // parameter.
+  const body = isSingleResourceWrapper(schema)
+    ? extractWrappedResource(schema, contextName, componentSchemas)
+    : extractDirectResource(schema, contextName, componentSchemas, options.settle);
+  return envelope.isEnvelope ? { ...body, unpagedEnvelope: true } : body;
 }
 
 interface ListEnvelopeResult {

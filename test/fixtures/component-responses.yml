@@ -56,6 +56,10 @@ paths:
           required: true
           schema:
             type: string
+        - name: after
+          in: query
+          schema:
+            type: string
       responses:
         '200':
           $ref: '#/components/responses/PhotoPage'
@@ -71,6 +75,10 @@ paths:
         - name: photoId
           in: path
           required: true
+          schema:
+            type: string
+        - name: after
+          in: query
           schema:
             type: string
       responses:

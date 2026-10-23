@@ -288,12 +288,15 @@ describe('response media types are matched by essence (issue #237)', () => {
 
   describe('several 2xx bodies', () => {
     /** Extract the only operation of a GET /pets/{petId} with the given `responses`. */
-    function getPetWith(responses: Record<string, unknown>): { op: Operation; inlineModels: Model[] } {
+    function getPetWith(
+      responses: Record<string, unknown>,
+      parameters: unknown[] = [],
+    ): { op: Operation; inlineModels: Model[] } {
       const paths = {
         '/pets/{petId}': {
           get: {
             operationId: 'getPet',
-            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }, ...parameters],
             responses,
           },
         },
@@ -367,24 +370,33 @@ describe('response media types are matched by essence (issue #237)', () => {
     });
 
     it('reads the paging fields from the primary response, not the last body read', () => {
-      const baseline = getPetWith({
-        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
-      });
+      // The envelope is unwrapped only for an iterator a declared parameter drives (#309).
+      const after = [{ name: 'after', in: 'query', schema: { type: 'string' } }];
+      const baseline = getPetWith(
+        { '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } } },
+        after,
+      );
       expect(baseline.op.pagination).toBeDefined();
 
-      const laterPlain = getPetWith({
-        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
-        '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
-      });
+      const laterPlain = getPetWith(
+        {
+          '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+          '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+        },
+        after,
+      );
       expect(laterPlain.op.response).toEqual(baseline.op.response);
       expect(laterPlain.op.pagination).toEqual(baseline.op.pagination);
       expectClosed(laterPlain.op, laterPlain.inlineModels);
 
       // Document order does not matter: the lowest 2xx with a body is primary.
-      const declaredFirst = getPetWith({
-        '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
-        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
-      });
+      const declaredFirst = getPetWith(
+        {
+          '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+          '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+        },
+        after,
+      );
       expect(declaredFirst.op.response).toEqual(baseline.op.response);
       expect(declaredFirst.op.pagination).toEqual(baseline.op.pagination);
     });

@@ -26,14 +26,20 @@ const jsonBody = (type: TypeRef) => ({
 });
 
 /** A `GET /pets` (`listPets`) document with the given responses and the `Pet` and `Error` components. */
-function petsSpec(responses: Record<string, unknown>): Record<string, unknown> {
+function petsSpec(
+  responses: Record<string, unknown>,
+  operation: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     openapi: '3.1.0',
     info,
-    paths: { '/pets': { get: { operationId: 'listPets', responses } } },
+    paths: { '/pets': { get: { operationId: 'listPets', ...operation, responses } } },
     components: { schemas: { Pet: petSchema, Error: errorSchema } },
   };
 }
+
+/** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
+const afterParam = { parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }] };
 
 async function parseTempSpec(spec: Record<string, unknown>): Promise<ApiSpec> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-fallback-responses-'));
@@ -1234,27 +1240,30 @@ describe('names no stem can move (titled variants) terminate and step around the
       // list operation is known; a fallback variant titled `ListMetadata` of another
       // shape must not take that name first and leave the merge to pick one.
       const ir = await parseWithoutWarnings(
-        petsSpec({
-          '200': {
-            description: 'ok',
-            content: json({
-              type: 'object',
-              properties: {
-                data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
-                list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
-              },
-            }),
+        petsSpec(
+          {
+            '200': {
+              description: 'ok',
+              content: json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+                  list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+                },
+              }),
+            },
+            default: {
+              description: 'd',
+              content: json({
+                oneOf: [
+                  titled('ListMetadata', 'meta', { reason: { type: 'string' }, hint: { type: 'string' } }),
+                  titled('Square', 'square', { side: { type: 'number' } }),
+                ],
+              }),
+            },
           },
-          default: {
-            description: 'd',
-            content: json({
-              oneOf: [
-                titled('ListMetadata', 'meta', { reason: { type: 'string' }, hint: { type: 'string' } }),
-                titled('Square', 'square', { side: { type: 'number' } }),
-              ],
-            }),
-          },
-        }),
+          afterParam,
+        ),
       );
       const types = fieldTypesByModel(ir.models);
       expect(types['ListMetadata']).toEqual({ after: str });
