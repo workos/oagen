@@ -15,9 +15,34 @@ const item = (name: string) => ({ ...ok, ...idParam(name) });
 
 type Method = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head';
 
+type Services = ReturnType<typeof extractOperations>['services'];
+
+/**
+ * Sound after every pass: within a service, two operations share a name only
+ * when they sit on one path and are its PUT and PATCH (both `update`). The
+ * differ keys a service's operations by name, so any other sharing hides one.
+ */
+function expectUniqueNames(services: Services): void {
+  for (const service of services) {
+    const byName = new Map<string, Services[number]['operations']>();
+    for (const op of service.operations) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, ops] of byName) {
+      if (ops.length < 2) continue;
+      const shape = { paths: [...new Set(ops.map((op) => op.path))], methods: ops.map((op) => op.httpMethod).sort() };
+      expect({ service: service.name, name, ...shape }).toEqual({
+        service: service.name,
+        name,
+        paths: [ops[0].path],
+        methods: ['patch', 'put'],
+      });
+    }
+  }
+}
+
 /** `name METHOD path` for every operation, sorted by path (code units) then method. */
 function names(paths: Record<string, Partial<Record<Method, unknown>>>) {
   const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
+  expectUniqueNames(services);
   const key = (op: { path: string; httpMethod: string }) => `${op.path}\0${op.httpMethod}`;
   return services
     .flatMap((s) => s.operations)
@@ -178,9 +203,13 @@ describe('fallback operation names (issue #210)', () => {
       '/orders/{id}/status': { post: item('id') },
       '/items/{id}/process': { post: item('id') },
     });
+    // A plural literal is a nested collection; one that does not look plural
+    // (`status`, `process`) is a singleton of the item, so the parent is
+    // named as for every other method on it (#271): `createOrderStatus`
+    // beside `getOrderStatus`, never `createStatus`.
     expect(result).toEqual([
-      'createProcess                POST   /items/{id}/process',
-      'createStatus                 POST   /orders/{id}/status',
+      'createItemProcess            POST   /items/{id}/process',
+      'createOrderStatus            POST   /orders/{id}/status',
       'createApiKeys                POST   /orgs/{id}/api_keys',
     ]);
   });
@@ -824,16 +853,23 @@ describe('custom-method paths (issue #269)', () => {
     const paths = { '/v1/pets:batchGet': { post: json }, '/v1/pets': { get: json } };
     const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
     expect(services.map((s) => s.name)).toEqual(['Pets']);
+    // `batchGet` ends in a CRUD verb, so it is the action (#271), as
+    // `/v1/pets/batchGet` is; the service segment it sits on is dropped.
     expect(names(paths)).toEqual([
       'list                         GET    /v1/pets',
-      'createBatchGet               POST   /v1/pets:batchGet',
+      'batchGet                     POST   /v1/pets:batchGet',
     ]);
   });
 
   it('qualifies by the parameter alone, never by the verb written after it', () => {
+    // `{petId}:history` is a singleton of one pet (#271), named with the
+    // parent before any qualifier runs, so it no longer collides with
+    // `/pets/history`; the verb written after the colon is still never a
+    // `By<Param>` word (see fallback-action-segments.test.ts for the
+    // colliding case).
     expect(names({ '/pets/{petId}:history': { get: jsonItem('petId') }, '/pets/history': { get: json } })).toEqual([
       'listHistory                  GET    /pets/history',
-      'listHistoryByPetId           GET    /pets/{petId}:history',
+      'getPetHistory                GET    /pets/{petId}:history',
     ]);
   });
 
