@@ -125,6 +125,16 @@ export function createSiblingSites(stems: SiblingStems = []): SiblingSites {
  */
 export type SiblingStems = readonly string[];
 
+/**
+ * The form `siblings` took between the string form and the container: a
+ * bare list of settlements. Accepted so a caller on that form keeps
+ * compiling. A non-empty list is used as the container's `settled` list
+ * itself — this call appends to it, as it did then. An empty array has no
+ * element to tell it from the string form, so it is read as that form:
+ * read-only, never written (`siblingSitesOf`).
+ */
+export type SettledSites = SettledSite[];
+
 export interface MaterializeInlineOptions {
   /**
    * The property name to extract the schema under for the `index`-th stem:
@@ -138,12 +148,14 @@ export interface MaterializeInlineOptions {
    * The settlements of the earlier sites of the same bare name, whose stems
    * are tried between the bare name and the caller's other candidates with
    * their renames replayed, and which this site's settlement is appended to:
-   * a `SiblingSites` container the caller created — the one argument this
-   * call mutates — or the earlier read-only string form, `SiblingStems`,
-   * copied into a container of this call's own. Absent, only the caller's
-   * candidates are tried and nothing is recorded.
+   * a `SiblingSites` container the caller created, or a non-empty bare list
+   * of settlements (`SettledSites`) — in either, the settled list is the one
+   * thing this call mutates — or the read-only string form, `SiblingStems`,
+   * copied into a container of this call's own; an empty array is read as
+   * the string form. Absent, only the caller's candidates are tried and
+   * nothing is recorded.
    */
-  siblings?: SiblingSites | SiblingStems;
+  siblings?: SiblingSites | SettledSites | SiblingStems;
   /** The parent the schema is a property of; none for a body. */
   parentName?: string;
   componentSchemas?: Record<string, SchemaObject>;
@@ -262,16 +274,21 @@ interface ResolvedOptions extends Omit<MaterializeInlineOptions, 'siblings'> {
 }
 
 /**
- * `siblings` as the loop reads it: the `SiblingSites` container as given —
- * the very object, since this call's settlement is appended to it — or, for
- * the earlier string form (`SiblingStems`), a fresh container seeded from it
- * (`createSiblingSites`), so the strings are only read. The two are told
- * apart by shape — a container carries `settled`, the string form is an
- * array, empty or not — never by emptiness; absent stays absent.
+ * `siblings` as the loop reads it, the three accepted forms told apart by
+ * shape, never by emptiness: the `SiblingSites` container as given (it
+ * carries `settled`) — the very object, since this call's settlement is
+ * appended to it; a non-empty array of settlement objects (`SettledSites`),
+ * wrapped as the container's settled list itself, so the call appends to the
+ * caller's list as it did on that form; and an array of strings
+ * (`SiblingStems`) — an empty array among them, which has no element to say
+ * otherwise — copied into a fresh container (`createSiblingSites`), so the
+ * array given is only read. Absent stays absent.
  */
-function siblingSitesOf(siblings: SiblingSites | SiblingStems | undefined): SiblingSites | undefined {
+function siblingSitesOf(siblings: SiblingSites | SettledSites | SiblingStems | undefined): SiblingSites | undefined {
   if (siblings === undefined) return undefined;
-  return 'settled' in siblings ? siblings : createSiblingSites(siblings);
+  if ('settled' in siblings) return siblings;
+  if (siblings.length > 0 && typeof siblings[0] !== 'string') return { settled: siblings as SettledSites };
+  return createSiblingSites(siblings as SiblingStems);
 }
 
 /** A stem to try, with the renames to replay on the trial extracted under it (none for the caller's own candidates). */
